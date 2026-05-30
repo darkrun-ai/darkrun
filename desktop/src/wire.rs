@@ -12,8 +12,8 @@
 use std::fmt;
 
 use darkrun_api::{
-    DirectionSelectRequest, PickerSelectRequest, QuestionAnswerRequest, ReviewDecisionRequest,
-    SessionPayload,
+    DirectionSelectRequest, OutputReviewRequest, PickerSelectRequest, QuestionAnswerRequest,
+    ReviewDecisionRequest, SessionPayload,
 };
 use serde::Serialize;
 use futures_util::StreamExt;
@@ -89,6 +89,18 @@ impl ConnConfig {
     /// The picker-select POST path (`/picker/:id/select`).
     pub fn picker_select_path(&self) -> String {
         format!("/picker/{}/select", self.session_id)
+    }
+
+    /// The output-annotation POST path (`/visual-review/:id/annotate`) — submits
+    /// the pins + comments the operator dropped on an output screenshot.
+    pub fn visual_review_annotate_path(&self) -> String {
+        format!("/visual-review/{}/annotate", self.session_id)
+    }
+
+    /// The proof GET path (`/api/proof/:run`) — reads a run's attached
+    /// objective-evidence proof.
+    pub fn proof_path(&self, run: &str) -> String {
+        format!("/api/proof/{run}")
     }
 }
 
@@ -215,6 +227,15 @@ pub async fn submit_picker_select(
     post_json(&cfg.authority(), &cfg.picker_select_path(), req).await
 }
 
+/// POST the output-screenshot annotations (`/visual-review/:id/annotate`) — the
+/// pins + comments the operator dropped become a piece of feedback server-side.
+pub async fn submit_output_review(
+    cfg: &ConnConfig,
+    req: &OutputReviewRequest,
+) -> Result<(), WireError> {
+    post_json(&cfg.authority(), &cfg.visual_review_annotate_path(), req).await
+}
+
 /// Hand-rolled HTTP/1.1 JSON POST over loopback TCP, shared by every decision /
 /// answer / selection path. Serializes `req`, writes the request, reads the
 /// response, and surfaces a typed result on the status code.
@@ -295,6 +316,11 @@ mod tests {
         assert_eq!(cfg.question_answer_path(), "/question/s-42/answer");
         assert_eq!(cfg.direction_select_path(), "/direction/s-42/select");
         assert_eq!(cfg.picker_select_path(), "/picker/s-42/select");
+        assert_eq!(
+            cfg.visual_review_annotate_path(),
+            "/visual-review/s-42/annotate"
+        );
+        assert_eq!(cfg.proof_path("my-run"), "/api/proof/my-run");
     }
 
     #[test]

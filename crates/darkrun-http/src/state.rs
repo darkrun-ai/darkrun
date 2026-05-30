@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use darkrun_api::SessionPayload;
+use darkrun_api::{Proof, SessionPayload};
 use darkrun_core::StateStore;
 use tokio::sync::broadcast;
 
@@ -150,11 +150,51 @@ impl Drop for WsSlot {
     }
 }
 
+/// One attached proof plus the station it was measured at.
+#[derive(Clone)]
+struct ProofEntry {
+    proof: Proof,
+    station: Option<String>,
+}
+
+/// In-memory registry of run-scoped objective-evidence [`Proof`]s, keyed by run
+/// slug. Populated by the Prove station's `POST /api/proof/:run`; read back by
+/// the desktop app's `GET /api/proof/:run`.
+///
+/// Clonable + `Send + Sync` (shares the backing map across clones), mirroring
+/// the [`SessionRegistry`] posture so the manager and HTTP handlers observe the
+/// same proofs without a disk round-trip.
+#[derive(Clone, Default)]
+pub struct ProofRegistry {
+    inner: Arc<Mutex<HashMap<String, ProofEntry>>>,
+}
+
+impl ProofRegistry {
+    /// Create an empty proof registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attach (or replace) the proof for a run, with its measured station.
+    pub fn attach(&self, run: &str, proof: Proof, station: Option<String>) {
+        let mut guard = self.inner.lock().expect("proof registry poisoned");
+        guard.insert(run.to_string(), ProofEntry { proof, station });
+    }
+
+    /// Fetch a run's attached proof + station, if any.
+    pub fn get(&self, run: &str) -> Option<(Proof, Option<String>)> {
+        let guard = self.inner.lock().expect("proof registry poisoned");
+        guard.get(run).map(|e| (e.proof.clone(), e.station.clone()))
+    }
+}
+
 /// The shared application state threaded through every handler.
 #[derive(Clone)]
 pub struct AppState {
     /// The in-memory interactive-session registry.
     pub sessions: SessionRegistry,
+    /// The in-memory run-scoped proof registry.
+    pub proofs: ProofRegistry,
     /// The filesystem state engine (used for feedback reads).
     pub store: Arc<StateStore>,
     /// Resource limits in effect.
@@ -166,6 +206,7 @@ impl AppState {
     pub fn new(store: StateStore, limits: Limits) -> Self {
         Self {
             sessions: SessionRegistry::new(),
+            proofs: ProofRegistry::new(),
             store: Arc::new(store),
             limits,
         }

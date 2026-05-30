@@ -16,7 +16,8 @@ use axum::http::{header, Method, Request, StatusCode};
 use darkrun_api::{
     ApproveAction, ApproveActionKind, DirectionArchetype, DirectionSessionPayload, GateType,
     PickerKind, PickerOption, PickerSessionPayload, QuestionOption, QuestionSessionPayload,
-    ReviewSessionPayload, SessionPayload, SessionStatus, ViewMode, ViewSessionPayload, ViewStatus,
+    ReviewSessionPayload, SessionPayload, SessionStatus, ViewMode, ViewScope, ViewSessionPayload,
+    ViewStatus,
 };
 use darkrun_core::StateStore;
 use darkrun_http::{build_router, AppState, Limits};
@@ -133,6 +134,8 @@ fn view(session_id: &str) -> SessionPayload {
         session_id: session_id.into(),
         status: ViewStatus::Open,
         run_slug: "run-v".into(),
+        scope: ViewScope::Run,
+        artifacts: vec![],
         factory: Some("web".into()),
         station: Some("frame".into()),
         artifact: None,

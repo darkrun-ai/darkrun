@@ -74,6 +74,14 @@ pub mod paths {
     pub fn picker_select(id: &str) -> String {
         format!("/picker/{id}/select")
     }
+    /// `POST /visual-review/{id}/annotate`.
+    pub fn visual_review_annotate(id: &str) -> String {
+        format!("/visual-review/{id}/annotate")
+    }
+    /// `GET`/`POST` `/api/proof/{run}`.
+    pub fn proof(run: &str) -> String {
+        format!("/api/proof/{run}")
+    }
     /// `POST /api/advance/{id}`.
     pub fn advance(id: &str) -> String {
         format!("/api/advance/{id}")
@@ -164,6 +172,27 @@ pub const ROUTES: &[RouteSpec] = &[
         operation_id: "postPickerSelect",
         summary: "Choose an option in a blocking picker session.",
         tag: "picker",
+    },
+    RouteSpec {
+        method: HttpMethod::Post,
+        path_template: "/visual-review/{sessionId}/annotate",
+        operation_id: "postVisualReviewAnnotate",
+        summary: "Annotate an output screenshot (pins + comments) -> feedback.",
+        tag: "visual-review",
+    },
+    RouteSpec {
+        method: HttpMethod::Get,
+        path_template: "/api/proof/{run}",
+        operation_id: "getProof",
+        summary: "Return a run's attached objective-evidence proof.",
+        tag: "proof",
+    },
+    RouteSpec {
+        method: HttpMethod::Post,
+        path_template: "/api/proof/{run}",
+        operation_id: "attachProof",
+        summary: "Attach an objective-evidence proof to a run.",
+        tag: "proof",
     },
     RouteSpec {
         method: HttpMethod::Post,

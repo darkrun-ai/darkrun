@@ -91,6 +91,89 @@ pub enum CheckpointOutcome {
     Awaiting,
 }
 
+/// The kind of SURFACE a Run delivers — the linchpin that routes which
+/// objective verification applies at the Prove/Audit stations.
+///
+/// Set at the Shape station, the surface classifies what the run produces so
+/// downstream stations route measurement by it:
+/// - [`Surface::WebUi`] / [`Surface::Desktop`] / [`Surface::Mobile`] — a real
+///   headless browser: screenshot + web vitals + a11y/contrast/touch-target/
+///   reduced-motion audits.
+/// - [`Surface::Library`] / [`Surface::Api`] / [`Surface::Data`] — criterion
+///   microbenchmarks + a small load harness (no browser); API-surface review.
+/// - [`Surface::Tui`] / [`Surface::Cli`] — terminal/output snapshot + interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Surface {
+    /// A reusable code library (criterion benches + load harness).
+    Library,
+    /// A network API surface (criterion benches + load harness).
+    Api,
+    /// A web UI (headless browser: screenshot + vitals + a11y audits).
+    WebUi,
+    /// A terminal UI (terminal snapshot + interaction).
+    Tui,
+    /// A command-line tool (output snapshot + interaction).
+    Cli,
+    /// A desktop application (headless browser: screenshot + vitals + a11y).
+    Desktop,
+    /// A mobile application (headless browser: screenshot + vitals + a11y).
+    Mobile,
+    /// A data pipeline / dataset (criterion benches + load harness).
+    Data,
+}
+
+impl Surface {
+    /// The serde token for this surface (the snake_case wire string).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Surface::Library => "library",
+            Surface::Api => "api",
+            Surface::WebUi => "web_ui",
+            Surface::Tui => "tui",
+            Surface::Cli => "cli",
+            Surface::Desktop => "desktop",
+            Surface::Mobile => "mobile",
+            Surface::Data => "data",
+        }
+    }
+
+    /// Parse a surface token, tolerating the common `web-ui`/`webui` spellings
+    /// and trimming/case-folding. Returns `None` for an unknown token.
+    pub fn parse(raw: &str) -> Option<Surface> {
+        match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+            "library" | "lib" => Some(Surface::Library),
+            "api" => Some(Surface::Api),
+            "web_ui" | "webui" | "web" => Some(Surface::WebUi),
+            "tui" => Some(Surface::Tui),
+            "cli" => Some(Surface::Cli),
+            "desktop" => Some(Surface::Desktop),
+            "mobile" => Some(Surface::Mobile),
+            "data" => Some(Surface::Data),
+            _ => None,
+        }
+    }
+
+    /// Whether this surface is verified through a real headless browser
+    /// (screenshot + web vitals + a11y audits) rather than benches or a
+    /// terminal snapshot.
+    pub fn is_visual(self) -> bool {
+        matches!(self, Surface::WebUi | Surface::Desktop | Surface::Mobile)
+    }
+
+    /// Whether this surface is verified through criterion microbenchmarks + a
+    /// small load harness (no browser).
+    pub fn is_bench(self) -> bool {
+        matches!(self, Surface::Library | Surface::Api | Surface::Data)
+    }
+
+    /// Whether this surface is verified through a terminal/output snapshot +
+    /// interaction.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Surface::Tui | Surface::Cli)
+    }
+}
+
 /// Git policy for a Run.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct RunGit {
@@ -124,6 +207,11 @@ pub struct RunFrontmatter {
     /// Lifecycle status.
     #[serde(default)]
     pub status: Status,
+    /// The SURFACE this run delivers — set at the Shape station, it routes
+    /// which objective verification applies at Prove/Audit. `None` until
+    /// classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<Surface>,
     /// Whether this run is archived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
@@ -149,6 +237,19 @@ pub struct Run {
     pub title: String,
     /// Raw markdown body (everything after the frontmatter fence).
     pub body: String,
+}
+
+impl Run {
+    /// The SURFACE this run delivers, if classified.
+    pub fn surface(&self) -> Option<Surface> {
+        self.frontmatter.surface
+    }
+
+    /// Set the run's SURFACE (what the Shape station calls once it classifies
+    /// the deliverable).
+    pub fn set_surface(&mut self, surface: Surface) {
+        self.frontmatter.surface = Some(surface);
+    }
 }
 
 /// Frontmatter for a Unit document (`.darkrun/<run>/units/<slug>.md`).

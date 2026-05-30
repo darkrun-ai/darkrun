@@ -960,6 +960,7 @@ fn run_frontmatter_full_roundtrip_json() {
         mode: "continuous".into(),
         active_station: "frame".into(),
         status: Status::Active,
+        surface: Some(Surface::WebUi),
         archived: Some(false),
         started_at: Some("2026-05-30T00:00:00Z".into()),
         completed_at: None,
@@ -970,6 +971,7 @@ fn run_frontmatter_full_roundtrip_json() {
         }),
     };
     let back = json_round(&fm);
+    assert_eq!(back.surface, Some(Surface::WebUi));
     assert_eq!(back.title.as_deref(), Some("Big Run"));
     assert_eq!(back.factory, "software");
     assert_eq!(back.mode, "continuous");
@@ -989,6 +991,7 @@ fn run_frontmatter_full_roundtrip_yaml() {
         mode: "m".into(),
         active_station: "s".into(),
         status: Status::Completed,
+        surface: Some(Surface::Cli),
         archived: Some(true),
         started_at: Some("t1".into()),
         completed_at: Some("t2".into()),
@@ -2812,6 +2815,7 @@ fn run_with_full_git_policy_yaml_roundtrips() {
             mode: "continuous".into(),
             active_station: "frame".into(),
             status: Status::Active,
+            surface: None,
             archived: Some(false),
             started_at: Some("2026-05-30T00:00:00Z".into()),
             completed_at: None,

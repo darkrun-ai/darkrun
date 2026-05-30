@@ -56,6 +56,10 @@ pub enum SessionType {
     Picker,
     /// A non-blocking artifact browser.
     View,
+    /// A visual review of an output screenshot.
+    VisualReview,
+    /// Objective evidence from the Prove station.
+    Proof,
 }
 
 /// Authorship type derived from a feedback item's origin.

@@ -24,6 +24,7 @@ mod auth;
 mod hook;
 mod pr;
 mod statusline;
+mod verify;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -61,6 +62,11 @@ enum Command {
     /// Inspect embedded factory content.
     #[command(subcommand)]
     Factory(FactoryCommand),
+    /// Capture objective verification evidence (the Prove station's NUMBERS).
+    #[command(subcommand)]
+    Verify(VerifyCommand),
+    /// Run the HTTP load harness against a target and print a BenchProof.
+    Bench(BenchArgs),
     /// Render or wire the Claude Code status line.
     Statusline(StatuslineArgs),
     /// Run a plugin hook handler (invoked by Claude Code; advisory, never blocks).
@@ -160,6 +166,64 @@ enum FactoryCommand {
     List,
 }
 
+/// `darkrun verify` — surface-routed objective evidence.
+#[derive(Debug, Subcommand)]
+enum VerifyCommand {
+    /// Drive a real headless browser over a URL: capture web vitals + a11y
+    /// audits + a screenshot, and print the WebProof JSON.
+    Web(VerifyWebArgs),
+}
+
+#[derive(Debug, Args)]
+struct VerifyWebArgs {
+    /// The URL to capture (http(s):// / file:// / data:).
+    url: String,
+    /// Write the proof JSON here (also prints to stdout).
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+    /// Where to save the screenshot PNG (defaults to <out>.png, else proof.png).
+    #[arg(long, value_name = "FILE")]
+    shot: Option<PathBuf>,
+    /// Tag the proof with this surface (web-ui|desktop|mobile). When omitted,
+    /// the bare WebProof is printed instead of a surface-tagged Proof.
+    #[arg(long)]
+    surface: Option<String>,
+    /// Viewport width in CSS pixels.
+    #[arg(long, default_value_t = 1280)]
+    width: u32,
+    /// Viewport height in CSS pixels.
+    #[arg(long, default_value_t = 800)]
+    height: u32,
+    /// Settle delay (ms) after navigation for paint/layout metrics to record.
+    #[arg(long, default_value_t = 800)]
+    settle_ms: u64,
+    /// Overall capture timeout (seconds).
+    #[arg(long, default_value_t = 30)]
+    timeout_s: u64,
+}
+
+#[derive(Debug, Args)]
+struct BenchArgs {
+    /// The HTTP target to load (http(s):// URL).
+    target: String,
+    /// Write the proof JSON here (also prints to stdout).
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+    /// Tag the proof with this surface (library|api|data). When omitted, the
+    /// bare BenchProof is printed instead of a surface-tagged Proof.
+    #[arg(long)]
+    surface: Option<String>,
+    /// Total number of requests to issue.
+    #[arg(long, default_value_t = 100)]
+    requests: u64,
+    /// Maximum in-flight requests at once.
+    #[arg(long, default_value_t = 8)]
+    concurrency: usize,
+    /// Per-request timeout (seconds).
+    #[arg(long, default_value_t = 10)]
+    timeout_s: u64,
+}
+
 #[derive(Debug, Args)]
 struct StatuslineArgs {
     #[command(subcommand)]
@@ -208,6 +272,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             hook::run(&name);
             Ok(())
         }
+        // Verification commands measure an external target (a URL), not the
+        // repo's `.darkrun/` state — handle them without resolving a repo root.
+        Command::Verify(cmd) => verify_command(cmd),
+        Command::Bench(args) => verify::bench_command(
+            args.target,
+            args.out,
+            args.surface,
+            args.requests,
+            args.concurrency,
+            args.timeout_s,
+        ),
         other => {
             let repo_root = match repo {
                 Some(p) => p,
@@ -219,7 +294,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Command::Run(cmd) => run_command(&repo_root, cmd),
                 Command::Auth(cmd) => auth_command(cmd),
                 Command::Factory(cmd) => factory_command(cmd),
-                Command::Statusline(_) | Command::Hook { .. } => unreachable!("handled above"),
+                Command::Statusline(_)
+                | Command::Hook { .. }
+                | Command::Verify(_)
+                | Command::Bench(_) => unreachable!("handled above"),
             }
         }
     }
@@ -378,6 +456,22 @@ fn factory_command(cmd: FactoryCommand) -> Result<(), Box<dyn std::error::Error>
             }
             Ok(())
         }
+    }
+}
+
+/// Handle the `verify` subcommands.
+fn verify_command(cmd: VerifyCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        VerifyCommand::Web(args) => verify::verify_web_command(
+            args.url,
+            args.out,
+            args.shot,
+            args.surface,
+            args.width,
+            args.height,
+            args.settle_ms,
+            args.timeout_s,
+        ),
     }
 }
 

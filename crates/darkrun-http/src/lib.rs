@@ -35,8 +35,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 pub use ratelimit::RateLimiter;
 pub use state::{
-    AppState, Limits, SessionRegistry, DEFAULT_BODY_MAX_BYTES, DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_WS_SESSIONS, DEFAULT_RATE_LIMIT_PER_MIN,
+    AppState, Limits, ProofRegistry, SessionRegistry, DEFAULT_BODY_MAX_BYTES,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_WS_SESSIONS, DEFAULT_RATE_LIMIT_PER_MIN,
 };
 
 /// The composite router state: the domain [`AppState`] plus the rate-limiter.
@@ -108,6 +108,14 @@ pub fn build_router(app: AppState) -> Router {
         .route("/question/{id}/answer", post(handlers::question_answer))
         .route("/direction/{id}/select", post(handlers::direction_select))
         .route("/picker/{id}/select", post(handlers::picker_select))
+        .route(
+            "/visual-review/{id}/annotate",
+            post(handlers::visual_review_annotate),
+        )
+        .route(
+            "/api/proof/{run}",
+            get(handlers::get_proof).post(handlers::attach_proof),
+        )
         .route("/api/advance/{id}", post(handlers::advance))
         .route(
             "/api/feedback/{run}/{station}",

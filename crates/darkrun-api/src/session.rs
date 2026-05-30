@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::common::{GateType, ReviewAnnotations, SessionStatus};
+use crate::proof::Proof;
 
 /// The fixed phase taxonomy a Station walks (mirrors
 /// `darkrun_core::domain::StationPhase`, kept local to stay dependency-light).
@@ -703,8 +704,66 @@ pub enum ViewMode {
     Boot,
 }
 
-/// The view-session payload (`session_type = "view"`) — a non-blocking
-/// artifact browser opened by `darkrun_view`.
+/// The render kind of one browsable output artifact in a view session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewArtifactKind {
+    /// An opaque file.
+    File,
+    /// An image.
+    Image,
+    /// A captured screenshot (the visual-review target).
+    Screenshot,
+    /// Markdown source.
+    Markdown,
+    /// A JSON document.
+    Json,
+}
+
+/// One browsable output artifact in a view session's artifact browser.
+///
+/// The view session is an ARTIFACT BROWSER: it lists the run's output
+/// deliverables so the operator can inspect them. Each entry carries a stable
+/// id, its run-relative path, a render kind, a display label, and optional
+/// fetch / thumbnail URLs.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ViewArtifact {
+    /// Stable id (referenced by an output-annotation review's `artifact_id`).
+    pub id: String,
+    /// Run-relative path of the artifact on disk.
+    pub path: String,
+    /// How to render the artifact.
+    pub kind: ViewArtifactKind,
+    /// Display label.
+    pub label: String,
+    /// Optional thumbnail URL (a small preview for the browser grid).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
+    /// Optional full fetch URL (session-scoped, already prefixed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// The scope a view session browses — which slice of the run's outputs it lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewScope {
+    /// Every output the run produced.
+    #[default]
+    Run,
+    /// Only the outputs of one station.
+    Station,
+    /// A single artifact deep-link.
+    Artifact,
+}
+
+/// The view-session payload (`session_type = "view"`) — a non-blocking ARTIFACT
+/// BROWSER opened by `darkrun_view`.
+///
+/// The centerpiece is [`artifacts`](ViewSessionPayload::artifacts): the list of
+/// output deliverables the operator browses, narrowed by
+/// [`scope`](ViewSessionPayload::scope). The viewer/boot mode + boot fields are
+/// retained for the dev-server boot path.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ViewSessionPayload {
     /// The session id.
@@ -713,13 +772,19 @@ pub struct ViewSessionPayload {
     pub status: ViewStatus,
     /// The run slug being viewed.
     pub run_slug: String,
+    /// What slice of the run's outputs this view browses.
+    #[serde(default)]
+    pub scope: ViewScope,
+    /// The output artifacts available to browse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ViewArtifact>,
     /// Optional factory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory: Option<String>,
     /// Optional station narrowing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub station: Option<String>,
-    /// Optional artifact deep-link.
+    /// Optional artifact deep-link (the `id` of the focused artifact).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<String>,
     /// Viewer or boot mode.
@@ -732,6 +797,13 @@ pub struct ViewSessionPayload {
     pub boot_command: Option<String>,
 }
 
+impl ViewSessionPayload {
+    /// Look up a browsable artifact by its stable id.
+    pub fn artifact_by_id(&self, id: &str) -> Option<&ViewArtifact> {
+        self.artifacts.iter().find(|a| a.id == id)
+    }
+}
+
 /// The open/closed status of a view session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -740,6 +812,97 @@ pub enum ViewStatus {
     Open,
     /// Closed.
     Closed,
+}
+
+/// A pin dropped on an OUTPUT screenshot during visual review — reuses the
+/// pin annotation model (relative coordinate + note) over an artifact's
+/// rendered screenshot.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VisualReviewPin {
+    /// X coordinate (0..1 relative to the screenshot width).
+    pub x: f64,
+    /// Y coordinate (0..1 relative to the screenshot height).
+    pub y: f64,
+    /// The note attached to the pin.
+    pub note: String,
+}
+
+/// The annotation bundle a visual review produces over an output screenshot:
+/// pins on the rendered surface plus free-text comments. This is the FEEDBACK
+/// the operator gives by annotating the OUTPUT (distinct from a pre-build
+/// design direction).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct VisualReviewAnnotations {
+    /// Pin annotations on the output screenshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<VisualReviewPin>,
+    /// Free-text comments on the output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
+}
+
+impl VisualReviewAnnotations {
+    /// Whether the bundle carries any feedback at all (a pin or a comment).
+    pub fn is_empty(&self) -> bool {
+        self.pins.is_empty() && self.comments.is_empty()
+    }
+}
+
+/// The visual-review session payload (`session_type = "visual_review"`) — a
+/// VISUAL REVIEW of an OUTPUT screenshot.
+///
+/// The operator annotates the rendered screenshot of one of the run's output
+/// artifacts (pins + comments over the captured surface), producing feedback.
+/// Reuses the pin annotation model from the design-direction flow, but points
+/// at a *produced* artifact rather than a pre-build design preview.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct VisualReviewSessionPayload {
+    /// The session id.
+    pub session_id: String,
+    /// Session lifecycle status.
+    pub status: SessionStatus,
+    /// The run slug whose output is under review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_slug: Option<String>,
+    /// The station that produced the output, if scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub station: Option<String>,
+    /// The id of the [`ViewArtifact`] being annotated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    /// Run-relative path of the artifact being annotated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    /// URL of the output screenshot the operator annotates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot_url: Option<String>,
+    /// Optional prompt rendered above the screenshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// The annotations the operator produced, once submitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<VisualReviewAnnotations>,
+}
+
+/// The proof-session payload (`session_type = "proof"`) — the Prove station's
+/// objective evidence surfaced as a session.
+///
+/// Carries the run's [`Proof`] (surface-tagged web vitals + audits, or bench
+/// percentiles + throughput) so the desktop app can render the NUMBERS.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProofSessionPayload {
+    /// The session id.
+    pub session_id: String,
+    /// Session lifecycle status.
+    pub status: SessionStatus,
+    /// The run slug the proof belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_slug: Option<String>,
+    /// The station the proof was measured at, if scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub station: Option<String>,
+    /// The objective evidence.
+    pub proof: Proof,
 }
 
 /// The session payload returned by `GET /api/session/:id`, discriminated on
@@ -762,6 +925,10 @@ pub enum SessionPayload {
     Picker(PickerSessionPayload),
     /// A non-blocking artifact browser.
     View(ViewSessionPayload),
+    /// A visual review of an output screenshot (pin annotations -> feedback).
+    VisualReview(VisualReviewSessionPayload),
+    /// Objective evidence from the Prove station.
+    Proof(ProofSessionPayload),
 }
 
 impl SessionPayload {
@@ -773,6 +940,8 @@ impl SessionPayload {
             SessionPayload::Direction(_) => "direction",
             SessionPayload::Picker(_) => "picker",
             SessionPayload::View(_) => "view",
+            SessionPayload::VisualReview(_) => "visual_review",
+            SessionPayload::Proof(_) => "proof",
         }
     }
 
@@ -784,6 +953,8 @@ impl SessionPayload {
             SessionPayload::Direction(p) => &p.session_id,
             SessionPayload::Picker(p) => &p.session_id,
             SessionPayload::View(p) => &p.session_id,
+            SessionPayload::VisualReview(p) => &p.session_id,
+            SessionPayload::Proof(p) => &p.session_id,
         }
     }
 }

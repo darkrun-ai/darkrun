@@ -6,6 +6,9 @@
 //!   - `GET    /api/session/:id`                     — interactive session JSON.
 //!   - `HEAD   /api/session/:id/heartbeat`           — client-presence ping.
 //!   - `POST   /review/:id/decide`                   — record a review decision.
+//!   - `POST   /visual-review/:id/annotate`          — annotate an output -> feedback.
+//!   - `POST   /api/proof/:run`                       — attach a run's proof.
+//!   - `GET    /api/proof/:run`                       — read a run's proof.
 //!   - `POST   /api/advance/:id`                     — SPA wake signal past a gate.
 //!   - `GET    /api/feedback/:run/:station`          — list feedback for a station.
 //!   - `POST   /api/feedback/:run/:station`          — create a feedback item.
@@ -23,8 +26,10 @@ use darkrun_api::{
     DirectionSelectRequest, DirectionSelectResponse, FeedbackCreateRequest, FeedbackCreateResponse,
     FeedbackDeleteResponse, FeedbackItem, FeedbackListResponse, FeedbackReplyCreateRequest,
     FeedbackReplyCreateResponse, FeedbackStatus, FeedbackUpdateRequest, FeedbackUpdateResponse,
-    PickerSelectRequest, PickerSelectResponse, QuestionAnswerRequest, QuestionAnswerResponse,
-    ReviewDecision, ReviewDecisionRequest, ReviewDecisionResponse, SessionPayload, SessionStatus,
+    OutputReviewRequest, OutputReviewResponse, PickerSelectRequest, PickerSelectResponse,
+    ProofAttachRequest, ProofAttachResponse, ProofGetResponse, QuestionAnswerRequest,
+    QuestionAnswerResponse, ReviewDecision, ReviewDecisionRequest, ReviewDecisionResponse,
+    SessionPayload, SessionStatus,
 };
 use serde_json::json;
 
@@ -228,6 +233,117 @@ pub async fn picker_select(
         }),
     )
         .into_response()
+}
+
+/// `POST /visual-review/:id/annotate` — record the operator's VISUAL REVIEW of
+/// an OUTPUT screenshot and emit it as FEEDBACK.
+///
+/// Records the pin + comment annotations onto the visual-review session (WS
+/// push), then mints a `user-visual` feedback item against the run/station the
+/// session targets so the fix-worker loop can act on it. `404` when the session
+/// is unknown, `409` when it is not a visual-review session, `422` when the
+/// annotation carries neither a pin nor a comment (nothing to act on).
+pub async fn visual_review_annotate(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<OutputReviewRequest>,
+) -> Response {
+    let Some(payload) = state.sessions.get(&id) else {
+        return not_found("session", &id);
+    };
+    let SessionPayload::VisualReview(mut review) = payload else {
+        return conflict("session is not a visual-review session", &id);
+    };
+
+    if req.annotations.is_empty() {
+        return unprocessable("annotation carries no pins or comments", &id);
+    }
+
+    let pins = req.annotations.pins.len();
+    let comments = req.annotations.comments.len();
+
+    // The feedback targets the run + station the session names. A visual review
+    // with no run slug cannot be routed to a feedback file.
+    let Some(run) = review.run_slug.clone() else {
+        return unprocessable("visual-review session has no run_slug", &id);
+    };
+    let station = review.station.clone().unwrap_or_default();
+
+    let existing = state.store.read_feedback_raw(&run).unwrap_or_default();
+    let fb_id = feedback_doc::next_id(existing.keys());
+    let title = req.title.clone().unwrap_or_else(|| {
+        match review.artifact_path.as_deref() {
+            Some(path) => format!("Visual review: {path}"),
+            None => "Visual review of output".to_string(),
+        }
+    });
+    let doc = FeedbackDoc::new_user(fb_id.clone(), station.clone(), title, req.to_feedback_body());
+    if state
+        .store
+        .write_feedback_raw(&run, &fb_id, &doc.render())
+        .is_err()
+    {
+        return internal_error("failed to persist visual-review feedback");
+    }
+
+    // Record the annotations back on the session + flip to decided so any
+    // WebSocket subscriber sees the resolved review.
+    review.annotations = Some(req.annotations);
+    review.status = SessionStatus::Decided;
+    state.sessions.upsert(SessionPayload::VisualReview(review));
+
+    (
+        StatusCode::CREATED,
+        Json(OutputReviewResponse {
+            ok: true,
+            feedback_id: fb_id,
+            pins,
+            comments,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /api/proof/:run` — attach a run's objective-evidence [`Proof`].
+///
+/// Stores the proof in the in-memory proof registry, keyed by run. `422` when
+/// the proof's populated block does not match its surface's verification route
+/// (e.g. a `web_ui` proof carrying only a bench block).
+pub async fn attach_proof(
+    State(state): State<AppState>,
+    Path(run): Path<String>,
+    Json(req): Json<ProofAttachRequest>,
+) -> Response {
+    let matches = req.proof.block_matches_surface();
+    if !matches {
+        return unprocessable("proof block does not match surface", req.proof.surface.as_str());
+    }
+    let surface = req.proof.surface;
+    state.proofs.attach(&run, req.proof, req.station.clone());
+
+    (
+        StatusCode::CREATED,
+        Json(ProofAttachResponse {
+            ok: true,
+            run,
+            surface,
+            block_matches_surface: matches,
+        }),
+    )
+        .into_response()
+}
+
+/// `GET /api/proof/:run` — return a run's attached objective-evidence proof.
+/// `404` when no proof has been attached for the run.
+pub async fn get_proof(State(state): State<AppState>, Path(run): Path<String>) -> Response {
+    match state.proofs.get(&run) {
+        Some((proof, station)) => (
+            StatusCode::OK,
+            Json(ProofGetResponse { run, station, proof }),
+        )
+            .into_response(),
+        None => not_found("proof", &run),
+    }
 }
 
 /// `GET /api/feedback/:run/:station` — list feedback items for a run's station.

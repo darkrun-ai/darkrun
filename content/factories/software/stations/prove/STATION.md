@@ -17,6 +17,25 @@ Prove establishes that the software actually does what Specify said it must —
 eyes and adversarial intent. This independence is the point: the people who wrote
 the code are the worst judges of whether it is correct.
 
+Verification here is **objective measurement, not judgment**. An agent reading
+the code and asserting "looks good" is not proof — proof is NUMBERS. Which
+numbers depends on the run's **surface** (classified at Shape), and the surface
+routes the measurement:
+
+- **web-ui / desktop / mobile** (visual) — a real headless browser. Run
+  `darkrun verify web` to capture a screenshot, the web vitals
+  (LCP / FCP / CLS / TTFB / INP), and the a11y / contrast / touch-target /
+  reduced-motion audits, then attach the `WebProof` with `darkrun_proof_attach`.
+- **library / api / data** (bench) — criterion microbenchmarks + a small load
+  harness. Run `darkrun bench` (plus the doc-tests) to capture the latency
+  percentiles (p50 / p95 / p99) and throughput, then attach the `BenchProof`.
+- **tui / cli** (terminal) — a terminal/output snapshot of the real invocation,
+  attached as a screenshot-bearing proof.
+
+The proof is **required to pass Prove**. A criterion backed only by an eyeballed
+claim is unproven; back it with the measured numbers the surface demands and
+attach them via `darkrun_proof_attach` so the checkpoint sees the evidence.
+
 ## Risk class eliminated
 
 *Escaped defects.* The code passed Build's tests, but those tests share the

@@ -32,7 +32,7 @@ pub use state::{run_is_complete, RunState, StateStore};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Run, RunFrontmatter, Status, Unit, UnitFrontmatter};
+    use crate::domain::{Run, RunFrontmatter, Status, Surface, Unit, UnitFrontmatter};
 
     fn unit(slug: &str, status: Status, deps: &[&str]) -> Unit {
         Unit {
@@ -67,6 +67,88 @@ mod tests {
         assert_eq!(parsed.active_station, "frame");
         assert_eq!(parsed.status, Status::Active);
         assert!(parsed_body.contains("Deliver the vertical slice."));
+    }
+
+    #[test]
+    fn surface_defaults_to_none_and_roundtrips() {
+        // Default frontmatter carries no surface, and serde omits the field.
+        let fm = RunFrontmatter {
+            factory: "software".into(),
+            ..Default::default()
+        };
+        assert_eq!(fm.surface, None);
+        let yaml = serde_yaml::to_string(&fm).expect("yaml");
+        assert!(!yaml.contains("surface"), "absent surface must not serialize");
+
+        // A classified surface serializes as its snake_case token and parses back.
+        let fm = RunFrontmatter {
+            factory: "software".into(),
+            surface: Some(Surface::WebUi),
+            ..Default::default()
+        };
+        let body = "# Web app\n";
+        let serialized = frontmatter::serialize(&fm, body).expect("serialize");
+        assert!(serialized.contains("surface: web_ui"));
+        let (parsed, _) = frontmatter::parse::<RunFrontmatter>(&serialized).expect("parse");
+        assert_eq!(parsed.surface, Some(Surface::WebUi));
+    }
+
+    #[test]
+    fn surface_helpers_classify_verification_route() {
+        // Visual surfaces route to the headless browser.
+        for s in [Surface::WebUi, Surface::Desktop, Surface::Mobile] {
+            assert!(s.is_visual() && !s.is_bench() && !s.is_terminal());
+        }
+        // Bench surfaces route to criterion + the load harness.
+        for s in [Surface::Library, Surface::Api, Surface::Data] {
+            assert!(s.is_bench() && !s.is_visual() && !s.is_terminal());
+        }
+        // Terminal surfaces route to a terminal/output snapshot.
+        for s in [Surface::Tui, Surface::Cli] {
+            assert!(s.is_terminal() && !s.is_visual() && !s.is_bench());
+        }
+    }
+
+    #[test]
+    fn surface_parse_tolerates_spellings() {
+        assert_eq!(Surface::parse("web-ui"), Some(Surface::WebUi));
+        assert_eq!(Surface::parse("WebUI"), Some(Surface::WebUi));
+        assert_eq!(Surface::parse(" web_ui "), Some(Surface::WebUi));
+        assert_eq!(Surface::parse("lib"), Some(Surface::Library));
+        assert_eq!(Surface::parse("CLI"), Some(Surface::Cli));
+        assert_eq!(Surface::parse("telepathy"), None);
+        // as_str round-trips through serde tokens.
+        for s in [
+            Surface::Library,
+            Surface::Api,
+            Surface::WebUi,
+            Surface::Tui,
+            Surface::Cli,
+            Surface::Desktop,
+            Surface::Mobile,
+            Surface::Data,
+        ] {
+            assert_eq!(Surface::parse(s.as_str()), Some(s));
+            let json = serde_json::to_value(s).unwrap();
+            assert_eq!(json, serde_json::json!(s.as_str()));
+        }
+    }
+
+    #[test]
+    fn run_surface_get_set_helpers() {
+        let mut run = Run {
+            slug: "r".into(),
+            frontmatter: RunFrontmatter {
+                factory: "software".into(),
+                ..Default::default()
+            },
+            title: "R".into(),
+            body: String::new(),
+        };
+        assert_eq!(run.surface(), None);
+        run.set_surface(Surface::Cli);
+        assert_eq!(run.surface(), Some(Surface::Cli));
+        assert_eq!(run.frontmatter.surface, Some(Surface::Cli));
     }
 
     #[test]

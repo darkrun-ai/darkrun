@@ -6,11 +6,14 @@
 
 pub mod chips;
 pub mod factory;
+pub mod output_review;
 pub mod phase_machine;
 pub mod pipeline;
 pub mod primitives;
+pub mod proof_panel;
 pub mod role;
 pub mod session_views;
 pub mod station_flow;
+pub mod view_artifacts;
 pub mod walkthrough;
 pub mod wordmark;

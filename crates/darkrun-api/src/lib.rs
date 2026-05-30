@@ -17,6 +17,8 @@ pub mod common;
 pub mod direction;
 pub mod feedback;
 pub mod openapi;
+pub mod output_review;
+pub mod proof;
 pub mod question;
 pub mod review;
 pub mod review_current;
@@ -40,6 +42,11 @@ pub use feedback::{
     FeedbackListResponse, FeedbackReplyCreateRequest, FeedbackReplyCreateResponse,
     FeedbackScope, FeedbackUpdateRequest, FeedbackUpdateResponse, IterationResult,
 };
+pub use output_review::{OutputReviewRequest, OutputReviewResponse};
+pub use proof::{
+    AuditResult, BenchProof, Proof, ProofAttachRequest, ProofAttachResponse, ProofGetResponse,
+    Surface, WebProof,
+};
 pub use question::{QuestionAnswerRequest, QuestionAnswerResponse};
 pub use review::{ReviewDecision, ReviewDecisionRequest, ReviewDecisionResponse};
 pub use review_current::{
@@ -54,10 +61,11 @@ pub use session::{
     DirectionSessionPayload, DiscoveredReviewUrl, DriftAction, DriftEntry, DriftKind,
     KnowledgeFile, MilestoneStatus, OutputArtifact, OutputArtifactType, PendingDecision,
     PickerKind, PickerOption, PickerSelection, PickerSessionPayload, PreviousReviewSnapshot,
-    ProgressMilestone, QuestionAnswer, QuestionOption, QuestionSessionPayload,
+    ProgressMilestone, ProofSessionPayload, QuestionAnswer, QuestionOption, QuestionSessionPayload,
     ReviewSessionPayload, RunCurrentState, RunPhase, SealStatus, SessionPayload,
-    StationArtifact, StationStateInfo, UnitOutputPreview, UnitOutputType, ViewMode,
-    ViewSessionPayload, ViewStatus,
+    StationArtifact, StationStateInfo, UnitOutputPreview, UnitOutputType, ViewArtifact,
+    ViewArtifactKind, ViewMode, ViewScope, ViewSessionPayload, ViewStatus,
+    VisualReviewAnnotations, VisualReviewPin, VisualReviewSessionPayload,
 };
 
 #[cfg(test)]
@@ -146,6 +154,8 @@ mod tests {
                     session_id: "v".into(),
                     status: ViewStatus::Open,
                     run_slug: "run".into(),
+                    scope: ViewScope::Run,
+                    artifacts: vec![],
                     factory: None,
                     station: None,
                     artifact: None,
@@ -154,6 +164,29 @@ mod tests {
                     boot_command: None,
                 }),
                 "view",
+            ),
+            (
+                SessionPayload::VisualReview(VisualReviewSessionPayload {
+                    session_id: "vr".into(),
+                    ..Default::default()
+                }),
+                "visual_review",
+            ),
+            (
+                SessionPayload::Proof(ProofSessionPayload {
+                    session_id: "pf".into(),
+                    status: SessionStatus::Pending,
+                    run_slug: Some("run".into()),
+                    station: None,
+                    proof: Proof::bench(
+                        Surface::Library,
+                        proof::BenchProof {
+                            p50: Some(1.0),
+                            ..Default::default()
+                        },
+                    ),
+                }),
+                "proof",
             ),
         ];
 

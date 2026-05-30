@@ -20,7 +20,8 @@ use std::time::Duration;
 use darkrun_api::{
     ApproveAction, ApproveActionKind, DirectionArchetype, DirectionSessionPayload, GateType,
     PickerKind, PickerOption, PickerSessionPayload, QuestionOption, QuestionSessionPayload,
-    ReviewSessionPayload, SessionPayload, SessionStatus, ViewMode, ViewSessionPayload, ViewStatus,
+    ReviewSessionPayload, SessionPayload, SessionStatus, ViewMode, ViewScope, ViewSessionPayload,
+    ViewStatus,
 };
 use darkrun_core::StateStore;
 use darkrun_http::{build_router, AppState, Limits, SessionRegistry};
@@ -122,6 +123,8 @@ fn view(session_id: &str) -> SessionPayload {
         session_id: session_id.into(),
         status: ViewStatus::Open,
         run_slug: "view-run".into(),
+        scope: ViewScope::Run,
+        artifacts: vec![],
         factory: None,
         station: None,
         artifact: None,

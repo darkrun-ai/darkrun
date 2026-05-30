@@ -55,6 +55,7 @@ pub mod graph;
 pub mod kinds;
 pub mod selection;
 pub mod tokens;
+pub mod view;
 
 /// The recommended glob import for consumers: every public component, the shared
 /// kinds, and the graph types, plus Dioxus' own prelude.
@@ -67,7 +68,11 @@ pub mod prelude {
     pub use crate::components::factory::{
         CheckpointBar, CheckpointKind, FactoryCard, UnitRow,
     };
+    pub use crate::components::output_review::OutputReview;
     pub use crate::components::phase_machine::PhaseMachine;
+    pub use crate::components::proof_panel::{
+        AuditRow, BenchStat, ProofMetricKind, ProofPanel, ProofView, VitalMetric,
+    };
     pub use crate::components::pipeline::{strip_for, PhaseDot, StationPipeline};
     pub use crate::components::primitives::{Badge, Button, ButtonVariant, Card};
     pub use crate::components::role::{ArtifactCard, ExpandableRole, RoleKind};
@@ -75,6 +80,7 @@ pub mod prelude {
         ArchetypeCard, DirectionView, OptionCard, PickerItem, PickerView, QuestionView,
     };
     pub use crate::components::station_flow::StationFlow;
+    pub use crate::components::view_artifacts::{ArtifactEntry, ViewArtifacts};
     pub use crate::components::walkthrough::RunWalkthrough;
     pub use crate::components::wordmark::{Wordmark, WordmarkVariant};
     pub use crate::flow::{
@@ -93,4 +99,8 @@ pub mod prelude {
         place_pin, PinPoint, SelectMode, SelectionModel,
     };
     pub use crate::tokens;
+    pub use crate::view::{
+        classify_vital, format_latency_ms, format_samples, format_throughput, format_vital,
+        vital_label, ArtifactKind, VitalVerdict,
+    };
 }

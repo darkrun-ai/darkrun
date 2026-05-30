@@ -7,13 +7,23 @@
 //! handful of conventional keys and degrade gracefully when one is absent.
 
 use darkrun_api::common::{GateType, SessionStatus};
+use darkrun_api::proof::{Proof, Surface};
 use darkrun_api::session::{
-    DirectionArchetype, DirectionPin, PickerOption, QuestionOption, RunPhase,
+    DirectionArchetype, DirectionPin, PickerOption, QuestionOption, RunPhase, ViewArtifact,
+    ViewArtifactKind,
 };
 use darkrun_ui::components::factory::CheckpointKind;
+use darkrun_ui::components::proof_panel::{
+    AuditRow, BenchStat, ProofMetricKind, ProofView, VitalMetric,
+};
 use darkrun_ui::components::session_views::{ArchetypeCard, OptionCard, PickerItem};
+use darkrun_ui::components::view_artifacts::ArtifactEntry;
 use darkrun_ui::kinds::{Phase, Tone};
 use darkrun_ui::selection::PinPoint;
+use darkrun_ui::view::{
+    classify_vital, format_latency_ms, format_samples, format_throughput, format_vital,
+    ArtifactKind,
+};
 use serde_json::Value;
 
 /// Map the wire [`RunPhase`] onto the UI [`Phase`].
@@ -206,6 +216,136 @@ pub fn pin_to_wire(p: &PinPoint) -> DirectionPin {
     }
 }
 
+// ---------------------------------------------------------------------------
+// View artifact mapping: wire ViewArtifact -> the ArtifactEntry the artifact
+// browser consumes.
+// ---------------------------------------------------------------------------
+
+/// Map a wire [`ViewArtifactKind`] onto the UI [`ArtifactKind`].
+pub fn artifact_kind(k: ViewArtifactKind) -> ArtifactKind {
+    match k {
+        ViewArtifactKind::File => ArtifactKind::File,
+        ViewArtifactKind::Image => ArtifactKind::Image,
+        ViewArtifactKind::Screenshot => ArtifactKind::Screenshot,
+        ViewArtifactKind::Markdown => ArtifactKind::Markdown,
+        ViewArtifactKind::Json => ArtifactKind::Json,
+    }
+}
+
+/// Map a wire [`ViewArtifact`] onto a UI [`ArtifactEntry`].
+pub fn artifact_entry(a: &ViewArtifact) -> ArtifactEntry {
+    ArtifactEntry {
+        id: a.id.clone(),
+        path: a.path.clone(),
+        kind: artifact_kind(a.kind),
+        label: a.label.clone(),
+        thumbnail_url: a.thumbnail_url.clone(),
+        url: a.url.clone(),
+        body: None,
+    }
+}
+
+/// Map every artifact on a view payload into UI entries.
+pub fn artifact_entries(arts: &[ViewArtifact]) -> Vec<ArtifactEntry> {
+    arts.iter().map(artifact_entry).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Proof mapping: wire Proof (surface-tagged web/bench blocks) -> the ProofView
+// the proof panel renders, with the numbers pre-formatted + classified.
+// ---------------------------------------------------------------------------
+
+/// The canonical order web vitals are surfaced in the panel.
+const VITAL_ORDER: [&str; 5] = ["lcp", "fcp", "ttfb", "inp", "cls"];
+
+/// Which display block a surface routes its proof through.
+pub fn proof_metric_kind(s: Surface) -> ProofMetricKind {
+    if s.is_visual() {
+        ProofMetricKind::Web
+    } else if s.is_bench() {
+        ProofMetricKind::Bench
+    } else {
+        ProofMetricKind::Terminal
+    }
+}
+
+/// Map a wire [`Proof`] onto the display-ready [`ProofView`], pre-formatting and
+/// classifying every number so the panel stays a thin renderer.
+pub fn proof_view(proof: &Proof) -> ProofView {
+    let kind = proof_metric_kind(proof.surface);
+    let block_matches_surface = proof.block_matches_surface();
+
+    let mut vitals = Vec::new();
+    let mut audits = Vec::new();
+    let mut screenshot_url = None;
+    if let Some(web) = &proof.web {
+        // Known vitals first, in canonical order; then any extras the engine
+        // emitted, in their stable BTreeMap order.
+        for key in VITAL_ORDER {
+            if let Some(value) = web.vitals.get(key) {
+                vitals.push(vital_metric(key, *value));
+            }
+        }
+        for (key, value) in &web.vitals {
+            if !VITAL_ORDER.contains(&key.as_str()) {
+                vitals.push(vital_metric(key, *value));
+            }
+        }
+        audits = web
+            .audits
+            .iter()
+            .map(|a| AuditRow {
+                name: a.name.clone(),
+                value: a.value.clone(),
+                pass: a.pass,
+            })
+            .collect();
+        screenshot_url = web.screenshot_url.clone();
+    }
+
+    let mut bench = Vec::new();
+    if let Some(b) = &proof.bench {
+        if let Some(v) = b.p50 {
+            bench.push(BenchStat { label: "p50".to_string(), display: format_latency_ms(v) });
+        }
+        if let Some(v) = b.p95 {
+            bench.push(BenchStat { label: "p95".to_string(), display: format_latency_ms(v) });
+        }
+        if let Some(v) = b.p99 {
+            bench.push(BenchStat { label: "p99".to_string(), display: format_latency_ms(v) });
+        }
+        if let Some(v) = b.throughput {
+            bench.push(BenchStat {
+                label: "throughput".to_string(),
+                display: format_throughput(v),
+            });
+        }
+        if let Some(n) = b.samples {
+            bench.push(BenchStat { label: "samples".to_string(), display: format_samples(n) });
+        }
+    }
+
+    ProofView {
+        surface: proof.surface.as_str().to_string(),
+        kind,
+        vitals,
+        audits,
+        screenshot_url,
+        bench,
+        block_matches_surface,
+    }
+}
+
+/// Build one classified, pre-formatted [`VitalMetric`] from a raw vital.
+fn vital_metric(key: &str, value: f64) -> VitalMetric {
+    VitalMetric {
+        key: key.to_string(),
+        value,
+        display: format_vital(key, value),
+        verdict: classify_vital(key, value),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +522,147 @@ mod tests {
         let mapped = pin_points(&pins);
         assert_eq!(mapped.len(), 2);
         assert_eq!(mapped[1].note, "b");
+    }
+
+    // --- view artifact mapping ---------------------------------------------
+
+    #[test]
+    fn artifact_kind_maps_every_wire_kind() {
+        assert_eq!(artifact_kind(ViewArtifactKind::File), ArtifactKind::File);
+        assert_eq!(artifact_kind(ViewArtifactKind::Image), ArtifactKind::Image);
+        assert_eq!(
+            artifact_kind(ViewArtifactKind::Screenshot),
+            ArtifactKind::Screenshot
+        );
+        assert_eq!(
+            artifact_kind(ViewArtifactKind::Markdown),
+            ArtifactKind::Markdown
+        );
+        assert_eq!(artifact_kind(ViewArtifactKind::Json), ArtifactKind::Json);
+    }
+
+    #[test]
+    fn artifact_entry_carries_paths_and_urls() {
+        let wire = ViewArtifact {
+            id: "a1".into(),
+            path: "out/home.png".into(),
+            kind: ViewArtifactKind::Screenshot,
+            label: "Home".into(),
+            thumbnail_url: Some("/thumb/a1".into()),
+            url: Some("/fetch/a1".into()),
+        };
+        let entry = artifact_entry(&wire);
+        assert_eq!(entry.id, "a1");
+        assert_eq!(entry.path, "out/home.png");
+        assert_eq!(entry.kind, ArtifactKind::Screenshot);
+        assert!(entry.kind.is_reviewable());
+        assert_eq!(entry.thumbnail_url.as_deref(), Some("/thumb/a1"));
+        assert_eq!(entry.url.as_deref(), Some("/fetch/a1"));
+    }
+
+    #[test]
+    fn artifact_entries_maps_all() {
+        let arts = vec![
+            ViewArtifact {
+                id: "a".into(),
+                path: "x".into(),
+                kind: ViewArtifactKind::Markdown,
+                label: "X".into(),
+                thumbnail_url: None,
+                url: None,
+            },
+            ViewArtifact {
+                id: "b".into(),
+                path: "y".into(),
+                kind: ViewArtifactKind::Json,
+                label: "Y".into(),
+                thumbnail_url: None,
+                url: None,
+            },
+        ];
+        let entries = artifact_entries(&arts);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].kind, ArtifactKind::Json);
+    }
+
+    // --- proof mapping -----------------------------------------------------
+
+    #[test]
+    fn proof_metric_kind_routes_by_surface() {
+        assert_eq!(proof_metric_kind(Surface::WebUi), ProofMetricKind::Web);
+        assert_eq!(proof_metric_kind(Surface::Desktop), ProofMetricKind::Web);
+        assert_eq!(proof_metric_kind(Surface::Library), ProofMetricKind::Bench);
+        assert_eq!(proof_metric_kind(Surface::Cli), ProofMetricKind::Terminal);
+    }
+
+    #[test]
+    fn proof_view_web_orders_vitals_and_formats() {
+        use darkrun_api::proof::{AuditResult, WebProof};
+        use std::collections::BTreeMap;
+        let mut vitals = BTreeMap::new();
+        // Insert out of canonical order to prove ordering.
+        vitals.insert("cls".to_string(), 0.02);
+        vitals.insert("lcp".to_string(), 1200.0);
+        vitals.insert("ttfb".to_string(), 640.0);
+        let proof = Proof::web(
+            Surface::WebUi,
+            WebProof {
+                vitals,
+                audits: vec![AuditResult {
+                    name: "contrast".into(),
+                    value: "4.8:1".into(),
+                    pass: true,
+                }],
+                screenshot_url: Some("/shot.png".into()),
+            },
+        );
+        let view = proof_view(&proof);
+        assert_eq!(view.surface, "web_ui");
+        assert_eq!(view.kind, ProofMetricKind::Web);
+        // Canonical order: lcp before ttfb before cls.
+        let keys: Vec<&str> = view.vitals.iter().map(|v| v.key.as_str()).collect();
+        assert_eq!(keys, vec!["lcp", "ttfb", "cls"]);
+        assert_eq!(view.vitals[0].display, "1.20 s");
+        assert_eq!(view.vitals[0].verdict, darkrun_ui::view::VitalVerdict::Good);
+        assert_eq!(view.audits.len(), 1);
+        assert_eq!(view.screenshot_url.as_deref(), Some("/shot.png"));
+        assert!(view.bench.is_empty());
+        assert!(view.block_matches_surface);
+    }
+
+    #[test]
+    fn proof_view_bench_formats_percentiles_and_throughput() {
+        use darkrun_api::proof::BenchProof;
+        let proof = Proof::bench(
+            Surface::Library,
+            BenchProof {
+                p50: Some(0.5),
+                p95: Some(1.2),
+                p99: Some(2.0),
+                throughput: Some(50_000.0),
+                samples: Some(1_000),
+            },
+        );
+        let view = proof_view(&proof);
+        assert_eq!(view.kind, ProofMetricKind::Bench);
+        let labels: Vec<&str> = view.bench.iter().map(|b| b.label.as_str()).collect();
+        assert_eq!(labels, vec!["p50", "p95", "p99", "throughput", "samples"]);
+        assert_eq!(view.bench[3].display, "50.0k ops/s");
+        assert_eq!(view.bench[4].display, "1,000");
+        assert!(view.vitals.is_empty());
+    }
+
+    #[test]
+    fn proof_view_flags_block_mismatch() {
+        use darkrun_api::proof::BenchProof;
+        // A visual surface carrying only a bench block does not match its route.
+        let proof = Proof {
+            surface: Surface::WebUi,
+            web: None,
+            bench: Some(BenchProof::default()),
+        };
+        let view = proof_view(&proof);
+        assert!(!view.block_matches_surface);
+        assert_eq!(view.kind, ProofMetricKind::Web);
     }
 }

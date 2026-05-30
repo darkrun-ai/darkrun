@@ -196,6 +196,26 @@ pub struct PromptContext {
     /// The wave-ready / on-record unit slugs for this action.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub units: Vec<String>,
+    /// The run's classified SURFACE token (`web_ui`, `library`, …), absent
+    /// until the Shape station records one. Drives surface-routed verification
+    /// in the Prove/Audit prompts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    /// True when the run's surface is verified through a headless browser
+    /// (web-ui / desktop / mobile) — the Prove prompt routes to `darkrun verify
+    /// web` and a `WebProof`. Also drives the manufacture phase's "get a design
+    /// direction first" guidance.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub user_facing: bool,
+    /// True when the run's surface is verified through criterion benches + a
+    /// load harness (library / api / data) — the Prove prompt routes to
+    /// `darkrun bench` and a `BenchProof`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bench_surface: bool,
+    /// True when the run's surface is verified through a terminal/output
+    /// snapshot (tui / cli) — the Prove prompt routes to an output snapshot.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub terminal_surface: bool,
 }
 
 /// Whether a unit is "past" — no further cursor work needed at its position.
@@ -471,6 +491,15 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
     // Resolve the station def for the roster / kills / artifact / checkpoint.
     if let Some(station) = station.as_deref() {
         let run = store.read_run(slug)?;
+        // Surface-routed verification flags: the run's classified surface
+        // decides which proof the Prove/Audit prompts demand, and whether the
+        // manufacture phase asks for a design direction first.
+        if let Some(surface) = run.surface() {
+            ctx.surface = Some(surface.as_str().to_string());
+            ctx.user_facing = surface.is_visual();
+            ctx.bench_surface = surface.is_bench();
+            ctx.terminal_surface = surface.is_terminal();
+        }
         if let Some(factory) = resolve_factory(&run.frontmatter.factory) {
             if let Some(def) = factory.station(station) {
                 ctx.kills = Some(def.kills.clone());
@@ -1004,5 +1033,64 @@ mod tests {
         assert_eq!(res.position.track, Track::Feedback);
         let s = store.read_state("r").unwrap().unwrap();
         assert_eq!(s.stations["frame"].status, Status::Blocked);
+    }
+
+    // ── Surface routing into the rendered prompt ─────────────────────────────
+
+    /// A classified visual surface lights up the headless-browser route in the
+    /// rendered Audit prompt.
+    #[test]
+    fn audit_prompt_routes_visual_surface_through_render() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+        crate::proof::set_surface(&store, "r", "web-ui").expect("classify");
+        let action = RunAction::Audit {
+            run: "r".into(),
+            station: "prove".into(),
+            reviewers: vec![],
+        };
+        let out = render_prompt(&store, "r", &action)
+            .expect("render")
+            .expect("audit has a template");
+        assert!(out.contains("darkrun verify web"), "visual run routes to web verify:\n{out}");
+        assert!(out.contains("darkrun_proof_attach"));
+        assert!(!out.contains("darkrun bench"));
+    }
+
+    /// A classified bench surface lights up the bench route instead.
+    #[test]
+    fn audit_prompt_routes_bench_surface_through_render() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+        crate::proof::set_surface(&store, "r", "api").expect("classify");
+        let action = RunAction::Audit {
+            run: "r".into(),
+            station: "prove".into(),
+            reviewers: vec![],
+        };
+        let out = render_prompt(&store, "r", &action)
+            .expect("render")
+            .expect("audit has a template");
+        assert!(out.contains("darkrun bench"), "bench run routes to bench:\n{out}");
+        assert!(!out.contains("darkrun verify web"));
+    }
+
+    /// An unclassified run carries no surface proof route in its Audit prompt.
+    #[test]
+    fn audit_prompt_without_surface_has_no_route() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+        let action = RunAction::Audit {
+            run: "r".into(),
+            station: "build".into(),
+            reviewers: vec![],
+        };
+        let out = render_prompt(&store, "r", &action)
+            .expect("render")
+            .expect("audit has a template");
+        assert!(
+            !out.contains("darkrun verify web") && !out.contains("darkrun bench"),
+            "unclassified run carries no proof route:\n{out}"
+        );
     }
 }

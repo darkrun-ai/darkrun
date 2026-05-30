@@ -22,8 +22,13 @@ use darkrun_api::session::{
     ProgressMilestone, QuestionAnswer, QuestionOption, QuestionSessionPayload,
     ReviewSessionPayload, RunCurrentState, RunPhase, SealStatus, SessionPayload,
     StationArtifact, StationStateInfo, UnitOutputPreview, UnitOutputType, ViewMode,
-    ViewSessionPayload, ViewStatus,
+    ViewScope, ViewSessionPayload, ViewStatus,
 };
+use darkrun_api::session::{
+    ProofSessionPayload, ViewArtifact, ViewArtifactKind, VisualReviewAnnotations, VisualReviewPin,
+    VisualReviewSessionPayload,
+};
+use darkrun_api::{AuditResult, BenchProof, Proof, Surface, WebProof};
 use serde_json::{json, Value};
 
 // -----------------------------------------------------------------------------
@@ -254,6 +259,8 @@ fn sample_view(id: &str) -> ViewSessionPayload {
         session_id: id.into(),
         status: ViewStatus::Open,
         run_slug: "run".into(),
+        scope: ViewScope::Run,
+        artifacts: vec![],
         factory: None,
         station: None,
         artifact: None,
@@ -2286,6 +2293,8 @@ fn view_payload_boot_mode_full_roundtrips() {
         session_id: "v".into(),
         status: ViewStatus::Open,
         run_slug: "run".into(),
+        scope: ViewScope::Run,
+        artifacts: vec![],
         factory: Some("software".into()),
         station: Some("frame".into()),
         artifact: Some("index.html".into()),
@@ -2307,6 +2316,8 @@ fn view_payload_boot_port_u16_boundaries() {
             session_id: "v".into(),
             status: ViewStatus::Open,
             run_slug: "run".into(),
+            scope: ViewScope::Run,
+            artifacts: vec![],
             factory: None,
             station: None,
             artifact: None,
@@ -2340,6 +2351,8 @@ fn view_payload_closed_status() {
         session_id: "v".into(),
         status: ViewStatus::Closed,
         run_slug: "run".into(),
+        scope: ViewScope::Run,
+        artifacts: vec![],
         factory: None,
         station: None,
         artifact: None,
@@ -2669,4 +2682,223 @@ fn malformed_json_text_is_rejected() {
     let text = r#"{ "session_type": "review", "session_id": "#;
     let parsed: Result<SessionPayload, _> = serde_json::from_str(text);
     assert!(parsed.is_err());
+}
+
+// =============================================================================
+// View artifact browser — the real `view` payload (artifacts + scope)
+// =============================================================================
+
+#[test]
+fn view_artifact_browser_lists_artifacts_with_kinds() {
+    let p = ViewSessionPayload {
+        session_id: "v".into(),
+        status: ViewStatus::Open,
+        run_slug: "run".into(),
+        scope: ViewScope::Station,
+        artifacts: vec![
+            ViewArtifact {
+                id: "a1".into(),
+                path: "build/index.html".into(),
+                kind: ViewArtifactKind::File,
+                label: "index.html".into(),
+                thumbnail_url: None,
+                url: Some("/view/v/a1".into()),
+            },
+            ViewArtifact {
+                id: "a2".into(),
+                path: "build/home.png".into(),
+                kind: ViewArtifactKind::Screenshot,
+                label: "Home screenshot".into(),
+                thumbnail_url: Some("/thumb/a2.png".into()),
+                url: Some("/view/v/a2".into()),
+            },
+        ],
+        factory: None,
+        station: Some("build".into()),
+        artifact: Some("a2".into()),
+        mode: ViewMode::Viewer,
+        boot_port: None,
+        boot_command: None,
+    };
+    let json = serde_json::to_value(&p).unwrap();
+    assert_eq!(json["scope"], "station");
+    assert_eq!(json["artifacts"][0]["id"], "a1");
+    assert_eq!(json["artifacts"][0]["kind"], "file");
+    assert_eq!(json["artifacts"][1]["kind"], "screenshot");
+    assert_eq!(json["artifacts"][1]["thumbnail_url"], "/thumb/a2.png");
+
+    let back: ViewSessionPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(back.artifacts.len(), 2);
+    assert_eq!(back.artifact_by_id("a2").unwrap().label, "Home screenshot");
+    assert!(back.artifact_by_id("ghost").is_none());
+}
+
+#[test]
+fn view_artifact_kind_tokens_are_snake_case() {
+    for (k, s) in [
+        (ViewArtifactKind::File, "file"),
+        (ViewArtifactKind::Image, "image"),
+        (ViewArtifactKind::Screenshot, "screenshot"),
+        (ViewArtifactKind::Markdown, "markdown"),
+        (ViewArtifactKind::Json, "json"),
+    ] {
+        assert_eq!(serde_json::to_value(k).unwrap(), json!(s));
+    }
+}
+
+#[test]
+fn view_scope_defaults_to_run_when_absent() {
+    // Legacy payloads omitting `scope` still parse, defaulting to `run`.
+    let back: ViewSessionPayload = serde_json::from_value(json!({
+        "session_id": "v",
+        "status": "open",
+        "run_slug": "run",
+        "mode": "viewer"
+    }))
+    .unwrap();
+    assert_eq!(back.scope, ViewScope::Run);
+    assert!(back.artifacts.is_empty());
+}
+
+#[test]
+fn view_payload_through_union_carries_artifacts() {
+    let p = SessionPayload::View(ViewSessionPayload {
+        session_id: "v".into(),
+        status: ViewStatus::Open,
+        run_slug: "run".into(),
+        scope: ViewScope::Run,
+        artifacts: vec![ViewArtifact {
+            id: "md".into(),
+            path: "README.md".into(),
+            kind: ViewArtifactKind::Markdown,
+            label: "Readme".into(),
+            thumbnail_url: None,
+            url: None,
+        }],
+        factory: None,
+        station: None,
+        artifact: None,
+        mode: ViewMode::Viewer,
+        boot_port: None,
+        boot_command: None,
+    });
+    let json = serde_json::to_value(&p).unwrap();
+    assert_eq!(json["session_type"], "view");
+    assert_eq!(json["artifacts"][0]["kind"], "markdown");
+    let back: SessionPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(back.session_type(), "view");
+}
+
+// =============================================================================
+// Visual-review payload — pin annotations over an output screenshot
+// =============================================================================
+
+#[test]
+fn visual_review_payload_roundtrips() {
+    let p = VisualReviewSessionPayload {
+        session_id: "vr".into(),
+        status: SessionStatus::Pending,
+        run_slug: Some("run".into()),
+        station: Some("build".into()),
+        artifact_id: Some("a2".into()),
+        artifact_path: Some("build/home.png".into()),
+        screenshot_url: Some("/shot/home.png".into()),
+        prompt: Some("Review the home page".into()),
+        annotations: Some(VisualReviewAnnotations {
+            pins: vec![VisualReviewPin {
+                x: 0.1,
+                y: 0.2,
+                note: "spacing".into(),
+            }],
+            comments: vec!["looks off".into()],
+        }),
+    };
+    let json = serde_json::to_value(&p).unwrap();
+    assert_eq!(json["artifact_id"], "a2");
+    assert_eq!(json["annotations"]["pins"][0]["note"], "spacing");
+    let back: VisualReviewSessionPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(back.annotations.unwrap().comments[0], "looks off");
+}
+
+#[test]
+fn visual_review_through_union_tags_correctly() {
+    let p = SessionPayload::VisualReview(VisualReviewSessionPayload {
+        session_id: "vr".into(),
+        ..Default::default()
+    });
+    let json = serde_json::to_value(&p).unwrap();
+    assert_eq!(json["session_type"], "visual_review");
+    let back: SessionPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(back.session_type(), "visual_review");
+    assert_eq!(back.session_id(), "vr");
+}
+
+#[test]
+fn visual_review_annotations_emptiness() {
+    assert!(VisualReviewAnnotations::default().is_empty());
+    assert!(!VisualReviewAnnotations {
+        comments: vec!["x".into()],
+        ..Default::default()
+    }
+    .is_empty());
+}
+
+// =============================================================================
+// Proof payload — the Prove station's objective evidence
+// =============================================================================
+
+#[test]
+fn proof_payload_web_through_union() {
+    let mut vitals = BTreeMap::new();
+    vitals.insert("lcp".to_string(), 980.0);
+    let p = SessionPayload::Proof(ProofSessionPayload {
+        session_id: "pf".into(),
+        status: SessionStatus::Pending,
+        run_slug: Some("run".into()),
+        station: Some("prove".into()),
+        proof: Proof::web(
+            Surface::WebUi,
+            WebProof {
+                vitals,
+                audits: vec![AuditResult {
+                    name: "reduced-motion".into(),
+                    value: "ok".into(),
+                    pass: true,
+                }],
+                screenshot_url: Some("/shot.png".into()),
+            },
+        ),
+    });
+    let json = serde_json::to_value(&p).unwrap();
+    assert_eq!(json["session_type"], "proof");
+    assert_eq!(json["proof"]["surface"], "web_ui");
+    assert_eq!(json["proof"]["web"]["vitals"]["lcp"], 980.0);
+    let back: SessionPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(back.session_type(), "proof");
+}
+
+#[test]
+fn proof_payload_bench_through_union() {
+    let p = SessionPayload::Proof(ProofSessionPayload {
+        session_id: "pf".into(),
+        status: SessionStatus::Pending,
+        run_slug: Some("run".into()),
+        station: None,
+        proof: Proof::bench(
+            Surface::Data,
+            BenchProof {
+                p50: Some(0.3),
+                p95: Some(0.9),
+                p99: Some(1.5),
+                throughput: Some(12000.0),
+                samples: Some(500),
+            },
+        ),
+    });
+    let json = serde_json::to_value(&p).unwrap();
+    assert_eq!(json["proof"]["surface"], "data");
+    assert_eq!(json["proof"]["bench"]["throughput"], 12000.0);
+    assert!(json["proof"].get("web").is_none());
+    let back: SessionPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(back.session_type(), "proof");
 }

@@ -722,6 +722,7 @@ fn roundtrip_run_full_frontmatter() {
         mode: "continuous".into(),
         active_station: "frame".into(),
         status: Status::Active,
+        surface: None,
         archived: Some(false),
         started_at: Some("2026-05-30T01:02:03Z".into()),
         completed_at: None,

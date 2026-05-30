@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 darkrun-core.workspace = true
 darkrun-api.workspace = true
+darkrun-verify.workspace = true
 darkrun-content.workspace = true
 darkrun-vcs.workspace = true
 serde.workspace = true

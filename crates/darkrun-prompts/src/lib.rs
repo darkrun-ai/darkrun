@@ -496,6 +496,89 @@ mod tests {
         );
     }
 
+    // ── Surface-routed audit verification ───────────────────────────────────
+
+    /// A visual surface routes Audit to the headless-browser proof: `darkrun
+    /// verify web`, the web vitals, and a `WebProof` attached via
+    /// `darkrun_proof_attach`.
+    #[test]
+    fn audit_routes_visual_surface_to_web_verification() {
+        let root = empty_root();
+        let out = render(
+            "phases/audit",
+            root.path(),
+            &json!({
+                "run": "r", "station": "prove", "kills": "escaped defects",
+                "reviewers": ["evidence"], "surface": "web_ui", "user_facing": true,
+            }),
+        )
+        .unwrap();
+        assert!(out.contains("darkrun verify web"), "visual audit runs the web verifier:\n{out}");
+        assert!(out.contains("darkrun_proof_attach"), "visual audit attaches a proof:\n{out}");
+        let lower = out.to_lowercase();
+        assert!(lower.contains("lcp") && lower.contains("vitals"), "names the web vitals:\n{out}");
+        assert!(!out.contains("darkrun bench"), "visual audit must not route to bench:\n{out}");
+    }
+
+    /// A bench surface routes Audit to `darkrun bench` + a `BenchProof`.
+    #[test]
+    fn audit_routes_bench_surface_to_bench_verification() {
+        let root = empty_root();
+        let out = render(
+            "phases/audit",
+            root.path(),
+            &json!({
+                "run": "r", "station": "prove", "kills": "escaped defects",
+                "reviewers": ["evidence"], "surface": "api", "bench_surface": true,
+            }),
+        )
+        .unwrap();
+        assert!(out.contains("darkrun bench"), "bench audit runs the bench harness:\n{out}");
+        assert!(out.contains("darkrun_proof_attach"), "bench audit attaches a proof:\n{out}");
+        let lower = out.to_lowercase();
+        assert!(lower.contains("p95") || lower.contains("percentile"), "names percentiles:\n{out}");
+        assert!(!out.contains("darkrun verify web"), "bench audit must not route to the browser:\n{out}");
+    }
+
+    /// A terminal surface routes Audit to an output snapshot.
+    #[test]
+    fn audit_routes_terminal_surface_to_snapshot() {
+        let root = empty_root();
+        let out = render(
+            "phases/audit",
+            root.path(),
+            &json!({
+                "run": "r", "station": "prove", "kills": "escaped defects",
+                "reviewers": ["evidence"], "surface": "cli", "terminal_surface": true,
+            }),
+        )
+        .unwrap();
+        let lower = out.to_lowercase();
+        assert!(lower.contains("snapshot"), "terminal audit takes an output snapshot:\n{out}");
+        assert!(out.contains("darkrun_proof_attach"), "terminal audit attaches a proof:\n{out}");
+        assert!(!out.contains("darkrun verify web") && !out.contains("darkrun bench"),
+            "terminal audit must not route to browser/bench:\n{out}");
+    }
+
+    /// With no surface classified, the audit carries no surface-routed proof
+    /// requirement — the verification block stays dark.
+    #[test]
+    fn audit_without_surface_carries_no_proof_route() {
+        let root = empty_root();
+        let out = render(
+            "phases/audit",
+            root.path(),
+            &json!({ "run": "r", "station": "build", "kills": "regressions",
+                     "reviewers": ["correctness"] }),
+        )
+        .unwrap();
+        assert!(
+            !out.contains("darkrun verify web") && !out.contains("darkrun bench")
+                && !out.contains("darkrun_proof_attach"),
+            "unclassified audit carries no surface proof route:\n{out}"
+        );
+    }
+
     /// Regression: the checkpoint template must not claim the station "passed
     /// tests" — Tests is folded into Audit, and the phase before Checkpoint is
     /// Reflect. The pre-gate summary should name reflect, not tests.

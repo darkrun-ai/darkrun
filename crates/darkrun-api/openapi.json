@@ -608,6 +608,64 @@
         "title": "FeedbackUpdateResponse",
         "type": "object"
       },
+      "OutputReviewRequest": {
+        "description": "Request body for `POST /visual-review/:id/annotate` — the operator's annotations over the output screenshot.",
+        "properties": {
+          "annotations": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/VisualReviewAnnotations"
+              }
+            ],
+            "description": "The pin + comment annotations on the output screenshot."
+          },
+          "title": {
+            "description": "Optional title for the produced feedback item (defaults to a surface-derived label server-side).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "annotations"
+        ],
+        "title": "OutputReviewRequest",
+        "type": "object"
+      },
+      "OutputReviewResponse": {
+        "description": "Response body for `POST /visual-review/:id/annotate` (201 on success).\n\nEchoes the recorded annotation counts and the id of the FEEDBACK item the annotation produced.",
+        "properties": {
+          "comments": {
+            "description": "Number of comments recorded.",
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "feedback_id": {
+            "description": "The minted `FB-NN` feedback id the annotation produced.",
+            "type": "string"
+          },
+          "ok": {
+            "description": "Always `true` on success.",
+            "type": "boolean"
+          },
+          "pins": {
+            "description": "Number of pins recorded.",
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "comments",
+          "feedback_id",
+          "ok",
+          "pins"
+        ],
+        "title": "OutputReviewResponse",
+        "type": "object"
+      },
       "PickerSelectRequest": {
         "description": "Request body for `POST /picker/:id/select`.",
         "properties": {
@@ -707,6 +765,180 @@
           "title"
         ],
         "title": "PickerSessionPayload",
+        "type": "object"
+      },
+      "Proof": {
+        "description": "The PROOF payload — a run's attached objective evidence.\n\nSurface-tagged: the [`web`](Proof::web) block is populated for visual surfaces, the [`bench`](Proof::bench) block for bench surfaces, and a terminal surface carries neither (its snapshot rides on a `web`-less proof, or a `web` block carrying only a `screenshot_url`).",
+        "properties": {
+          "bench": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/BenchProof"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The benchmark block (bench surfaces)."
+          },
+          "surface": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/Surface"
+              }
+            ],
+            "description": "The surface this proof measures — routes which block is authoritative."
+          },
+          "web": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/WebProof"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The web-vitals + audit block (visual surfaces)."
+          }
+        },
+        "required": [
+          "surface"
+        ],
+        "title": "Proof",
+        "type": "object"
+      },
+      "ProofAttachRequest": {
+        "description": "Request body for attaching a run's [`Proof`] — `POST /api/proof/:run`.",
+        "properties": {
+          "proof": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/Proof"
+              }
+            ],
+            "description": "The objective evidence to attach."
+          },
+          "station": {
+            "description": "The station the proof was measured at, if scoped.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "proof"
+        ],
+        "title": "ProofAttachRequest",
+        "type": "object"
+      },
+      "ProofAttachResponse": {
+        "description": "Response body for attaching a run's proof (201 on success).",
+        "properties": {
+          "block_matches_surface": {
+            "description": "Whether the proof's block matched its surface's verification route.",
+            "type": "boolean"
+          },
+          "ok": {
+            "description": "Always `true` on success.",
+            "type": "boolean"
+          },
+          "run": {
+            "description": "The run the proof was attached to.",
+            "type": "string"
+          },
+          "surface": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/Surface"
+              }
+            ],
+            "description": "The surface the proof measures."
+          }
+        },
+        "required": [
+          "block_matches_surface",
+          "ok",
+          "run",
+          "surface"
+        ],
+        "title": "ProofAttachResponse",
+        "type": "object"
+      },
+      "ProofGetResponse": {
+        "description": "Response body for reading a run's attached proof — `GET /api/proof/:run`.",
+        "properties": {
+          "proof": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/Proof"
+              }
+            ],
+            "description": "The objective evidence."
+          },
+          "run": {
+            "description": "The run the proof belongs to.",
+            "type": "string"
+          },
+          "station": {
+            "description": "The station the proof was measured at, if scoped.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "proof",
+          "run"
+        ],
+        "title": "ProofGetResponse",
+        "type": "object"
+      },
+      "ProofSessionPayload": {
+        "description": "The proof-session payload (`session_type = \"proof\"`) — the Prove station's objective evidence surfaced as a session.\n\nCarries the run's [`Proof`] (surface-tagged web vitals + audits, or bench percentiles + throughput) so the desktop app can render the NUMBERS.",
+        "properties": {
+          "proof": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/Proof"
+              }
+            ],
+            "description": "The objective evidence."
+          },
+          "run_slug": {
+            "description": "The run slug the proof belongs to.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "The session id.",
+            "type": "string"
+          },
+          "station": {
+            "description": "The station the proof was measured at, if scoped.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/SessionStatus"
+              }
+            ],
+            "description": "Session lifecycle status."
+          }
+        },
+        "required": [
+          "proof",
+          "session_id",
+          "status"
+        ],
+        "title": "ProofSessionPayload",
         "type": "object"
       },
       "QuestionAnswerRequest": {
@@ -2148,11 +2380,18 @@
             "description": "A non-blocking artifact browser.",
             "properties": {
               "artifact": {
-                "description": "Optional artifact deep-link.",
+                "description": "Optional artifact deep-link (the `id` of the focused artifact).",
                 "type": [
                   "string",
                   "null"
                 ]
+              },
+              "artifacts": {
+                "description": "The output artifacts available to browse.",
+                "items": {
+                  "$ref": "#/definitions/ViewArtifact"
+                },
+                "type": "array"
               },
               "boot_command": {
                 "description": "Boot-mode dev-server command.",
@@ -2189,6 +2428,15 @@
                 "description": "The run slug being viewed.",
                 "type": "string"
               },
+              "scope": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/ViewScope"
+                  }
+                ],
+                "default": "run",
+                "description": "What slice of the run's outputs this view browses."
+              },
               "session_id": {
                 "description": "The session id.",
                 "type": "string"
@@ -2223,6 +2471,140 @@
               "status"
             ],
             "type": "object"
+          },
+          {
+            "description": "A visual review of an output screenshot (pin annotations -> feedback).",
+            "properties": {
+              "annotations": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/VisualReviewAnnotations"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The annotations the operator produced, once submitted."
+              },
+              "artifact_id": {
+                "description": "The id of the [`ViewArtifact`] being annotated.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "artifact_path": {
+                "description": "Run-relative path of the artifact being annotated.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prompt": {
+                "description": "Optional prompt rendered above the screenshot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "run_slug": {
+                "description": "The run slug whose output is under review.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "screenshot_url": {
+                "description": "URL of the output screenshot the operator annotates.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "description": "The session id.",
+                "type": "string"
+              },
+              "session_type": {
+                "enum": [
+                  "visual_review"
+                ],
+                "type": "string"
+              },
+              "station": {
+                "description": "The station that produced the output, if scoped.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/SessionStatus"
+                  }
+                ],
+                "description": "Session lifecycle status."
+              }
+            },
+            "required": [
+              "session_id",
+              "session_type",
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Objective evidence from the Prove station.",
+            "properties": {
+              "proof": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/Proof"
+                  }
+                ],
+                "description": "The objective evidence."
+              },
+              "run_slug": {
+                "description": "The run slug the proof belongs to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "description": "The session id.",
+                "type": "string"
+              },
+              "session_type": {
+                "enum": [
+                  "proof"
+                ],
+                "type": "string"
+              },
+              "station": {
+                "description": "The station the proof was measured at, if scoped.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/SessionStatus"
+                  }
+                ],
+                "description": "Session lifecycle status."
+              }
+            },
+            "required": [
+              "proof",
+              "session_id",
+              "session_type",
+              "status"
+            ],
+            "type": "object"
           }
         ],
         "title": "SessionPayload"
@@ -2250,14 +2632,21 @@
         "type": "object"
       },
       "ViewSessionPayload": {
-        "description": "The view-session payload (`session_type = \"view\"`) — a non-blocking artifact browser opened by `darkrun_view`.",
+        "description": "The view-session payload (`session_type = \"view\"`) — a non-blocking ARTIFACT BROWSER opened by `darkrun_view`.\n\nThe centerpiece is [`artifacts`](ViewSessionPayload::artifacts): the list of output deliverables the operator browses, narrowed by [`scope`](ViewSessionPayload::scope). The viewer/boot mode + boot fields are retained for the dev-server boot path.",
         "properties": {
           "artifact": {
-            "description": "Optional artifact deep-link.",
+            "description": "Optional artifact deep-link (the `id` of the focused artifact).",
             "type": [
               "string",
               "null"
             ]
+          },
+          "artifacts": {
+            "description": "The output artifacts available to browse.",
+            "items": {
+              "$ref": "#/definitions/ViewArtifact"
+            },
+            "type": "array"
           },
           "boot_command": {
             "description": "Boot-mode dev-server command.",
@@ -2294,6 +2683,15 @@
             "description": "The run slug being viewed.",
             "type": "string"
           },
+          "scope": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/ViewScope"
+              }
+            ],
+            "default": "run",
+            "description": "What slice of the run's outputs this view browses."
+          },
           "session_id": {
             "description": "The session id.",
             "type": "string"
@@ -2321,6 +2719,82 @@
           "status"
         ],
         "title": "ViewSessionPayload",
+        "type": "object"
+      },
+      "VisualReviewSessionPayload": {
+        "description": "The visual-review session payload (`session_type = \"visual_review\"`) — a VISUAL REVIEW of an OUTPUT screenshot.\n\nThe operator annotates the rendered screenshot of one of the run's output artifacts (pins + comments over the captured surface), producing feedback. Reuses the pin annotation model from the design-direction flow, but points at a *produced* artifact rather than a pre-build design preview.",
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/VisualReviewAnnotations"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The annotations the operator produced, once submitted."
+          },
+          "artifact_id": {
+            "description": "The id of the [`ViewArtifact`] being annotated.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "artifact_path": {
+            "description": "Run-relative path of the artifact being annotated.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt": {
+            "description": "Optional prompt rendered above the screenshot.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_slug": {
+            "description": "The run slug whose output is under review.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "screenshot_url": {
+            "description": "URL of the output screenshot the operator annotates.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "The session id.",
+            "type": "string"
+          },
+          "station": {
+            "description": "The station that produced the output, if scoped.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/SessionStatus"
+              }
+            ],
+            "description": "Session lifecycle status."
+          }
+        },
+        "required": [
+          "session_id",
+          "status"
+        ],
+        "title": "VisualReviewSessionPayload",
         "type": "object"
       }
     }
@@ -2409,6 +2883,32 @@
         "summary": "Append a reply to a feedback thread; optionally close as answered.",
         "tags": [
           "feedback"
+        ]
+      }
+    },
+    "/api/proof/{run}": {
+      "get": {
+        "operationId": "getProof",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Return a run's attached objective-evidence proof.",
+        "tags": [
+          "proof"
+        ]
+      },
+      "post": {
+        "operationId": "attachProof",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Attach an objective-evidence proof to a run.",
+        "tags": [
+          "proof"
         ]
       }
     },
@@ -2549,6 +3049,20 @@
         "summary": "Submit a review decision (approved | changes_requested).",
         "tags": [
           "review"
+        ]
+      }
+    },
+    "/visual-review/{sessionId}/annotate": {
+      "post": {
+        "operationId": "postVisualReviewAnnotate",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Annotate an output screenshot (pins + comments) -> feedback.",
+        "tags": [
+          "visual-review"
         ]
       }
     }

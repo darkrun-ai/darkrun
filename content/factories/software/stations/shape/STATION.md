@@ -1,7 +1,7 @@
 ---
 name: shape
 description: Shape the structure — decide the architecture and prove the risky assumptions cheaply before they get expensive.
-explorers: [architecture, risk]
+explorers: [surface, architecture, risk]
 workers: [designer, visual_designer, spiker, pressure_tester, resolver]
 reviewers: [fit, reversibility, simplicity]
 checkpoint: ask
@@ -25,8 +25,16 @@ unworkable integration, an assumption that does not hold at scale.
 
 ## What this station produces
 
+- **The classified surface** — the one shape the run delivers (library / api /
+  web-ui / tui / cli / desktop / mobile / data), recorded onto the run via
+  `darkrun_run_surface`. This is the linchpin: it routes both *how Shape
+  designs* (a library gets public-API design; an api gets a contract; a web-ui
+  gets visual + component design; a tui gets terminal layout; a cli gets
+  command/output UX; data gets structural design) *and how Prove/Audit verify*
+  (visual surfaces → headless-browser proof; bench surfaces → criterion + load;
+  terminal surfaces → output snapshot).
 - **The design** — components, boundaries, data flow, the integration points,
-  and the key decisions with their rationale.
+  and the key decisions with their rationale, shaped to the classified surface.
 - **The visual direction** — for user-facing work, the chosen UI/UX archetype the
   operator picked, captured with its option images and annotations. (For internal or
   headless work there is no visual surface, so this is empty.)
@@ -35,7 +43,7 @@ unworkable integration, an assumption that does not hold at scale.
 
 ## The pass-loop
 
-- **Designer** proposes the structure that satisfies the spec with the least machinery.
+- **Designer** classifies the surface from the Surface Explorer's finding, records it with `darkrun_run_surface`, then proposes the structure that satisfies the spec with the least machinery — designing *for that surface* (public-API / contract / visual+component / terminal layout / command-output UX / structural).
 - **VisualDesigner** owns the visual/UX facet for user-facing work: it generates two to four design options (mockups / option images) and uses `darkrun_question` or `darkrun_direction` to get the operator's visual decision *before* any UI is built. For non-UI work there is no surface to shape, so this beat is skipped.
 - **Spiker** builds a *throwaway* proof of the riskiest assumptions — the thing most likely to be wrong — and reports what it learned. The spike code is discarded; the knowledge is kept.
 - **PressureTester** attacks the design under load, failure, and change: what reverses this, what does not scale, what is hard to undo?

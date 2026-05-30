@@ -32,6 +32,10 @@
 //!   `darkrun_feedback_resolve`, `darkrun_feedback_reject`,
 //!   `darkrun_feedback_move`.
 //! - **Checkpoint:** `darkrun_checkpoint_decide`.
+//! - **Surface + proof:** `darkrun_run_surface` (classify/read the run's
+//!   verification surface) plus `darkrun_proof_attach` / `darkrun_proof_get`
+//!   (attach/read the surface-routed objective evidence — the Prove station's
+//!   NUMBERS — feeding the view/review).
 //! - **Factories:** `darkrun_factory_list`, `darkrun_factory_detail`.
 //! - **Visual sessions:** `darkrun_question`, `darkrun_direction`,
 //!   `darkrun_picker` (emit a mid-run operator prompt) plus
@@ -39,8 +43,8 @@
 //!   `darkrun_picker_result` (read the operator's answer/selection back).
 //!
 //! [`server::serve_stdio`] serves the surface over stdio. The typed helpers
-//! behind the tools live in [`units`], [`feedback`], [`runs`], [`drift`], and
-//! [`sessions`].
+//! behind the tools live in [`units`], [`feedback`], [`runs`], [`drift`],
+//! [`proof`], and [`sessions`].
 
 pub mod change;
 pub mod drift;
@@ -48,6 +52,7 @@ pub mod error;
 pub mod factory;
 pub mod feedback;
 pub mod position;
+pub mod proof;
 pub mod runs;
 pub mod server;
 pub mod sessions;
@@ -60,6 +65,9 @@ pub use factory::{list_factories, resolve_factory, FactoryDef, StationDef};
 pub use position::{
     checkpoint_decide, derive_position, render_prompt, run_start, run_tick, Position, PromptContext,
     RunAction, TickResult, Track,
+};
+pub use proof::{
+    attach_proof, get_proof, get_surface, route_for, set_surface, SurfaceResult,
 };
 pub use runs::RunSummary;
 pub use server::serve_stdio;

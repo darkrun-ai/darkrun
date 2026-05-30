@@ -16,9 +16,9 @@
 use darkrun_mcp::tools::{
     ArchetypeInput, CheckpointDecideInput, DirectionInput, FactoryRef, FeedbackCreateInput,
     FeedbackListInput, FeedbackMoveInput, FeedbackRejectInput, FeedbackResolveInput,
-    PickerInput, PickerOptionInput, QuestionInput, QuestionOptionInput, RunArchiveInput,
-    RunListInput, RunRef, RunStartInput, SessionResultInput, UnitCreateInput, UnitRef,
-    UnitUpdateInput,
+    PickerInput, PickerOptionInput, ProofAttachInput, ProofGetInput, QuestionInput,
+    QuestionOptionInput, RunArchiveInput, RunListInput, RunRef, RunStartInput, RunSurfaceInput,
+    SessionResultInput, UnitCreateInput, UnitRef, UnitUpdateInput,
 };
 use darkrun_mcp::DarkrunServer;
 use rmcp::handler::server::wrapper::Parameters;
@@ -5666,6 +5666,247 @@ fn result_tool_rejects_wrong_session_kind() {
             slug: "r".into(),
             session_id: "q-01".into(),
         }))
+        .unwrap();
+    assert!(is_err(&res));
+}
+
+// ── Surface classification (darkrun_run_surface) ───────────────────────────
+
+fn set_surface(server: &DarkrunServer, slug: &str, surface: &str) -> CallToolResult {
+    server
+        .darkrun_run_surface(Parameters(RunSurfaceInput {
+            slug: slug.into(),
+            surface: Some(surface.into()),
+        }))
+        .unwrap()
+}
+
+fn get_surface(server: &DarkrunServer, slug: &str) -> CallToolResult {
+    server
+        .darkrun_run_surface(Parameters(RunSurfaceInput {
+            slug: slug.into(),
+            surface: None,
+        }))
+        .unwrap()
+}
+
+#[test]
+fn surface_unclassified_reads_none() {
+    let (_d, server) = started("r");
+    let res = get_surface(&server, "r");
+    assert!(is_ok(&res));
+    assert!(body(&res)["surface"].is_null());
+    assert!(body(&res).get("route").is_none_or(|v| v.is_null()));
+}
+
+#[test]
+fn surface_classify_web_ui_routes_web() {
+    let (_d, server) = started("r");
+    let res = set_surface(&server, "r", "web-ui");
+    assert!(is_ok(&res));
+    let b = body(&res);
+    assert_eq!(b["surface"], "web_ui");
+    assert_eq!(b["is_visual"], true);
+    assert_eq!(b["is_bench"], false);
+    assert_eq!(b["route"], "web");
+}
+
+#[test]
+fn surface_classify_library_routes_bench() {
+    let (_d, server) = started("r");
+    let b = body(&set_surface(&server, "r", "lib"));
+    assert_eq!(b["surface"], "library");
+    assert_eq!(b["is_bench"], true);
+    assert_eq!(b["route"], "bench");
+}
+
+#[test]
+fn surface_classify_cli_routes_terminal() {
+    let (_d, server) = started("r");
+    let b = body(&set_surface(&server, "r", "cli"));
+    assert_eq!(b["surface"], "cli");
+    assert_eq!(b["is_terminal"], true);
+    assert_eq!(b["route"], "terminal");
+}
+
+#[test]
+fn surface_persists_across_reads() {
+    let (_d, server) = started("r");
+    set_surface(&server, "r", "mobile");
+    let b = body(&get_surface(&server, "r"));
+    assert_eq!(b["surface"], "mobile");
+    assert_eq!(b["route"], "web");
+}
+
+#[test]
+fn surface_unknown_token_is_error() {
+    let (_d, server) = started("r");
+    let res = server
+        .darkrun_run_surface(Parameters(RunSurfaceInput {
+            slug: "r".into(),
+            surface: Some("telepathy".into()),
+        }))
+        .unwrap();
+    assert!(is_err(&res));
+    assert!(err_message(&res).contains("unknown surface"));
+}
+
+#[test]
+fn surface_on_missing_run_is_error() {
+    let (_d, server) = server();
+    let res = get_surface(&server, "ghost");
+    assert!(is_err(&res));
+}
+
+// ── Proof attach/get (darkrun_proof_attach / _get) ─────────────────────────
+
+#[test]
+fn proof_attach_requires_classified_surface() {
+    let (_d, server) = started("r");
+    let res = server
+        .darkrun_proof_attach(Parameters(ProofAttachInput {
+            slug: "r".into(),
+            proof: serde_json::json!({ "surface": "library", "bench": { "p50": 1.0 } }),
+            station: None,
+        }))
+        .unwrap();
+    assert!(is_err(&res));
+    assert!(err_message(&res).contains("no classified surface"));
+}
+
+#[test]
+fn proof_attach_rejects_surface_mismatch() {
+    let (_d, server) = started("r");
+    set_surface(&server, "r", "library");
+    let res = server
+        .darkrun_proof_attach(Parameters(ProofAttachInput {
+            slug: "r".into(),
+            proof: serde_json::json!({ "surface": "web_ui", "web": {} }),
+            station: None,
+        }))
+        .unwrap();
+    assert!(is_err(&res));
+    assert!(err_message(&res).contains("does not match"));
+}
+
+#[test]
+fn proof_attach_invalid_payload_is_error() {
+    let (_d, server) = started("r");
+    set_surface(&server, "r", "api");
+    let res = server
+        .darkrun_proof_attach(Parameters(ProofAttachInput {
+            slug: "r".into(),
+            proof: serde_json::json!({ "not_a_surface": true }),
+            station: None,
+        }))
+        .unwrap();
+    assert!(is_err(&res));
+    assert!(err_message(&res).contains("invalid proof payload"));
+}
+
+#[test]
+fn proof_attach_bench_then_get() {
+    let (_d, server) = started("r");
+    set_surface(&server, "r", "api");
+    let attach = server
+        .darkrun_proof_attach(Parameters(ProofAttachInput {
+            slug: "r".into(),
+            proof: serde_json::json!({
+                "surface": "api",
+                "bench": { "p50": 1.0, "p95": 2.5, "p99": 4.0, "throughput": 12000.0, "samples": 500 }
+            }),
+            station: Some("prove".into()),
+        }))
+        .unwrap();
+    assert!(is_ok(&attach));
+    let ab = body(&attach);
+    assert_eq!(ab["ok"], true);
+    assert_eq!(ab["surface"], "api");
+    assert_eq!(ab["block_matches_surface"], true);
+
+    let got = server
+        .darkrun_proof_get(Parameters(ProofGetInput {
+            slug: "r".into(),
+            station: Some("prove".into()),
+        }))
+        .unwrap();
+    assert!(is_ok(&got));
+    let gb = body(&got);
+    assert_eq!(gb["run"], "r");
+    assert_eq!(gb["station"], "prove");
+    assert_eq!(gb["proof"]["bench"]["p95"], 2.5);
+}
+
+#[test]
+fn proof_attach_web_carries_vitals_and_audits() {
+    let (_d, server) = started("r");
+    set_surface(&server, "r", "web-ui");
+    let attach = server
+        .darkrun_proof_attach(Parameters(ProofAttachInput {
+            slug: "r".into(),
+            proof: serde_json::json!({
+                "surface": "web_ui",
+                "web": {
+                    "vitals": { "lcp": 1100.0, "cls": 0.02 },
+                    "audits": [{ "name": "contrast", "value": "5.1:1", "pass": true }],
+                    "screenshot_url": "/shot/home.png"
+                }
+            }),
+            station: None,
+        }))
+        .unwrap();
+    assert_eq!(body(&attach)["block_matches_surface"], true);
+
+    let got = body(&server
+        .darkrun_proof_get(Parameters(ProofGetInput { slug: "r".into(), station: None }))
+        .unwrap());
+    assert_eq!(got["proof"]["web"]["vitals"]["lcp"], 1100.0);
+    assert_eq!(got["proof"]["web"]["audits"][0]["name"], "contrast");
+}
+
+#[test]
+fn proof_attach_flags_missing_block_but_records() {
+    // A visual surface with no web block attaches, but is flagged.
+    let (_d, server) = started("r");
+    set_surface(&server, "r", "desktop");
+    let attach = server
+        .darkrun_proof_attach(Parameters(ProofAttachInput {
+            slug: "r".into(),
+            proof: serde_json::json!({ "surface": "desktop" }),
+            station: None,
+        }))
+        .unwrap();
+    assert!(is_ok(&attach));
+    assert_eq!(body(&attach)["block_matches_surface"], false);
+}
+
+#[test]
+fn proof_get_station_falls_back_to_run_level() {
+    let (_d, server) = started("r");
+    set_surface(&server, "r", "cli");
+    server
+        .darkrun_proof_attach(Parameters(ProofAttachInput {
+            slug: "r".into(),
+            proof: serde_json::json!({ "surface": "cli", "web": { "screenshot_url": "/snap.txt" } }),
+            station: None,
+        }))
+        .unwrap();
+    let got = body(&server
+        .darkrun_proof_get(Parameters(ProofGetInput {
+            slug: "r".into(),
+            station: Some("prove".into()),
+        }))
+        .unwrap());
+    assert!(got["station"].is_null());
+    assert_eq!(got["proof"]["web"]["screenshot_url"], "/snap.txt");
+}
+
+#[test]
+fn proof_get_errors_when_none_attached() {
+    let (_d, server) = started("r");
+    set_surface(&server, "r", "data");
+    let res = server
+        .darkrun_proof_get(Parameters(ProofGetInput { slug: "r".into(), station: None }))
         .unwrap();
     assert!(is_err(&res));
 }

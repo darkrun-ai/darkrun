@@ -16,11 +16,12 @@
 
 use darkrun_api::session::{
     DirectionAnnotations, DirectionSessionPayload, OutputArtifact, PickerSessionPayload,
-    QuestionSessionPayload, ReviewSessionPayload,
+    ProofSessionPayload, QuestionSessionPayload, ReviewSessionPayload, ViewSessionPayload,
+    VisualReviewAnnotations, VisualReviewPin, VisualReviewSessionPayload,
 };
 use darkrun_api::{
-    DirectionSelectRequest, PickerSelectRequest, QuestionAnswerRequest, ReviewDecisionRequest,
-    SessionPayload,
+    DirectionSelectRequest, OutputReviewRequest, PickerSelectRequest, QuestionAnswerRequest,
+    ReviewDecisionRequest, SessionPayload,
 };
 use darkrun_ui::prelude::*;
 
@@ -93,14 +94,9 @@ pub fn ReviewApp(cfg: ConnConfig) -> Element {
                 Some(SessionPayload::Question(q)) => question_session(cfg.clone(), q),
                 Some(SessionPayload::Direction(d)) => direction_session(cfg.clone(), d),
                 Some(SessionPayload::Picker(p)) => picker_session(cfg.clone(), p),
-                Some(other) => rsx! {
-                    Card {
-                        Badge { tone: Tone::Neutral, "session: {other.session_type()}" }
-                        p { style: "margin-top:8px;color:var(--dr-text-muted);",
-                            "This session type isn't rendered by the review app."
-                        }
-                    }
-                },
+                Some(SessionPayload::View(v)) => view_session(cfg.clone(), v),
+                Some(SessionPayload::VisualReview(vr)) => visual_review_session(cfg.clone(), vr),
+                Some(SessionPayload::Proof(pr)) => proof_session(pr),
                 None => rsx! {
                     Card {
                         p { style: "color:var(--dr-text-muted);",
@@ -695,6 +691,196 @@ fn PickerSession(
             on_select: select,
         }
         SubmitStatus { state: submit.read().clone() }
+    }
+}
+
+// ===========================================================================
+// View / visual-review / proof sessions.
+//
+// The view session is a non-blocking ARTIFACT BROWSER; focusing a screenshot
+// artifact reveals the inline OutputReview annotator, which POSTs its pins +
+// comments to the output-annotation route. The standalone visual-review session
+// renders the same annotator over a single screenshot. The proof session renders
+// the surface-routed NUMBERS in the ProofPanel.
+// ===========================================================================
+
+/// Extract the view payload's `PartialEq` data and render the artifact browser.
+fn view_session(cfg: ConnConfig, v: ViewSessionPayload) -> Element {
+    let run_slug = if v.run_slug.is_empty() {
+        None
+    } else {
+        Some(v.run_slug.clone())
+    };
+    rsx! {
+        ViewSession {
+            cfg,
+            run_slug,
+            station: v.station.clone(),
+            artifacts: map::artifact_entries(&v.artifacts),
+            seed_focus: v.artifact.clone(),
+        }
+    }
+}
+
+/// The live artifact browser: owns the focused artifact + the inline output
+/// review it spawns when a screenshot is reviewed.
+#[component]
+fn ViewSession(
+    cfg: ConnConfig,
+    run_slug: Option<String>,
+    station: Option<String>,
+    artifacts: Vec<ArtifactEntry>,
+    seed_focus: Option<String>,
+) -> Element {
+    let mut focused = use_signal(|| seed_focus.clone());
+    // The id of the artifact currently being visually reviewed, if any.
+    let mut reviewing = use_signal(|| None::<String>);
+
+    let focus = move |id: String| {
+        focused.set(Some(id));
+    };
+    let review = move |id: String| {
+        reviewing.set(Some(id));
+    };
+
+    // The screenshot artifact under review, resolved from the browser list.
+    let review_entry = reviewing
+        .read()
+        .clone()
+        .and_then(|id| artifacts.iter().find(|a| a.id == id).cloned());
+
+    rsx! {
+        ViewArtifacts {
+            run_slug: run_slug.clone(),
+            station: station.clone(),
+            artifacts: artifacts.clone(),
+            focused: focused.read().clone(),
+            on_focus: focus,
+            on_review: review,
+        }
+        if let Some(entry) = review_entry {
+            OutputReviewSession {
+                cfg,
+                run_slug,
+                station,
+                artifact_label: Some(entry.label.clone()),
+                artifact_path: Some(entry.path.clone()),
+                screenshot_url: entry.url.clone().or(entry.thumbnail_url.clone()),
+                prompt: None,
+            }
+        }
+    }
+}
+
+/// Extract the visual-review payload's `PartialEq` data and render the annotator.
+fn visual_review_session(cfg: ConnConfig, vr: VisualReviewSessionPayload) -> Element {
+    rsx! {
+        OutputReviewSession {
+            cfg,
+            run_slug: vr.run_slug.clone(),
+            station: vr.station.clone(),
+            artifact_label: vr.artifact_id.clone(),
+            artifact_path: vr.artifact_path.clone(),
+            screenshot_url: vr.screenshot_url.clone(),
+            prompt: vr.prompt.clone(),
+        }
+    }
+}
+
+/// The live output-review session: owns the pin set + comment list over an output
+/// screenshot and POSTs them to `/visual-review/:id/annotate`.
+#[component]
+fn OutputReviewSession(
+    cfg: ConnConfig,
+    run_slug: Option<String>,
+    station: Option<String>,
+    artifact_label: Option<String>,
+    artifact_path: Option<String>,
+    screenshot_url: Option<String>,
+    prompt: Option<String>,
+) -> Element {
+    let mut pins = use_signal(Vec::<PinPoint>::new);
+    let mut comments = use_signal(Vec::<String>::new);
+    let submit = use_signal(|| Submit::Idle);
+
+    let place = move |(x, y, w, h): (f64, f64, f64, f64)| {
+        let note = format!("pin {}", pins.read().len() + 1);
+        let pt = if w > 0.0 && h > 0.0 {
+            place_pin(x, y, w, h, note)
+        } else {
+            PinPoint::new(x, y, note)
+        };
+        pins.write().push(pt);
+    };
+    let comment = move |text: String| {
+        comments.write().push(text);
+    };
+
+    let do_submit = {
+        let cfg = cfg.clone();
+        let label = artifact_label.clone();
+        move |_| {
+            let cfg = cfg.clone();
+            let label = label.clone();
+            let mut submit = submit;
+            let pin_list: Vec<VisualReviewPin> = pins
+                .read()
+                .iter()
+                .map(|p| VisualReviewPin { x: p.x, y: p.y, note: p.note.clone() })
+                .collect();
+            let comment_list = comments.read().clone();
+            spawn(async move {
+                submit.set(Submit::Sending);
+                let req = OutputReviewRequest {
+                    annotations: VisualReviewAnnotations {
+                        pins: pin_list.clone(),
+                        comments: comment_list.clone(),
+                    },
+                    title: label,
+                };
+                match wire::submit_output_review(&cfg, &req).await {
+                    Ok(()) => submit.set(Submit::Sent(format!(
+                        "feedback recorded ({} pins · {} comments)",
+                        pin_list.len(),
+                        comment_list.len()
+                    ))),
+                    Err(e) => submit.set(Submit::Failed(e.to_string())),
+                }
+            });
+        }
+    };
+
+    let sending = matches!(*submit.read(), Submit::Sending);
+    let submitted = matches!(*submit.read(), Submit::Sent(_));
+    rsx! {
+        OutputReview {
+            run_slug,
+            station,
+            artifact_label,
+            screenshot_url,
+            prompt,
+            pins: pins.read().clone(),
+            comments: comments.read().clone(),
+            submitted: submitted || sending,
+            on_place_pin: place,
+            on_comment: comment,
+            on_submit: do_submit,
+        }
+        SubmitStatus { state: submit.read().clone() }
+        if let Some(path) = artifact_path {
+            div {
+                style: "margin-top:6px;font-family:var(--dr-font-mono);\
+                        font-size:11px;color:var(--dr-text-faint);",
+                "annotating: {path}"
+            }
+        }
+    }
+}
+
+/// Render the proof session's surface-routed objective NUMBERS in the panel.
+fn proof_session(pr: ProofSessionPayload) -> Element {
+    rsx! {
+        ProofPanel { proof: map::proof_view(&pr.proof) }
     }
 }
 

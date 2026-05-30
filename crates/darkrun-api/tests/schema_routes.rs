@@ -42,7 +42,7 @@ use darkrun_api::{
     ReviewDecisionRequest, ReviewDecisionResponse, ReviewSessionPayload, RouteSpec,
     RunCurrentState, RunPhase, SealStatus, SessionPayload, SessionStatus, SessionType,
     StationArtifact, StationStateInfo, UnitOutputPreview, UnitOutputType,
-    ValidationError, ValidationIssue, ViewMode, ViewSessionPayload, ViewStatus, ROUTES,
+    ValidationError, ValidationIssue, ViewMode, ViewScope, ViewSessionPayload, ViewStatus, ROUTES,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ where
 #[test]
 fn routes_table_is_non_empty() {
     assert!(!ROUTES.is_empty());
-    assert_eq!(ROUTES.len(), 17);
+    assert_eq!(ROUTES.len(), 20);
 }
 
 #[test]
@@ -514,6 +514,8 @@ fn session_payload_view_tag() {
         session_id: "v".into(),
         status: ViewStatus::Open,
         run_slug: "run".into(),
+        scope: ViewScope::Run,
+        artifacts: vec![],
         factory: None,
         station: None,
         artifact: None,
@@ -554,6 +556,8 @@ fn session_payload_roundtrips_all_variants() {
             session_id: "v".into(),
             status: ViewStatus::Closed,
             run_slug: "run".into(),
+            scope: ViewScope::Run,
+            artifacts: vec![],
             factory: None,
             station: None,
             artifact: None,
@@ -1398,6 +1402,8 @@ fn view_payload_boot_mode_roundtrip() {
         session_id: "v".into(),
         status: ViewStatus::Open,
         run_slug: "run".into(),
+        scope: ViewScope::Run,
+        artifacts: vec![],
         factory: Some("software".into()),
         station: Some("frame".into()),
         artifact: Some("index.html".into()),
@@ -1960,6 +1966,8 @@ fn boot_port_handles_u16_boundary() {
         session_id: "v".into(),
         status: ViewStatus::Open,
         run_slug: "r".into(),
+        scope: ViewScope::Run,
+        artifacts: vec![],
         factory: None,
         station: None,
         artifact: None,
@@ -2180,7 +2188,11 @@ fn session_payload_schema_has_title_and_one_of() {
     assert_eq!(s["title"], "SessionPayload");
     assert!(s.get("oneOf").is_some(), "discriminated union -> oneOf");
     let arms = s["oneOf"].as_array().unwrap();
-    assert_eq!(arms.len(), 5, "five session variants");
+    assert_eq!(
+        arms.len(),
+        7,
+        "review / question / direction / picker / view / visual_review / proof"
+    );
 }
 
 #[test]
@@ -2619,8 +2631,8 @@ fn openapi_core_schemas_present() {
 fn openapi_schema_count_is_stable() {
     let doc = openapi::document();
     let schemas = doc["components"]["schemas"].as_object().unwrap();
-    // 31 component schemas are emitted by component_schemas().
-    assert_eq!(schemas.len(), 31);
+    // 39 component schemas are emitted by component_schemas().
+    assert_eq!(schemas.len(), 39);
 }
 
 #[test]

@@ -25,7 +25,7 @@ use darkrun_core::StateStore;
 use crate::factory::{list_factories, resolve_factory};
 use crate::position::{checkpoint_decide, run_start, run_tick};
 use crate::sessions::{self, ArchetypeSpec, PickerOptionSpec, QuestionOptionSpec};
-use crate::{feedback, runs, units};
+use crate::{feedback, proof, runs, units};
 
 /// The darkrun MCP server: an manager bound to a repo root.
 #[derive(Clone)]
@@ -377,6 +377,54 @@ pub struct SessionResultInput {
     pub slug: String,
     /// The session id minted when the session was created.
     pub session_id: String,
+}
+
+/// Input for `darkrun_run_surface` — classify or read a run's verification
+/// surface. With `surface` set, the run is classified (and persisted onto the
+/// frontmatter); omitted, the tool just reads the current classification.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RunSurfaceInput {
+    /// The run slug.
+    pub slug: String,
+    /// The surface token to classify the run as. One of `library`, `api`,
+    /// `web_ui` (or `web-ui`/`webui`), `tui`, `cli`, `desktop`, `mobile`,
+    /// `data`. Omit to read the current surface without changing it.
+    #[serde(default)]
+    pub surface: Option<String>,
+}
+
+/// Input for `darkrun_proof_attach` — attach surface-routed objective evidence
+/// (the Prove station's NUMBERS) to a run.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ProofAttachInput {
+    /// The run slug.
+    pub slug: String,
+    /// The objective proof object. Its `surface` must match the run's
+    /// classified surface. Shape: `{ "surface": "web_ui", "web": { "vitals":
+    /// {"lcp": 1200.0, ...}, "audits": [{"name": "contrast", "value": "4.8:1",
+    /// "pass": true}], "screenshot_url": "..." } }` for visual surfaces, or
+    /// `{ "surface": "api", "bench": { "p50": .., "p95": .., "p99": ..,
+    /// "throughput": .., "samples": .. } }` for bench surfaces. A terminal
+    /// (cli/tui) surface carries a screenshot-only `web` block.
+    pub proof: serde_json::Value,
+    /// The station the proof was measured at (e.g. `prove`). Omit for a
+    /// run-level proof.
+    #[serde(default)]
+    pub station: Option<String>,
+}
+
+/// Input for `darkrun_proof_get` — read a run's attached objective proof.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ProofGetInput {
+    /// The run slug.
+    pub slug: String,
+    /// The station whose proof to read. Falls back to the run-level proof when
+    /// the station has none; omit to read the run-level proof directly.
+    #[serde(default)]
+    pub station: Option<String>,
 }
 
 fn parse_status_arg(raw: &str) -> Option<Status> {
@@ -741,6 +789,76 @@ impl DarkrunServer {
                 "slug": input.slug,
                 "archived": input.archived,
             })),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    // ── Surface + proof ──────────────────────────────────────────────────
+
+    /// Classify or read a run's verification SURFACE — the linchpin that routes
+    /// which objective measurement Prove/Audit apply. Set `surface` to classify
+    /// (Shape calls this once the deliverable is known); omit it to read the
+    /// current classification back. Returns the surface plus its route flags
+    /// (`is_visual`/`is_bench`/`is_terminal`) and the selected route
+    /// (`web`/`bench`/`terminal`).
+    #[tool(
+        name = "darkrun_run_surface",
+        description = "Classify or read a run's verification surface (library|api|web_ui|tui|cli|desktop|mobile|data); set `surface` to classify, omit to read. Routes which objective proof Prove/Audit apply."
+    )]
+    pub fn darkrun_run_surface(
+        &self,
+        Parameters(input): Parameters<RunSurfaceInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let store = self.store();
+        let result = match input.surface.as_deref() {
+            Some(raw) => proof::set_surface(&store, &input.slug, raw),
+            None => proof::get_surface(&store, &input.slug),
+        };
+        match result {
+            Ok(res) => ok_json(&res),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Attach surface-routed objective EVIDENCE — the Prove station's NUMBERS —
+    /// to a run. The proof's `surface` must match the run's classified surface;
+    /// the response reports `block_matches_surface` (a visual surface must carry
+    /// a `web` vitals/audits block, a bench surface a `bench` percentile block)
+    /// so the agent cannot pass Prove on an eyeballed claim.
+    #[tool(
+        name = "darkrun_proof_attach",
+        description = "Attach surface-routed objective proof (web vitals+audits, or bench percentiles+throughput) to a run; the proof surface must match the run's classified surface."
+    )]
+    pub fn darkrun_proof_attach(
+        &self,
+        Parameters(input): Parameters<ProofAttachInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let parsed: darkrun_api::proof::Proof = match serde_json::from_value(input.proof) {
+            Ok(p) => p,
+            Err(e) => return Ok(err_text(format!("invalid proof payload: {e}"))),
+        };
+        let store = self.store();
+        match proof::attach_proof(&store, &input.slug, parsed, input.station) {
+            Ok(resp) => ok_json(&resp),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Read a run's attached objective proof back — for the view/review, or for
+    /// a downstream station to confirm Prove measured what the surface demands.
+    /// Pass a `station` to read that station's scoped proof (falling back to the
+    /// run-level proof), or omit it for the run-level proof.
+    #[tool(
+        name = "darkrun_proof_get",
+        description = "Read a run's attached objective proof (surface + web/bench block); pass a station to read its scoped proof, omit for the run-level proof."
+    )]
+    pub fn darkrun_proof_get(
+        &self,
+        Parameters(input): Parameters<ProofGetInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let store = self.store();
+        match proof::get_proof(&store, &input.slug, input.station) {
+            Ok(resp) => ok_json(&resp),
             Err(e) => Ok(err_text(e)),
         }
     }

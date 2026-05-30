@@ -59,7 +59,7 @@ const STATIONS: &[Expected] = &[
     },
     Expected {
         name: "shape",
-        explorers: &["architecture", "risk"],
+        explorers: &["surface", "architecture", "risk"],
         workers: &["designer", "visual_designer", "spiker", "pressure_tester", "resolver"],
         reviewers: &["fit", "reversibility", "simplicity"],
         checkpoint: CheckpointKind::Ask,
@@ -376,10 +376,35 @@ fn specify_explorers_are_contract_and_edge_case() {
 }
 
 #[test]
-fn shape_explorers_are_architecture_and_risk() {
+fn shape_explorers_are_surface_architecture_and_risk() {
     assert_eq!(
         slugs(&factory().station("shape").unwrap().explorers),
-        vec!["architecture", "risk"]
+        vec!["surface", "architecture", "risk"]
+    );
+}
+
+#[test]
+fn shape_surface_explorer_classifies_the_run_surface() {
+    let factory = factory();
+    let shape = factory.station("shape").unwrap();
+    let surface = shape
+        .explorers
+        .iter()
+        .find(|e| e.name() == "surface")
+        .expect("shape has a surface explorer");
+    let body = surface.body.to_lowercase();
+    // The surface explorer enumerates the full taxonomy and routes verification.
+    for token in [
+        "library", "api", "web-ui", "tui", "cli", "desktop", "mobile", "data",
+    ] {
+        assert!(
+            body.contains(token),
+            "surface explorer must name the `{token}` surface"
+        );
+    }
+    assert!(
+        body.contains("headless") || body.contains("bench"),
+        "surface explorer must tie the surface to its verification route"
     );
 }
 
@@ -408,9 +433,17 @@ fn harden_explorers_are_threat_and_operability() {
 }
 
 #[test]
-fn every_station_has_exactly_two_explorers() {
+fn every_station_has_at_least_two_explorers() {
+    // Every station carries at least two explorers; Shape carries a third
+    // (`surface`) that classifies the run's verification surface.
     for s in &factory().stations {
-        assert_eq!(s.explorers.len(), 2, "{} explorer count", s.name());
+        let expected = if s.name() == "shape" { 3 } else { 2 };
+        assert_eq!(
+            s.explorers.len(),
+            expected,
+            "{} explorer count",
+            s.name()
+        );
     }
 }
 
@@ -1300,16 +1333,16 @@ fn frontmatter_role_slugs_match_loaded_role_names() {
 
 #[test]
 fn total_role_count_across_factory() {
-    // 2 explorers + (3 or 4) workers + (2 or 3) reviewers per station.
+    // (2 or 3) explorers + (3 or 4) workers + (2 or 3) reviewers per station.
     let f = factory();
     let total: usize = f
         .stations
         .iter()
         .map(|s| s.explorers.len() + s.workers.len() + s.reviewers.len())
         .sum();
-    // frame 2+3+2=7, specify 2+3+2=7, shape 2+5+3=10, build 2+4+2=8,
-    // prove 2+3+2=7, harden 2+3+2=7  => 46
-    assert_eq!(total, 46);
+    // frame 2+3+2=7, specify 2+3+2=7, shape 3+5+3=11, build 2+4+2=8,
+    // prove 2+3+2=7, harden 2+3+2=7  => 47 (Shape gains a `surface` explorer)
+    assert_eq!(total, 47);
 }
 
 #[test]

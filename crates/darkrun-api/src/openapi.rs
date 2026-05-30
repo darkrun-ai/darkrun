@@ -61,6 +61,22 @@ fn component_schemas() -> Map<String, Value> {
         "ViewSessionPayload",
         crate::session::ViewSessionPayload
     );
+    collect_schema!(
+        schemas,
+        "VisualReviewSessionPayload",
+        crate::session::VisualReviewSessionPayload
+    );
+    collect_schema!(
+        schemas,
+        "ProofSessionPayload",
+        crate::session::ProofSessionPayload
+    );
+    collect_schema!(schemas, "Proof", crate::proof::Proof);
+    collect_schema!(schemas, "OutputReviewRequest", crate::output_review::OutputReviewRequest);
+    collect_schema!(schemas, "OutputReviewResponse", crate::output_review::OutputReviewResponse);
+    collect_schema!(schemas, "ProofAttachRequest", crate::proof::ProofAttachRequest);
+    collect_schema!(schemas, "ProofAttachResponse", crate::proof::ProofAttachResponse);
+    collect_schema!(schemas, "ProofGetResponse", crate::proof::ProofGetResponse);
     collect_schema!(schemas, "RunPhase", crate::session::RunPhase);
     collect_schema!(schemas, "RunCurrentState", crate::session::RunCurrentState);
 
