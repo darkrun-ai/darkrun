@@ -1,0 +1,59 @@
+//! darkrun-mcp — the MCP server + manager that drives a darkrun Run.
+//!
+//! This crate is the engine half of darkrun: the manager
+//! (`run-tick` -> `derive_position`) and the core MCP tool
+//! surface, built around the factory vocabulary
+//! (Factory > Station > Unit > Pass).
+//!
+//! ## Manager
+//!
+//! The manager is a **pure read** of on-disk `.darkrun/` state that
+//! returns ONE structured next-action instruction. It never runs LLM agents —
+//! it tells the caller what to do; the caller does it, then re-ticks. See
+//! [`position::derive_position`] and [`position::run_tick`].
+//!
+//! Three-track priority (Track C -> B -> A): **drift -> feedback ->
+//! run**. Inside the run track, each Station walks the phase machine
+//! `Elaborate -> Execute -> Review -> Checkpoint`, where the checkpoint kind
+//! (`auto`/`ask`/`external`/`await`) decides whether the station advances
+//! automatically or holds for an operator decision.
+//!
+//! ## MCP surface
+//!
+//! [`tools::DarkrunServer`] exposes the tool surface over the official Rust
+//! MCP SDK (`rmcp`):
+//!
+//! - **Run:** `darkrun_run_start`, `darkrun_run_next`, `darkrun_run_show`,
+//!   `darkrun_run_list`, `darkrun_run_archive`.
+//! - **Units:** `darkrun_unit_list`, `darkrun_unit_get`, `darkrun_unit_create`,
+//!   `darkrun_unit_update`.
+//! - **Feedback:** `darkrun_feedback_create`, `darkrun_feedback_list`,
+//!   `darkrun_feedback_resolve`, `darkrun_feedback_reject`,
+//!   `darkrun_feedback_move`.
+//! - **Checkpoint:** `darkrun_checkpoint_decide`.
+//! - **Factories:** `darkrun_factory_list`, `darkrun_factory_detail`.
+//!
+//! [`server::serve_stdio`] serves the surface over stdio. The typed helpers
+//! behind the tools live in [`units`], [`feedback`], [`runs`], and [`drift`].
+
+pub mod change;
+pub mod drift;
+pub mod error;
+pub mod factory;
+pub mod feedback;
+pub mod position;
+pub mod runs;
+pub mod server;
+pub mod tools;
+pub mod units;
+
+pub use change::{change_request_intent, ChangeRequestIntent};
+pub use error::{McpError, Result};
+pub use factory::{list_factories, resolve_factory, FactoryDef, StationDef};
+pub use position::{
+    checkpoint_decide, derive_position, run_start, run_tick, Position, RunAction, TickResult, Track,
+};
+pub use runs::RunSummary;
+pub use server::serve_stdio;
+pub use tools::DarkrunServer;
+pub use units::UnitUpdate;

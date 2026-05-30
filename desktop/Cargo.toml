@@ -1,0 +1,33 @@
+[package]
+name = "darkrun-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "darkrun cross-platform desktop review app (Dioxus): connects to the local engine over WebSocket and renders the Review session screen"
+publish = false
+
+[[bin]]
+name = "darkrun-desktop"
+path = "src/main.rs"
+
+[dependencies]
+# Wire contract — the session/review payload types rendered by the UI.
+darkrun-api = { workspace = true }
+
+# Shared design system — tokens + components rendered by the review screens.
+darkrun-ui = { workspace = true }
+
+# UI: Dioxus + the desktop (WebView) renderer, behind the `desktop` feature.
+dioxus = { version = "0.7", features = ["desktop"] }
+
+# Live session feed: an async WebSocket client to ws://127.0.0.1:PORT/ws/session/:id.
+# tokio is already the workspace async runtime; tungstenite is its companion WS impl.
+tokio = { workspace = true }
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+
+# (De)serialization of the wire payloads.
+serde = { workspace = true }
+serde_json = { workspace = true }

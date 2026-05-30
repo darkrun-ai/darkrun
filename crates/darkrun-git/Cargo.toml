@@ -1,0 +1,15 @@
+[package]
+name = "darkrun-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "darkrun git worktree management — libgit2-backed with a shell-out fallback"
+
+[dependencies]
+git2 = { version = "0.20", default-features = false }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

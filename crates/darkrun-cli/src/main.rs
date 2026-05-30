@@ -1,0 +1,437 @@
+//! darkrun — the command-line entry point.
+//!
+//! Assembles the engine crates behind a single `darkrun` binary:
+//!
+//! - `darkrun mcp`              — serve the manager over stdio (MCP).
+//! - `darkrun serve`           — serve the HTTP/WebSocket review server (axum).
+//! - `darkrun run start <desc>` — seed a new run at the factory's first station.
+//! - `darkrun run next [slug]` — tick the manager and print the next action.
+//! - `darkrun run show [slug]` — print a run's current state + derived position.
+//! - `darkrun run decide [slug]` — approve (or `--reject`) the active Checkpoint.
+//! - `darkrun run pr [slug]`   — open a PR/MR for a run at its external Checkpoint.
+//! - `darkrun auth login`      — website-brokered OAuth login (GitHub/GitLab).
+//! - `darkrun auth status`     — show which providers are authed.
+//! - `darkrun auth logout`     — remove a stored credential.
+//! - `darkrun factory list`    — list the embedded factories and their stations.
+//! - `darkrun statusline`      — render the Claude Code status line (+ install/uninstall).
+//!
+//! The `run` subcommands drive on-disk `.darkrun/` state via darkrun-mcp's
+//! manager (a pure read over darkrun-core state). When a slug is omitted they
+//! resolve the **active run** (the `.darkrun/active` pointer). All commands root
+//! their state at the current working directory unless `--repo` overrides it.
+
+mod auth;
+mod pr;
+mod statusline;
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use clap::{Args, Parser, Subcommand};
+
+use darkrun_core::{run_is_complete, StateStore};
+use darkrun_mcp::{checkpoint_decide, list_factories, run_start, run_tick};
+
+/// darkrun: a software factory that drives a Run through ordered stations.
+#[derive(Debug, Parser)]
+#[command(name = "darkrun", version, about, long_about = None)]
+struct Cli {
+    /// Repository root whose `.darkrun/` directory holds run state.
+    #[arg(long, global = true, value_name = "DIR")]
+    repo: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Start the stdio MCP server (the manager).
+    Mcp,
+    /// Start the axum HTTP + WebSocket review server.
+    Serve(ServeArgs),
+    /// Drive a run through the factory.
+    #[command(subcommand)]
+    Run(RunCommand),
+    /// Authenticate to a version-control provider (GitHub / GitLab).
+    #[command(subcommand)]
+    Auth(AuthCommand),
+    /// Inspect embedded factory content.
+    #[command(subcommand)]
+    Factory(FactoryCommand),
+    /// Render or wire the Claude Code status line.
+    Statusline(StatuslineArgs),
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    /// Address to bind, e.g. 127.0.0.1:4317.
+    #[arg(long, default_value = "127.0.0.1:4317")]
+    addr: SocketAddr,
+}
+
+#[derive(Debug, Subcommand)]
+enum RunCommand {
+    /// Start a new run from a one-line description.
+    Start {
+        /// What this run is about (becomes the title; slug is derived).
+        description: String,
+        /// Factory (methodology) to drive the run.
+        #[arg(long, default_value = "software")]
+        factory: String,
+        /// Run sizing mode.
+        #[arg(long, default_value = "continuous")]
+        mode: String,
+        /// Explicit slug (otherwise derived from the description).
+        #[arg(long)]
+        slug: Option<String>,
+    },
+    /// Tick the manager and print the next action.
+    Next {
+        /// Run slug (defaults to the active run).
+        slug: Option<String>,
+    },
+    /// Print a run's current state and derived next action.
+    Show {
+        /// Run slug (defaults to the active run).
+        slug: Option<String>,
+    },
+    /// Decide the current Checkpoint — approve to advance, or `--reject` to
+    /// route rework back as drift.
+    Decide {
+        /// Run slug (defaults to the active run).
+        slug: Option<String>,
+        /// Reject instead of approve (holds the station; routes feedback).
+        #[arg(long)]
+        reject: bool,
+        /// Notes recorded with the decision (the rework feedback on reject).
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// Open a Pull Request (GitHub) / Merge Request (GitLab) for a run sitting
+    /// at its external Checkpoint, using the stored credential.
+    Pr {
+        /// Run slug (defaults to the active run).
+        slug: Option<String>,
+        /// Source branch (defaults to the repo's current branch).
+        #[arg(long)]
+        head: Option<String>,
+        /// Target branch (defaults to the repo's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// Git remote to read coordinates from.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
+}
+
+/// `darkrun auth` — website-brokered OAuth.
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Open the browser to authorize, then store the returned token.
+    Login {
+        /// Which provider to authorize against.
+        #[arg(long, value_name = "github|gitlab")]
+        provider: String,
+    },
+    /// Show which providers currently have a stored credential.
+    Status,
+    /// Remove a stored credential.
+    Logout {
+        /// Which provider's credential to remove.
+        #[arg(long, value_name = "github|gitlab")]
+        provider: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FactoryCommand {
+    /// List the embedded factories and their stations.
+    List,
+}
+
+#[derive(Debug, Args)]
+struct StatuslineArgs {
+    #[command(subcommand)]
+    action: Option<StatuslineAction>,
+}
+
+#[derive(Debug, Subcommand)]
+enum StatuslineAction {
+    /// Point Claude Code's `statusLine` at darkrun (saving any existing line).
+    Install {
+        /// Wire the user-level `~/.claude/settings.json` instead of the project.
+        #[arg(long)]
+        global: bool,
+        /// The command Claude Code runs (override for plugin installs).
+        #[arg(long, default_value = "darkrun statusline")]
+        command: String,
+    },
+    /// Restore the status line that was in place before `install`.
+    Uninstall {
+        /// Operate on the user-level settings.
+        #[arg(long)]
+        global: bool,
+    },
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match run(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let Cli { repo, command } = cli;
+    match command {
+        // Statusline resolves its own root (it prefers the cwd Claude Code
+        // pipes in on stdin), so it bypasses the process-cwd default.
+        Command::Statusline(args) => statusline_command(repo, args),
+        other => {
+            let repo_root = match repo {
+                Some(p) => p,
+                None => std::env::current_dir()?,
+            };
+            match other {
+                Command::Mcp => serve_mcp(repo_root),
+                Command::Serve(args) => serve_http(repo_root, args.addr),
+                Command::Run(cmd) => run_command(&repo_root, cmd),
+                Command::Auth(cmd) => auth_command(cmd),
+                Command::Factory(cmd) => factory_command(cmd),
+                Command::Statusline(_) => unreachable!("handled above"),
+            }
+        }
+    }
+}
+
+/// Block on the stdio MCP server.
+fn serve_mcp(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(darkrun_mcp::serve_stdio(repo_root))?;
+    Ok(())
+}
+
+/// Block on the axum HTTP/WS review server.
+fn serve_http(repo_root: PathBuf, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    let store = StateStore::new(&repo_root);
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(darkrun_http::serve(addr, store))?;
+    Ok(())
+}
+
+/// Resolve an optional slug to a concrete run, falling back to the active run.
+fn resolve_slug(
+    store: &StateStore,
+    slug: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match slug {
+        Some(s) => Ok(s),
+        None => store.active_run()?.ok_or_else(|| {
+            "no active run — pass a slug or start one with `darkrun run start <desc>`".into()
+        }),
+    }
+}
+
+/// Handle the `run` subcommands.
+fn run_command(repo_root: &Path, cmd: RunCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let store = StateStore::new(repo_root);
+    match cmd {
+        RunCommand::Start {
+            description,
+            factory,
+            mode,
+            slug,
+        } => {
+            let slug = slug.unwrap_or_else(|| slugify(&description));
+            if slug.is_empty() {
+                return Err("could not derive a slug from the description".into());
+            }
+            let run = run_start(&store, &slug, &factory, Some(description), &mode)?;
+            store.set_active_run(&run.slug)?;
+            println!("started run '{}' ({})", run.slug, run.title);
+            println!("  factory:        {}", run.frontmatter.factory);
+            println!("  active station: {}", run.frontmatter.active_station);
+            println!("  state:          {}", store.run_dir(&run.slug).display());
+            Ok(())
+        }
+        RunCommand::Next { slug } => {
+            let slug = resolve_slug(&store, slug)?;
+            let tick = run_tick(&store, &slug)?;
+            print_json(&tick)
+        }
+        RunCommand::Show { slug } => {
+            let slug = resolve_slug(&store, slug)?;
+            let run = store.read_run(&slug)?;
+            let state = store.read_state(&slug)?;
+            let position = darkrun_mcp::derive_position(&store, &slug).ok();
+            let show = serde_json::json!({
+                "run": run,
+                "state": state,
+                "position": position,
+                "complete": run_is_complete(&run),
+            });
+            print_json(&show)
+        }
+        RunCommand::Decide {
+            slug,
+            reject,
+            notes,
+        } => {
+            let slug = resolve_slug(&store, slug)?;
+            let tick = checkpoint_decide(&store, &slug, !reject, notes)?;
+            print_json(&tick)
+        }
+        RunCommand::Pr {
+            slug,
+            head,
+            base,
+            remote,
+        } => {
+            let slug = resolve_slug(&store, slug)?;
+            let cred_store = darkrun_vcs::CredentialStore::default_path()?;
+            let transport = auth::ReqwestTransport::new()?;
+            let facts = pr::GitCliFacts::new(repo_root.to_path_buf(), remote);
+            let cr = pr::create_for_run(
+                &transport,
+                &facts,
+                &store,
+                &cred_store,
+                &slug,
+                head,
+                base,
+            )?;
+            println!("Opened {} #{} for run '{}'", cr.provider.display_name(), cr.number, slug);
+            println!("  {}", cr.url);
+            Ok(())
+        }
+    }
+}
+
+/// Handle the `auth` subcommands.
+fn auth_command(cmd: AuthCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let store = darkrun_vcs::CredentialStore::default_path()?;
+    match cmd {
+        AuthCommand::Login { provider } => {
+            let provider = auth::parse_provider(&provider)?;
+            auth::login(provider, &store)
+        }
+        AuthCommand::Status => auth::status(&store),
+        AuthCommand::Logout { provider } => {
+            let provider = auth::parse_provider(&provider)?;
+            auth::logout(provider, &store)?;
+            Ok(())
+        }
+    }
+}
+
+/// Handle the `factory` subcommands.
+fn factory_command(cmd: FactoryCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        FactoryCommand::List => {
+            let names = darkrun_content::list_factories();
+            if names.is_empty() {
+                // Fall back to the manager's built-in plan if the embedded
+                // content fails to load.
+                for f in list_factories() {
+                    println!("{}", f.name);
+                }
+                return Ok(());
+            }
+            for name in names {
+                match darkrun_content::load_factory(&name) {
+                    Ok(factory) => {
+                        let fm = &factory.frontmatter;
+                        if fm.description.is_empty() {
+                            println!("{}", fm.name);
+                        } else {
+                            println!("{}  —  {}", fm.name, fm.description);
+                        }
+                        let stations: Vec<&str> =
+                            factory.stations.iter().map(|s| s.name()).collect();
+                        if !stations.is_empty() {
+                            println!("    {}", stations.join(" → "));
+                        }
+                    }
+                    Err(_) => println!("{name}"),
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Handle the `statusline` command.
+fn statusline_command(
+    repo: Option<PathBuf>,
+    args: StatuslineArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match args.action {
+        None => {
+            if let Some(line) = statusline::render(repo) {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Some(StatuslineAction::Install { global, command }) => {
+            let repo_root = resolve_repo(repo)?;
+            statusline::install(global, &repo_root, &command)
+        }
+        Some(StatuslineAction::Uninstall { global }) => {
+            let repo_root = resolve_repo(repo)?;
+            statusline::uninstall(global, &repo_root)
+        }
+    }
+}
+
+/// Resolve a repo root for commands that need a concrete project directory.
+fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match repo {
+        Some(p) => Ok(p),
+        None => Ok(std::env::current_dir()?),
+    }
+}
+
+/// Pretty-print a serializable value as JSON to stdout.
+fn print_json<T: serde::Serialize>(value: &T) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// Derive a URL-safe slug from free text: lowercase, alphanumerics kept,
+/// every run of other characters collapsed to a single hyphen, trimmed.
+fn slugify(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_dash = false;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slugify;
+
+    #[test]
+    fn slugify_collapses_and_trims() {
+        assert_eq!(slugify("Add a Login Page!"), "add-a-login-page");
+        assert_eq!(slugify("  spaced  out  "), "spaced-out");
+        assert_eq!(slugify("already-slug"), "already-slug");
+        assert_eq!(slugify("!!!"), "");
+    }
+}

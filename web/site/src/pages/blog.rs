@@ -1,0 +1,64 @@
+//! `/blog` and `/blog/:slug` — the post index and individual posts, rendered
+//! from the embedded blog corpus.
+
+use darkrun_ui::prelude::*;
+
+use crate::content::{self, POSTS};
+use crate::route::Route;
+use crate::ui::{Prose, SectionHead};
+
+/// `/blog` — the post index, newest first.
+#[component]
+pub fn Blog() -> Element {
+    rsx! {
+        SectionHead {
+            kicker: "writing".to_string(),
+            title: "Blog".to_string(),
+            lead: Some("Notes on running an agent as a factory.".to_string()),
+        }
+        div { style: "display:flex;flex-direction:column;gap:12px;",
+            for post in POSTS {
+                Link {
+                    to: Route::Post { slug: post.slug.to_string() },
+                    style: "text-decoration:none;display:block;",
+                    Card {
+                        span {
+                            style: format!("font-family:{};font-size:17px;font-weight:700;color:{};", tokens::FONT_SANS, tokens::TEXT),
+                            "{post.title}"
+                        }
+                        p {
+                            style: format!("font-family:{};font-size:14px;color:{};margin:6px 0 0;", tokens::FONT_SANS, tokens::TEXT_MUTED),
+                            "{post.summary}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `/blog/:slug` — a single post.
+#[component]
+pub fn Post(slug: String) -> Element {
+    match content::find(POSTS, &slug) {
+        Some(post) => rsx! {
+            div { style: "margin-bottom:8px;",
+                Link { to: Route::Blog {},
+                    span {
+                        style: format!("font-family:{};font-size:13px;color:{};", tokens::FONT_MONO, tokens::ACCENT),
+                        "\u{2190} all posts"
+                    }
+                }
+            }
+            Prose { doc: *post }
+        },
+        None => rsx! {
+            SectionHead {
+                kicker: "not found".to_string(),
+                title: "No such post".to_string(),
+                lead: Some(format!("There is no post at /blog/{slug}.")),
+            }
+            Link { to: Route::Blog {}, Button { variant: ButtonVariant::Secondary, "All posts" } }
+        },
+    }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "darkrun",
+  "version": "0.1.0",
+  "description": "darkrun — factory-based lifecycle orchestration for Claude Code. A native Rust engine drives Runs through factory Stations with Workers, Explorers, Reviewers, and Checkpoints.",
+  "author": {
+    "name": "jwaldrip",
+    "url": "https://darkrun.ai"
+  },
+  "homepage": "https://darkrun.ai",
+  "repository": "https://github.com/jwaldrip/darkrun",
+  "license": "Apache-2.0",
+  "keywords": [
+    "darkrun",
+    "lifecycle",
+    "factory",
+    "orchestration",
+    "workflow",
+    "rust",
+    "completion-criteria",
+    "human-ai-collaboration"
+  ]
+}

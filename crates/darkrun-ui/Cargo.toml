@@ -1,0 +1,15 @@
+[package]
+name = "darkrun-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "darkrun shared design system: dark-only tokens + Dioxus components consumed by the desktop app and the website (native + wasm)"
+publish = false
+
+[dependencies]
+# Renderer-agnostic Dioxus surface: macro + html + signals + hooks, NO platform
+# renderer. The `lib` feature is the same set the desktop app pulls transitively,
+# and it compiles cleanly for both native and wasm32-unknown-unknown.
+dioxus = { version = "0.7", default-features = false, features = ["lib"] }

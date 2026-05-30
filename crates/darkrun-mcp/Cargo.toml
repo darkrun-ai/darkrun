@@ -1,0 +1,21 @@
+[package]
+name = "darkrun-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "darkrun MCP server + manager — drives a Run through the factory's stations over stdio"
+
+[dependencies]
+darkrun-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+schemars.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+rmcp = { version = "1.7", features = ["server", "transport-io", "macros", "schemars"] }
+
+[dev-dependencies]
+tempfile = "3"

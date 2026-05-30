@@ -1,0 +1,29 @@
+[package]
+name = "darkrun-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "darkrun — the command-line entry point that assembles the engine (MCP, HTTP, run orchestration, factories)"
+
+[[bin]]
+name = "darkrun"
+path = "src/main.rs"
+
+[dependencies]
+darkrun-core.workspace = true
+darkrun-api.workspace = true
+darkrun-content.workspace = true
+darkrun-vcs.workspace = true
+serde.workspace = true
+darkrun-mcp = { path = "../darkrun-mcp" }
+darkrun-http = { path = "../darkrun-http" }
+darkrun-git = { path = "../darkrun-git" }
+serde_json.workspace = true
+tokio.workspace = true
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,21 @@
+# dx (Dioxus CLI) bundling config for the darkrun.ai website.
+#
+# This drives `dx serve` / `dx build` for the wasm web app. `cargo build
+# --target wasm32-unknown-unknown` works without it; dx adds the JS glue,
+# the index shell, and the static asset copy.
+
+[application]
+name = "darkrun-site"
+default_platform = "web"
+
+[web.app]
+title = "darkrun — an assembly line for software"
+
+[web.watcher]
+reload_html = true
+
+[web.resource]
+# Static SEO artifacts emitted by `darkrun-site-gen` into ./dist are served at
+# the site root.
+style = []
+script = []

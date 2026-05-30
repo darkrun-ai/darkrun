@@ -1,0 +1,2416 @@
+{
+  "components": {
+    "schemas": {
+      "AdvanceResponse": {
+        "description": "Response body for `POST /api/advance/:id`.",
+        "properties": {
+          "ok": {
+            "description": "Always `true` on success.",
+            "type": "boolean"
+          },
+          "open_feedback_count": {
+            "description": "Number of pending / fixing / addressed feedback items on the station at the time of the call. Zero means the user slots were stamped.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "stamped_user_slots": {
+            "description": "True when this call stamped the user review/approval slots.",
+            "type": "boolean"
+          },
+          "station": {
+            "description": "The station the advance signal resolved against.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "open_feedback_count",
+          "stamped_user_slots",
+          "station"
+        ],
+        "title": "AdvanceResponse",
+        "type": "object"
+      },
+      "DirectionSelectRequest": {
+        "description": "Request body for `POST /direction/:id/select` — discriminated on `mode`.",
+        "oneOf": [
+          {
+            "description": "Final selection — the user picked one archetype.",
+            "properties": {
+              "annotations": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/DirectionAnnotations"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional annotations."
+              },
+              "archetype": {
+                "description": "The chosen archetype name.",
+                "type": "string"
+              },
+              "comments": {
+                "description": "Optional free-text comments.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mode": {
+                "enum": [
+                  "select"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "archetype",
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Regenerate request — the user wants more / different variants.",
+            "properties": {
+              "comments": {
+                "description": "Optional steering notes.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "keep": {
+                "description": "Archetype names to preserve.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "mode": {
+                "enum": [
+                  "regenerate"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "keep",
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Upload submission — finished designs supplied directly.",
+            "properties": {
+              "comments": {
+                "description": "Optional overall notes.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "files": {
+                "description": "The uploaded files.",
+                "items": {
+                  "$ref": "#/definitions/DirectionUploadFile"
+                },
+                "type": "array"
+              },
+              "mode": {
+                "enum": [
+                  "upload"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "files",
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Intake signal — nothing to upload; generate variants.",
+            "properties": {
+              "comments": {
+                "description": "Optional steering notes for the first generation.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mode": {
+                "enum": [
+                  "generate"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "DirectionSelectRequest"
+      },
+      "DirectionSelectResponse": {
+        "description": "Response body for `POST /direction/:id/select`.",
+        "properties": {
+          "ok": {
+            "description": "Always `true` on success.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "DirectionSelectResponse",
+        "type": "object"
+      },
+      "DirectionSessionPayload": {
+        "description": "The direction-session payload (`session_type = \"direction\"`).",
+        "properties": {
+          "archetypes": {
+            "description": "Archetype cards to choose between.",
+            "items": {
+              "$ref": "#/definitions/DirectionArchetype"
+            },
+            "type": "array"
+          },
+          "context": {
+            "description": "Optional markdown preamble above the archetype cards.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_slug": {
+            "description": "The run slug.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/DirectionSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The saved selection, if any."
+          },
+          "session_id": {
+            "description": "The session id.",
+            "type": "string"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/SessionStatus"
+              }
+            ],
+            "description": "Session lifecycle status."
+          },
+          "title": {
+            "description": "Optional title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id",
+          "status"
+        ],
+        "title": "DirectionSessionPayload",
+        "type": "object"
+      },
+      "FeedbackCreateRequest": {
+        "description": "`POST /api/feedback/:run/:station` request body.",
+        "properties": {
+          "anchor": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackAnchor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pin-anchor metadata for visual annotations."
+          },
+          "attachment_data_url": {
+            "description": "Optional PNG/JPEG/WebP attachment as a data URL.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "author": {
+            "description": "Optional author hint (the server always stamps `user` for HTTP submissions, so this is retained for compatibility only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "description": "Body (required, non-empty).",
+            "type": "string"
+          },
+          "inline_anchor": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackInlineAnchor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Inline text-anchor metadata."
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Origin (defaults to `user-visual` server-side when omitted)."
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackResolution"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The author's preferred resolution path."
+          },
+          "source_ref": {
+            "description": "Back-reference to an origin artifact.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "Title (required, non-empty).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "title"
+        ],
+        "title": "FeedbackCreateRequest",
+        "type": "object"
+      },
+      "FeedbackCreateResponse": {
+        "description": "`POST /api/feedback/:run/:station` response body (201 on success).",
+        "properties": {
+          "feedback_id": {
+            "description": "The minted `FB-NN` id.",
+            "type": "string"
+          },
+          "file": {
+            "description": "Path to the committed feedback file, relative to the run dir.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable confirmation message.",
+            "type": "string"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/FeedbackStatus"
+              }
+            ],
+            "description": "Always `pending` on create."
+          }
+        },
+        "required": [
+          "feedback_id",
+          "file",
+          "message",
+          "status"
+        ],
+        "title": "FeedbackCreateResponse",
+        "type": "object"
+      },
+      "FeedbackDeleteResponse": {
+        "description": "`DELETE /api/feedback/:run/:station/:id` response body.",
+        "properties": {
+          "deleted": {
+            "description": "Always `true` on success.",
+            "type": "boolean"
+          },
+          "feedback_id": {
+            "description": "The deleted id.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable confirmation message.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deleted",
+          "feedback_id",
+          "message"
+        ],
+        "title": "FeedbackDeleteResponse",
+        "type": "object"
+      },
+      "FeedbackItem": {
+        "description": "A single feedback item as projected onto the wire.",
+        "properties": {
+          "author": {
+            "description": "Free-form author handle (e.g. `user`, `agent`).",
+            "type": "string"
+          },
+          "author_type": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/AuthorType"
+              }
+            ],
+            "description": "Derived authorship type."
+          },
+          "body": {
+            "default": "",
+            "description": "Markdown body.",
+            "type": "string"
+          },
+          "closed_by": {
+            "description": "Unit slug that certified closure, or `None` while open.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "closure_reply": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ClosureReply"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The worker's plain-language closure reply."
+          },
+          "closure_reply_unread": {
+            "description": "Whether the closure reply is unacknowledged.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "created_at": {
+            "description": "ISO-8601 creation timestamp.",
+            "type": "string"
+          },
+          "feedback_id": {
+            "description": "Stable `FB-NN` identifier (scoped per station).",
+            "type": "string"
+          },
+          "inline_anchor": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackInlineAnchor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Inline-text anchor metadata, when text-anchored."
+          },
+          "iterations": {
+            "description": "Per-bolt fix-loop history.",
+            "items": {
+              "$ref": "#/definitions/FeedbackIteration"
+            },
+            "type": "array"
+          },
+          "origin": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/FeedbackOrigin"
+              }
+            ],
+            "description": "Where the item originated."
+          },
+          "replies": {
+            "description": "Thread of replies.",
+            "items": {
+              "$ref": "#/definitions/FeedbackReply"
+            },
+            "type": "array"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackResolution"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Routing hint for the resolver."
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackScope"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether the item is run- or station-scope."
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackSeverity"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Finding urgency (null until classified)."
+          },
+          "source_ref": {
+            "description": "Back-reference to the origin artifact, or null.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/FeedbackStatus"
+              }
+            ],
+            "description": "Lifecycle status."
+          },
+          "title": {
+            "default": "",
+            "description": "Short title.",
+            "type": "string"
+          },
+          "visit": {
+            "description": "Station-visit counter at creation time.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "author",
+          "author_type",
+          "created_at",
+          "feedback_id",
+          "origin",
+          "status",
+          "visit"
+        ],
+        "title": "FeedbackItem",
+        "type": "object"
+      },
+      "FeedbackListResponse": {
+        "description": "`GET /api/feedback/:run/:station` response body.",
+        "properties": {
+          "count": {
+            "description": "Number of items returned.",
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "items": {
+            "description": "The feedback items.",
+            "items": {
+              "$ref": "#/definitions/FeedbackItem"
+            },
+            "type": "array"
+          },
+          "run": {
+            "description": "The run (intent) slug.",
+            "type": "string"
+          },
+          "station": {
+            "description": "The station.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "count",
+          "items",
+          "run",
+          "station"
+        ],
+        "title": "FeedbackListResponse",
+        "type": "object"
+      },
+      "FeedbackReplyCreateRequest": {
+        "description": "`POST /api/feedback/:run/:station/:id/replies` request body.",
+        "properties": {
+          "author": {
+            "description": "Optional author hint.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "description": "Reply body (required, non-empty).",
+            "type": "string"
+          },
+          "close_as_answered": {
+            "description": "If `true`, transitions the parent to `answered` in the same write.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "title": "FeedbackReplyCreateRequest",
+        "type": "object"
+      },
+      "FeedbackReplyCreateResponse": {
+        "description": "`POST /api/feedback/:run/:station/:id/replies` response body.",
+        "properties": {
+          "feedback_id": {
+            "description": "The parent id.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable confirmation message.",
+            "type": "string"
+          },
+          "reply_index": {
+            "description": "Zero-based index of the appended reply.",
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/FeedbackStatus"
+              }
+            ],
+            "description": "The parent status after the write."
+          }
+        },
+        "required": [
+          "feedback_id",
+          "message",
+          "reply_index",
+          "status"
+        ],
+        "title": "FeedbackReplyCreateResponse",
+        "type": "object"
+      },
+      "FeedbackUpdateRequest": {
+        "description": "`PUT /api/feedback/:run/:station/:id` request body.\n\nAt least one of `status` / `closed_by` / `resolution` must be supplied; an empty body is a `400`.",
+        "properties": {
+          "closed_by": {
+            "description": "Unit slug certifying closure, if changing.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackResolution"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New resolution hint, if changing."
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/FeedbackStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New status, if changing."
+          }
+        },
+        "title": "FeedbackUpdateRequest",
+        "type": "object"
+      },
+      "FeedbackUpdateResponse": {
+        "description": "`PUT /api/feedback/:run/:station/:id` response body.",
+        "properties": {
+          "feedback_id": {
+            "description": "The updated id.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable confirmation message.",
+            "type": "string"
+          },
+          "updated_fields": {
+            "description": "Frontmatter fields that were actually changed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "feedback_id",
+          "message",
+          "updated_fields"
+        ],
+        "title": "FeedbackUpdateResponse",
+        "type": "object"
+      },
+      "PickerSelectRequest": {
+        "description": "Request body for `POST /picker/:id/select`.",
+        "properties": {
+          "id": {
+            "description": "The id of the option to select — must match one of the session's options.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "PickerSelectRequest",
+        "type": "object"
+      },
+      "PickerSelectResponse": {
+        "description": "Response body for `POST /picker/:id/select`.",
+        "properties": {
+          "id": {
+            "description": "The selected option id, echoed back.",
+            "type": "string"
+          },
+          "ok": {
+            "description": "Always `true` on success.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "ok"
+        ],
+        "title": "PickerSelectResponse",
+        "type": "object"
+      },
+      "PickerSessionPayload": {
+        "description": "The picker-session payload (`session_type = \"picker\"`).",
+        "properties": {
+          "kind": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/PickerKind"
+              }
+            ],
+            "description": "The kind of selection."
+          },
+          "options": {
+            "description": "Selectable options.",
+            "items": {
+              "$ref": "#/definitions/PickerOption"
+            },
+            "type": "array"
+          },
+          "prompt": {
+            "description": "Prompt text.",
+            "type": "string"
+          },
+          "run_slug": {
+            "description": "The run slug, if scoped.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/PickerSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The saved selection, if any."
+          },
+          "session_id": {
+            "description": "The session id.",
+            "type": "string"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/SessionStatus"
+              }
+            ],
+            "description": "Session lifecycle status."
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "options",
+          "prompt",
+          "session_id",
+          "status",
+          "title"
+        ],
+        "title": "PickerSessionPayload",
+        "type": "object"
+      },
+      "QuestionAnswerRequest": {
+        "description": "Request body for `POST /question/:id/answer`.",
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/QuestionAnnotations"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional annotation bundle."
+          },
+          "answers": {
+            "description": "The answers, one per question.",
+            "items": {
+              "$ref": "#/definitions/QuestionAnswerItem"
+            },
+            "type": "array"
+          },
+          "feedback": {
+            "description": "Optional overall free-text feedback.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "answers"
+        ],
+        "title": "QuestionAnswerRequest",
+        "type": "object"
+      },
+      "QuestionAnswerResponse": {
+        "description": "Response body for `POST /question/:id/answer`.",
+        "properties": {
+          "ok": {
+            "description": "Always `true` on success.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "QuestionAnswerResponse",
+        "type": "object"
+      },
+      "QuestionSessionPayload": {
+        "description": "The question-session payload (`session_type = \"question\"`).",
+        "properties": {
+          "answers": {
+            "description": "Recorded answers, once submitted.",
+            "items": {
+              "$ref": "#/definitions/QuestionAnswer"
+            },
+            "type": "array"
+          },
+          "context": {
+            "description": "Optional markdown context preamble.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image_urls": {
+            "description": "Reference image URLs the questions annotate.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "questions": {
+            "description": "The questions to answer.",
+            "items": {
+              "$ref": "#/definitions/QuestionDef"
+            },
+            "type": "array"
+          },
+          "session_id": {
+            "description": "The session id.",
+            "type": "string"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/SessionStatus"
+              }
+            ],
+            "description": "Session lifecycle status."
+          },
+          "title": {
+            "description": "Optional title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id",
+          "status"
+        ],
+        "title": "QuestionSessionPayload",
+        "type": "object"
+      },
+      "ReviewCurrentPayload": {
+        "description": "`GET /api/review/current` response body.",
+        "properties": {
+          "feedback_summary": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/FeedbackSummary"
+              }
+            ],
+            "description": "Per-status feedback counts."
+          },
+          "phase": {
+            "description": "The active phase (display).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run": {
+            "description": "The active run slug.",
+            "type": "string"
+          },
+          "station": {
+            "description": "The active station, or null when between stations.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stations": {
+            "description": "All stations on the run.",
+            "items": {
+              "$ref": "#/definitions/ReviewCurrentStation"
+            },
+            "type": "array"
+          },
+          "units": {
+            "description": "The units in the active station.",
+            "items": {
+              "$ref": "#/definitions/ReviewCurrentUnit"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "feedback_summary",
+          "run",
+          "stations",
+          "units"
+        ],
+        "title": "ReviewCurrentPayload",
+        "type": "object"
+      },
+      "ReviewDecisionRequest": {
+        "description": "Request body for `POST /review/:id/decide`.",
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ReviewAnnotations"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional annotations attached to the decision."
+          },
+          "decision": {
+            "description": "Raw decision string — the server canonicalizes to one of the [`ReviewDecision`] variants.",
+            "type": "string"
+          },
+          "feedback": {
+            "description": "Optional reviewer free-text feedback.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "ReviewDecisionRequest",
+        "type": "object"
+      },
+      "ReviewDecisionResponse": {
+        "description": "Response body for `POST /review/:id/decide`.",
+        "properties": {
+          "decision": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/ReviewDecision"
+              }
+            ],
+            "description": "The canonicalized decision."
+          },
+          "feedback": {
+            "description": "The feedback echoed back (empty when none was supplied).",
+            "type": "string"
+          },
+          "ok": {
+            "description": "Always `true` on success.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "decision",
+          "feedback",
+          "ok"
+        ],
+        "title": "ReviewDecisionResponse",
+        "type": "object"
+      },
+      "ReviewSessionPayload": {
+        "description": "The review-session payload (`session_type = \"review\"`) — the load-bearing variant for phase 1.\n\nOpaque parsed artifacts (run/unit/criteria structures built from markdown) are carried as raw JSON [`Value`]s — a loose-by-design approach for internal parser output.",
+        "properties": {
+          "ad_hoc": {
+            "description": "Whether this is an ad-hoc (non-gate) review.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "annotations": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ReviewAnnotations"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Annotations attached to the decision."
+          },
+          "approve_action": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ApproveAction"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The Approve button's computed label + consequence."
+          },
+          "await_active": {
+            "description": "True when a `darkrun_await_gate` call is currently blocked on this session (drives the Approve button's enabled state).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "await_count": {
+            "description": "Cumulative number of awaits that have run on this session.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "criteria": {
+            "description": "Opaque parsed completion criteria.",
+            "items": true,
+            "type": "array"
+          },
+          "current_state": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/RunCurrentState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The unified current-state snapshot."
+          },
+          "decision": {
+            "description": "The recorded decision, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "discovered_review_url": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/DiscoveredReviewUrl"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An auto-discovered delivery PR/MR."
+          },
+          "drift": {
+            "description": "Drift-sweep results for the active station.",
+            "items": {
+              "$ref": "#/definitions/DriftEntry"
+            },
+            "type": "array"
+          },
+          "feedback": {
+            "description": "Reviewer free-text feedback.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gate_context": {
+            "description": "Where in the lifecycle this gate fires.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gate_type": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/GateType"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The checkpoint gate kind that opened this review."
+          },
+          "knowledge_files": {
+            "description": "Knowledge files surfaced in the review.",
+            "items": {
+              "$ref": "#/definitions/KnowledgeFile"
+            },
+            "type": "array"
+          },
+          "last_await_ended_at": {
+            "description": "When the last await ended.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_await_started_at": {
+            "description": "When the last await started.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mermaid": {
+            "description": "Optional mermaid diagram source.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_phase": {
+            "description": "The phase that begins after approval.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_station": {
+            "description": "The station that begins after approval.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "other_files": {
+            "description": "Stray station-scope files not declared by any unit.",
+            "items": {
+              "$ref": "#/definitions/OutputArtifact"
+            },
+            "type": "array"
+          },
+          "output_artifacts": {
+            "description": "Declared output deliverables.",
+            "items": {
+              "$ref": "#/definitions/OutputArtifact"
+            },
+            "type": "array"
+          },
+          "output_declared_by": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "description": "Inverse of `unit_outputs`: output path -> declaring unit slugs.",
+            "type": "object"
+          },
+          "pending_decision": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/PendingDecision"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A decision queued while no await was open."
+          },
+          "previous_review": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/PreviousReviewSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior review snapshot, on a changes-requested follow-up."
+          },
+          "reflection": {
+            "description": "The run-scope synthesized reflection.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run": {
+            "description": "Opaque parsed run document."
+          },
+          "run_dir": {
+            "description": "The run directory on disk.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_other_files": {
+            "description": "Stray run-root files.",
+            "items": {
+              "$ref": "#/definitions/OutputArtifact"
+            },
+            "type": "array"
+          },
+          "run_slug": {
+            "description": "The run slug under review.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "The session id.",
+            "type": "string"
+          },
+          "station": {
+            "description": "The station the review was opened against.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "station_artifacts": {
+            "description": "Per-station artifacts.",
+            "items": {
+              "$ref": "#/definitions/StationArtifact"
+            },
+            "type": "array"
+          },
+          "station_briefs": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Per-station user-facing briefs, keyed by station name.",
+            "type": "object"
+          },
+          "station_elaborations": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Per-station elaboration narratives, keyed by station name.",
+            "type": "object"
+          },
+          "station_milestones": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/definitions/ProgressMilestone"
+              },
+              "type": "array"
+            },
+            "description": "Per-station milestone tracks, keyed by station name.",
+            "type": "object"
+          },
+          "station_observations": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Per-station worker observations, keyed by station name.",
+            "type": "object"
+          },
+          "station_states": {
+            "additionalProperties": {
+              "$ref": "#/definitions/StationStateInfo"
+            },
+            "description": "Per-station status snapshots, keyed by station name.",
+            "type": "object"
+          },
+          "station_summaries": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Per-station definition summaries, keyed by station name.",
+            "type": "object"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/SessionStatus"
+              }
+            ],
+            "description": "Session lifecycle status."
+          },
+          "target": {
+            "description": "The artifact this review targets.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit_outputs": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/definitions/UnitOutputPreview"
+              },
+              "type": "array"
+            },
+            "description": "Per-unit output previews, keyed by unit slug.",
+            "type": "object"
+          },
+          "units": {
+            "description": "Opaque parsed unit documents.",
+            "items": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "session_id",
+          "status"
+        ],
+        "title": "ReviewSessionPayload",
+        "type": "object"
+      },
+      "RunCurrentState": {
+        "description": "Unified current-state snapshot — \"where is this run right now?\".",
+        "properties": {
+          "awaiting_merge_into": {
+            "description": "The default branch the work is waiting to land on, when pending seal.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "factory": {
+            "description": "The factory driving the run.",
+            "type": "string"
+          },
+          "milestones": {
+            "description": "Granular milestone track for the active station.",
+            "items": {
+              "$ref": "#/definitions/ProgressMilestone"
+            },
+            "type": "array"
+          },
+          "pending_signals": {
+            "description": "Elaborate-phase signals not yet satisfied.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/RunPhase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The active phase, if resolvable."
+          },
+          "progress_index": {
+            "description": "Index of the active (first not-done) milestone.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "progress_total": {
+            "description": "Total milestone count.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "seal_status": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/SealStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Terminal seal state, present once every station has merged."
+          },
+          "station": {
+            "description": "The active station.",
+            "type": "string"
+          },
+          "step": {
+            "description": "The active sub-step, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "factory",
+          "station"
+        ],
+        "title": "RunCurrentState",
+        "type": "object"
+      },
+      "RunPhase": {
+        "description": "The fixed phase taxonomy a Station walks (mirrors `darkrun_core::domain::StationPhase`, kept local to stay dependency-light).",
+        "oneOf": [
+          {
+            "description": "Specify: Explore + Decompose into Units.",
+            "enum": [
+              "spec"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Review the spec before manufacturing.",
+            "enum": [
+              "review"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Manufacture: the Pass-loop over Units.",
+            "enum": [
+              "manufacture"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Audit the output against the spec.",
+            "enum": [
+              "audit"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Quality checks / tests.",
+            "enum": [
+              "tests"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "The Checkpoint gate fires.",
+            "enum": [
+              "checkpoint"
+            ],
+            "type": "string"
+          }
+        ],
+        "title": "RunPhase"
+      },
+      "SessionPayload": {
+        "description": "The session payload returned by `GET /api/session/:id`, discriminated on `session_type`.\n\nThe `Review` variant is intentionally the largest (it is the load-bearing phase-1 payload); the size disparity is accepted to keep the public constructor ergonomic for every caller.",
+        "oneOf": [
+          {
+            "description": "A checkpoint review (the load-bearing variant).",
+            "properties": {
+              "ad_hoc": {
+                "description": "Whether this is an ad-hoc (non-gate) review.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "annotations": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/ReviewAnnotations"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Annotations attached to the decision."
+              },
+              "approve_action": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/ApproveAction"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The Approve button's computed label + consequence."
+              },
+              "await_active": {
+                "description": "True when a `darkrun_await_gate` call is currently blocked on this session (drives the Approve button's enabled state).",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "await_count": {
+                "description": "Cumulative number of awaits that have run on this session.",
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "criteria": {
+                "description": "Opaque parsed completion criteria.",
+                "items": true,
+                "type": "array"
+              },
+              "current_state": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/RunCurrentState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The unified current-state snapshot."
+              },
+              "decision": {
+                "description": "The recorded decision, if any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "discovered_review_url": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/DiscoveredReviewUrl"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "An auto-discovered delivery PR/MR."
+              },
+              "drift": {
+                "description": "Drift-sweep results for the active station.",
+                "items": {
+                  "$ref": "#/definitions/DriftEntry"
+                },
+                "type": "array"
+              },
+              "feedback": {
+                "description": "Reviewer free-text feedback.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "gate_context": {
+                "description": "Where in the lifecycle this gate fires.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "gate_type": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/GateType"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The checkpoint gate kind that opened this review."
+              },
+              "knowledge_files": {
+                "description": "Knowledge files surfaced in the review.",
+                "items": {
+                  "$ref": "#/definitions/KnowledgeFile"
+                },
+                "type": "array"
+              },
+              "last_await_ended_at": {
+                "description": "When the last await ended.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_await_started_at": {
+                "description": "When the last await started.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mermaid": {
+                "description": "Optional mermaid diagram source.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "next_phase": {
+                "description": "The phase that begins after approval.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "next_station": {
+                "description": "The station that begins after approval.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "other_files": {
+                "description": "Stray station-scope files not declared by any unit.",
+                "items": {
+                  "$ref": "#/definitions/OutputArtifact"
+                },
+                "type": "array"
+              },
+              "output_artifacts": {
+                "description": "Declared output deliverables.",
+                "items": {
+                  "$ref": "#/definitions/OutputArtifact"
+                },
+                "type": "array"
+              },
+              "output_declared_by": {
+                "additionalProperties": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "description": "Inverse of `unit_outputs`: output path -> declaring unit slugs.",
+                "type": "object"
+              },
+              "pending_decision": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/PendingDecision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "A decision queued while no await was open."
+              },
+              "previous_review": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/PreviousReviewSnapshot"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The prior review snapshot, on a changes-requested follow-up."
+              },
+              "reflection": {
+                "description": "The run-scope synthesized reflection.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "run": {
+                "description": "Opaque parsed run document."
+              },
+              "run_dir": {
+                "description": "The run directory on disk.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "run_other_files": {
+                "description": "Stray run-root files.",
+                "items": {
+                  "$ref": "#/definitions/OutputArtifact"
+                },
+                "type": "array"
+              },
+              "run_slug": {
+                "description": "The run slug under review.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "description": "The session id.",
+                "type": "string"
+              },
+              "session_type": {
+                "enum": [
+                  "review"
+                ],
+                "type": "string"
+              },
+              "station": {
+                "description": "The station the review was opened against.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "station_artifacts": {
+                "description": "Per-station artifacts.",
+                "items": {
+                  "$ref": "#/definitions/StationArtifact"
+                },
+                "type": "array"
+              },
+              "station_briefs": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Per-station user-facing briefs, keyed by station name.",
+                "type": "object"
+              },
+              "station_elaborations": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Per-station elaboration narratives, keyed by station name.",
+                "type": "object"
+              },
+              "station_milestones": {
+                "additionalProperties": {
+                  "items": {
+                    "$ref": "#/definitions/ProgressMilestone"
+                  },
+                  "type": "array"
+                },
+                "description": "Per-station milestone tracks, keyed by station name.",
+                "type": "object"
+              },
+              "station_observations": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Per-station worker observations, keyed by station name.",
+                "type": "object"
+              },
+              "station_states": {
+                "additionalProperties": {
+                  "$ref": "#/definitions/StationStateInfo"
+                },
+                "description": "Per-station status snapshots, keyed by station name.",
+                "type": "object"
+              },
+              "station_summaries": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Per-station definition summaries, keyed by station name.",
+                "type": "object"
+              },
+              "status": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/SessionStatus"
+                  }
+                ],
+                "description": "Session lifecycle status."
+              },
+              "target": {
+                "description": "The artifact this review targets.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "unit_outputs": {
+                "additionalProperties": {
+                  "items": {
+                    "$ref": "#/definitions/UnitOutputPreview"
+                  },
+                  "type": "array"
+                },
+                "description": "Per-unit output previews, keyed by unit slug.",
+                "type": "object"
+              },
+              "units": {
+                "description": "Opaque parsed unit documents.",
+                "items": true,
+                "type": "array"
+              }
+            },
+            "required": [
+              "session_id",
+              "session_type",
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A multi-question prompt.",
+            "properties": {
+              "answers": {
+                "description": "Recorded answers, once submitted.",
+                "items": {
+                  "$ref": "#/definitions/QuestionAnswer"
+                },
+                "type": "array"
+              },
+              "context": {
+                "description": "Optional markdown context preamble.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "image_urls": {
+                "description": "Reference image URLs the questions annotate.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "questions": {
+                "description": "The questions to answer.",
+                "items": {
+                  "$ref": "#/definitions/QuestionDef"
+                },
+                "type": "array"
+              },
+              "session_id": {
+                "description": "The session id.",
+                "type": "string"
+              },
+              "session_type": {
+                "enum": [
+                  "question"
+                ],
+                "type": "string"
+              },
+              "status": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/SessionStatus"
+                  }
+                ],
+                "description": "Session lifecycle status."
+              },
+              "title": {
+                "description": "Optional title.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "session_id",
+              "session_type",
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A design-direction selection.",
+            "properties": {
+              "archetypes": {
+                "description": "Archetype cards to choose between.",
+                "items": {
+                  "$ref": "#/definitions/DirectionArchetype"
+                },
+                "type": "array"
+              },
+              "context": {
+                "description": "Optional markdown preamble above the archetype cards.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "run_slug": {
+                "description": "The run slug.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "selection": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/DirectionSelection"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The saved selection, if any."
+              },
+              "session_id": {
+                "description": "The session id.",
+                "type": "string"
+              },
+              "session_type": {
+                "enum": [
+                  "direction"
+                ],
+                "type": "string"
+              },
+              "status": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/SessionStatus"
+                  }
+                ],
+                "description": "Session lifecycle status."
+              },
+              "title": {
+                "description": "Optional title.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "session_id",
+              "session_type",
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A blocking picker selection.",
+            "properties": {
+              "kind": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/PickerKind"
+                  }
+                ],
+                "description": "The kind of selection."
+              },
+              "options": {
+                "description": "Selectable options.",
+                "items": {
+                  "$ref": "#/definitions/PickerOption"
+                },
+                "type": "array"
+              },
+              "prompt": {
+                "description": "Prompt text.",
+                "type": "string"
+              },
+              "run_slug": {
+                "description": "The run slug, if scoped.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "selection": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/PickerSelection"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The saved selection, if any."
+              },
+              "session_id": {
+                "description": "The session id.",
+                "type": "string"
+              },
+              "session_type": {
+                "enum": [
+                  "picker"
+                ],
+                "type": "string"
+              },
+              "status": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/SessionStatus"
+                  }
+                ],
+                "description": "Session lifecycle status."
+              },
+              "title": {
+                "description": "Title.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "options",
+              "prompt",
+              "session_id",
+              "session_type",
+              "status",
+              "title"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A non-blocking artifact browser.",
+            "properties": {
+              "artifact": {
+                "description": "Optional artifact deep-link.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "boot_command": {
+                "description": "Boot-mode dev-server command.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "boot_port": {
+                "description": "Boot-mode dev-server port.",
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "factory": {
+                "description": "Optional factory.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mode": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/ViewMode"
+                  }
+                ],
+                "description": "Viewer or boot mode."
+              },
+              "run_slug": {
+                "description": "The run slug being viewed.",
+                "type": "string"
+              },
+              "session_id": {
+                "description": "The session id.",
+                "type": "string"
+              },
+              "session_type": {
+                "enum": [
+                  "view"
+                ],
+                "type": "string"
+              },
+              "station": {
+                "description": "Optional station narrowing.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/ViewStatus"
+                  }
+                ],
+                "description": "Whether the view is open or closed."
+              }
+            },
+            "required": [
+              "mode",
+              "run_slug",
+              "session_id",
+              "session_type",
+              "status"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "SessionPayload"
+      },
+      "ValidationError": {
+        "description": "The uniform `400` envelope returned whenever a request body fails schema validation (including malformed JSON, surfaced as a synthetic issue).",
+        "properties": {
+          "error": {
+            "description": "Always `validation_failed`.",
+            "type": "string"
+          },
+          "issues": {
+            "description": "The issues that caused the rejection.",
+            "items": {
+              "$ref": "#/definitions/ValidationIssue"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "error",
+          "issues"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "ViewSessionPayload": {
+        "description": "The view-session payload (`session_type = \"view\"`) — a non-blocking artifact browser opened by `darkrun_view`.",
+        "properties": {
+          "artifact": {
+            "description": "Optional artifact deep-link.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "boot_command": {
+            "description": "Boot-mode dev-server command.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "boot_port": {
+            "description": "Boot-mode dev-server port.",
+            "format": "uint16",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "factory": {
+            "description": "Optional factory.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/ViewMode"
+              }
+            ],
+            "description": "Viewer or boot mode."
+          },
+          "run_slug": {
+            "description": "The run slug being viewed.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "The session id.",
+            "type": "string"
+          },
+          "station": {
+            "description": "Optional station narrowing.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/ViewStatus"
+              }
+            ],
+            "description": "Whether the view is open or closed."
+          }
+        },
+        "required": [
+          "mode",
+          "run_slug",
+          "session_id",
+          "status"
+        ],
+        "title": "ViewSessionPayload",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "The darkrun software-factory HTTP + WebSocket wire contract.",
+    "title": "darkrun API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/advance/{sessionId}": {
+      "post": {
+        "operationId": "postAdvance",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Wake signal: walk the run past a user checkpoint on the next tick.",
+        "tags": [
+          "review"
+        ]
+      }
+    },
+    "/api/feedback/{run}/{station}": {
+      "get": {
+        "operationId": "listFeedback",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "List feedback items for a run's station.",
+        "tags": [
+          "feedback"
+        ]
+      },
+      "post": {
+        "operationId": "createFeedback",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Create a new feedback item in a run's station.",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/feedback/{run}/{station}/{id}": {
+      "delete": {
+        "operationId": "deleteFeedback",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Delete a feedback item (blocks open items via 409).",
+        "tags": [
+          "feedback"
+        ]
+      },
+      "put": {
+        "operationId": "updateFeedback",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Update status or closed_by on a feedback item.",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/feedback/{run}/{station}/{id}/replies": {
+      "post": {
+        "operationId": "createFeedbackReply",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Append a reply to a feedback thread; optionally close as answered.",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/review/current": {
+      "get": {
+        "operationId": "getReviewCurrent",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Compact run-state summary: active station, units, feedback counts.",
+        "tags": [
+          "review"
+        ]
+      }
+    },
+    "/api/session/{sessionId}": {
+      "get": {
+        "operationId": "getSession",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Return session JSON for the desktop app to render.",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/api/session/{sessionId}/heartbeat": {
+      "head": {
+        "operationId": "sessionHeartbeat",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Client presence ping. 200 if the session exists, 404 otherwise.",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/direction/{sessionId}/select": {
+      "post": {
+        "operationId": "postDirectionSelect",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Select, regenerate, upload, or request a design direction.",
+        "tags": [
+          "direction"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Readiness probe. 200 once listening, 503 while starting.",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/picker/{sessionId}/select": {
+      "post": {
+        "operationId": "postPickerSelect",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Choose an option in a blocking picker session.",
+        "tags": [
+          "picker"
+        ]
+      }
+    },
+    "/question/{sessionId}/answer": {
+      "post": {
+        "operationId": "postQuestionAnswer",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Submit answers to a multi-question session.",
+        "tags": [
+          "question"
+        ]
+      }
+    },
+    "/review/{sessionId}/decide": {
+      "post": {
+        "operationId": "postReviewDecide",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Submit a review decision (approved | changes_requested).",
+        "tags": [
+          "review"
+        ]
+      }
+    }
+  }
+}

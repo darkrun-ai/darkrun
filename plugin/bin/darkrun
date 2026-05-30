@@ -1,0 +1,70 @@
+#!/usr/bin/env sh
+# darkrun launcher — locate and exec the native, per-arch `darkrun` binary.
+#
+# There is NO JavaScript runtime here. This is a tiny POSIX shim whose only job
+# is to find the prebuilt native binary for the current platform and exec it.
+#
+# Distribution (npm): the main `darkrun` package declares per-arch binaries as
+# optionalDependencies (`@darkrun/<os>-<arch>`); npm installs only the matching
+# one. This shim resolves that package's `bin/<binary>` and execs it.
+#
+# Dev (workspace checkout): falls back to `target/release` / `target/debug` so
+# `cargo build -p darkrun-cli` "just works" without an npm install.
+set -eu
+
+# Resolve this script's real directory through any symlinks (npm bin links).
+SOURCE=$0
+while [ -L "$SOURCE" ]; do
+	DIR=$(cd "$(dirname "$SOURCE")" && pwd)
+	SOURCE=$(readlink "$SOURCE")
+	case $SOURCE in
+	/*) : ;;
+	*) SOURCE="$DIR/$SOURCE" ;;
+	esac
+done
+HERE=$(cd "$(dirname "$SOURCE")" && pwd) # <pkg>/bin
+PKG=$(cd "$HERE/.." && pwd)              # <pkg>
+
+# Pin an absolute plugin root for the MCP server and subcommands.
+case "${CLAUDE_PLUGIN_ROOT:-}" in
+/*) : ;;
+*) CLAUDE_PLUGIN_ROOT="$PKG" && export CLAUDE_PLUGIN_ROOT ;;
+esac
+
+# Determine the platform key (os-arch) the way npm names the sub-packages.
+os=$(uname -s 2>/dev/null || echo unknown)
+arch=$(uname -m 2>/dev/null || echo unknown)
+case "$os" in
+Darwin) os=darwin ;;
+Linux) os=linux ;;
+MINGW* | MSYS* | CYGWIN* | Windows_NT) os=win32 ;;
+esac
+case "$arch" in
+arm64 | aarch64) arch=arm64 ;;
+x86_64 | amd64) arch=x64 ;;
+esac
+plat="$os-$arch"
+binname=darkrun
+[ "$os" = "win32" ] && binname=darkrun.exe
+
+# Candidate locations, in priority order:
+#  1-3. the installed @darkrun/<plat> npm sub-package (hoisted or nested)
+#  4.   a vendored copy inside this package
+#  5-6. a local cargo build (dev checkout: <repo>/target/{release,debug})
+for cand in \
+	"$PKG/node_modules/@darkrun/$plat/bin/$binname" \
+	"$PKG/../@darkrun/$plat/bin/$binname" \
+	"$PKG/../../@darkrun/$plat/bin/$binname" \
+	"$PKG/vendor/$plat/$binname" \
+	"$PKG/../target/release/$binname" \
+	"$PKG/../target/debug/$binname"; do
+	if [ -x "$cand" ]; then
+		exec "$cand" "$@"
+	fi
+done
+
+echo "darkrun: no native binary found for platform '$plat'." >&2
+echo "  Tried npm sub-package @darkrun/$plat and local target/{release,debug}." >&2
+echo "  Fix: reinstall the darkrun npm package, or build from source:" >&2
+echo "       cargo build --release -p darkrun-cli" >&2
+exit 1

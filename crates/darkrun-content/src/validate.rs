@@ -1,0 +1,327 @@
+//! Structural validation of a loaded [`Factory`].
+//!
+//! Loading proves the files *parse*; validation proves they are *coherent*:
+//! every station references roles that exist, each role's declared `name` and
+//! `agent_type` match where it is referenced, the Make/Challenge/Resolve worker
+//! sequence is present, and each station declares a checkpoint and a locked
+//! artifact.
+
+use crate::error::{ContentError, Result};
+use crate::model::{Factory, Role, RoleKind, Station};
+
+/// Validate a loaded factory, returning the first structural error found.
+pub fn validate(factory: &Factory) -> Result<()> {
+    let slug = factory.name().to_string();
+    let invalid = |message: String| ContentError::Invalid {
+        factory: slug.clone(),
+        message,
+    };
+
+    if factory.frontmatter.stations.is_empty() {
+        return Err(invalid("factory declares no stations".into()));
+    }
+
+    // Every declared station slug must have produced a loaded station whose
+    // frontmatter name agrees (loader preserves order, so zip by index).
+    if factory.stations.len() != factory.frontmatter.stations.len() {
+        return Err(invalid(format!(
+            "declared {} stations but loaded {}",
+            factory.frontmatter.stations.len(),
+            factory.stations.len()
+        )));
+    }
+
+    for (declared, station) in factory
+        .frontmatter
+        .stations
+        .iter()
+        .zip(factory.stations.iter())
+    {
+        if declared != station.name() {
+            return Err(invalid(format!(
+                "station slug `{declared}` resolved to `{}`",
+                station.name()
+            )));
+        }
+        validate_station(&slug, station)?;
+    }
+
+    Ok(())
+}
+
+fn validate_station(factory: &str, station: &Station) -> Result<()> {
+    let name = station.name().to_string();
+    let invalid = |message: String| ContentError::Invalid {
+        factory: factory.to_string(),
+        message: format!("station `{name}`: {message}"),
+    };
+
+    // A station must do work: at least one worker beat.
+    if station.frontmatter.workers.is_empty() {
+        return Err(invalid("declares no workers".into()));
+    }
+
+    // The pass-loop needs at least Make -> Challenge -> Resolve (3 beats), and
+    // exactly one terminal Resolve worker.
+    if station.workers.len() < 3 {
+        return Err(invalid(format!(
+            "needs at least 3 workers for Make->Challenge->Resolve, has {}",
+            station.workers.len()
+        )));
+    }
+
+    // The Explore phase needs Explorers; without one the station gathers no
+    // context before decomposing.
+    if station.frontmatter.explorers.is_empty() {
+        return Err(invalid("declares no explorers for the Explore phase".into()));
+    }
+
+    // The Review phase needs Reviewers; without one no independent party verifies
+    // the workers' output before the checkpoint.
+    if station.frontmatter.reviewers.is_empty() {
+        return Err(invalid("declares no reviewers for the Review phase".into()));
+    }
+
+    // A station must lock a durable artifact.
+    if station.frontmatter.locked_artifact.trim().is_empty() {
+        return Err(invalid("declares no locked_artifact".into()));
+    }
+
+    // No two declared roles within a kind may share a slug — a duplicate
+    // reference is almost always a copy-paste mistake and makes the run loop
+    // ambiguous about which definition to apply.
+    reject_duplicate_slugs(&invalid, "explorer", &station.frontmatter.explorers)?;
+    reject_duplicate_slugs(&invalid, "worker", &station.frontmatter.workers)?;
+    reject_duplicate_slugs(&invalid, "reviewer", &station.frontmatter.reviewers)?;
+
+    // Each referenced role must match its declared slug and kind.
+    check_roles(&invalid, &station.frontmatter.explorers, &station.explorers, RoleKind::Explorer)?;
+    check_roles(&invalid, &station.frontmatter.workers, &station.workers, RoleKind::Worker)?;
+    check_roles(&invalid, &station.frontmatter.reviewers, &station.reviewers, RoleKind::Reviewer)?;
+
+    Ok(())
+}
+
+/// Reject a kind's reference list when it names the same slug twice.
+fn reject_duplicate_slugs(
+    invalid: &impl Fn(String) -> ContentError,
+    kind: &str,
+    declared: &[String],
+) -> Result<()> {
+    for (i, slug) in declared.iter().enumerate() {
+        if declared[..i].iter().any(|earlier| earlier == slug) {
+            return Err(invalid(format!("declares {kind} `{slug}` more than once")));
+        }
+    }
+    Ok(())
+}
+
+/// Verify that each loaded role matches its declared slug and the expected kind.
+fn check_roles(
+    invalid: &impl Fn(String) -> ContentError,
+    declared: &[String],
+    loaded: &[Role],
+    expected: RoleKind,
+) -> Result<()> {
+    if declared.len() != loaded.len() {
+        return Err(invalid(format!(
+            "declared {} {:?} roles but loaded {}",
+            declared.len(),
+            expected,
+            loaded.len()
+        )));
+    }
+    for (slug, role) in declared.iter().zip(loaded.iter()) {
+        if role.name() != slug {
+            return Err(invalid(format!(
+                "{expected:?} `{slug}` defines name `{}`",
+                role.name()
+            )));
+        }
+        if role.kind() != expected {
+            return Err(invalid(format!(
+                "{expected:?} `{slug}` declares agent_type {:?}",
+                role.kind()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{
+        Factory, FactoryFrontmatter, RoleFrontmatter, StationFrontmatter,
+    };
+    use darkrun_core::domain::CheckpointKind;
+
+    fn role(name: &str, kind: RoleKind) -> Role {
+        Role {
+            frontmatter: RoleFrontmatter {
+                name: name.to_string(),
+                agent_type: kind,
+                model: None,
+            },
+            body: format!("# {name}\n\ninstructions"),
+        }
+    }
+
+    /// A minimal, structurally valid single-station factory used as the baseline
+    /// each failure test mutates one field of.
+    fn valid_factory() -> Factory {
+        let station = Station {
+            frontmatter: StationFrontmatter {
+                name: "s1".into(),
+                description: String::new(),
+                explorers: vec!["e1".into()],
+                workers: vec!["w1".into(), "w2".into(), "w3".into()],
+                reviewers: vec!["r1".into()],
+                checkpoint: CheckpointKind::Auto,
+                locked_artifact: "out.md".into(),
+                inputs: vec![],
+            },
+            body: "# s1".into(),
+            explorers: vec![role("e1", RoleKind::Explorer)],
+            workers: vec![
+                role("w1", RoleKind::Worker),
+                role("w2", RoleKind::Worker),
+                role("w3", RoleKind::Worker),
+            ],
+            reviewers: vec![role("r1", RoleKind::Reviewer)],
+        };
+        Factory {
+            frontmatter: FactoryFrontmatter {
+                name: "demo".into(),
+                description: String::new(),
+                category: String::new(),
+                default_model: "sonnet".into(),
+                stations: vec!["s1".into()],
+                fix_workers: vec![],
+            },
+            body: "# demo".into(),
+            stations: vec![station],
+        }
+    }
+
+    fn message(factory: &Factory) -> String {
+        match validate(factory) {
+            Err(ContentError::Invalid { message, .. }) => message,
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn baseline_is_valid() {
+        validate(&valid_factory()).expect("the baseline factory must validate");
+    }
+
+    #[test]
+    fn rejects_factory_with_no_stations() {
+        let mut f = valid_factory();
+        f.frontmatter.stations.clear();
+        f.stations.clear();
+        assert!(message(&f).contains("no stations"));
+    }
+
+    #[test]
+    fn rejects_declared_loaded_station_count_mismatch() {
+        let mut f = valid_factory();
+        // Declare two stations but only one is loaded.
+        f.frontmatter.stations.push("s2".into());
+        assert!(message(&f).contains("declared 2 stations but loaded 1"));
+    }
+
+    #[test]
+    fn rejects_station_order_mismatch() {
+        let mut f = valid_factory();
+        // The declared slug no longer matches the loaded station's name.
+        f.frontmatter.stations[0] = "other".into();
+        let msg = message(&f);
+        assert!(msg.contains("`other` resolved to `s1`"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_station_with_no_workers() {
+        let mut f = valid_factory();
+        f.stations[0].frontmatter.workers.clear();
+        f.stations[0].workers.clear();
+        assert!(message(&f).contains("no workers"));
+    }
+
+    #[test]
+    fn rejects_too_few_workers_for_pass_loop() {
+        let mut f = valid_factory();
+        f.stations[0].frontmatter.workers.pop();
+        f.stations[0].workers.pop();
+        assert!(message(&f).contains("at least 3 workers"));
+    }
+
+    #[test]
+    fn rejects_station_with_no_explorers() {
+        let mut f = valid_factory();
+        f.stations[0].frontmatter.explorers.clear();
+        f.stations[0].explorers.clear();
+        assert!(message(&f).contains("no explorers"));
+    }
+
+    #[test]
+    fn rejects_station_with_no_reviewers() {
+        let mut f = valid_factory();
+        f.stations[0].frontmatter.reviewers.clear();
+        f.stations[0].reviewers.clear();
+        assert!(message(&f).contains("no reviewers"));
+    }
+
+    #[test]
+    fn rejects_missing_locked_artifact() {
+        let mut f = valid_factory();
+        f.stations[0].frontmatter.locked_artifact = "   ".into();
+        assert!(message(&f).contains("no locked_artifact"));
+    }
+
+    #[test]
+    fn rejects_duplicate_role_reference() {
+        let mut f = valid_factory();
+        // Reference the same worker slug twice.
+        f.stations[0].frontmatter.workers = vec!["w1".into(), "w1".into(), "w2".into()];
+        f.stations[0].workers = vec![
+            role("w1", RoleKind::Worker),
+            role("w1", RoleKind::Worker),
+            role("w2", RoleKind::Worker),
+        ];
+        assert!(message(&f).contains("worker `w1` more than once"));
+    }
+
+    #[test]
+    fn rejects_dangling_role_reference_count_mismatch() {
+        let mut f = valid_factory();
+        // Declared a reviewer the loader never resolved (length mismatch stands
+        // in for a dangling reference, since the loader would otherwise fail).
+        f.stations[0]
+            .frontmatter
+            .reviewers
+            .push("ghost".into());
+        let msg = message(&f);
+        assert!(msg.contains("declared 2"), "{msg}");
+        assert!(msg.contains("Reviewer"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_role_slug_mismatch() {
+        let mut f = valid_factory();
+        // The loaded explorer defines a different name than the reference.
+        f.stations[0].explorers[0] = role("wrong", RoleKind::Explorer);
+        let msg = message(&f);
+        assert!(msg.contains("Explorer `e1` defines name `wrong`"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_role_kind_mismatch() {
+        let mut f = valid_factory();
+        // A file referenced as a worker is actually tagged as a reviewer.
+        f.stations[0].workers[0] = role("w1", RoleKind::Reviewer);
+        let msg = message(&f);
+        assert!(msg.contains("Worker `w1` declares agent_type Reviewer"), "{msg}");
+    }
+}

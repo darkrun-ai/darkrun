@@ -1,0 +1,47 @@
+{
+  "name": "darkrun",
+  "version": "0.1.0",
+  "description": "darkrun — factory-based lifecycle orchestration for Claude Code. Ships a native, per-arch Rust binary (no JS runtime).",
+  "homepage": "https://darkrun.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jwaldrip/darkrun.git",
+    "directory": "plugin"
+  },
+  "license": "Apache-2.0",
+  "author": {
+    "name": "jwaldrip",
+    "url": "https://darkrun.ai"
+  },
+  "bin": {
+    "darkrun": "bin/darkrun"
+  },
+  "keywords": [
+    "darkrun",
+    "claude-code",
+    "claude-code-plugin",
+    "lifecycle",
+    "factory",
+    "orchestration",
+    "workflow",
+    "rust"
+  ],
+  "files": [
+    ".claude-plugin",
+    ".mcp.json",
+    "bin",
+    "commands",
+    "skills",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "@darkrun/darwin-arm64": "0.1.0",
+    "@darkrun/darwin-x64": "0.1.0",
+    "@darkrun/linux-x64": "0.1.0",
+    "@darkrun/linux-arm64": "0.1.0",
+    "@darkrun/win32-x64": "0.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

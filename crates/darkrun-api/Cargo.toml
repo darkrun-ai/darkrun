@@ -1,0 +1,13 @@
+[package]
+name = "darkrun-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "darkrun shared wire contract (serde + schemars session payloads and routes)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true

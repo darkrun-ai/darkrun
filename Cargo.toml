@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "desktop", "web/site", "web/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["darkrun contributors"]
+repository = "https://github.com/jwaldrip/darkrun"
+homepage = "https://darkrun.ai"
+
+[workspace.dependencies]
+# Shared runtime + serialization stack inherited by member crates.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+schemars = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+nix = { version = "0.29", features = ["signal", "process"] }
+
+# Internal crates — referenced by path so downstream members can depend on them.
+darkrun-core = { path = "crates/darkrun-core" }
+darkrun-api = { path = "crates/darkrun-api" }
+darkrun-content = { path = "crates/darkrun-content" }
+darkrun-ui = { path = "crates/darkrun-ui" }
+darkrun-vcs = { path = "crates/darkrun-vcs" }

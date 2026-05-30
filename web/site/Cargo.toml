@@ -1,0 +1,58 @@
+[package]
+name = "darkrun-site"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage = "https://darkrun.ai"
+description = "darkrun.ai — the marketing + docs website, a Dioxus (wasm) single-page app with dioxus-router, dark-theme only, built on the shared darkrun-ui design system"
+publish = false
+
+[lib]
+name = "darkrun_site"
+path = "src/lib.rs"
+
+[[bin]]
+name = "darkrun-site"
+path = "src/main.rs"
+
+# Native-only static-site generator: emits sitemap.xml, robots.txt, and the
+# feeds for SEO. It runs at build time on the host and reuses the library's pure
+# string builders, so it pulls in no extra wasm weight.
+[[bin]]
+name = "darkrun-site-gen"
+path = "src/bin/gen.rs"
+
+[dependencies]
+# Brand + components. Renderer-agnostic, compiles to wasm.
+darkrun-ui = { workspace = true }
+
+# Wire contract — consumed by the /browse + /review scaffolds so they line up
+# with the real engine payloads.
+darkrun-api = { workspace = true }
+
+# Embedded factory corpus — the source for /factories.
+darkrun-content = { workspace = true }
+
+# Domain enums (CheckpointKind) used when rendering station detail. Pulled in for
+# types only; the lock engine is unix-gated so this stays wasm-clean.
+darkrun-core = { workspace = true }
+
+# Dioxus with the web renderer and the router. `default-features = false` keeps
+# us off the desktop default; we opt into exactly the renderer-agnostic `lib`
+# surface (macro/html/signals/hooks/document/asset — matching darkrun-ui), the
+# `web` renderer, the `router`, and `launch` for the wasm entrypoint.
+# `devtools` is included because dioxus-web's history (used by the router) gates
+# the `web-sys/Location` binding behind dioxus-web's `devtools` feature; without
+# it the router's browser history fails to compile.
+dioxus = { version = "0.7", default-features = false, features = ["lib", "web", "router", "launch", "devtools"] }
+
+# Markdown rendering for /docs and the concept pages.
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+
+[features]
+default = []
+# Enables the native static-site generator binary's heavy paths (feeds, sitemap).
+# Kept default-off so `cargo build --target wasm32-unknown-unknown` never pulls it.
+ssg = []

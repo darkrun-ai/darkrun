@@ -1,0 +1,115 @@
+//! Small presentational helpers shared across pages: global CSS, section
+//! headers, prose rendering, and a phase legend. These sit on top of the
+//! `darkrun-ui` design system and add only website-specific layout.
+
+use darkrun_ui::prelude::*;
+
+use crate::content::Doc;
+
+/// Global website CSS layered on top of [`darkrun_ui::tokens::THEME_CSS`]:
+/// link hovers, the markdown `.dr-prose` typography, and a couple of resets.
+/// Dark-theme only — there is no light variant anywhere.
+pub const GLOBAL_CSS: &str = r#"
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+a { color: inherit; }
+.dr-navlink:hover { color: var(--dr-accent) !important; }
+.dr-prose { color: var(--dr-text); line-height: 1.7; font-size: 16px; }
+.dr-prose h1 { font-size: 30px; line-height: 1.2; margin: 0 0 16px; letter-spacing: -0.01em; }
+.dr-prose h2 { font-size: 22px; margin: 32px 0 12px; color: var(--dr-text); }
+.dr-prose h3 { font-size: 18px; margin: 24px 0 8px; }
+.dr-prose p { margin: 0 0 16px; color: var(--dr-text-muted); }
+.dr-prose ul, .dr-prose ol { margin: 0 0 16px; padding-left: 22px; color: var(--dr-text-muted); }
+.dr-prose li { margin: 4px 0; }
+.dr-prose strong { color: var(--dr-text); }
+.dr-prose a { color: var(--dr-accent); text-decoration: none; }
+.dr-prose a:hover { text-decoration: underline; }
+.dr-prose code {
+  font-family: var(--dr-font-mono); font-size: 13px;
+  background: var(--dr-surface-overlay); border: 1px solid var(--dr-border);
+  border-radius: 4px; padding: 1px 5px; color: var(--dr-accent);
+}
+.dr-prose pre {
+  background: var(--dr-surface-raised); border: 1px solid var(--dr-border);
+  border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 0 0 16px;
+}
+.dr-prose pre code { background: none; border: none; padding: 0; color: var(--dr-text); }
+.dr-prose table { border-collapse: collapse; width: 100%; margin: 0 0 16px; font-size: 14px; }
+.dr-prose th, .dr-prose td { border: 1px solid var(--dr-border); padding: 8px 12px; text-align: left; }
+.dr-prose th { background: var(--dr-surface-raised); color: var(--dr-text); }
+.dr-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+"#;
+
+/// A page section header: an eyebrow kicker, a title, and an optional lead.
+#[component]
+pub fn SectionHead(kicker: String, title: String, lead: Option<String>) -> Element {
+    let kicker_style = format!(
+        "font-family:{mono};font-size:12px;letter-spacing:0.08em;text-transform:uppercase;\
+         color:{accent};margin-bottom:8px;",
+        mono = tokens::FONT_MONO,
+        accent = tokens::ACCENT,
+    );
+    let title_style = format!(
+        "font-family:{sans};font-size:28px;font-weight:700;letter-spacing:-0.01em;\
+         color:{text};margin:0;",
+        sans = tokens::FONT_SANS,
+        text = tokens::TEXT,
+    );
+    let lead_style = format!(
+        "font-family:{sans};font-size:16px;color:{muted};margin:10px 0 0;max-width:64ch;",
+        sans = tokens::FONT_SANS,
+        muted = tokens::TEXT_MUTED,
+    );
+    rsx! {
+        div { style: "margin-bottom:24px;",
+            div { style: "{kicker_style}", "{kicker}" }
+            h1 { style: "{title_style}", "{title}" }
+            if let Some(lead) = lead {
+                p { style: "{lead_style}", "{lead}" }
+            }
+        }
+    }
+}
+
+/// Render a [`Doc`]'s markdown body as a `.dr-prose` block.
+///
+/// The markdown is rendered to HTML at build time (or in the browser, once) and
+/// injected with `dangerous_inner_html`. The source is our own embedded corpus,
+/// not user input, so there is no untrusted-HTML concern.
+#[component]
+pub fn Prose(doc: Doc) -> Element {
+    let html = doc.to_html();
+    rsx! {
+        article { class: "dr-prose", dangerous_inner_html: "{html}" }
+    }
+}
+
+/// The six-phase legend strip: every phase with its hue and glyph, in order.
+/// Reused on the landing page and the methodology page.
+#[component]
+pub fn PhaseLegend() -> Element {
+    let wrap = "display:flex;gap:10px;flex-wrap:wrap;margin:8px 0 0;";
+    rsx! {
+        div { style: "{wrap}",
+            for phase in Phase::ALL {
+                {
+                    let hue = phase.hue();
+                    let chip = format!(
+                        "display:inline-flex;align-items:center;gap:6px;\
+                         font-family:{mono};font-size:12px;color:{base};\
+                         border:1px solid {border};border-radius:999px;padding:4px 10px;",
+                        mono = tokens::FONT_MONO,
+                        base = hue.base,
+                        border = tokens::BORDER,
+                    );
+                    rsx! {
+                        span { style: "{chip}",
+                            span { "{tokens::GLYPH_ACTIVE}" }
+                            "{phase.name()}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

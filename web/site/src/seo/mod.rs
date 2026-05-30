@@ -1,0 +1,201 @@
+//! SEO artifacts: sitemap.xml, robots.txt, and the RSS / Atom / JSON feeds.
+//!
+//! These are pure string builders over the embedded corpora and the route
+//! table, so they are unit-testable and compile to wasm. The native static-site
+//! generator ([`crate::bin`]-side) writes their output to disk.
+
+use crate::content::POSTS;
+use crate::route::Route;
+
+/// Canonical site origin (no trailing slash).
+pub const SITE_URL: &str = "https://darkrun.ai";
+
+/// The site's human name.
+pub const SITE_NAME: &str = "darkrun";
+
+/// One-line site description for feed metadata.
+pub const SITE_DESCRIPTION: &str = "An assembly line for software.";
+
+/// Build `sitemap.xml` covering every concrete route on the site.
+pub fn sitemap() -> String {
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
+    );
+    for path in Route::all_paths() {
+        out.push_str("  <url><loc>");
+        out.push_str(SITE_URL);
+        out.push_str(&xml_escape(&path));
+        out.push_str("</loc></url>\n");
+    }
+    out.push_str("</urlset>\n");
+    out
+}
+
+/// Build `robots.txt`: allow everything (including the major AI crawlers) and
+/// point at the sitemap and feeds.
+pub fn robots() -> String {
+    format!(
+        "# darkrun robots.txt\n\
+         User-agent: *\n\
+         Allow: /\n\n\
+         # AI crawlers welcome\n\
+         User-agent: GPTBot\nAllow: /\n\
+         User-agent: ClaudeBot\nAllow: /\n\
+         User-agent: anthropic-ai\nAllow: /\n\
+         User-agent: Google-Extended\nAllow: /\n\
+         User-agent: PerplexityBot\nAllow: /\n\
+         User-agent: CCBot\nAllow: /\n\n\
+         # Feeds: {site}/feed.xml (RSS) \u{00b7} {site}/atom.xml (Atom) \u{00b7} {site}/feed.json (JSON)\n\
+         Sitemap: {site}/sitemap.xml\n",
+        site = SITE_URL,
+    )
+}
+
+/// Build an RSS 2.0 feed of the blog posts.
+pub fn feed_rss() -> String {
+    let mut items = String::new();
+    for post in POSTS {
+        let link = format!("{SITE_URL}/blog/{}", post.slug);
+        items.push_str(&format!(
+            "    <item>\n      <title>{title}</title>\n      <link>{link}</link>\n      <guid>{link}</guid>\n      <description>{summary}</description>\n    </item>\n",
+            title = xml_escape(post.title),
+            link = xml_escape(&link),
+            summary = xml_escape(post.summary),
+        ));
+    }
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\">\n  <channel>\n    <title>{name}</title>\n    <link>{site}</link>\n    <description>{desc}</description>\n{items}  </channel>\n</rss>\n",
+        name = xml_escape(SITE_NAME),
+        site = SITE_URL,
+        desc = xml_escape(SITE_DESCRIPTION),
+    )
+}
+
+/// Build an Atom 1.0 feed of the blog posts.
+pub fn feed_atom() -> String {
+    let mut entries = String::new();
+    for post in POSTS {
+        let link = format!("{SITE_URL}/blog/{}", post.slug);
+        entries.push_str(&format!(
+            "  <entry>\n    <title>{title}</title>\n    <id>{link}</id>\n    <link href=\"{link}\"/>\n    <summary>{summary}</summary>\n  </entry>\n",
+            title = xml_escape(post.title),
+            link = xml_escape(&link),
+            summary = xml_escape(post.summary),
+        ));
+    }
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<feed xmlns=\"http://www.w3.org/2005/Atom\">\n  <title>{name}</title>\n  <id>{site}/</id>\n  <link href=\"{site}/\"/>\n{entries}</feed>\n",
+        name = xml_escape(SITE_NAME),
+        site = SITE_URL,
+    )
+}
+
+/// Build a JSON Feed 1.1 document of the blog posts.
+pub fn feed_json() -> String {
+    let items: Vec<String> = POSTS
+        .iter()
+        .map(|post| {
+            let link = format!("{SITE_URL}/blog/{}", post.slug);
+            format!(
+                "{{\"id\":{id},\"url\":{url},\"title\":{title},\"summary\":{summary}}}",
+                id = json_string(&link),
+                url = json_string(&link),
+                title = json_string(post.title),
+                summary = json_string(post.summary),
+            )
+        })
+        .collect();
+    format!(
+        "{{\"version\":\"https://jsonfeed.org/version/1.1\",\
+         \"title\":{name},\"home_page_url\":{home},\"feed_url\":{feed},\
+         \"description\":{desc},\"items\":[{items}]}}",
+        name = json_string(SITE_NAME),
+        home = json_string(SITE_URL),
+        feed = json_string(&format!("{SITE_URL}/feed.json")),
+        desc = json_string(SITE_DESCRIPTION),
+        items = items.join(","),
+    )
+}
+
+/// Minimal XML text escaping.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// JSON string literal escaping (quotes, backslashes, control chars).
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sitemap_lists_landing_and_factories_index() {
+        let xml = sitemap();
+        assert!(xml.contains("<loc>https://darkrun.ai/</loc>"));
+        assert!(xml.contains("<loc>https://darkrun.ai/factories</loc>"));
+        assert!(xml.trim_end().ends_with("</urlset>"));
+    }
+
+    #[test]
+    fn sitemap_includes_dynamic_factory_routes() {
+        let xml = sitemap();
+        // The embedded corpus ships at least the `software` factory.
+        assert!(xml.contains("/factories/software"));
+    }
+
+    #[test]
+    fn robots_allows_all_and_points_at_sitemap() {
+        let txt = robots();
+        assert!(txt.contains("User-agent: *"));
+        assert!(txt.contains("Allow: /"));
+        assert!(txt.contains("Sitemap: https://darkrun.ai/sitemap.xml"));
+        assert!(txt.contains("ClaudeBot"));
+    }
+
+    #[test]
+    fn feeds_render_every_post() {
+        let rss = feed_rss();
+        let atom = feed_atom();
+        let json = feed_json();
+        for post in POSTS {
+            assert!(rss.contains(post.title), "rss missing {}", post.title);
+            assert!(atom.contains(post.title), "atom missing {}", post.title);
+            assert!(json.contains(post.title), "json missing {}", post.title);
+        }
+        assert!(rss.starts_with("<?xml"));
+        assert!(atom.contains("<feed"));
+        assert!(json.contains("jsonfeed.org"));
+    }
+
+    #[test]
+    fn xml_escaping_is_applied() {
+        assert_eq!(xml_escape("a & b < c"), "a &amp; b &lt; c");
+    }
+
+    #[test]
+    fn json_string_escapes_quotes() {
+        assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
+    }
+}
