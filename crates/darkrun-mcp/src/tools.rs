@@ -104,6 +104,16 @@ impl DarkrunServer {
     fn store(&self) -> StateStore {
         StateStore::new(self.repo_root.as_ref())
     }
+
+    /// Adapt a tick's engine-rendered prompt to the active harness (appends the
+    /// "Harness note" with the execution-model differences) before it goes back
+    /// to the agent. A no-op under Claude Code.
+    fn adapt_tick(&self, mut tick: crate::position::TickResult) -> crate::position::TickResult {
+        if let Some(p) = tick.prompt.as_mut() {
+            *p = darkrun_harness::adapt_instructions(p, &self.caps);
+        }
+        tick
+    }
 }
 
 fn ok_json<T: Serialize>(value: &T) -> std::result::Result<CallToolResult, ErrorData> {
@@ -553,7 +563,7 @@ impl DarkrunServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
         match run_tick(&store, &input.slug) {
-            Ok(tick) => ok_json(&tick),
+            Ok(tick) => ok_json(&self.adapt_tick(tick)),
             Err(e) => Ok(err_text(e)),
         }
     }
@@ -635,7 +645,7 @@ impl DarkrunServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
         match checkpoint_decide(&store, &input.slug, input.approved, input.feedback.clone()) {
-            Ok(tick) => ok_json(&tick),
+            Ok(tick) => ok_json(&self.adapt_tick(tick)),
             Err(e) => Ok(err_text(e)),
         }
     }

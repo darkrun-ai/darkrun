@@ -372,6 +372,86 @@ impl Capabilities {
     }
 }
 
+/// Adapt an engine-rendered instruction to the active harness.
+///
+/// The canonical prompt corpus is written for the maximal reference harness
+/// (Claude Code): parallel subagents, a browser review UI, a hook system. Rather
+/// than mutate that body with fragile rewrites, this *appends* a "Harness note"
+/// spelling out the execution-model differences the agent must honour on this
+/// harness — no subagents → run sequentially, no browser UI → ask inline, no
+/// hooks → drive the loop and track outputs yourself. For Claude Code it is a
+/// no-op (the corpus already matches).
+pub fn adapt_instructions(text: &str, caps: &Capabilities) -> String {
+    if caps.harness.is_claude_code() {
+        return text.to_string();
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+
+    // Subagent execution model.
+    if !caps.subagents.supported {
+        notes.push(
+            "No subagents on this harness — do each Unit's work yourself, sequentially, \
+             in the main thread. Ignore any 'dispatch in parallel' phrasing above."
+                .to_string(),
+        );
+    } else if !caps.subagents.parallel_spawn {
+        notes.push(format!(
+            "Subagents run one at a time here (via `{}`) — dispatch the wave sequentially, \
+             not in parallel.",
+            caps.subagent_tool()
+        ));
+    } else if caps.subagent_tool() != "Agent" {
+        notes.push(format!(
+            "Spawn subagents with this harness's `{}` mechanism.",
+            caps.subagent_tool()
+        ));
+    }
+
+    // Interactive decisions / review surface.
+    if !caps.browser_ui {
+        if caps.elicitation {
+            notes.push(
+                "No browser review UI — surface design directions and decisions through MCP \
+                 elicitation, not the desktop app."
+                    .to_string(),
+            );
+        } else {
+            notes.push(
+                "No interactive review UI — when a step asks for a design direction or a user \
+                 decision, ask inline in plain text and act on the answer."
+                    .to_string(),
+            );
+        }
+    }
+
+    // Hook-driven automation that this harness lacks.
+    if !caps.hooks {
+        notes.push(
+            "No hooks on this harness — call `darkrun_run_next` yourself at the start of each \
+             session and after each step, and register Unit outputs explicitly. Nothing is \
+             auto-injected or auto-tracked."
+                .to_string(),
+        );
+    }
+
+    if notes.is_empty() {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len() + 256);
+    out.push_str(text.trim_end());
+    out.push_str("\n\n---\n**Harness note (");
+    out.push_str(caps.display_name);
+    out.push_str("):**\n");
+    for n in &notes {
+        out.push_str("- ");
+        out.push_str(n);
+        out.push('\n');
+    }
+    out
+}
+
 /// The env var that selects the harness when no `--harness` flag is passed.
 pub const ENV_VAR: &str = "DARKRUN_HARNESS";
 
@@ -487,5 +567,51 @@ mod tests {
             let expect = matches!(h, Harness::ClaudeCode | Harness::Kiro);
             assert_eq!(h.capabilities().hooks, expect, "{}", h.key());
         }
+    }
+
+    #[test]
+    fn adapt_is_noop_for_claude_code() {
+        let caps = Harness::ClaudeCode.capabilities();
+        let text = "Dispatch the make beat in parallel across these Units.";
+        assert_eq!(adapt_instructions(text, &caps), text);
+    }
+
+    #[test]
+    fn adapt_notes_sequential_for_no_subagent_harness() {
+        let caps = Harness::Windsurf.capabilities();
+        let out = adapt_instructions("Do the work.", &caps);
+        assert!(out.contains("Harness note (Windsurf)"));
+        assert!(out.contains("No subagents"));
+        // Windsurf also lacks a browser UI and hooks.
+        assert!(out.contains("No interactive review UI"));
+        assert!(out.contains("No hooks"));
+        // The original body is preserved.
+        assert!(out.contains("Do the work."));
+    }
+
+    #[test]
+    fn adapt_uses_elicitation_phrasing_when_supported() {
+        // Cursor has elicitation but no browser UI.
+        let caps = Harness::Cursor.capabilities();
+        let out = adapt_instructions("Do the work.", &caps);
+        assert!(out.contains("MCP elicitation"));
+        assert!(!out.contains("ask inline in plain text"));
+    }
+
+    #[test]
+    fn adapt_names_the_harness_subagent_tool() {
+        // Gemini supports parallel subagents but via @subagent, not Agent.
+        let caps = Harness::GeminiCli.capabilities();
+        let out = adapt_instructions("Do the work.", &caps);
+        assert!(out.contains("@subagent"));
+    }
+
+    #[test]
+    fn adapt_codex_flags_manual_loop_and_inline_decisions() {
+        let caps = Harness::Codex.capabilities();
+        let out = adapt_instructions("Do the work.", &caps);
+        assert!(out.contains("No subagents"));
+        assert!(out.contains("ask inline in plain text"));
+        assert!(out.contains("call `darkrun_run_next` yourself"));
     }
 }
