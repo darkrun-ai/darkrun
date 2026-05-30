@@ -22,6 +22,7 @@
 
 mod auth;
 mod hook;
+mod plugin;
 mod pr;
 mod statusline;
 mod verify;
@@ -77,6 +78,20 @@ enum Command {
         /// Trailing args from Claude Code are tolerated and ignored.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
+    },
+    /// Plugin maintenance (regenerate per-harness command files, etc.).
+    #[command(subcommand)]
+    Plugin(PluginCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCommand {
+    /// Regenerate the per-harness `.toml` slash commands (Gemini CLI / Kiro)
+    /// from the canonical `.md` commands, keeping the two from drifting.
+    Sync {
+        /// The commands directory.
+        #[arg(long, default_value = "plugin/commands")]
+        dir: PathBuf,
     },
 }
 
@@ -290,6 +305,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // Verification commands measure an external target (a URL), not the
         // repo's `.darkrun/` state — handle them without resolving a repo root.
         Command::Verify(cmd) => verify_command(cmd),
+        // Plugin maintenance operates on the plugin source tree, not the run
+        // state, so it resolves its own paths.
+        Command::Plugin(PluginCommand::Sync { dir }) => {
+            let written = plugin::sync_commands(&dir)?;
+            println!(
+                "darkrun: generated {} harness command file(s) in {}",
+                written.len(),
+                dir.display()
+            );
+            Ok(())
+        }
         Command::Bench(args) => verify::bench_command(
             args.target,
             args.out,
@@ -312,7 +338,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Command::Statusline(_)
                 | Command::Hook { .. }
                 | Command::Verify(_)
-                | Command::Bench(_) => unreachable!("handled above"),
+                | Command::Bench(_)
+                | Command::Plugin(_) => unreachable!("handled above"),
             }
         }
     }

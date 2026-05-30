@@ -1,0 +1,12 @@
+{
+  "name": "darkrun",
+  "version": "0.1.0",
+  "description": "darkrun — a dark factory harness. An agentic assembly line for any structured work: a native Rust engine drives Runs through factory Stations with Workers, Explorers, Reviewers, and Checkpoints.",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "darkrun": {
+      "command": "npx",
+      "args": ["-y", "darkrun", "mcp", "--harness", "gemini-cli"]
+    }
+  }
+}

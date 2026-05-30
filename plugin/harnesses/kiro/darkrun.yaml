@@ -1,0 +1,9 @@
+mcpServers:
+  darkrun:
+    command: npx
+    args:
+      - -y
+      - darkrun
+      - mcp
+      - --harness
+      - kiro

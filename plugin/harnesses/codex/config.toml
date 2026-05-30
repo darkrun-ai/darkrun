@@ -1,0 +1,5 @@
+# darkrun MCP server for OpenAI Codex CLI.
+# Merge this into ~/.codex/config.toml (or a project-scoped .codex/config.toml).
+[mcp_servers.darkrun]
+command = "npx"
+args = ["-y", "darkrun", "mcp", "--harness", "codex"]

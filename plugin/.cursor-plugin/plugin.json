@@ -1,0 +1,16 @@
+{
+  "name": "darkrun",
+  "displayName": "darkrun",
+  "description": "A dark factory harness — an agentic assembly line for any structured work, driven by a native Rust engine.",
+  "version": "0.1.0",
+  "author": "jwaldrip",
+  "homepage": "https://darkrun.ai",
+  "repository": "https://github.com/jwaldrip/darkrun",
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "darkrun": {
+      "command": "npx",
+      "args": ["-y", "darkrun", "mcp", "--harness", "cursor"]
+    }
+  }
+}

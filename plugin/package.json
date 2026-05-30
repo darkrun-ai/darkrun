@@ -28,7 +28,13 @@
   ],
   "files": [
     ".claude-plugin",
+    ".cursor-plugin",
     ".mcp.json",
+    "gemini-extension.json",
+    "opencode.json",
+    "harnesses",
+    "AGENTS.md",
+    "GEMINI.md",
     "bin",
     "commands",
     "factories",
