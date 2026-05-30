@@ -63,7 +63,7 @@ pub struct UnitView {
 }
 
 /// Probe a `Value` object for the first present string among `keys`.
-fn first_str(v: &Value, keys: &[&str]) -> Option<String> {
+pub fn first_str(v: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|k| v.get(*k).and_then(Value::as_str))
         .map(str::to_string)
@@ -83,7 +83,7 @@ pub fn label_tone(label: &str) -> Tone {
 /// Pull completion-criteria lines out of a unit `Value`. Accepts either a list
 /// of strings or a list of objects carrying a `text`/`description`/`label`
 /// field — whichever the parser emitted.
-fn extract_criteria(unit: &Value) -> Vec<String> {
+pub fn extract_criteria(unit: &Value) -> Vec<String> {
     for key in ["criteria", "completion_criteria", "acceptance", "checks"] {
         if let Some(arr) = unit.get(key).and_then(Value::as_array) {
             let lines: Vec<String> = arr

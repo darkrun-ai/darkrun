@@ -15,9 +15,9 @@
 
 use darkrun_ui::prelude::*;
 
-mod map;
+use darkrun_desktop::{map, wire};
+
 mod review;
-mod wire;
 
 use wire::ConnConfig;
 

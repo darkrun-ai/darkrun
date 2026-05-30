@@ -54,7 +54,7 @@ impl ConnConfig {
     }
 
     /// The `host:port` authority.
-    fn authority(&self) -> String {
+    pub fn authority(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
 
@@ -68,7 +68,7 @@ impl ConnConfig {
     }
 
     /// The decision POST path (`/review/:id/decide`).
-    fn decide_path(&self) -> String {
+    pub fn decide_path(&self) -> String {
         format!("/review/{}/decide", self.session_id)
     }
 }
@@ -206,7 +206,7 @@ pub async fn submit_decision(
 
 /// Pull the numeric status code out of an HTTP/1.1 response head
 /// (`HTTP/1.1 200 OK`).
-fn parse_status_code(buf: &[u8]) -> Result<u16, WireError> {
+pub fn parse_status_code(buf: &[u8]) -> Result<u16, WireError> {
     let head = String::from_utf8_lossy(buf);
     let first = head.lines().next().unwrap_or_default();
     first

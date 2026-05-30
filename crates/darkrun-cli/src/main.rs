@@ -434,4 +434,85 @@ mod tests {
         assert_eq!(slugify("already-slug"), "already-slug");
         assert_eq!(slugify("!!!"), "");
     }
+
+    #[test]
+    fn slugify_lowercases_ascii() {
+        assert_eq!(slugify("HELLO"), "hello");
+        assert_eq!(slugify("MixedCase"), "mixedcase");
+    }
+
+    #[test]
+    fn slugify_keeps_digits() {
+        assert_eq!(slugify("v2 build 39"), "v2-build-39");
+        assert_eq!(slugify("404"), "404");
+    }
+
+    #[test]
+    fn slugify_collapses_consecutive_separators() {
+        assert_eq!(slugify("a___b---c   d"), "a-b-c-d");
+        assert_eq!(slugify("a/b\\c.d:e"), "a-b-c-d-e");
+    }
+
+    #[test]
+    fn slugify_trims_leading_and_trailing_separators() {
+        assert_eq!(slugify("---abc---"), "abc");
+        assert_eq!(slugify("   abc   "), "abc");
+        assert_eq!(slugify("...abc..."), "abc");
+    }
+
+    #[test]
+    fn slugify_empty_and_separator_only_yields_empty() {
+        assert_eq!(slugify(""), "");
+        assert_eq!(slugify("   "), "");
+        assert_eq!(slugify("-_-_-"), "");
+        assert_eq!(slugify("@#$%"), "");
+    }
+
+    #[test]
+    fn slugify_drops_non_ascii_alphanumerics() {
+        // Accented letters and their combining marks are not ascii alphanumeric.
+        assert_eq!(slugify("café"), "caf");
+        assert_eq!(slugify("naïve"), "na-ve");
+        assert_eq!(slugify("über cool"), "ber-cool");
+        assert_eq!(slugify("🚀 ship"), "ship");
+    }
+
+    #[test]
+    fn slugify_single_token_unchanged() {
+        assert_eq!(slugify("login"), "login");
+        assert_eq!(slugify("a"), "a");
+    }
+
+    #[test]
+    fn slugify_does_not_start_with_dash_after_leading_junk() {
+        // A separator before any alphanumeric must not introduce a leading dash.
+        let s = slugify("   hello");
+        assert!(!s.starts_with('-'));
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn slugify_is_idempotent_on_its_own_output() {
+        for input in ["Add a Login Page!", "v1.2.3", "  trim  ", "snake_case"] {
+            let once = slugify(input);
+            let twice = slugify(&once);
+            assert_eq!(once, twice, "slugify not idempotent for {input:?}");
+        }
+    }
+
+    #[test]
+    fn slugify_output_is_url_safe() {
+        for input in ["Add a Login Page!", "feat/login", "v1.2.3", "café déjà"] {
+            let s = slugify(input);
+            assert!(
+                s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "non-url-safe slug {s:?} from {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn slugify_newlines_and_tabs_are_separators() {
+        assert_eq!(slugify("one\ttwo\nthree"), "one-two-three");
+    }
 }

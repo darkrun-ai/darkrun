@@ -233,12 +233,12 @@ fn EmptyState() -> Element {
 }
 
 /// Map a station's position to the phase hue used for its accent stripe.
-fn phase_for_index(index: usize) -> Option<Phase> {
+pub fn phase_for_index(index: usize) -> Option<Phase> {
     Phase::ALL.get(index).copied()
 }
 
 /// Human label for a content-layer checkpoint kind.
-fn checkpoint_label(kind: darkrun_core::domain::CheckpointKind) -> String {
+pub fn checkpoint_label(kind: darkrun_core::domain::CheckpointKind) -> String {
     use darkrun_core::domain::CheckpointKind as C;
     match kind {
         C::Auto => "auto",

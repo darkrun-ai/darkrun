@@ -198,4 +198,82 @@ mod tests {
     fn json_string_escapes_quotes() {
         assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
     }
+
+    #[test]
+    fn xml_escape_handles_all_five_entities() {
+        assert_eq!(
+            xml_escape("&<>\"'"),
+            "&amp;&lt;&gt;&quot;&apos;"
+        );
+    }
+
+    #[test]
+    fn xml_escape_ampersand_first_avoids_double_escaping() {
+        // `<` becomes `&lt;`; the `&` it introduces must not be re-escaped.
+        assert_eq!(xml_escape("<"), "&lt;");
+        assert_eq!(xml_escape(">"), "&gt;");
+        assert_eq!(xml_escape("\""), "&quot;");
+        assert_eq!(xml_escape("'"), "&apos;");
+    }
+
+    #[test]
+    fn xml_escape_passes_through_plain_text() {
+        assert_eq!(xml_escape("plain text 123"), "plain text 123");
+        assert_eq!(xml_escape(""), "");
+    }
+
+    #[test]
+    fn xml_escape_preserves_unicode() {
+        assert_eq!(xml_escape("café · darkrun"), "café · darkrun");
+    }
+
+    #[test]
+    fn xml_escape_repeated_specials() {
+        assert_eq!(xml_escape("a&&b"), "a&amp;&amp;b");
+        assert_eq!(xml_escape("<<>>"), "&lt;&lt;&gt;&gt;");
+    }
+
+    #[test]
+    fn json_string_wraps_in_quotes() {
+        assert_eq!(json_string("hi"), "\"hi\"");
+        assert_eq!(json_string(""), "\"\"");
+    }
+
+    #[test]
+    fn json_string_escapes_backslash() {
+        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
+    }
+
+    #[test]
+    fn json_string_escapes_whitespace_controls() {
+        assert_eq!(json_string("a\nb"), "\"a\\nb\"");
+        assert_eq!(json_string("a\rb"), "\"a\\rb\"");
+        assert_eq!(json_string("a\tb"), "\"a\\tb\"");
+    }
+
+    #[test]
+    fn json_string_escapes_low_control_chars_as_unicode() {
+        // A NUL and a vertical tab fall to the \u00xx branch.
+        assert_eq!(json_string("\u{0}"), "\"\\u0000\"");
+        assert_eq!(json_string("\u{b}"), "\"\\u000b\"");
+        assert_eq!(json_string("\u{1f}"), "\"\\u001f\"");
+    }
+
+    #[test]
+    fn json_string_passes_through_unicode_above_control_range() {
+        // 0x20 and above are emitted verbatim (no escaping of normal unicode).
+        assert_eq!(json_string("é·🚀"), "\"é·🚀\"");
+        assert_eq!(json_string(" "), "\" \"");
+    }
+
+    #[test]
+    fn json_string_does_not_escape_forward_slash() {
+        // Forward slashes are legal unescaped in JSON; our builder leaves them.
+        assert_eq!(json_string("a/b"), "\"a/b\"");
+    }
+
+    #[test]
+    fn json_string_combined() {
+        assert_eq!(json_string("\"\\\n"), "\"\\\"\\\\\\n\"");
+    }
 }

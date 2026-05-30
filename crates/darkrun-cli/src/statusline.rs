@@ -319,3 +319,110 @@ pub fn uninstall(global: bool, repo: &Path) -> Result<(), Dyn> {
     println!("darkrun statusline removed → {}", settings_file.display());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{osc8, paint, parse_git_url, web_base};
+
+    #[test]
+    fn parse_git_url_https_github() {
+        assert_eq!(
+            parse_git_url("https://github.com/owner/repo.git"),
+            Some(("github.com".into(), "owner".into(), "repo".into()))
+        );
+    }
+
+    #[test]
+    fn parse_git_url_https_without_dot_git() {
+        assert_eq!(
+            parse_git_url("https://github.com/owner/repo"),
+            Some(("github.com".into(), "owner".into(), "repo".into()))
+        );
+    }
+
+    #[test]
+    fn parse_git_url_scp_style() {
+        assert_eq!(
+            parse_git_url("git@github.com:owner/repo.git"),
+            Some(("github.com".into(), "owner".into(), "repo".into()))
+        );
+    }
+
+    #[test]
+    fn parse_git_url_https_with_userinfo() {
+        // The leading `user@` (token in URL) is stripped from the host.
+        assert_eq!(
+            parse_git_url("https://x-token@gitlab.com/owner/repo.git"),
+            Some(("gitlab.com".into(), "owner".into(), "repo".into()))
+        );
+    }
+
+    #[test]
+    fn parse_git_url_gitlab_subgroups_absorb_into_repo() {
+        // The trailing segments after host/owner all belong to the repo path.
+        assert_eq!(
+            parse_git_url("https://gitlab.com/group/subgroup/repo.git"),
+            Some(("gitlab.com".into(), "group".into(), "subgroup/repo".into()))
+        );
+    }
+
+    #[test]
+    fn parse_git_url_ssh_url_form() {
+        assert_eq!(
+            parse_git_url("ssh://git@github.com/owner/repo.git"),
+            Some(("github.com".into(), "owner".into(), "repo".into()))
+        );
+    }
+
+    #[test]
+    fn parse_git_url_rejects_too_few_segments() {
+        assert_eq!(parse_git_url("https://github.com/owner"), None);
+        assert_eq!(parse_git_url("github.com"), None);
+        assert_eq!(parse_git_url(""), None);
+    }
+
+    #[test]
+    fn parse_git_url_handles_trailing_slash_segments() {
+        // Empty path segments are filtered out before counting.
+        assert_eq!(
+            parse_git_url("https://github.com/owner/repo/"),
+            Some(("github.com".into(), "owner".into(), "repo".into()))
+        );
+    }
+
+    #[test]
+    fn web_base_defaults_when_unset() {
+        std::env::remove_var("DARKRUN_WEB_BASE");
+        assert_eq!(web_base(), "https://darkrun.ai");
+    }
+
+    #[test]
+    fn web_base_trims_trailing_slash_and_whitespace() {
+        std::env::set_var("DARKRUN_WEB_BASE", "  https://x.test/  ");
+        assert_eq!(web_base(), "https://x.test");
+        std::env::remove_var("DARKRUN_WEB_BASE");
+    }
+
+    #[test]
+    fn web_base_blank_falls_back_to_default() {
+        std::env::set_var("DARKRUN_WEB_BASE", "   ");
+        assert_eq!(web_base(), "https://darkrun.ai");
+        std::env::remove_var("DARKRUN_WEB_BASE");
+    }
+
+    #[test]
+    fn paint_wraps_in_sgr_and_reset() {
+        let s = paint("38;5;81", "hi");
+        assert!(s.starts_with("\x1b[38;5;81m"));
+        assert!(s.ends_with("\x1b[0m"));
+        assert!(s.contains("hi"));
+    }
+
+    #[test]
+    fn osc8_wraps_text_in_a_hyperlink() {
+        let s = osc8("https://x.test", "label");
+        assert!(s.starts_with("\x1b]8;;https://x.test\x1b\\"));
+        assert!(s.contains("label"));
+        assert!(s.ends_with("\x1b]8;;\x1b\\"));
+    }
+}
