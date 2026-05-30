@@ -31,17 +31,21 @@ pub enum Harness {
     Opencode,
     /// Kiro — hooks + elicitation + parallel subagents (Claude-Code-like).
     Kiro,
+    /// OpenAI Codex CLI — single-agent, no hooks/browser; conservative profile
+    /// (elicitation + MCP-prompt slash commands left off pending confirmation).
+    Codex,
 }
 
 impl Harness {
     /// Every harness, in registry order.
-    pub const ALL: [Harness; 6] = [
+    pub const ALL: [Harness; 7] = [
         Harness::ClaudeCode,
         Harness::Cursor,
         Harness::Windsurf,
         Harness::GeminiCli,
         Harness::Opencode,
         Harness::Kiro,
+        Harness::Codex,
     ];
 
     /// The canonical kebab-case key (`claude-code`, `gemini-cli`, …) — the value
@@ -54,6 +58,7 @@ impl Harness {
             Harness::GeminiCli => "gemini-cli",
             Harness::Opencode => "opencode",
             Harness::Kiro => "kiro",
+            Harness::Codex => "codex",
         }
     }
 
@@ -68,6 +73,7 @@ impl Harness {
                 "claude" | "claudecode" | "cc" => Some(Harness::ClaudeCode),
                 "gemini" | "geminicli" => Some(Harness::GeminiCli),
                 "open-code" => Some(Harness::Opencode),
+                "codex-cli" | "codexcli" | "openai-codex" => Some(Harness::Codex),
                 _ => None,
             }
         })
@@ -225,6 +231,37 @@ impl Harness {
                     model_param: false,
                 },
             },
+            // Conservative profile. Codex reads the MCP `instructions` field and
+            // serves STDIO/HTTP MCP servers, but its docs don't confirm MCP
+            // elicitation or MCP-prompts-as-slash-commands — both left off so we
+            // never instruct the agent to use machinery that may be absent
+            // (degrades to inline text rather than breaking). It is single-agent
+            // (no parallel subagent spawn) and has no Claude-Code-style hooks. It
+            // does have a native plan mode (`/plan-mode`).
+            Harness::Codex => Capabilities {
+                harness: self,
+                display_name: "Codex",
+                native_skills: false,
+                prompts_as_slash_commands: false,
+                hooks: false,
+                elicitation: false,
+                native_ask_user: false,
+                plan_mode: true,
+                max_tools: None,
+                mcp_prompts: false,
+                mcp_resources: false,
+                browser_ui: false,
+                model_provider: "openai",
+                model_tiers: &["low", "medium", "high"],
+                subagents: Subagents {
+                    supported: false,
+                    tool_names: &[],
+                    parallel_spawn: false,
+                    background_spawn: false,
+                    isolation: false,
+                    model_param: false,
+                },
+            },
         }
     }
 }
@@ -310,6 +347,14 @@ impl Capabilities {
                 "sonnet" | "opus" => "pro",
                 _ => "pro",
             },
+            // OpenAI (Codex) maps tiers to reasoning-effort levels — the model
+            // is fixed, the depth is what varies.
+            "openai" => match t.as_str() {
+                "haiku" => "low",
+                "sonnet" => "medium",
+                "opus" => "high",
+                _ => "medium",
+            },
             // Multi-provider harnesses use abstract fast/balanced/powerful tiers.
             _ => match t.as_str() {
                 "haiku" => "fast",
@@ -356,7 +401,20 @@ mod tests {
         assert_eq!(Harness::parse("gemini_cli"), Some(Harness::GeminiCli));
         assert_eq!(Harness::parse("CLAUDE-CODE"), Some(Harness::ClaudeCode));
         assert_eq!(Harness::parse("claude"), Some(Harness::ClaudeCode));
+        assert_eq!(Harness::parse("codex"), Some(Harness::Codex));
+        assert_eq!(Harness::parse("codex-cli"), Some(Harness::Codex));
         assert_eq!(Harness::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn codex_is_conservative_single_agent() {
+        let c = Harness::Codex.capabilities();
+        assert!(!c.hooks && !c.browser_ui && !c.elicitation && !c.mcp_prompts);
+        assert!(!c.subagents.supported);
+        assert!(c.plan_mode);
+        assert_eq!(c.model_provider, "openai");
+        assert_eq!(c.map_model("haiku"), "low");
+        assert_eq!(c.map_model("opus"), "high");
     }
 
     #[test]
