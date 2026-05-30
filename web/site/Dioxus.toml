@@ -13,9 +13,3 @@ title = "darkrun — an assembly line for software"
 
 [web.watcher]
 reload_html = true
-
-[web.resource]
-# Static SEO artifacts emitted by `darkrun-site-gen` into ./dist are served at
-# the site root.
-style = []
-script = []
