@@ -1520,10 +1520,8 @@ fn unit_graph_node_tone_color_resolves() {
 fn unit_graph_nodes_feed_layout_by_inner_node() {
     // The view drives the same layout we test directly; confirm the inner
     // GraphNodes layer correctly when extracted (mirrors view.rs behavior).
-    let units = vec![
-        UnitGraphNode::new("a", "A"),
-        UnitGraphNode::new("b", "B").with_tone(Tone::Ok),
-    ];
+    let units = [UnitGraphNode::new("a", "A"),
+        UnitGraphNode::new("b", "B").with_tone(Tone::Ok)];
     let nodes: Vec<GraphNode> = units.iter().map(|u| u.node.clone()).collect();
     let edges = vec![GraphEdge::new("a", "b")];
     let r = LayeredLayout.layout(&nodes, &edges, &LayoutOptions::default());
@@ -1646,12 +1644,10 @@ fn factory_pipeline_at_each_station_phase_is_consistent() {
 #[test]
 fn unit_dag_scenario_layers_and_routes_end_to_end() {
     // spec -> build -> prove, with build also feeding a docs side unit.
-    let units = vec![
-        UnitGraphNode::new("spec", "Spec").with_tone(Tone::Info),
+    let units = [UnitGraphNode::new("spec", "Spec").with_tone(Tone::Info),
         UnitGraphNode::new("build", "Build").with_tone(Tone::Accent),
         UnitGraphNode::new("prove", "Prove").with_tone(Tone::Ok),
-        UnitGraphNode::new("docs", "Docs").with_tone(Tone::Neutral),
-    ];
+        UnitGraphNode::new("docs", "Docs").with_tone(Tone::Neutral)];
     let edges = vec![
         GraphEdge::new("spec", "build"),
         GraphEdge::new("build", "prove"),

@@ -739,9 +739,8 @@ async fn ws_slot_acquire_is_thread_safe() {
         let reg = Arc::clone(&reg);
         handles.push(tokio::task::spawn_blocking(move || {
             // Hold each acquired slot briefly so concurrency actually competes.
-            reg.try_acquire_ws_slot(cap).map(|s| {
+            reg.try_acquire_ws_slot(cap).inspect(|_slot| {
                 std::thread::yield_now();
-                s
             })
         }));
     }
@@ -753,7 +752,7 @@ async fn ws_slot_acquire_is_thread_safe() {
     }
     // The cap must never be exceeded under contention.
     assert!(held.len() <= cap, "acquired {} > cap {cap}", held.len());
-    assert!(held.len() > 0, "expected at least some acquisitions");
+    assert!(!held.is_empty(), "expected at least some acquisitions");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -1124,8 +1124,8 @@ fn ready_set_walks_a_chain_to_completion() {
 
     // step 3: a,b,c done
     let mut u = base();
-    for i in 0..3 {
-        u[i].frontmatter.status = Status::Completed;
+    for unit in u.iter_mut().take(3) {
+        unit.frontmatter.status = Status::Completed;
     }
     assert_eq!(ready_slugs(&u), vec!["d"]);
 
@@ -1162,8 +1162,8 @@ fn ready_diamond_apex_then_arms_then_sink() {
     assert_eq!(ready_slugs(&u), vec!["b", "c"]);
     // a,b,c done -> d
     let mut u = base();
-    for i in 0..3 {
-        u[i].frontmatter.status = Status::Completed;
+    for unit in u.iter_mut().take(3) {
+        unit.frontmatter.status = Status::Completed;
     }
     assert_eq!(ready_slugs(&u), vec!["d"]);
 }
@@ -1765,8 +1765,8 @@ fn complex_graph_ready_frontier_advances() {
     assert_eq!(ready_slugs(&u), vec!["build"]);
     // all but ship done -> ship
     let mut u = base();
-    for i in 0..4 {
-        u[i].frontmatter.status = Status::Completed;
+    for unit in u.iter_mut().take(4) {
+        unit.frontmatter.status = Status::Completed;
     }
     assert_eq!(ready_slugs(&u), vec!["ship"]);
 }
@@ -1858,8 +1858,8 @@ fn large_deep_chain_sorts_in_order() {
     let units = linear_chain(500);
     let order = Dag::build(&units).topological_sort().expect("topo");
     assert_eq!(order.len(), 500);
-    for i in 0..500 {
-        assert_eq!(order[i], format!("c{i:03}"));
+    for (i, slug) in order.iter().enumerate() {
+        assert_eq!(*slug, format!("c{i:03}"));
     }
 }
 

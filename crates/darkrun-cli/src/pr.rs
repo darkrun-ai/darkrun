@@ -125,38 +125,40 @@ pub fn create_for_run(
     };
     let intent = change_request_intent(state_store, slug, head)?;
 
-    // 4. The base branch: explicit override or the provider's default branch.
-    let base = match base_override {
-        Some(b) => b,
-        None => default_branch(transport, provider, &cred, &coords)?,
+    // 4. Open the PR/MR. Each provider resolves the repo exactly once: GitHub
+    //    only when it must learn the default branch; GitLab always (it needs the
+    //    numeric project id for the MR), reusing that lookup for the base too.
+    let cr = match provider {
+        Provider::GitHub => {
+            let base = match base_override {
+                Some(b) => b,
+                None => github_get_repo(transport, &cred, &coords)?.default_branch,
+            };
+            github_create_pull_request(
+                transport,
+                &cred,
+                &coords,
+                &intent.head,
+                &base,
+                &intent.title,
+                &intent.body,
+            )?
+        }
+        Provider::GitLab => {
+            let project = gitlab_resolve_project(transport, &cred, &coords)?;
+            let base = base_override.unwrap_or(project.default_branch);
+            gitlab_create_merge_request(
+                transport,
+                &cred,
+                project.id,
+                &intent.head,
+                &base,
+                &intent.title,
+                &intent.body,
+            )?
+        }
     };
-
-    // 5. Open it.
-    let cr = create_change_request(
-        transport,
-        provider,
-        &cred,
-        &coords,
-        &intent.head,
-        &base,
-        &intent.title,
-        &intent.body,
-    )?;
     Ok(cr)
-}
-
-/// Look up the repository's default branch (the PR/MR base) from the provider.
-fn default_branch(
-    transport: &dyn HttpTransport,
-    provider: Provider,
-    cred: &Credential,
-    coords: &RepoCoords,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let info = match provider {
-        Provider::GitHub => darkrun_vcs::github_get_repo(transport, cred, coords)?,
-        Provider::GitLab => darkrun_vcs::gitlab_resolve_project(transport, cred, coords)?,
-    };
-    Ok(info.default_branch)
 }
 
 #[cfg(test)]
@@ -205,16 +207,13 @@ mod tests {
             store.write_unit(slug, &unit).unwrap();
             for _ in 0..12 {
                 let tick = run_tick(store, slug).unwrap();
-                match &tick.action {
-                    RunAction::Checkpoint { kind, station: s, .. } => {
-                        if s == station {
-                            if matches!(kind, CheckpointKind::Ask) {
-                                darkrun_mcp::checkpoint_decide(store, slug, true, None).unwrap();
-                            }
-                            break;
+                if let RunAction::Checkpoint { kind, station: s, .. } = &tick.action {
+                    if s == station {
+                        if matches!(kind, CheckpointKind::Ask) {
+                            darkrun_mcp::checkpoint_decide(store, slug, true, None).unwrap();
                         }
+                        break;
                     }
-                    _ => {}
                 }
             }
             if station == "harden" {
@@ -294,21 +293,18 @@ mod tests {
             branch: Some("darkrun/r".into()),
         };
         let mock = MockTransport::new();
-        // resolve project (url-encoded path) is hit twice: once for the default
-        // branch lookup, once inside create_change_request. Queue both (FIFO).
-        let project_json = serde_json::to_vec(&serde_json::json!({
-            "id": 99, "default_branch": "trunk", "web_url": "https://gitlab.com/group/sub/widgets"
-        }))
-        .unwrap();
+        // resolve project (url-encoded path) — resolved exactly once, reused for
+        // both the project id and the default (target) branch.
         mock.expect(
             Method::Get,
             "https://gitlab.com/api/v4/projects/group%2Fsub%2Fwidgets",
-            HttpResponse::new(200, project_json.clone()),
-        );
-        mock.expect(
-            Method::Get,
-            "https://gitlab.com/api/v4/projects/group%2Fsub%2Fwidgets",
-            HttpResponse::new(200, project_json),
+            HttpResponse::new(
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "id": 99, "default_branch": "trunk", "web_url": "https://gitlab.com/group/sub/widgets"
+                }))
+                .unwrap(),
+            ),
         );
         // create MR.
         mock.expect(
@@ -446,22 +442,12 @@ mod tests {
             branch: Some("darkrun/r".into()),
         };
         let mock = MockTransport::new();
-        // get-repo will be reached (provider resolves), but intent fails first.
-        mock.expect(
-            Method::Get,
-            "https://api.github.com/repos/acme/widgets",
-            HttpResponse::new(
-                200,
-                serde_json::to_vec(&serde_json::json!({
-                    "id": 1, "default_branch": "main", "html_url": "x"
-                }))
-                .unwrap(),
-            ),
-        );
+        // No network is reached: provider + credential resolve, but the pure
+        // intent derivation rejects the non-external checkpoint before any POST.
         let err = create_for_run(&mock, &facts, &state, &cred_store, "r", None, Some("main".into()))
             .unwrap_err();
-        // base override avoids the get-repo call; the intent derivation fails.
         assert!(err.to_string().to_lowercase().contains("checkpoint"));
+        assert!(mock.requests().is_empty());
     }
 
     #[test]

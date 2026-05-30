@@ -5,6 +5,11 @@
 //! fences with no newline, empty bodies, body-only docs, inline dashes,
 //! nested YAML, lists, quotes, unicode) and round-trips every domain
 //! frontmatter type through the YAML envelope the module produces.
+//!
+//! The tests deliberately construct a `default()` value and then mutate one
+//! field at a time so each case isolates a single attribute; that pattern
+//! trips `clippy::field_reassign_with_default`, which we allow here.
+#![allow(clippy::field_reassign_with_default)]
 
 use darkrun_core::domain::{
     Checkpoint, CheckpointKind, CheckpointOutcome, Drift, DriftKind, Explorer, Feedback,

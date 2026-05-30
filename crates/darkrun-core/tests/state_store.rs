@@ -7,6 +7,7 @@
 //! fall-through), the `run_dir` / `units_dir` / `feedback_dir` path helpers,
 //! `RunNotFound` / `UnitNotFound` errors, malformed on-disk files, and unicode
 //! slugs. Every test exercises real behavior and can fail for a real reason.
+#![allow(clippy::field_reassign_with_default)]
 
 use std::collections::BTreeMap;
 use std::fs;

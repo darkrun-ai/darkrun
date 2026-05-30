@@ -10,6 +10,11 @@
 //!
 //! The vocabulary mirrors the factory model: a Run carries Stations, each
 //! Station accrues Feedback items routed back from a Checkpoint.
+//!
+//! Several tests assert ordering and positivity invariants over the crate's
+//! default limit constants; those comparisons are compile-time constant, which
+//! trips `clippy::assertions_on_constants` even though the guard is meaningful.
+#![allow(clippy::assertions_on_constants)]
 
 use std::net::SocketAddr;
 
@@ -1347,7 +1352,7 @@ async fn limits_is_copy_and_clone() {
         rate_limit_per_min: 9,
     };
     let copied = l; // Copy
-    let cloned = l.clone();
+    let cloned = l;
     assert_eq!(copied.max_connections, 7);
     assert_eq!(cloned.max_ws_sessions, 3);
     assert_eq!(l.rate_limit_per_min, 9);

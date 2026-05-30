@@ -7,6 +7,11 @@
 //! Drives only the crate's public API. Every test is written to fail for a
 //! concrete reason — a wrong discriminator, a missing route, a broken
 //! roundtrip, a drifted schema.
+//!
+//! The body-size-constant ordering tests compare compile-time constants, which
+//! trips `clippy::assertions_on_constants` even though the ordering guard is a
+//! real invariant we want to enforce.
+#![allow(clippy::assertions_on_constants)]
 
 use schemars::schema_for;
 use serde_json::{json, Value};
