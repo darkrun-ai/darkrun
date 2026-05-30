@@ -389,14 +389,18 @@ fn run_next_noop_when_unit_blocked_mid_wave() {
     let (_d, server) = started("r");
     next(&server, "r");
     next(&server, "r");
-    // Unit with an unmet dependency: no wave-ready unit, not all complete.
+    // A dispatched, in-flight unit: no wave-ready unit, not all complete → noop.
+    // (A dangling dep would be a units_invalid decomposition error.)
+    create_unit(&server, "r", "u1", "frame");
     server
-        .darkrun_unit_create(Parameters(UnitCreateInput {
+        .darkrun_unit_update(Parameters(UnitUpdateInput {
             slug: "r".into(),
             unit: "u1".into(),
-            station: "frame".into(),
-            title: None,
-            depends_on: vec!["ghost".into()],
+            status: Some("in_progress".into()),
+            depends_on: None,
+            worker: None,
+            inputs: None,
+            outputs: None,
         }))
         .unwrap();
     let v = body(&next(&server, "r"));
@@ -1973,7 +1977,10 @@ fn walk_station_to_checkpoint(server: &DarkrunServer, slug: &str, station: &str)
         let v = body(&next(server, slug));
         let action = v["action"]["action"].as_str().unwrap().to_string();
         let on = v["action"]["station"].as_str().unwrap_or("").to_string();
-        if action == "checkpoint" && on == station {
+        // The gate is a local checkpoint or, for an external station,
+        // external_review_requested.
+        let is_gate = action == "checkpoint" || action == "external_review_requested";
+        if is_gate && on == station {
             return v;
         }
         assert!(
@@ -2071,7 +2078,8 @@ fn harden_station_external_checkpoint_holds() {
     walk_station_to_checkpoint(&server, "r", "build");
     walk_station_to_checkpoint(&server, "r", "prove");
     let cp = walk_station_to_checkpoint(&server, "r", "harden");
-    assert_eq!(cp["action"]["kind"], "external");
+    // harden's external gate surfaces as ExternalReviewRequested.
+    assert_eq!(cp["action"]["action"], "external_review_requested");
     let show = body(
         &server
             .darkrun_run_show(Parameters(RunRef { slug: "r".into() }))
@@ -2534,13 +2542,17 @@ fn run_next_noop_carries_message() {
     let (_d, server) = started("r");
     next(&server, "r");
     next(&server, "r");
+    // A dispatched, in-flight unit yields the mid-wave noop.
+    create_unit(&server, "r", "u1", "frame");
     server
-        .darkrun_unit_create(Parameters(UnitCreateInput {
+        .darkrun_unit_update(Parameters(UnitUpdateInput {
             slug: "r".into(),
             unit: "u1".into(),
-            station: "frame".into(),
-            title: None,
-            depends_on: vec!["ghost".into()],
+            status: Some("in_progress".into()),
+            depends_on: None,
+            worker: None,
+            inputs: None,
+            outputs: None,
         }))
         .unwrap();
     let v = body(&next(&server, "r"));
@@ -4507,13 +4519,17 @@ fn noop_position_action_is_null_in_show() {
     let (_d, server) = started("r");
     next(&server, "r"); // spec -> review
     next(&server, "r"); // review -> manufacture
+    // A dispatched, in-flight unit yields the mid-wave noop.
+    create_unit(&server, "r", "u1", "frame");
     server
-        .darkrun_unit_create(Parameters(UnitCreateInput {
+        .darkrun_unit_update(Parameters(UnitUpdateInput {
             slug: "r".into(),
             unit: "u1".into(),
-            station: "frame".into(),
-            title: None,
-            depends_on: vec!["ghost".into()],
+            status: Some("in_progress".into()),
+            depends_on: None,
+            worker: None,
+            inputs: None,
+            outputs: None,
         }))
         .unwrap();
     let v = body(
@@ -4530,13 +4546,17 @@ fn noop_tick_action_is_noop_but_position_null() {
     let (_d, server) = started("r");
     next(&server, "r");
     next(&server, "r");
+    // A dispatched, in-flight unit yields the mid-wave noop.
+    create_unit(&server, "r", "u1", "frame");
     server
-        .darkrun_unit_create(Parameters(UnitCreateInput {
+        .darkrun_unit_update(Parameters(UnitUpdateInput {
             slug: "r".into(),
             unit: "u1".into(),
-            station: "frame".into(),
-            title: None,
-            depends_on: vec!["ghost".into()],
+            status: Some("in_progress".into()),
+            depends_on: None,
+            worker: None,
+            inputs: None,
+            outputs: None,
         }))
         .unwrap();
     let v = body(&next(&server, "r"));
@@ -5056,7 +5076,7 @@ fn next_station_seeded_pending_after_advance() {
 }
 
 #[test]
-fn unit_with_dependency_on_self_never_ready() {
+fn unit_with_dependency_on_self_is_units_invalid() {
     let (_d, server) = started("r");
     next(&server, "r");
     next(&server, "r");
@@ -5069,9 +5089,11 @@ fn unit_with_dependency_on_self_never_ready() {
             depends_on: vec!["u1".into()],
         }))
         .unwrap();
-    // u1 depends on itself (pending) → never wave-ready → noop.
+    // u1 depends on itself — a trivial dependency cycle. The manager surfaces a
+    // units_invalid repair action, not a silent mid-wave noop.
     let v = body(&next(&server, "r"));
-    assert_eq!(v["action"]["action"], "noop");
+    assert_eq!(v["action"]["action"], "units_invalid");
+    assert_eq!(v["action"]["problem"], "dependency_cycle");
 }
 
 #[test]

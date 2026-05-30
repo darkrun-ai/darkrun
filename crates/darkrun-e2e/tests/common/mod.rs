@@ -146,6 +146,14 @@ impl Harness {
         }
     }
 
+    /// Force a unit's status (test setup — e.g. mark a dispatched unit
+    /// `InProgress` to model an outstanding, in-flight pass).
+    pub fn set_unit_status(&self, unit_slug: &str, status: Status) {
+        let mut u = self.store.read_unit(&self.slug, unit_slug).expect("read_unit");
+        u.frontmatter.status = status;
+        self.store.write_unit(&self.slug, &u).expect("write_unit");
+    }
+
     /// Force a station's persisted phase (test setup — lets a suite place the
     /// cursor at a station's canonical `Spec` entry regardless of how the
     /// upstream gate's internal re-tick left it).
@@ -236,6 +244,8 @@ impl Harness {
                     let owned: Vec<&str> = units.iter().map(|s| s.as_str()).collect();
                     self.complete_units(&owned);
                 }
+                // A held gate — a non-auto local Checkpoint, or an external
+                // review gate — needs an operator decision to advance.
                 RunAction::Checkpoint { station, kind, .. }
                     if !matches!(kind, CheckpointKind::Auto) =>
                 {
@@ -245,6 +255,19 @@ impl Harness {
                     }
                     // The decide re-tick already advanced the next station;
                     // re-handle its action so the loop stays in sync.
+                    if let RunAction::Spec { station: ns, .. } = &decided.action {
+                        let unit = format!("{ns}-unit");
+                        if self.store.read_unit(&self.slug, &unit).is_err() {
+                            self.decompose(ns, &[(unit.as_str(), &[])]);
+                        }
+                    }
+                    let _ = station;
+                }
+                RunAction::ExternalReviewRequested { station, .. } => {
+                    let decided = self.decide(true, None);
+                    if log.last() != Some(&decided.action) {
+                        log.push(decided.action.clone());
+                    }
                     if let RunAction::Spec { station: ns, .. } = &decided.action {
                         let unit = format!("{ns}-unit");
                         if self.store.read_unit(&self.slug, &unit).is_err() {
@@ -288,6 +311,13 @@ pub fn is_reflect(a: &RunAction, station: &str) -> bool {
 /// Assert an action is a `Checkpoint` on `station`.
 pub fn is_checkpoint(a: &RunAction, station: &str) -> bool {
     matches!(a, RunAction::Checkpoint { station: s, .. } if s == station)
+}
+
+/// Assert an action is a *gate* on `station` — a local `Checkpoint` or, for an
+/// external station, an `ExternalReviewRequested`.
+pub fn is_gate(a: &RunAction, station: &str) -> bool {
+    matches!(a, RunAction::Checkpoint { station: s, .. } if s == station)
+        || matches!(a, RunAction::ExternalReviewRequested { station: s, .. } if s == station)
 }
 
 /// The `action` discriminator string serde emits for an action.

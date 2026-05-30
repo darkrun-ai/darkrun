@@ -73,10 +73,12 @@ pub fn change_request_intent(
     // The active station is whatever the cursor currently sits on.
     let position = derive_position(store, slug)?;
     let station = match &position.action {
-        Some(RunAction::Checkpoint { station, .. }) => station.clone(),
+        // An external gate surfaces as ExternalReviewRequested — exactly the
+        // action this PR/MR handoff serves.
+        Some(RunAction::ExternalReviewRequested { station, .. }) => station.clone(),
         Some(action) => {
             return Err(McpError::InvalidInput(format!(
-                "run '{slug}' is not at a Checkpoint (current action: {})",
+                "run '{slug}' is not at an external review gate (current action: {})",
                 action_name(action)
             )));
         }
@@ -140,7 +142,14 @@ fn action_name(action: &RunAction) -> &'static str {
         RunAction::Reflect { .. } => "reflect",
         RunAction::Checkpoint { .. } => "checkpoint",
         RunAction::FixFeedback { .. } => "fix_feedback",
+        RunAction::FeedbackQuestion { .. } => "feedback_question",
         RunAction::ResolveDrift { .. } => "resolve_drift",
+        RunAction::UnitsInvalid { .. } => "units_invalid",
+        RunAction::Escalate { .. } => "escalate",
+        RunAction::SafeRepair { .. } => "safe_repair",
+        RunAction::ReviseUnitSpecs { .. } => "revise_unit_specs",
+        RunAction::ExternalReviewRequested { .. } => "external_review_requested",
+        RunAction::PendingSeal { .. } => "pending_seal",
         RunAction::Sealed { .. } => "sealed",
         RunAction::Noop { .. } => "noop",
     }
@@ -194,16 +203,20 @@ mod tests {
         }
     }
 
-    /// Walk one station up to (and stopping at) its Checkpoint, without deciding.
+    /// Walk one station up to (and stopping at) its gate, without deciding. The
+    /// gate surfaces as a local `Checkpoint` or, for an external station, as
+    /// `ExternalReviewRequested`.
     fn walk_station_to_checkpoint(store: &StateStore, slug: &str, station: &str) {
         seed_one_unit(store, slug, station);
         for _ in 0..12 {
             let tick = run_tick(store, slug).expect("tick");
-            if matches!(&tick.action, RunAction::Checkpoint { station: s, .. } if s == station) {
+            let at_gate = matches!(&tick.action, RunAction::Checkpoint { station: s, .. } if s == station)
+                || matches!(&tick.action, RunAction::ExternalReviewRequested { station: s, .. } if s == station);
+            if at_gate {
                 return;
             }
         }
-        panic!("never reached {station} checkpoint");
+        panic!("never reached {station} gate");
     }
 
     /// Give a station one completed unit so Manufacture clears to Audit.

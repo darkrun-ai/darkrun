@@ -65,13 +65,19 @@ fn seed_completed_unit(store: &StateStore, run: &str, station: &str, slug: &str)
     store.write_unit(run, &unit).expect("write unit");
 }
 
-/// Drive a station from wherever it sits to its open Checkpoint action.
+/// Drive a station from wherever it sits to its open gate action — a local
+/// `Checkpoint` or, for an external station, an `ExternalReviewRequested`.
 fn walk_to_checkpoint(store: &StateStore, run: &str, station: &str) -> RunAction {
     seed_completed_unit(store, run, station, &format!("{station}-u1"));
     for _ in 0..10 {
         let t = run_tick(store, run).expect("tick");
         match &t.action {
-            RunAction::Checkpoint { station: s, .. } if s == station => return t.action,
+            RunAction::Checkpoint { station: s, .. }
+            | RunAction::ExternalReviewRequested { station: s, .. }
+                if s == station =>
+            {
+                return t.action
+            }
             RunAction::Spec { station: s, .. }
             | RunAction::Review { station: s, .. }
             | RunAction::Manufacture { station: s, .. }
@@ -93,10 +99,11 @@ fn advance_to_station(store: &StateStore, run: &str, target: &str) {
             return;
         }
         let cp = walk_to_checkpoint(store, run, st);
-        if let RunAction::Checkpoint { kind, .. } = cp {
-            if !matches!(kind, CheckpointKind::Auto) {
-                checkpoint_decide(store, run, true, None).expect("approve");
-            }
+        // Non-auto local gates and external review gates both need a decision.
+        let needs_decision = matches!(cp, RunAction::Checkpoint { kind, .. } if !matches!(kind, CheckpointKind::Auto))
+            || matches!(cp, RunAction::ExternalReviewRequested { .. });
+        if needs_decision {
+            checkpoint_decide(store, run, true, None).expect("approve");
         }
     }
 }
@@ -553,7 +560,7 @@ fn approve_through_every_station_to_sealed() {
     let (_d, store) = started();
     advance_to_station(&store, "r", "harden");
     let cp = walk_to_checkpoint(&store, "r", "harden");
-    assert!(matches!(cp, RunAction::Checkpoint { kind: CheckpointKind::External, .. }));
+    assert!(matches!(cp, RunAction::ExternalReviewRequested { .. }));
     let sealed = checkpoint_decide(&store, "r", true, None).expect("seal");
     assert!(matches!(&sealed.action, RunAction::Sealed { run } if run == "r"));
 }
@@ -785,7 +792,7 @@ fn external_kind_holds_for_decision() {
     let (_d, store) = started();
     advance_to_station(&store, "r", "harden");
     let cp = walk_to_checkpoint(&store, "r", "harden");
-    assert!(matches!(cp, RunAction::Checkpoint { kind: CheckpointKind::External, .. }));
+    assert!(matches!(cp, RunAction::ExternalReviewRequested { .. }));
     assert_eq!(station_status(&store, "r", "harden"), Status::InProgress);
 }
 
@@ -830,12 +837,16 @@ fn checkpoint_action_kind_matches_factory_def() {
         let (_d, store) = started();
         advance_to_station(&store, "r", st);
         let cp = walk_to_checkpoint(&store, "r", st);
-        match cp {
-            RunAction::Checkpoint { kind: k, station, .. } => {
-                assert_eq!(k, kind, "{st} kind");
+        match (cp, kind) {
+            // An external gate surfaces as ExternalReviewRequested (no kind).
+            (RunAction::ExternalReviewRequested { station, .. }, CheckpointKind::External) => {
                 assert_eq!(station, st);
             }
-            other => panic!("expected checkpoint, got {other:?}"),
+            (RunAction::Checkpoint { kind: k, station, .. }, expected_kind) => {
+                assert_eq!(k, expected_kind, "{st} kind");
+                assert_eq!(station, st);
+            }
+            (other, _) => panic!("expected gate, got {other:?}"),
         }
     }
 }
@@ -1127,12 +1138,13 @@ fn noop_action_for_null_position() {
     run_tick(&store, "r").unwrap(); // spec → review
     run_tick(&store, "r").unwrap(); // review → manufacture
     // Pending unit with unmet dep → mid-wave noop.
+    // A dispatched, in-flight unit yields the mid-wave noop. (A dangling dep
+    // would be a UnitsInvalid decomposition error.)
     let blocked = Unit {
         slug: "u1".into(),
         frontmatter: UnitFrontmatter {
-            status: Status::Pending,
+            status: Status::InProgress,
             station: Some("frame".into()),
-            depends_on: vec!["ghost".into()],
             ..Default::default()
         },
         title: "u1".into(),
@@ -1262,12 +1274,13 @@ fn runaction_noop_serializes_message() {
     let (_d, store) = started();
     run_tick(&store, "r").unwrap();
     run_tick(&store, "r").unwrap();
+    // A dispatched, in-flight unit yields the mid-wave noop. (A dangling dep
+    // would be a UnitsInvalid decomposition error.)
     let blocked = Unit {
         slug: "u1".into(),
         frontmatter: UnitFrontmatter {
-            status: Status::Pending,
+            status: Status::InProgress,
             station: Some("frame".into()),
-            depends_on: vec!["ghost".into()],
             ..Default::default()
         },
         title: "u1".into(),
@@ -1341,12 +1354,13 @@ fn position_null_action_serializes_null() {
     let (_d, store) = started();
     run_tick(&store, "r").unwrap();
     run_tick(&store, "r").unwrap();
+    // A dispatched, in-flight unit yields the mid-wave noop. (A dangling dep
+    // would be a UnitsInvalid decomposition error.)
     let blocked = Unit {
         slug: "u1".into(),
         frontmatter: UnitFrontmatter {
-            status: Status::Pending,
+            status: Status::InProgress,
             station: Some("frame".into()),
-            depends_on: vec!["ghost".into()],
             ..Default::default()
         },
         title: "u1".into(),
@@ -1449,7 +1463,7 @@ fn harden_checkpoint_is_external_and_holds() {
     let (_d, store) = started();
     advance_to_station(&store, "r", "harden");
     let cp = walk_to_checkpoint(&store, "r", "harden");
-    assert!(matches!(cp, RunAction::Checkpoint { kind: CheckpointKind::External, .. }));
+    assert!(matches!(cp, RunAction::ExternalReviewRequested { .. }));
     assert_eq!(station_status(&store, "r", "harden"), Status::InProgress);
 }
 
@@ -1644,10 +1658,11 @@ fn resolving_first_open_advances_to_next_open() {
 fn run_to_sealed(store: &StateStore, run: &str) -> RunAction {
     for st in ["frame", "specify", "shape", "build", "prove", "harden"] {
         let cp = walk_to_checkpoint(store, run, st);
-        if let RunAction::Checkpoint { kind, .. } = cp {
-            if !matches!(kind, CheckpointKind::Auto) {
-                checkpoint_decide(store, run, true, None).expect("approve");
-            }
+        // Non-auto local gates and external review gates both need a decision.
+        let needs_decision = matches!(cp, RunAction::Checkpoint { kind, .. } if !matches!(kind, CheckpointKind::Auto))
+            || matches!(cp, RunAction::ExternalReviewRequested { .. });
+        if needs_decision {
+            checkpoint_decide(store, run, true, None).expect("approve");
         }
     }
     derive_position(store, run).unwrap().action.unwrap()
@@ -2649,7 +2664,7 @@ fn auto_stations_chain_to_harden_external() {
     walk_to_checkpoint(&store, "r", "build"); // auto → prove
     walk_to_checkpoint(&store, "r", "prove"); // auto → harden
     let cp = walk_to_checkpoint(&store, "r", "harden");
-    assert!(matches!(cp, RunAction::Checkpoint { kind: CheckpointKind::External, .. }));
+    assert!(matches!(cp, RunAction::ExternalReviewRequested { .. }));
     assert_eq!(station_status(&store, "r", "harden"), Status::InProgress);
 }
 
@@ -2802,18 +2817,19 @@ fn whole_run_with_mid_rejects_still_seals() {
     let (_d, store) = started();
     for st in ["frame", "specify", "shape", "build", "prove", "harden"] {
         let cp = walk_to_checkpoint(&store, "r", st);
-        if let RunAction::Checkpoint { kind, .. } = cp {
-            if matches!(kind, CheckpointKind::Auto) {
-                continue;
-            }
-            // reject, address, approve.
-            checkpoint_decide(&store, "r", false, Some(format!("rework {st}")))
-                .expect("reject");
-            let fb = feedback::list(&store, "r").unwrap();
-            let open = fb.iter().find(|f| !feedback::is_terminal(f.status)).unwrap();
-            feedback::set_status(&store, "r", &open.id, FeedbackStatus::Addressed).unwrap();
-            checkpoint_decide(&store, "r", true, None).expect("approve");
+        // Auto gates self-advance; non-auto local gates and external review
+        // gates take a decision.
+        let auto = matches!(cp, RunAction::Checkpoint { kind: CheckpointKind::Auto, .. });
+        if auto {
+            continue;
         }
+        // reject, address, approve.
+        checkpoint_decide(&store, "r", false, Some(format!("rework {st}")))
+            .expect("reject");
+        let fb = feedback::list(&store, "r").unwrap();
+        let open = fb.iter().find(|f| !feedback::is_terminal(f.status)).unwrap();
+        feedback::set_status(&store, "r", &open.id, FeedbackStatus::Addressed).unwrap();
+        checkpoint_decide(&store, "r", true, None).expect("approve");
     }
     assert!(matches!(
         derive_position(&store, "r").unwrap().action,

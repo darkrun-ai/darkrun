@@ -93,7 +93,9 @@ macro_rules! station_phase_suite {
                 advance_to(&h, $station);
                 let actions = h.walk_station_to_checkpoint($station, &["w1"]);
                 assert!(is_reflect(&actions[actions.len() - 2], $station));
-                assert!(is_checkpoint(actions.last().unwrap(), $station));
+                // The gate is a local Checkpoint, or an ExternalReviewRequested
+                // for an external station (harden).
+                assert!(is_gate(actions.last().unwrap(), $station));
             }
 
             #[test]
@@ -101,11 +103,15 @@ macro_rules! station_phase_suite {
                 let h = Harness::start(concat!($station, "-kind"));
                 advance_to(&h, $station);
                 let actions = h.walk_station_to_checkpoint($station, &["w1"]);
-                match actions.last().unwrap() {
-                    RunAction::Checkpoint { kind, .. } => {
-                        assert_eq!(*kind, manager_checkpoint($station))
+                match (actions.last().unwrap(), manager_checkpoint($station)) {
+                    // External gates surface as ExternalReviewRequested (no kind).
+                    (RunAction::ExternalReviewRequested { .. }, CheckpointKind::External) => {}
+                    (RunAction::Checkpoint { kind, .. }, expected) => {
+                        assert_eq!(*kind, expected)
                     }
-                    other => panic!("expected Checkpoint, got {other:?}"),
+                    (other, expected) => {
+                        panic!("expected gate of kind {expected:?}, got {other:?}")
+                    }
                 }
             }
 

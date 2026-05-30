@@ -505,16 +505,16 @@ fn resolve_drift_action_renders_track_prompt() {
 fn noop_action_renders_message_prompt() {
     let (_d, store) = fresh("r");
     at_phase(&store, "r", "frame", StationPhase::Manufacture);
-    // A pending unit blocked on a ghost dependency → mid-wave noop.
+    // A dispatched, in-flight unit → mid-wave noop. (A dangling dep would be a
+    // UnitsInvalid decomposition error.)
     let unit = Unit {
-        slug: "blocked".into(),
+        slug: "inflight".into(),
         frontmatter: UnitFrontmatter {
-            status: Status::Pending,
+            status: Status::InProgress,
             station: Some("frame".into()),
-            depends_on: vec!["ghost".into()],
             ..Default::default()
         },
-        title: "blocked".into(),
+        title: "inflight".into(),
         body: String::new(),
     };
     store.write_unit("r", &unit).expect("write unit");

@@ -446,7 +446,9 @@ mod tests {
         // intent derivation rejects the non-external checkpoint before any POST.
         let err = create_for_run(&mock, &facts, &state, &cred_store, "r", None, Some("main".into()))
             .unwrap_err();
-        assert!(err.to_string().to_lowercase().contains("checkpoint"));
+        // A non-external run rejects with an "external review gate" error before
+        // any POST.
+        assert!(err.to_string().to_lowercase().contains("gate"));
         assert!(mock.requests().is_empty());
     }
 

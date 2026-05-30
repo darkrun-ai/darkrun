@@ -969,6 +969,7 @@ fn run_frontmatter_full_roundtrip_json() {
             auto_merge: true,
             auto_squash: false,
         }),
+        seal: None,
     };
     let back = json_round(&fm);
     assert_eq!(back.surface, Some(Surface::WebUi));
@@ -996,6 +997,7 @@ fn run_frontmatter_full_roundtrip_yaml() {
         started_at: Some("t1".into()),
         completed_at: Some("t2".into()),
         git: Some(RunGit::default()),
+        seal: None,
     };
     let back = yaml_round(&fm);
     assert_eq!(back.status, Status::Completed);
@@ -1340,6 +1342,7 @@ fn unit_frontmatter_full_roundtrip_json() {
         worker: "builder".into(),
         model: Some("opus".into()),
         station: Some("build".into()),
+        revise: false,
         inputs: vec!["spec.md".into()],
         outputs: vec!["impl.rs".into()],
         started_at: Some("t1".into()),
@@ -2824,6 +2827,7 @@ fn run_with_full_git_policy_yaml_roundtrips() {
                 auto_merge: true,
                 auto_squash: true,
             }),
+            seal: None,
         },
         title: "Ship".into(),
         body: "# Ship\n".into(),
@@ -2847,6 +2851,7 @@ fn unit_with_full_frontmatter_yaml_roundtrips() {
             worker: "builder".into(),
             model: Some("opus".into()),
             station: Some("build".into()),
+            revise: false,
             inputs: vec!["spec.md".into()],
             outputs: vec!["auth.rs".into()],
             started_at: Some("t".into()),

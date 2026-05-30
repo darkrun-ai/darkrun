@@ -74,18 +74,8 @@ fn is_gated(kind: CheckpointKind) -> bool {
 }
 
 fn action_name(a: &RunAction) -> &'static str {
-    match a {
-        RunAction::Spec { .. } => "spec",
-        RunAction::Review { .. } => "review",
-        RunAction::Manufacture { .. } => "manufacture",
-        RunAction::Audit { .. } => "audit",
-        RunAction::Reflect { .. } => "reflect",
-        RunAction::Checkpoint { .. } => "checkpoint",
-        RunAction::FixFeedback { .. } => "fix_feedback",
-        RunAction::ResolveDrift { .. } => "resolve_drift",
-        RunAction::Sealed { .. } => "sealed",
-        RunAction::Noop { .. } => "noop",
-    }
+    // Delegate to the crate's single source of truth for action → tag.
+    darkrun_mcp::position::action_tag(a)
 }
 
 fn action_station(a: &RunAction) -> Option<&str> {
@@ -97,8 +87,14 @@ fn action_station(a: &RunAction) -> Option<&str> {
         | RunAction::Reflect { station, .. }
         | RunAction::Checkpoint { station, .. }
         | RunAction::FixFeedback { station, .. }
-        | RunAction::ResolveDrift { station, .. } => Some(station),
-        RunAction::Sealed { .. } | RunAction::Noop { .. } => None,
+        | RunAction::FeedbackQuestion { station, .. }
+        | RunAction::ResolveDrift { station, .. }
+        | RunAction::UnitsInvalid { station, .. }
+        | RunAction::Escalate { station, .. }
+        | RunAction::SafeRepair { station, .. }
+        | RunAction::ReviseUnitSpecs { station, .. }
+        | RunAction::ExternalReviewRequested { station, .. } => Some(station),
+        RunAction::PendingSeal { .. } | RunAction::Sealed { .. } | RunAction::Noop { .. } => None,
     }
 }
 
@@ -292,7 +288,8 @@ phase_derive_test!(harden_review_derives_review, "harden", StationPhase::Review,
 phase_derive_test!(harden_manufacture_derives_manufacture, "harden", StationPhase::Manufacture, "manufacture");
 phase_derive_test!(harden_audit_derives_audit, "harden", StationPhase::Audit, "audit");
 phase_derive_test!(harden_reflect_derives_reflect, "harden", StationPhase::Reflect, "reflect");
-phase_derive_test!(harden_checkpoint_derives_checkpoint, "harden", StationPhase::Checkpoint, "checkpoint");
+// harden's external gate surfaces as ExternalReviewRequested, not Checkpoint.
+phase_derive_test!(harden_checkpoint_derives_checkpoint, "harden", StationPhase::Checkpoint, "external_review_requested");
 
 // ─────────── run_tick write-cache advancement per (station, phase) ───────────
 //
@@ -419,7 +416,7 @@ manufacture_all_complete_audits_test!(build_manufacture_all_complete_audits, "bu
 manufacture_all_complete_audits_test!(prove_manufacture_all_complete_audits, "prove");
 manufacture_all_complete_audits_test!(harden_manufacture_all_complete_audits, "harden");
 
-// ───── Manufacture: mid-wave noop when units in flight (blocked dep) ─────
+// ───── Manufacture: mid-wave noop when a unit is in flight ─────
 
 macro_rules! manufacture_midwave_noop_test {
     ($name:ident, $station:expr) => {
@@ -427,9 +424,10 @@ macro_rules! manufacture_midwave_noop_test {
         fn $name() {
             let (_d, store) = fresh("r");
             at_phase(&store, "r", $station, StationPhase::Manufacture);
-            // Pending unit depending on a non-existent unit → not ready, not all
-            // complete → null position (mid-wave noop).
-            seed_unit(&store, "r", $station, "u1", Status::Pending, &["ghost"]);
+            // A dispatched, in-flight unit (InProgress): not wave-ready (not
+            // Pending) and not all complete → null position (mid-wave noop). A
+            // dangling dep would instead be a UnitsInvalid decomposition error.
+            seed_unit(&store, "r", $station, "u1", Status::InProgress, &[]);
             let pos = derive_position(&store, "r").expect("pos");
             assert_eq!(pos.track, Track::Run);
             assert!(pos.action.is_none(), "expected mid-wave noop, got {:?}", pos.action);
@@ -495,7 +493,18 @@ checkpoint_kind_test!(specify_checkpoint_is_ask, "specify", CheckpointKind::Ask)
 checkpoint_kind_test!(shape_checkpoint_is_ask, "shape", CheckpointKind::Ask);
 checkpoint_kind_test!(build_checkpoint_is_auto, "build", CheckpointKind::Auto);
 checkpoint_kind_test!(prove_checkpoint_is_auto, "prove", CheckpointKind::Auto);
-checkpoint_kind_test!(harden_checkpoint_is_external, "harden", CheckpointKind::External);
+
+// harden's external gate surfaces as ExternalReviewRequested, not Checkpoint.
+#[test]
+fn harden_checkpoint_is_external() {
+    let (_d, store) = fresh("r");
+    at_phase(&store, "r", "harden", StationPhase::Checkpoint);
+    let pos = derive_position(&store, "r").expect("pos");
+    match pos.action.expect("action") {
+        RunAction::ExternalReviewRequested { station, .. } => assert_eq!(station, "harden"),
+        other => panic!("expected ExternalReviewRequested, got {other:?}"),
+    }
+}
 
 // ───── Auto checkpoint tick completes the station and advances ─────
 
@@ -546,7 +555,21 @@ macro_rules! gated_checkpoint_holds_test {
 gated_checkpoint_holds_test!(frame_gated_holds, "frame", CheckpointKind::Ask);
 gated_checkpoint_holds_test!(specify_gated_holds, "specify", CheckpointKind::Ask);
 gated_checkpoint_holds_test!(shape_gated_holds, "shape", CheckpointKind::Ask);
-gated_checkpoint_holds_test!(harden_gated_holds, "harden", CheckpointKind::External);
+
+// harden's external gate (ExternalReviewRequested) holds the station too,
+// stamping an external Awaiting checkpoint until an operator decides.
+#[test]
+fn harden_gated_holds() {
+    let (_d, store) = fresh("r");
+    at_phase(&store, "r", "harden", StationPhase::Checkpoint);
+    let t = run_tick(&store, "r").expect("tick");
+    assert!(matches!(t.action, RunAction::ExternalReviewRequested { .. }));
+    let s = store.read_state("r").unwrap().unwrap();
+    assert_ne!(s.stations["harden"].status, Status::Completed);
+    assert_eq!(s.active_station, "harden");
+    let cp = s.stations["harden"].checkpoint.as_ref().expect("cp");
+    assert!(cp.entered_at.is_some());
+}
 
 // ───── checkpoint_decide approve → completes & advances to next Spec ─────
 
@@ -722,11 +745,12 @@ fn sealed_after_all_six_stations() {
         let mut reached = false;
         for _ in 0..10 {
             let t = run_tick(&store, "r").expect("tick");
-            if let RunAction::Checkpoint { station: s, .. } = &t.action {
-                if s == station {
-                    reached = true;
-                    break;
-                }
+            // The gate is a local Checkpoint or, for harden, ExternalReviewRequested.
+            let at_gate = matches!(&t.action, RunAction::Checkpoint { station: s, .. } if s == station)
+                || matches!(&t.action, RunAction::ExternalReviewRequested { station: s, .. } if s == station);
+            if at_gate {
+                reached = true;
+                break;
             }
         }
         assert!(reached, "did not reach {station} checkpoint");
@@ -1206,9 +1230,14 @@ macro_rules! full_station_walk_test {
             // Reflect
             let t = run_tick(&store, "r").unwrap();
             assert_eq!(action_name(&t.action), "reflect");
-            // Checkpoint
+            // The gate — a local checkpoint, or an external review for an
+            // external station (harden).
             let t = run_tick(&store, "r").unwrap();
-            assert_eq!(action_name(&t.action), "checkpoint");
+            let gate = action_name(&t.action);
+            assert!(
+                gate == "checkpoint" || gate == "external_review_requested",
+                "expected a gate action, got {gate}"
+            );
         }
     };
 }
@@ -1269,13 +1298,15 @@ fn next_station_helper_matches_factory() {
 
 #[test]
 fn all_station_phase_pairs_derive_expected_action() {
-    let expected = |p: StationPhase| -> &'static str {
+    let expected = |station: &str, p: StationPhase| -> &'static str {
         match p {
             StationPhase::Spec => "spec",
             StationPhase::Review => "review",
             StationPhase::Manufacture => "manufacture",
             StationPhase::Audit => "audit",
             StationPhase::Reflect => "reflect",
+            // The external station's gate surfaces as ExternalReviewRequested.
+            StationPhase::Checkpoint if station == "harden" => "external_review_requested",
             StationPhase::Checkpoint => "checkpoint",
         }
     };
@@ -1288,7 +1319,7 @@ fn all_station_phase_pairs_derive_expected_action() {
             }
             let pos = derive_position(&store, "r").expect("pos");
             let a = pos.action.expect("action");
-            assert_eq!(action_name(&a), expected(phase), "station {station} phase {phase:?}");
+            assert_eq!(action_name(&a), expected(station, phase), "station {station} phase {phase:?}");
             assert_eq!(action_station(&a), Some(station));
         }
     }
@@ -1424,7 +1455,9 @@ fn tick_result_action_matches_position_when_present() {
 fn tick_result_noop_when_position_null() {
     let (_d, store) = fresh("r");
     at_phase(&store, "r", "frame", StationPhase::Manufacture);
-    seed_unit(&store, "r", "frame", "u", Status::Pending, &["ghost"]);
+    // A dispatched, in-flight unit → null position (mid-wave noop). A dangling
+    // dep would instead be a UnitsInvalid decomposition error.
+    seed_unit(&store, "r", "frame", "u", Status::InProgress, &[]);
     let t = run_tick(&store, "r").unwrap();
     assert!(t.position.action.is_none());
     assert!(matches!(t.action, RunAction::Noop { .. }));
@@ -1524,7 +1557,9 @@ fn manufacture_mixed_statuses_dispatches_only_ready_pending() {
     at_phase(&store, "r", "frame", StationPhase::Manufacture);
     seed_unit(&store, "r", "frame", "done", Status::Completed, &[]);
     seed_unit(&store, "r", "frame", "ready", Status::Pending, &[]);
-    seed_unit(&store, "r", "frame", "blocked", Status::Pending, &["never"]);
+    // `blocked` waits on the still-pending `ready` (a real edge — a dangling
+    // dep would be a UnitsInvalid decomposition error).
+    seed_unit(&store, "r", "frame", "blocked", Status::Pending, &["ready"]);
     let units = manufacture_units(&store, "r");
     assert_eq!(units, vec!["ready".to_string()]);
 }
@@ -1811,7 +1846,8 @@ macro_rules! action_run_slug_test {
                 | RunAction::Manufacture { run, .. }
                 | RunAction::Audit { run, .. }
                 | RunAction::Reflect { run, .. }
-                | RunAction::Checkpoint { run, .. } => run.as_str(),
+                | RunAction::Checkpoint { run, .. }
+                | RunAction::ExternalReviewRequested { run, .. } => run.as_str(),
                 other => panic!("unexpected {other:?}"),
             };
             assert_eq!(run, "slug-x");
@@ -1828,7 +1864,7 @@ action_run_slug_test!(slug_harden_spec, "harden", StationPhase::Spec, "spec");
 action_run_slug_test!(slug_harden_review, "harden", StationPhase::Review, "review");
 action_run_slug_test!(slug_harden_audit, "harden", StationPhase::Audit, "audit");
 action_run_slug_test!(slug_harden_reflect, "harden", StationPhase::Reflect, "reflect");
-action_run_slug_test!(slug_harden_checkpoint, "harden", StationPhase::Checkpoint, "checkpoint");
+action_run_slug_test!(slug_harden_checkpoint, "harden", StationPhase::Checkpoint, "external_review_requested");
 
 // ───── Serialization tag per action variant (snake_case) ─────
 
@@ -1853,7 +1889,7 @@ action_serializes_tag_test!(ser_specify_review, "specify", StationPhase::Review,
 action_serializes_tag_test!(ser_shape_audit, "shape", StationPhase::Audit, "audit");
 action_serializes_tag_test!(ser_build_reflect, "build", StationPhase::Reflect, "reflect");
 action_serializes_tag_test!(ser_prove_manufacture, "prove", StationPhase::Manufacture, "manufacture");
-action_serializes_tag_test!(ser_harden_checkpoint, "harden", StationPhase::Checkpoint, "checkpoint");
+action_serializes_tag_test!(ser_harden_checkpoint, "harden", StationPhase::Checkpoint, "external_review_requested");
 
 // ───── Tick advances phase exactly one step per call (Spec→Review→…) ─────
 
@@ -1958,11 +1994,15 @@ macro_rules! station_phase_sequence_test {
             seen.push(action_name(&run_tick(&store, "r").unwrap().action));
             // Reflect.
             seen.push(action_name(&run_tick(&store, "r").unwrap().action));
-            // Checkpoint.
-            seen.push(action_name(&run_tick(&store, "r").unwrap().action));
+            // The gate (local checkpoint, or external review for harden).
+            let gate = action_name(&run_tick(&store, "r").unwrap().action);
             assert_eq!(
                 seen,
-                vec!["spec", "review", "manufacture", "audit", "reflect", "checkpoint"]
+                vec!["spec", "review", "manufacture", "audit", "reflect"]
+            );
+            assert!(
+                gate == "checkpoint" || gate == "external_review_requested",
+                "expected a gate action, got {gate}"
             );
         }
     };
@@ -2109,7 +2149,20 @@ checkpoint_kind_stable_test!(cp_stable_specify, "specify", CheckpointKind::Ask);
 checkpoint_kind_stable_test!(cp_stable_shape, "shape", CheckpointKind::Ask);
 checkpoint_kind_stable_test!(cp_stable_build, "build", CheckpointKind::Auto);
 checkpoint_kind_stable_test!(cp_stable_prove, "prove", CheckpointKind::Auto);
-checkpoint_kind_stable_test!(cp_stable_harden, "harden", CheckpointKind::External);
+
+// harden's external gate re-derives stably as ExternalReviewRequested.
+#[test]
+fn cp_stable_harden() {
+    let (_d, store) = fresh("r");
+    at_phase(&store, "r", "harden", StationPhase::Checkpoint);
+    for _ in 0..3 {
+        let pos = derive_position(&store, "r").unwrap();
+        match pos.action.unwrap() {
+            RunAction::ExternalReviewRequested { station, .. } => assert_eq!(station, "harden"),
+            other => panic!("got {other:?}"),
+        }
+    }
+}
 
 // ───── Empty-units Manufacture re-stamps Review (Spec fallback loop) ─────
 // At Manufacture with no units, derive yields Spec; a tick re-runs Spec's

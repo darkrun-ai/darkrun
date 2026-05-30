@@ -77,6 +77,32 @@ pub enum CheckpointKind {
     Await,
 }
 
+/// The run-level final gate that holds a fully-manufactured run *before* it
+/// seals — the parity for the predecessor's `pending_seal` / `intent_approved` tail.
+///
+/// When every station is locked but a `seal:` is declared, the manager emits
+/// `PendingSeal` instead of `Sealed`: the run waits on an external decision
+/// (e.g. a PR/MR merge) or an explicit await-gate before it is considered
+/// delivered. Absent (`None`) → the run seals as soon as the last station locks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SealKind {
+    /// Hold for an external surface (a PR/MR merge) before sealing.
+    External,
+    /// Hold on an await-gate decision before sealing.
+    Await,
+}
+
+impl SealKind {
+    /// The serde token for this seal kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SealKind::External => "external",
+            SealKind::Await => "await",
+        }
+    }
+}
+
 /// The outcome a Checkpoint produced when it last fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -224,6 +250,11 @@ pub struct RunFrontmatter {
     /// Git integration policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<RunGit>,
+    /// The run-level final gate. When set, a fully-manufactured run holds at
+    /// `PendingSeal` (awaiting an external merge or an await decision) instead
+    /// of sealing the moment the last station locks. `None` → seal immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal: Option<SealKind>,
 }
 
 /// A parsed Run document: frontmatter + markdown body.
@@ -281,6 +312,11 @@ pub struct UnitFrontmatter {
     /// The station this unit belongs to (injected when read from a station dir).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub station: Option<String>,
+    /// When `true`, the operator has rolled this unit back for spec revision:
+    /// the manager re-opens its spec (parity for the predecessor's `revise_unit_specs`)
+    /// and holds the station until the flag clears.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub revise: bool,
     /// Run-relative paths to artifacts the unit consumed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,

@@ -33,8 +33,8 @@
 
 use chrono::Utc;
 use darkrun_core::domain::{
-    Checkpoint, CheckpointKind, CheckpointOutcome, Run, RunFrontmatter, Station, StationPhase,
-    Status, Unit,
+    Checkpoint, CheckpointKind, CheckpointOutcome, Run, RunFrontmatter, SealKind, Station,
+    StationPhase, Status, Unit,
 };
 use darkrun_core::{RunState, StateStore};
 use serde::Serialize;
@@ -110,6 +110,65 @@ pub enum RunAction {
         station: String,
         path: String,
     },
+    /// Answer an open feedback item that is a *question* (needs a user
+    /// decision, not a code fix). Track B's question half — parity for the predecessor's
+    /// `feedback_question`. The agent surfaces it via `darkrun_question`.
+    FeedbackQuestion {
+        run: String,
+        station: String,
+        feedback_id: String,
+    },
+    /// The active station's decomposition is malformed and must be repaired
+    /// before manufacture — parity for the predecessor's `unit_naming_invalid`,
+    /// `unit_inputs_missing`, `unresolved_dependencies`, `dag_cycle_detected`
+    /// (all consolidated under one action with a `problem` discriminator).
+    UnitsInvalid {
+        run: String,
+        station: String,
+        /// What's wrong: `invalid_naming` | `unresolved_deps` | `dependency_cycle`.
+        problem: String,
+        /// The offending unit slugs.
+        units: Vec<String>,
+    },
+    /// A Unit's Pass loop exceeded its iteration budget — stop auto-looping and
+    /// escalate to the operator. Parity for the predecessor's `escalate` / `loop_halted`.
+    Escalate {
+        run: String,
+        station: String,
+        reason: String,
+    },
+    /// Persisted state is internally inconsistent (a unit points at a station
+    /// the factory doesn't define). Run a guarded repair before proceeding —
+    /// parity for the predecessor's `safe_intent_repair`.
+    SafeRepair {
+        run: String,
+        station: String,
+        reason: String,
+    },
+    /// The operator rolled units back for spec revision; re-open their specs
+    /// before continuing — parity for the predecessor's `revise_unit_specs`.
+    ReviseUnitSpecs {
+        run: String,
+        station: String,
+        units: Vec<String>,
+    },
+    /// The active station's gate is `external`: hand off to an external review
+    /// surface (open/annotate a PR/MR) and hold — parity for the predecessor's
+    /// `external_review_requested`. Distinct from a local `Checkpoint`.
+    ExternalReviewRequested {
+        run: String,
+        station: String,
+        /// The external target the review hangs off (e.g. a PR/MR ref); empty
+        /// until the agent opens one.
+        target: String,
+    },
+    /// Every station is locked but the run declares a final `seal:` gate — hold
+    /// for an external merge / await decision before sealing. Parity for
+    /// the predecessor's `pending_seal` / `intent_approved`.
+    PendingSeal {
+        run: String,
+        kind: SealKind,
+    },
     /// Every station is locked and the run is sealed.
     Sealed { run: String },
     /// Nothing to do this tick (mid-wave; outstanding subagents still working).
@@ -184,6 +243,18 @@ pub struct PromptContext {
     /// The drifted artifact path, for the drift track.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// What's structurally wrong, for `UnitsInvalid` (`invalid_naming` etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// The external review target, for `ExternalReviewRequested`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// A human-readable reason, for `Escalate` / `SafeRepair`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The run-level seal gate (`external` / `await`), for `PendingSeal`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seal: Option<String>,
     /// A free-form message (mid-wave noop).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -246,6 +317,131 @@ fn station_units<'a>(units: &'a [Unit], station: &str) -> Vec<&'a Unit> {
     units.iter().filter(|u| u.station() == station).collect()
 }
 
+/// The per-Unit Pass-loop iteration budget. A unit whose `pass` index climbs
+/// past this is escalated rather than looped forever — the darkrun parity for
+/// the predecessor's `loop_halted` / `escalate` runaway guard.
+const MAX_PASSES: u32 = 8;
+
+/// Structural validation of a station's decomposition, as a pure function of
+/// the units on disk. Returns the first problem found as `(problem_tag,
+/// offending_slugs)`, or `None` when the decomposition is well-formed.
+///
+/// Consolidates the predecessor's `unit_naming_invalid`, `unit_inputs_missing` /
+/// `unresolved_dependencies`, and `dag_cycle_detected` under one check (the
+/// same spirit as the predecessor's `elaborate_loop` consolidation).
+fn validate_units(all_units: &[Unit], su: &[&Unit]) -> Option<(String, Vec<String>)> {
+    // 1. Naming — every slug must be non-empty and kebab-ish (lowercase, no
+    //    whitespace). Catches `unit_naming_invalid`.
+    let bad_names: Vec<String> = su
+        .iter()
+        .filter(|u| {
+            let s = u.slug.trim();
+            s.is_empty() || s.chars().any(|c| c.is_whitespace() || c.is_ascii_uppercase())
+        })
+        .map(|u| u.slug.clone())
+        .collect();
+    if !bad_names.is_empty() {
+        return Some(("invalid_naming".to_string(), bad_names));
+    }
+
+    // 2. Unresolved deps — every `depends_on` must name a unit that exists in
+    //    the run. Catches `unit_inputs_missing` / `unresolved_dependencies`.
+    let known: std::collections::HashSet<&str> =
+        all_units.iter().map(|u| u.slug.as_str()).collect();
+    let unresolved: Vec<String> = su
+        .iter()
+        .filter(|u| {
+            u.frontmatter
+                .depends_on
+                .iter()
+                .any(|d| !known.contains(d.as_str()))
+        })
+        .map(|u| u.slug.clone())
+        .collect();
+    if !unresolved.is_empty() {
+        return Some(("unresolved_deps".to_string(), unresolved));
+    }
+
+    // 3. Dependency cycle among the station's units. Catches `dag_cycle_detected`.
+    if let Some(cycle) = first_cycle(su) {
+        return Some(("dependency_cycle".to_string(), cycle));
+    }
+    None
+}
+
+/// Detect a dependency cycle among `units`, returning the slugs on a cycle (in
+/// discovery order) if any. Only edges *within* the set count — edges that
+/// leave it are an unresolved-dep concern, not a cycle.
+fn first_cycle(units: &[&Unit]) -> Option<Vec<String>> {
+    use std::collections::HashMap;
+    let deps: HashMap<String, Vec<String>> = units
+        .iter()
+        .map(|u| (u.slug.clone(), u.frontmatter.depends_on.clone()))
+        .collect();
+    let mut color: HashMap<String, u8> = HashMap::new(); // 0=unseen 1=on-stack 2=done
+    let mut stack: Vec<String> = Vec::new();
+
+    fn dfs(
+        node: &str,
+        deps: &HashMap<String, Vec<String>>,
+        color: &mut HashMap<String, u8>,
+        stack: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        color.insert(node.to_string(), 1);
+        stack.push(node.to_string());
+        if let Some(ds) = deps.get(node) {
+            for dep in ds {
+                if !deps.contains_key(dep) {
+                    continue; // leaves the set — handled by unresolved_deps
+                }
+                match color.get(dep).copied().unwrap_or(0) {
+                    1 => {
+                        let start = stack.iter().position(|x| x == dep).unwrap_or(0);
+                        return Some(stack[start..].to_vec());
+                    }
+                    0 => {
+                        if let Some(c) = dfs(dep, deps, color, stack) {
+                            return Some(c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        stack.pop();
+        color.insert(node.to_string(), 2);
+        None
+    }
+
+    for u in units {
+        if color.get(&u.slug).copied().unwrap_or(0) == 0 {
+            stack.clear();
+            if let Some(c) = dfs(&u.slug, &deps, &mut color, &mut stack) {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+/// Persisted-state integrity check: a unit that points at a station the factory
+/// doesn't define means `state.json`/units have drifted out of sync. Returns a
+/// human-readable reason for the first such inconsistency — the trigger for a
+/// guarded `SafeRepair` (parity for the predecessor's `safe_intent_repair`).
+fn integrity_problem(factory: &FactoryDef, units: &[Unit]) -> Option<String> {
+    for u in units {
+        if let Some(st) = u.frontmatter.station.as_deref() {
+            if !st.is_empty() && factory.station(st).is_none() {
+                return Some(format!(
+                    "unit `{}` references station `{st}`, which the factory does not define",
+                    u.slug
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// Derive the station's current phase from its persisted state, defaulting to
 /// `Spec` for a freshly-entered station.
 fn station_phase(state: &RunState, station: &str) -> StationPhase {
@@ -278,14 +474,38 @@ fn walk_feedback(store: &StateStore, slug: &str, station: &str) -> Result<Option
     let raw = store.read_feedback_raw(slug)?;
     for (id, content) in raw {
         if feedback_open(&content) {
-            return Ok(Some(RunAction::FixFeedback {
-                run: slug.to_string(),
-                station: station.to_string(),
-                feedback_id: id,
-            }));
+            // A feedback item that is a *question* needs a user decision, not a
+            // code fix — route it to the question half of the track.
+            let action = if feedback_is_question(&content) {
+                RunAction::FeedbackQuestion {
+                    run: slug.to_string(),
+                    station: station.to_string(),
+                    feedback_id: id,
+                }
+            } else {
+                RunAction::FixFeedback {
+                    run: slug.to_string(),
+                    station: station.to_string(),
+                    feedback_id: id,
+                }
+            };
+            return Ok(Some(action));
         }
     }
     Ok(None)
+}
+
+/// Whether a feedback document is a *question* (needs a user decision) rather
+/// than a fix. Reads a `kind:` frontmatter line; `question` → true. Absent →
+/// false (a plain fix), keeping legacy feedback backward-compatible.
+fn feedback_is_question(raw: &str) -> bool {
+    for line in raw.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("kind:") {
+            return rest.trim().trim_matches('"').eq_ignore_ascii_case("question");
+        }
+    }
+    false
 }
 
 /// Whether a feedback document is still open (no terminal status line).
@@ -316,12 +536,23 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
     let station = match current_station(&factory, &state) {
         Some(s) => s.to_string(),
         None => {
-            // Every station locked → sealed.
+            // Every station locked. If the run declares a final `seal:` gate
+            // and hasn't been confirmed delivered, hold at PendingSeal
+            // (awaiting an external merge / await decision); otherwise seal.
+            let action = match run.frontmatter.seal {
+                Some(kind) if run.frontmatter.status != Status::Completed => {
+                    RunAction::PendingSeal {
+                        run: slug.to_string(),
+                        kind,
+                    }
+                }
+                _ => RunAction::Sealed {
+                    run: slug.to_string(),
+                },
+            };
             return Ok(Position {
                 track: Track::Run,
-                action: Some(RunAction::Sealed {
-                    run: slug.to_string(),
-                }),
+                action: Some(action),
             });
         }
     };
@@ -352,6 +583,72 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
         return Ok(Position {
             track: Track::Feedback,
             action: Some(action),
+        });
+    }
+
+    // ── Track A preemptions ──────────────────────────────────────────────
+    // Before walking the phase machine, the manager catches malformed or
+    // inconsistent persisted state and routes a repair action — the run can't
+    // make sound forward progress until it's fixed. All pure reads of disk.
+    let su_all = station_units(&units, &station);
+
+    // Integrity: a unit pointing at a station the factory doesn't define.
+    if let Some(reason) = integrity_problem(&factory, &units) {
+        return Ok(Position {
+            track: Track::Run,
+            action: Some(RunAction::SafeRepair {
+                run: slug.to_string(),
+                station: station.clone(),
+                reason,
+            }),
+        });
+    }
+
+    // Operator rollback: units flagged `revise` re-open the station's spec.
+    let revising: Vec<String> = su_all
+        .iter()
+        .filter(|u| u.frontmatter.revise)
+        .map(|u| u.slug.clone())
+        .collect();
+    if !revising.is_empty() {
+        return Ok(Position {
+            track: Track::Run,
+            action: Some(RunAction::ReviseUnitSpecs {
+                run: slug.to_string(),
+                station: station.clone(),
+                units: revising,
+            }),
+        });
+    }
+
+    // Malformed decomposition: invalid naming / unresolved deps / dep cycle.
+    if !su_all.is_empty() {
+        if let Some((problem, bad)) = validate_units(&units, &su_all) {
+            return Ok(Position {
+                track: Track::Run,
+                action: Some(RunAction::UnitsInvalid {
+                    run: slug.to_string(),
+                    station: station.clone(),
+                    problem,
+                    units: bad,
+                }),
+            });
+        }
+    }
+
+    // Runaway Pass loop: a unit past its iteration budget escalates instead of
+    // looping forever.
+    if let Some(u) = su_all.iter().find(|u| u.frontmatter.pass > MAX_PASSES) {
+        return Ok(Position {
+            track: Track::Run,
+            action: Some(RunAction::Escalate {
+                run: slug.to_string(),
+                station: station.clone(),
+                reason: format!(
+                    "unit `{}` has run {} passes (budget {MAX_PASSES}) — escalating",
+                    u.slug, u.frontmatter.pass
+                ),
+            }),
         });
     }
 
@@ -418,11 +715,24 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
             run: slug.to_string(),
             station: station.clone(),
         },
-        StationPhase::Checkpoint => RunAction::Checkpoint {
-            run: slug.to_string(),
-            station: station.clone(),
-            kind: def.checkpoint,
-        },
+        StationPhase::Checkpoint => {
+            // An `external` gate hands off to an external review surface (a
+            // PR/MR) rather than a local prompt — a distinct action so the
+            // agent gets focused "open/annotate the review" instructions.
+            if matches!(def.checkpoint, CheckpointKind::External) {
+                RunAction::ExternalReviewRequested {
+                    run: slug.to_string(),
+                    station: station.clone(),
+                    target: String::new(),
+                }
+            } else {
+                RunAction::Checkpoint {
+                    run: slug.to_string(),
+                    station: station.clone(),
+                    kind: def.checkpoint,
+                }
+            }
+        }
     };
 
     Ok(Position {
@@ -445,7 +755,10 @@ fn cascade_repo_root(store: &StateStore) -> std::path::PathBuf {
 }
 
 /// Serde tag for a [`RunAction`] (its `action` field), used to pick a template.
-fn action_tag(action: &RunAction) -> &'static str {
+///
+/// Public so tests and tooling can name an action without re-deriving the
+/// mapping (the single source of truth for action → tag).
+pub fn action_tag(action: &RunAction) -> &'static str {
     match action {
         RunAction::Spec { .. } => "spec",
         RunAction::Review { .. } => "review",
@@ -454,7 +767,14 @@ fn action_tag(action: &RunAction) -> &'static str {
         RunAction::Reflect { .. } => "reflect",
         RunAction::Checkpoint { .. } => "checkpoint",
         RunAction::FixFeedback { .. } => "fix_feedback",
+        RunAction::FeedbackQuestion { .. } => "feedback_question",
         RunAction::ResolveDrift { .. } => "resolve_drift",
+        RunAction::UnitsInvalid { .. } => "units_invalid",
+        RunAction::Escalate { .. } => "escalate",
+        RunAction::SafeRepair { .. } => "safe_repair",
+        RunAction::ReviseUnitSpecs { .. } => "revise_unit_specs",
+        RunAction::ExternalReviewRequested { .. } => "external_review_requested",
+        RunAction::PendingSeal { .. } => "pending_seal",
         RunAction::Sealed { .. } => "sealed",
         RunAction::Noop { .. } => "noop",
     }
@@ -477,8 +797,14 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         | RunAction::Reflect { station, .. }
         | RunAction::Checkpoint { station, .. }
         | RunAction::FixFeedback { station, .. }
-        | RunAction::ResolveDrift { station, .. } => Some(station.clone()),
-        RunAction::Sealed { .. } | RunAction::Noop { .. } => None,
+        | RunAction::FeedbackQuestion { station, .. }
+        | RunAction::ResolveDrift { station, .. }
+        | RunAction::UnitsInvalid { station, .. }
+        | RunAction::Escalate { station, .. }
+        | RunAction::SafeRepair { station, .. }
+        | RunAction::ReviseUnitSpecs { station, .. }
+        | RunAction::ExternalReviewRequested { station, .. } => Some(station.clone()),
+        RunAction::PendingSeal { .. } | RunAction::Sealed { .. } | RunAction::Noop { .. } => None,
     };
 
     let mut ctx = PromptContext {
@@ -529,11 +855,29 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         RunAction::Checkpoint { kind, .. } => {
             ctx.kind = Some(*kind);
         }
-        RunAction::FixFeedback { feedback_id, .. } => {
+        RunAction::FixFeedback { feedback_id, .. }
+        | RunAction::FeedbackQuestion { feedback_id, .. } => {
             ctx.feedback_id = Some(feedback_id.clone());
         }
         RunAction::ResolveDrift { path, .. } => {
             ctx.path = Some(path.clone());
+        }
+        RunAction::UnitsInvalid { problem, units, .. } => {
+            ctx.problem = Some(problem.clone());
+            ctx.units = units.clone();
+        }
+        RunAction::ReviseUnitSpecs { units, .. } => {
+            ctx.units = units.clone();
+        }
+        RunAction::Escalate { reason, .. } | RunAction::SafeRepair { reason, .. } => {
+            ctx.reason = Some(reason.clone());
+        }
+        RunAction::ExternalReviewRequested { target, .. } => {
+            ctx.target = Some(target.clone());
+            ctx.kind = Some(CheckpointKind::External);
+        }
+        RunAction::PendingSeal { kind, .. } => {
+            ctx.seal = Some(kind.as_str().to_string());
         }
         RunAction::Noop { message, .. } => {
             ctx.message = Some(message.clone());
@@ -670,8 +1014,20 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
                 complete_station(&mut state, &factory, station, &now)?;
             }
         }
-        // Feedback / drift / noop / sealed actions don't advance the run
-        // phase machine on their own.
+        RunAction::ExternalReviewRequested { station, .. } => {
+            // Enter the external checkpoint and hold — no outcome until
+            // checkpoint_decide lands a decision (mirrors a local gate's entry).
+            let st = ensure_station(&mut state, &factory, station)?;
+            st.checkpoint = Some(Checkpoint {
+                kind: CheckpointKind::External,
+                entered_at: Some(now.clone()),
+                outcome: None,
+            });
+            state.active_station = station.clone();
+        }
+        // Validation / repair / feedback / drift / seal / noop actions are all
+        // HOLDS — they don't advance the run phase machine on their own. The
+        // next tick re-derives once the agent has cleared the condition.
         _ => {}
     }
 

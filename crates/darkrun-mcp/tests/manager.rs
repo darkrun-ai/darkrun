@@ -45,7 +45,14 @@ fn walk_to_checkpoint(store: &StateStore, run: &str, station: &str) -> RunAction
     for _ in 0..8 {
         let t = run_tick(store, run).expect("tick");
         match &t.action {
-            RunAction::Checkpoint { station: s, .. } if s == station => return t.action,
+            // The gate — a local Checkpoint or, for an external station, an
+            // ExternalReviewRequested.
+            RunAction::Checkpoint { station: s, .. }
+            | RunAction::ExternalReviewRequested { station: s, .. }
+                if s == station =>
+            {
+                return t.action
+            }
             RunAction::Spec { station: s, .. }
             | RunAction::Review { station: s, .. }
             | RunAction::Manufacture { station: s, .. }
@@ -93,9 +100,9 @@ fn full_run_walks_all_six_stations_to_sealed() {
         "harden"
     );
 
-    // harden: external → holds until decide, like ask.
+    // harden: external → surfaces as ExternalReviewRequested, holds until decide.
     let cp = walk_to_checkpoint(&store, "r", "harden");
-    assert!(matches!(cp, RunAction::Checkpoint { kind: CheckpointKind::External, .. }));
+    assert!(matches!(cp, RunAction::ExternalReviewRequested { .. }));
     let s = store.read_state("r").unwrap().unwrap();
     assert_eq!(s.stations["harden"].status, Status::InProgress);
 
@@ -155,18 +162,8 @@ fn every_phase_appears_in_order_for_a_station() {
 }
 
 fn action_name(a: &RunAction) -> &'static str {
-    match a {
-        RunAction::Spec { .. } => "spec",
-        RunAction::Review { .. } => "review",
-        RunAction::Manufacture { .. } => "manufacture",
-        RunAction::Audit { .. } => "audit",
-        RunAction::Reflect { .. } => "reflect",
-        RunAction::Checkpoint { .. } => "checkpoint",
-        RunAction::FixFeedback { .. } => "fix_feedback",
-        RunAction::ResolveDrift { .. } => "resolve_drift",
-        RunAction::Sealed { .. } => "sealed",
-        RunAction::Noop { .. } => "noop",
-    }
+    // Delegate to the crate's single source of truth for action → tag.
+    darkrun_mcp::position::action_tag(a)
 }
 
 #[test]
@@ -176,20 +173,20 @@ fn manufacture_holds_mid_wave_when_units_in_flight() {
     run_tick(&store, "r").unwrap(); // spec → review
     run_tick(&store, "r").unwrap(); // review → manufacture
 
-    // A pending unit with an UNMET dependency: no wave-ready unit, not all
-    // complete → mid-wave noop.
-    let blocked = Unit {
+    // A dispatched unit still in flight (InProgress): no wave-ready Pending
+    // unit, and not all complete → mid-wave noop. (A pending unit with a
+    // dangling dep would instead be a UnitsInvalid decomposition error.)
+    let in_flight = Unit {
         slug: "u1".into(),
         frontmatter: UnitFrontmatter {
-            status: Status::Pending,
+            status: Status::InProgress,
             station: Some("frame".into()),
-            depends_on: vec!["ghost".into()],
             ..Default::default()
         },
         title: "u1".into(),
         body: String::new(),
     };
-    store.write_unit("r", &blocked).unwrap();
+    store.write_unit("r", &in_flight).unwrap();
 
     let pos = derive_position(&store, "r").unwrap();
     assert_eq!(pos.track, Track::Run);
@@ -325,7 +322,7 @@ fn sealed_when_all_stations_complete() {
                 kind: CheckpointKind::Ask | CheckpointKind::External | CheckpointKind::Await,
                 ..
             }
-        );
+        ) || matches!(cp, RunAction::ExternalReviewRequested { .. });
         if gated {
             checkpoint_decide(&store, "r", true, None).expect("approve");
         }

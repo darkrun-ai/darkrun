@@ -731,6 +731,7 @@ fn roundtrip_run_full_frontmatter() {
             auto_merge: true,
             auto_squash: false,
         }),
+        seal: None,
     };
     let doc = frontmatter::serialize(&fm, "# Body\n").expect("ser");
     let (back, _) = parse_run(&doc);
@@ -899,6 +900,7 @@ fn roundtrip_unit_full() {
         worker: "builder".into(),
         model: Some("opus".into()),
         station: Some("frame".into()),
+        revise: false,
         inputs: vec!["in/x.md".into()],
         outputs: vec!["out/y.md".into(), "out/z.md".into()],
         started_at: Some("2026-05-30T00:00:00Z".into()),

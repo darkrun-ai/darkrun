@@ -504,11 +504,19 @@ fn full_run_action_log_has_six_reflects() {
 fn full_run_action_log_has_six_checkpoints() {
     let h = Harness::start("full");
     let log = h.run_to_seal();
+    // Five stations gate locally (Checkpoint); harden's external gate surfaces
+    // as ExternalReviewRequested — six gates total.
     let cps = log
         .iter()
         .filter(|a| matches!(a, RunAction::Checkpoint { .. }))
         .count();
-    assert_eq!(cps, 6);
+    let external = log
+        .iter()
+        .filter(|a| matches!(a, RunAction::ExternalReviewRequested { .. }))
+        .count();
+    assert_eq!(cps, 5);
+    assert_eq!(external, 1);
+    assert_eq!(cps + external, 6);
 }
 
 #[test]
@@ -540,10 +548,13 @@ fn full_run_spec_station_order_is_canonical() {
 fn full_run_checkpoint_station_order_is_canonical() {
     let h = Harness::start("full");
     let log = h.run_to_seal();
+    // Every station's gate, in order — a local Checkpoint for five, an external
+    // review gate for harden.
     let cp_stations: Vec<String> = log
         .iter()
         .filter_map(|a| match a {
-            RunAction::Checkpoint { station, .. } => Some(station.clone()),
+            RunAction::Checkpoint { station, .. }
+            | RunAction::ExternalReviewRequested { station, .. } => Some(station.clone()),
             _ => None,
         })
         .collect();
@@ -554,10 +565,13 @@ fn full_run_checkpoint_station_order_is_canonical() {
 fn full_run_checkpoint_kinds_in_order() {
     let h = Harness::start("full");
     let log = h.run_to_seal();
+    // The external gate (harden) carries no `kind` field — it IS the external
+    // case — so map it to External to read the canonical gate-kind sequence.
     let kinds: Vec<CheckpointKind> = log
         .iter()
         .filter_map(|a| match a {
             RunAction::Checkpoint { kind, .. } => Some(*kind),
+            RunAction::ExternalReviewRequested { .. } => Some(CheckpointKind::External),
             _ => None,
         })
         .collect();
@@ -818,12 +832,15 @@ fn wave_blocked_unit_keeps_station_in_manufacture() {
     let h = Harness::start("blk");
     h.tick();
     h.tick();
-    h.decompose("frame", &[("u1", &[]), ("u2", &["missing-dep"])]);
-    h.tick(); // dispatch u1
-    h.complete_unit("u1");
-    // u2 depends on a never-existing unit → never ready, never complete.
+    // u2 depends on u1 (a real edge — an unresolved/dangling dep would be a
+    // UnitsInvalid decomposition error, not a legitimate block).
+    h.decompose("frame", &[("u1", &[]), ("u2", &["u1"])]);
+    h.tick(); // dispatch the ready wave (u1)
+    // u1 is dispatched and in-flight (not yet locked); u2 is blocked behind it.
+    h.set_unit_status("u1", Status::InProgress);
+    // No wave-ready Pending unit (u1 is in-flight, u2 blocked on incomplete u1)
+    // and not all complete → mid-wave noop.
     let pos = derive_position(&h.store, "blk").unwrap();
-    // No wave-ready and not all complete → mid-wave noop.
     assert!(pos.action.is_none());
 }
 
