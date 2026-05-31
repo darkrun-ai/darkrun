@@ -765,10 +765,28 @@ impl DarkrunServer {
         };
         let state = store.read_state(&input.slug).ok().flatten();
         let position = crate::position::derive_position(&store, &input.slug).ok();
-        // Bring up the desktop interface: raise the run's review surface so the
-        // desktop app (the only interactive surface darkrun drives) shows it.
-        // The structured state is returned too, for the agent.
+        // Bring up the desktop interface: raise the run's review surface, then
+        // LAUNCH the desktop app pointed at it when none is already connected.
+        // The desktop is the only interactive surface darkrun drives. The
+        // structured state is returned too, for the agent.
         let _ = crate::sessions::create_show(&self.sessions, &store, &input.slug);
+        let desktop = if self.sessions.live_connections() > 0 {
+            // A desktop is already connected; its home poller navigates to the run.
+            serde_json::json!({ "status": "connected" })
+        } else if let Some(addr) = self.announced_addr {
+            match crate::desktop::spawn(self.repo_root.as_ref(), addr.port()) {
+                Some(bin) => serde_json::json!({
+                    "status": "launched",
+                    "bin": bin.to_string_lossy(),
+                }),
+                None => serde_json::json!({
+                    "status": "not_found",
+                    "hint": "darkrun-desktop binary not found — set DARKRUN_DESKTOP or build it (cargo build -p darkrun-desktop)",
+                }),
+            }
+        } else {
+            serde_json::json!({ "status": "no_engine_port" })
+        };
         ok_json(&serde_json::json!({
             "run": run,
             "state": state,
@@ -777,7 +795,7 @@ impl DarkrunServer {
                 "surface": "desktop",
                 "session_id": input.slug,
                 "port": self.announced_addr.map(|a| a.port()),
-                "note": "Raised in the darkrun desktop app — open it (darkrun serve) to view this run.",
+                "desktop": desktop,
             },
         }))
     }

@@ -124,6 +124,13 @@ impl SessionRegistry {
         guard.contains_key(id)
     }
 
+    /// The number of live WebSocket subscribers across all sessions — a proxy
+    /// for "is the desktop app connected". `0` means nothing is listening, so the
+    /// engine should launch the desktop app.
+    pub fn live_connections(&self) -> u64 {
+        self.ws_session_count.load(Ordering::Acquire)
+    }
+
     /// Remove a session and drop its broadcast channel (closing subscribers).
     pub fn remove(&self, id: &str) -> Option<SessionPayload> {
         let mut guard = self.inner.lock().expect("session registry poisoned");
