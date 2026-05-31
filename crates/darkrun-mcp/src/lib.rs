@@ -53,6 +53,8 @@ pub mod drift;
 pub mod error;
 pub mod factory;
 pub mod feedback;
+pub mod gate;
+pub mod meta;
 pub mod position;
 pub mod proof;
 pub mod reflection;
@@ -62,6 +64,7 @@ pub mod sessions;
 pub mod skill_bridge;
 pub mod tools;
 pub mod units;
+pub mod zap;
 
 pub use change::{change_request_intent, ChangeRequestIntent};
 pub use error::{McpError, Result};

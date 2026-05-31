@@ -277,6 +277,57 @@ pub struct DriftAcceptInput {
     pub path: String,
 }
 
+/// Input for `darkrun_changelog` — optionally scope to one release.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ChangelogInput {
+    /// A specific version (e.g. `0.1.0`); omit for the whole changelog.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// Input for `darkrun_zap` — stateless single-task execution.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ZapInput {
+    /// The task to run straight through a station's Worker loop.
+    pub task: String,
+    /// The factory (defaults to `software`).
+    #[serde(default)]
+    pub factory: Option<String>,
+    /// The station (defaults to the factory's build-class station).
+    #[serde(default)]
+    pub station: Option<String>,
+}
+
+/// Input for `darkrun_report` — submit feedback about darkrun itself.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ReportInput {
+    /// The synthesized report (what happened, expected, repro).
+    pub message: String,
+    /// Optional contact email.
+    #[serde(default)]
+    pub contact_email: Option<String>,
+    /// Optional reporter name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Input for `darkrun_gate_review` — review the working tree before a gate.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct GateReviewInput {
+    /// The run slug (for context; the diff is the repo working tree).
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+/// Empty input for tools that take no arguments.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct NoInput {}
+
 /// Input for `darkrun_feedback_list`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -831,6 +882,80 @@ impl DarkrunServer {
             ))),
             Err(e) => Ok(err_text(e)),
         }
+    }
+
+    // ── Meta / utility ───────────────────────────────────────────────────
+
+    /// Report the running engine/plugin version, build, target, and entry.
+    #[tool(
+        name = "darkrun_version_info",
+        description = "Report the running darkrun engine version, plugin version, build kind, target, and entry point."
+    )]
+    pub fn darkrun_version_info(
+        &self,
+        Parameters(_): Parameters<NoInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        ok_json(&crate::meta::version_info())
+    }
+
+    /// Surface the changelog, optionally for one release.
+    #[tool(
+        name = "darkrun_changelog",
+        description = "Show the darkrun changelog; pass a version to scope to one release."
+    )]
+    pub fn darkrun_changelog(
+        &self,
+        Parameters(input): Parameters<ChangelogInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let text = crate::meta::changelog(input.version.as_deref());
+        ok_json(&serde_json::json!({ "changelog": text }))
+    }
+
+    /// Capture a feedback/bug report about darkrun.
+    #[tool(
+        name = "darkrun_report",
+        description = "Capture a feedback or bug report about darkrun (saved locally; no hosted intake yet)."
+    )]
+    pub fn darkrun_report(
+        &self,
+        Parameters(input): Parameters<ReportInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        match crate::meta::report(
+            self.repo_root.as_ref(),
+            &input.message,
+            input.contact_email.as_deref(),
+            input.name.as_deref(),
+        ) {
+            Ok(r) => ok_json(&r),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Resolve a stateless single-task zap (factory/station + Worker loop).
+    #[tool(
+        name = "darkrun_zap",
+        description = "Resolve a stateless single-task run: the factory/station and its Worker loop, with the run/verify/commit procedure."
+    )]
+    pub fn darkrun_zap(
+        &self,
+        Parameters(input): Parameters<ZapInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        match crate::zap::zap(&input.task, input.factory.as_deref(), input.station.as_deref()) {
+            Ok(z) => ok_json(&z),
+            Err(e) => ok_json(&e),
+        }
+    }
+
+    /// Compute the working-tree diff and review instructions for a gate.
+    #[tool(
+        name = "darkrun_gate_review",
+        description = "Compute the working-tree diff and return review instructions for a pre-checkpoint code review."
+    )]
+    pub fn darkrun_gate_review(
+        &self,
+        Parameters(_): Parameters<GateReviewInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        ok_json(&crate::gate::gate_review(self.repo_root.as_ref()))
     }
 
     /// List a run's feedback findings.
