@@ -6,10 +6,10 @@
 //! the factory vocabulary.
 //!
 //! ```text
-//! darkrun · add-healthcheck ●●◉○○○ build ❯ execute · 3/8 units
+//! darkrun · add-healthcheck · software ●●◉○○○ build ❯ execute · 3/8 units
 //! ```
 //!
-//! - the **darkrun** wordmark brand mark (dark bold · run regular), then the Run slug
+//! - the **darkrun** wordmark brand mark (dark bold · run regular), then the Run slug, then the factory
 //! - the **station pipeline**: `●` complete · `◉` active · `○` pending
 //! - the active **station**, a flow mark (`❯` running · `⊘` gated at a
 //!   non-auto Checkpoint), and the **phase** (color-coded)
@@ -37,6 +37,7 @@ const BRAND: &str = "\x1b[1;38;5;81mdark\x1b[0m\x1b[38;5;81mrun\x1b[0m";
 // Palette (xterm-256). The phase hues double as the design system's semantic
 // accents (see [[darkrun-brand]]).
 const C_SLUG: &str = "1;38;5;255"; // bright white bold — the run slug
+const C_FACTORY: &str = "38;5;245"; // grey — the factory (methodology) name
 const C_DONE: &str = "38;5;71"; // green — a completed station pip
 const C_PENDING: &str = "38;5;243"; // dim grey — a pending pip
 const C_DIM: &str = "38;5;240"; // delimiters + the unit aggregate
@@ -198,6 +199,11 @@ pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
         ),
         None => slug_painted,
     };
+    // The factory (methodology) driving the run, linked to its catalog page.
+    let factory_disp = osc8(
+        &format!("{base}/factories/{}/", run.frontmatter.factory),
+        &paint(C_FACTORY, &run.frontmatter.factory),
+    );
     let station_disp = osc8(
         &format!(
             "{base}/factories/{}/stations/{}/",
@@ -213,8 +219,9 @@ pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
     let phase_disp = paint(phase_code, phase_label);
     let sep = paint(C_DIM, "·");
 
-    let mut line =
-        format!("{brand} {sep} {slug_disp} {pipeline} {station_disp} {flow} {phase_disp}");
+    let mut line = format!(
+        "{brand} {sep} {slug_disp} {sep} {factory_disp} {pipeline} {station_disp} {flow} {phase_disp}"
+    );
     if total > 0 {
         line.push_str(&format!(
             " {sep} {}",
@@ -299,6 +306,7 @@ pub fn install(global: bool, repo: &Path, command: &str) -> Result<(), Dyn> {
         "type": "command",
         "command": command,
         "padding": 0,
+        "refreshInterval": 1,
     });
     write_json(&settings_file, &settings)?;
     println!(
