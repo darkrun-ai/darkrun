@@ -36,7 +36,32 @@ enum Load {
 #[component]
 pub fn HomeApp(cfg: ConnConfig) -> Element {
     // The session id of the run currently opened into Review, if any.
-    let opened = use_signal(|| None::<String>);
+    let mut opened = use_signal(|| None::<String>);
+
+    // Watch the `current` focus channel: when the agent calls `darkrun_show`,
+    // the engine raises that run under `current`, and the home navigates to it.
+    // We navigate only when the focus *changes* — so a back-out (`opened = None`)
+    // isn't immediately undone by the next poll. Signals are Copy, so the poller
+    // captures these and the render still uses `opened`.
+    let mut last_focus = use_signal(|| None::<String>);
+    {
+        let cfg = cfg.clone();
+        use_future(move || {
+            let cfg = cfg.clone();
+            async move {
+                loop {
+                    let focus = wire::fetch_current_focus(&cfg).await;
+                    if *last_focus.peek() != focus {
+                        last_focus.set(focus.clone());
+                        if let Some(slug) = focus {
+                            opened.set(Some(slug));
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                }
+            }
+        });
+    }
 
     let shell = "padding:24px;display:flex;flex-direction:column;gap:16px;\
                  max-width:880px;margin:0 auto;";

@@ -280,6 +280,23 @@ pub async fn fetch_runs(cfg: &ConnConfig) -> Result<RunListPayload, WireError> {
     get_json(&cfg.authority(), &cfg.runs_path()).await
 }
 
+/// GET the `current` focus session and return the run slug it names, if any.
+///
+/// `darkrun_show` upserts a Review payload under the `current` session id whose
+/// `run_slug` is the run to display; the home screen polls this to navigate when
+/// the agent raises a run. `None` when no focus is set or the engine is
+/// unreachable (the home then just stays on the run list).
+pub async fn fetch_current_focus(cfg: &ConnConfig) -> Option<String> {
+    let v: serde_json::Value = get_json(&cfg.authority(), "/api/session/current").await.ok()?;
+    if v.get("session_type").and_then(|t| t.as_str()) != Some("review") {
+        return None;
+    }
+    v.get("run_slug")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 /// GET a single run's detail (`/api/runs/:slug`) and decode it into a
 /// [`RunDetailPayload`].
 pub async fn fetch_run_detail(

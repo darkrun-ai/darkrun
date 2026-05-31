@@ -30,12 +30,44 @@
 
 use darkrun_api::session::{
     DirectionArchetype, DirectionSessionPayload, PickerKind, PickerOption, PickerSessionPayload,
-    QuestionOption, QuestionSessionPayload, SessionPayload,
+    QuestionOption, QuestionSessionPayload, ReviewSessionPayload, SessionPayload,
 };
 use darkrun_api::SessionStatus;
+use darkrun_core::StateStore;
 use serde::Serialize;
 
 use crate::error::{McpError, Result};
+
+/// The focus channel the desktop home watches: when a Review payload appears
+/// under this session id, the app navigates to the run it names.
+pub const CURRENT_SESSION: &str = "current";
+
+/// Raise a run's review surface for the **desktop app** — the only interactive
+/// surface darkrun drives. Builds a [`ReviewSessionPayload`] from the run's real
+/// state and upserts it twice: once under the run slug (the id the desktop
+/// subscribes to for the live feed) and once under [`CURRENT_SESSION`] (the
+/// focus pointer the home screen watches so it navigates to this run). Returns
+/// the run slug — the session id the desktop renders.
+pub fn create_show(registry: &SessionRegistry, store: &StateStore, slug: &str) -> Result<String> {
+    let run = store.read_run(slug)?;
+    let units = store.read_units(slug)?;
+    let run_json = serde_json::to_value(&run).ok();
+    let unit_jsons: Vec<serde_json::Value> =
+        units.iter().filter_map(|u| serde_json::to_value(u).ok()).collect();
+    let build = |session_id: &str| {
+        SessionPayload::Review(ReviewSessionPayload {
+            session_id: session_id.to_string(),
+            status: SessionStatus::Pending,
+            run_slug: Some(slug.to_string()),
+            run: run_json.clone(),
+            units: unit_jsons.clone(),
+            ..Default::default()
+        })
+    };
+    registry.upsert(build(slug));
+    registry.upsert(build(CURRENT_SESSION));
+    Ok(slug.to_string())
+}
 
 /// The in-memory interactive-session registry shared between the MCP tool
 /// handlers and the in-process HTTP/WS server. Re-exported from `darkrun-http`
@@ -414,6 +446,30 @@ mod tests {
 
     fn registry() -> SessionRegistry {
         SessionRegistry::new()
+    }
+
+    #[test]
+    fn create_show_raises_run_review_under_slug_and_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        crate::position::run_start(&store, "r", "software", None, "continuous").unwrap();
+        let reg = registry();
+
+        let id = create_show(&reg, &store, "r").expect("show");
+        assert_eq!(id, "r");
+
+        // The run is reachable both under its slug (the desktop's live feed) and
+        // under `current` (the focus pointer the home navigates to).
+        for sid in ["r", CURRENT_SESSION] {
+            match reg.get(sid).expect("session present") {
+                SessionPayload::Review(rev) => {
+                    assert_eq!(rev.session_id, sid);
+                    assert_eq!(rev.run_slug.as_deref(), Some("r"));
+                    assert!(rev.run.is_some(), "run json populated");
+                }
+                other => panic!("expected a review session, got {other:?}"),
+            }
+        }
     }
 
     fn q_opt(id: &str, label: &str) -> QuestionOptionSpec {

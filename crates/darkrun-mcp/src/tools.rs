@@ -765,10 +765,20 @@ impl DarkrunServer {
         };
         let state = store.read_state(&input.slug).ok().flatten();
         let position = crate::position::derive_position(&store, &input.slug).ok();
+        // Bring up the desktop interface: raise the run's review surface so the
+        // desktop app (the only interactive surface darkrun drives) shows it.
+        // The structured state is returned too, for the agent.
+        let _ = crate::sessions::create_show(&self.sessions, &store, &input.slug);
         ok_json(&serde_json::json!({
             "run": run,
             "state": state,
             "position": position,
+            "showing": {
+                "surface": "desktop",
+                "session_id": input.slug,
+                "port": self.announced_addr.map(|a| a.port()),
+                "note": "Raised in the darkrun desktop app — open it (darkrun serve) to view this run.",
+            },
         }))
     }
 
