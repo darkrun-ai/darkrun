@@ -1,45 +1,35 @@
-//! `/browse` — the web workspace explorer.
+//! `/browse` — the web viewer for a *published / remote* workspace.
 //!
-//! Browsing runs in the **website**, not the desktop app: you open a project's
-//! `.darkrun/` workspace and explore its runs, stations, units, and artifacts —
-//! read-only, in the browser. (Review — the interactive annotate/decide surface
-//! — stays in the desktop app so it never takes over your browser.)
+//! The website browses runs read-only: point it at a repository and it renders
+//! that workspace's runs, stations, units, and artifacts in the browser. There
+//! is deliberately **no local-folder picker here** — picking and opening a local
+//! workspace (and reviewing it) is the **desktop app's** job. The agent never
+//! opens a browser; the desktop app is the only interactive surface it drives.
 //!
-//! Two entry points, mirroring how a workspace reaches the browser:
-//! - **Local folder** — pick a directory containing a `.darkrun/` folder; the
-//!   files are read client-side, nothing leaves your machine.
-//! - **Remote repository** — paste a repo URL to browse its workspace.
-//!
-//! The engine's HTTP/WS contract (`darkrun_api::ROUTES`) is listed as reference
-//! for the live-engine path.
+//! The engine's HTTP/WS contract (`darkrun_api::ROUTES`) is listed as reference.
 
 use darkrun_api::{HttpMethod, ROUTES};
 use darkrun_ui::prelude::*;
 
 use crate::ui::SectionHead;
 
-/// `/browse` — open a darkrun workspace and explore its runs, in the browser.
+/// `/browse` — view a published/remote darkrun workspace in the browser.
 #[component]
 pub fn Browse() -> Element {
     rsx! {
         SectionHead {
             kicker: "browse a workspace".to_string(),
-            title: "Browse a darkrun workspace".to_string(),
+            title: "Browse a published workspace".to_string(),
             lead: Some(
-                "Explore runs, stations, units, and artifacts from any darkrun workspace \u{2014} \
-                 read-only, right in your browser. Open a local project folder or point at a \
-                 remote repository."
+                "View a darkrun workspace's runs, stations, units, and artifacts read-only, \
+                 right in your browser. Point at a repository to render its published workspace."
                     .to_string(),
             ),
         }
 
-        // Entry point 1 — a local project folder, read client-side.
-        Dropzone {}
-
-        // Entry point 2 — a remote repository.
         RemoteRepo {}
 
-        ClientSideNote {}
+        DesktopForLocal {}
 
         // Reference: the live-engine contract the desktop review app speaks.
         div { style: "margin-top:32px;",
@@ -55,13 +45,13 @@ pub fn Browse() -> Element {
                     "font-family:{};font-size:14px;color:{};margin:0 0 18px;max-width:62ch;",
                     tokens::FONT_SANS, tokens::TEXT_MUTED,
                 ),
-                "For reference: the HTTP / WS routes a running engine exposes. A live browse \
+                "For reference: the HTTP / WS routes a running engine exposes. The desktop app \
                  reads "
                 code {
                     style: format!("font-family:{};color:{};", tokens::FONT_MONO, tokens::ACCENT),
                     "GET /api/runs"
                 }
-                "; the desktop review app streams each run over the session socket."
+                " and streams each run over the session socket."
             }
         }
 
@@ -79,46 +69,11 @@ pub fn Browse() -> Element {
     }
 }
 
-/// The local-folder dropzone (open a directory containing a `.darkrun/` folder).
-#[component]
-fn Dropzone() -> Element {
-    let zone = format!(
-        "border:1px dashed {border};border-radius:12px;padding:40px 24px;text-align:center;\
-         background:{raised};cursor:pointer;",
-        border = tokens::BORDER_STRONG,
-        raised = tokens::SURFACE_RAISED,
-    );
-    rsx! {
-        // The picker hook reads the chosen directory client-side via the File
-        // System Access API (`data-darkrun-pick`); the workspace reader renders
-        // the discovered runs in place.
-        div { style: "{zone}", "data-darkrun-pick": "true",
-            div {
-                style: format!("font-family:{};font-size:32px;color:{};margin-bottom:10px;", tokens::FONT_SANS, tokens::TEXT_FAINT),
-                "▢"
-            }
-            div {
-                style: format!("font-family:{};font-size:16px;color:{};", tokens::FONT_SANS, tokens::TEXT),
-                "Drop a project folder here or click to browse"
-            }
-            div {
-                style: format!("font-family:{};font-size:13px;color:{};margin-top:6px;", tokens::FONT_SANS, tokens::TEXT_MUTED),
-                "Select a directory containing a "
-                code {
-                    style: format!("font-family:{};color:{};", tokens::FONT_MONO, tokens::ACCENT),
-                    ".darkrun/"
-                }
-                " folder."
-            }
-        }
-    }
-}
-
-/// The remote-repository entry: paste a repo URL to browse its workspace.
+/// The remote-repository entry: paste a repo URL to render its published workspace.
 #[component]
 fn RemoteRepo() -> Element {
     let card = format!(
-        "margin-top:20px;border:1px solid {border};border-radius:12px;padding:18px 20px;background:{raised};",
+        "border:1px solid {border};border-radius:12px;padding:18px 20px;background:{raised};",
         border = tokens::BORDER,
         raised = tokens::SURFACE_RAISED,
     );
@@ -144,7 +99,7 @@ fn RemoteRepo() -> Element {
                     "font-family:{};font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:{};margin-bottom:10px;",
                     tokens::FONT_MONO, tokens::TEXT_FAINT,
                 ),
-                "or browse a remote repository"
+                "browse a remote repository"
             }
             div { style: "display:flex;gap:10px;align-items:center;",
                 input {
@@ -155,13 +110,22 @@ fn RemoteRepo() -> Element {
                 }
                 button { style: "{btn}", "data-darkrun-remote-go": "true", "Browse" }
             }
+            p {
+                style: format!("font-family:{};font-size:13px;color:{};margin:12px 0 0;", tokens::FONT_SANS, tokens::TEXT_MUTED),
+                "Renders the repo's "
+                code {
+                    style: format!("font-family:{};color:{};", tokens::FONT_MONO, tokens::ACCENT),
+                    ".darkrun/"
+                }
+                " workspace read-only \u{2014} a shareable link to a run's shape."
+            }
         }
     }
 }
 
-/// A note framing browse as a read-only, client-side surface.
+/// A note pointing local browsing and review at the desktop app.
 #[component]
-fn ClientSideNote() -> Element {
+fn DesktopForLocal() -> Element {
     let wrap = format!(
         "margin-top:18px;border:1px solid {border};border-left:3px solid {accent};border-radius:8px;\
          padding:12px 16px;background:{overlay};",
@@ -172,14 +136,18 @@ fn ClientSideNote() -> Element {
     rsx! {
         div { style: "{wrap}",
             div { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px;",
-                Badge { tone: Tone::Accent, filled: true, "in the browser" }
-                Badge { tone: Tone::Neutral, "read-only" }
+                Badge { tone: Tone::Accent, filled: true, "desktop app" }
+                Badge { tone: Tone::Neutral, "your local runs" }
             }
             p {
                 style: format!("font-family:{};font-size:13px;color:{};margin:0;", tokens::FONT_SANS, tokens::TEXT_MUTED),
-                "Browsing reads the workspace files client-side \u{2014} a local folder never \
-                 leaves your machine. Browse is for reading a run's shape; driving the work \
-                 (approve / request-changes) happens in the desktop review app."
+                "To browse and review your own runs, open the darkrun desktop app \u{2014} run "
+                code {
+                    style: format!("font-family:{};color:{};", tokens::FONT_MONO, tokens::ACCENT),
+                    "darkrun serve"
+                }
+                ". It picks your local workspace and opens any run into its live review on your \
+                 machine. The web browse here is read-only and never touches your local files."
             }
         }
     }
