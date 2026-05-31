@@ -90,11 +90,11 @@ fn section_for(text: &str, version: &str) -> Option<String> {
     let mut out: Vec<&str> = Vec::new();
     let mut capturing = false;
     for line in &mut lines {
-        if line.starts_with("## ") {
+        if let Some(heading) = line.strip_prefix("## ") {
             if capturing {
                 break; // next release heading ends the section
             }
-            if line[3..].contains(version) {
+            if heading.contains(version) {
                 capturing = true;
                 out.push(line);
                 continue;

@@ -45,7 +45,7 @@ fn status_str(status: FeedbackStatus) -> &'static str {
     }
 }
 
-fn parse_status(raw: &str) -> Option<FeedbackStatus> {
+pub fn parse_status(raw: &str) -> Option<FeedbackStatus> {
     match raw.trim().trim_matches('"').to_ascii_lowercase().as_str() {
         "pending" => Some(FeedbackStatus::Pending),
         "fixing" => Some(FeedbackStatus::Fixing),

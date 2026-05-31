@@ -50,6 +50,7 @@
 
 pub mod backlog;
 pub mod change;
+pub mod debug;
 pub mod drift;
 pub mod error;
 pub mod factory;

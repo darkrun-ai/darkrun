@@ -382,6 +382,35 @@ pub struct RunResetInput {
     pub confirm: bool,
 }
 
+/// Input for `darkrun_debug` — admin recovery ops on a wedged run.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DebugInput {
+    /// The run slug.
+    pub slug: String,
+    /// The op: `preview_cursor` | `force_station_complete` | `set_run_field` |
+    /// `reset_drift` | `mutate_feedback`.
+    pub op: String,
+    /// The station, for `force_station_complete`.
+    #[serde(default)]
+    pub station: Option<String>,
+    /// The field name, for `set_run_field` (`mode` | `active_station`).
+    #[serde(default)]
+    pub field: Option<String>,
+    /// The new value, for `set_run_field`; or the new status, for `mutate_feedback`.
+    #[serde(default)]
+    pub value: Option<String>,
+    /// The feedback id, for `mutate_feedback`.
+    #[serde(default)]
+    pub feedback_id: Option<String>,
+    /// Why the bypass is needed (required on every mutating op).
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Must be true to apply a mutating op.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
 /// Input for `darkrun_feedback_list`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -1094,6 +1123,47 @@ impl DarkrunServer {
         let store = self.store();
         match crate::reset::reset(&store, &input.slug, input.station.as_deref(), input.confirm) {
             Ok(plan) => ok_json(&plan),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Admin recovery ops on a wedged run (preview / force-complete / set-field /
+    /// reset-drift / mutate-feedback). Mutating ops need confirm + reason.
+    #[tool(
+        name = "darkrun_debug",
+        description = "Admin recovery for a wedged run: preview_cursor (read-only), force_station_complete, set_run_field, reset_drift, mutate_feedback. Mutating ops require confirm:true and a reason."
+    )]
+    pub fn darkrun_debug(
+        &self,
+        Parameters(input): Parameters<DebugInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let store = self.store();
+        let slug = &input.slug;
+        let reason = input.reason.as_deref();
+        let missing = |what: &str| err_text(format!("`{what}` is required for op `{}`", input.op));
+        let result = match input.op.as_str() {
+            "preview_cursor" => crate::debug::preview_cursor(&store, slug),
+            "force_station_complete" => match input.station.as_deref() {
+                Some(st) => crate::debug::force_station_complete(&store, slug, st, input.confirm, reason),
+                None => return Ok(missing("station")),
+            },
+            "set_run_field" => match (input.field.as_deref(), input.value.as_deref()) {
+                (Some(f), Some(v)) => {
+                    crate::debug::set_run_field(&store, slug, f, v, input.confirm, reason)
+                }
+                _ => return Ok(missing("field+value")),
+            },
+            "reset_drift" => crate::debug::reset_drift(&store, slug, input.confirm, reason),
+            "mutate_feedback" => match (input.feedback_id.as_deref(), input.value.as_deref()) {
+                (Some(id), Some(status)) => {
+                    crate::debug::mutate_feedback(&store, slug, id, status, input.confirm, reason)
+                }
+                _ => return Ok(missing("feedback_id+value")),
+            },
+            other => return Ok(err_text(format!("unknown debug op `{other}`"))),
+        };
+        match result {
+            Ok(r) => ok_json(&r),
             Err(e) => Ok(err_text(e)),
         }
     }
