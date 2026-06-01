@@ -10,9 +10,53 @@
 //! - **Installed plugin**: the per-arch sub-package ships `darkrun-desktop` next
 //!   to `darkrun`, so it's a sibling of the running engine binary.
 //! - `DARKRUN_DESKTOP` overrides everything.
+//!
+//! ## macOS: launch via LaunchServices, not a bare `exec`
+//!
+//! The MCP server is itself spawned by the harness (Claude Code) in a process
+//! context that is *detached from the Aqua GUI session*. A GUI app `exec`'d
+//! directly from there cannot reach the WindowServer and AppKit simply `exit()`s
+//! it — so `Command::spawn().is_ok()` reports success (fork/exec worked) while the
+//! window never appears and the process is gone a moment later. The fix is to hand
+//! the launch to **LaunchServices** via `open`, which starts the app *in* the
+//! login GUI session regardless of who asked. `open` needs an `.app` bundle, so we
+//! materialize a tiny wrapper (Info.plist + a symlink to the real binary) next to
+//! the binary on demand. `open --stdout/--stderr` captures the app's output to a
+//! log so a launch is never silent again.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+/// Where a launched app's stdout/stderr is captured, so a failed launch leaves a
+/// trace instead of vanishing silently. Lives under the project's state dir.
+fn log_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".darkrun").join("desktop.log")
+}
+
+/// Open the launch log for append (creating `.darkrun/` if needed), for wiring a
+/// child's stdout/stderr to it.
+fn open_log(repo_root: &Path) -> Option<std::fs::File> {
+    let path = log_path(repo_root);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok()?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()
+}
+
+/// A child's stdout/stderr wired to the launch log, or null if it can't be opened.
+fn log_stdio(repo_root: &Path) -> (Stdio, Stdio) {
+    match open_log(repo_root) {
+        Some(f) => match f.try_clone() {
+            Ok(f2) => (Stdio::from(f), Stdio::from(f2)),
+            Err(_) => (Stdio::from(f), Stdio::null()),
+        },
+        None => (Stdio::null(), Stdio::null()),
+    }
+}
 
 /// The desktop binary name for this platform.
 fn bin_name() -> &'static str {
@@ -64,13 +108,87 @@ fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"))
 }
 
-/// Spawn a **detached** `cargo build -p darkrun-desktop && <bin>` so the build
+/// The minimal `Info.plist` for the macOS launch wrapper. `CFBundleName` is what
+/// the Dock/menu-bar show ("darkrun"); the window title is set by the app itself.
+#[cfg(target_os = "macos")]
+const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>darkrun-desktop</string>
+  <key>CFBundleIdentifier</key><string>ai.darkrun.desktop</string>
+  <key>CFBundleName</key><string>darkrun</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+"#;
+
+/// Materialize (idempotently) a tiny `.app` wrapper next to `bin` so `open` can
+/// hand the launch to LaunchServices. The `Contents/MacOS` executable is a
+/// symlink to the real binary — so the bundle never goes stale across rebuilds,
+/// and it's valid to create even before `cargo build` has produced `bin` (the
+/// dev cold-build path): the symlink simply resolves once the build lands.
+/// Returns the `.app` path.
+#[cfg(target_os = "macos")]
+fn ensure_bundle(bin: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::symlink;
+    let dir = bin.parent().unwrap_or_else(|| Path::new("."));
+    let bundle = dir.join("darkrun-desktop.app");
+    let macos = bundle.join("Contents").join("MacOS");
+    std::fs::create_dir_all(&macos)?;
+    std::fs::write(bundle.join("Contents").join("Info.plist"), INFO_PLIST)?;
+    let link = macos.join("darkrun-desktop");
+    let _ = std::fs::remove_file(&link); // refresh the symlink target
+    symlink(bin, &link)?;
+    Ok(bundle)
+}
+
+/// Spawn a **detached** `cargo build -p darkrun-desktop && <launch>` so the build
 /// runs in the background and the app launches itself when it completes — the
-/// `show` call doesn't block on the (one-time) compile. Returns whether the
-/// builder process spawned.
-fn spawn_build_then_launch(ws: &Path, profile: &str, bin: &Path, port: u16) -> bool {
+/// `show` call doesn't block on the (one-time) compile. Build + app output go to
+/// the launch log. Returns whether the builder process spawned.
+fn spawn_build_then_launch(
+    ws: &Path,
+    profile: &str,
+    bin: &Path,
+    port: u16,
+    repo_root: &Path,
+) -> bool {
     let rel = if profile == "release" { " --release" } else { "" };
+    let (out, err) = log_stdio(repo_root);
     let mut cmd;
+    #[cfg(target_os = "macos")]
+    {
+        // Pre-create the wrapper (symlink may dangle until the build lands), then
+        // launch through LaunchServices so the app reaches the GUI session.
+        let bundle = ensure_bundle(bin).map(|b| b.to_string_lossy().into_owned());
+        let log = log_path(repo_root);
+        let script = match bundle {
+            Ok(bundle) => format!(
+                "cargo build -p darkrun-desktop{rel} && exec open -n {} --env DARKRUN_PORT={port} --stdout {} --stderr {}",
+                sh_quote(Path::new(&bundle)),
+                sh_quote(&log),
+                sh_quote(&log),
+            ),
+            // Bundle couldn't be written — fall back to a direct exec.
+            Err(_) => format!(
+                "cargo build -p darkrun-desktop{rel} && exec {}",
+                sh_quote(bin)
+            ),
+        };
+        cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let script = format!(
+            "cargo build -p darkrun-desktop{rel} && exec {}",
+            sh_quote(bin)
+        );
+        cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+    }
     #[cfg(windows)]
     {
         let script = format!(
@@ -80,21 +198,12 @@ fn spawn_build_then_launch(ws: &Path, profile: &str, bin: &Path, port: u16) -> b
         cmd = Command::new("cmd");
         cmd.arg("/C").arg(script);
     }
-    #[cfg(not(windows))]
-    {
-        let script = format!(
-            "cargo build -p darkrun-desktop{rel} && exec {}",
-            sh_quote(bin)
-        );
-        cmd = Command::new("sh");
-        cmd.arg("-c").arg(script);
-    }
     cmd.current_dir(ws)
         .env("DARKRUN_PORT", port.to_string())
         .env_remove("DARKRUN_SESSION_ID")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(out)
+        .stderr(err)
         .spawn()
         .is_ok()
 }
@@ -126,16 +235,62 @@ pub fn find(repo_root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Launch a resolved binary (detached) pointed at the engine `port`. Unpinned
+/// Launch a resolved binary pointed at the engine `port`, unpinned
 /// (`DARKRUN_SESSION_ID` cleared) so it opens the run-browser home, whose
-/// `current`-focus poller navigates to the run the engine just raised.
-fn launch(bin: PathBuf, port: u16) -> Launch {
+/// `current`-focus poller navigates to the run the engine just raised. Output is
+/// captured to the launch log.
+///
+/// On **macOS** this goes through LaunchServices (`open` on a generated `.app`
+/// wrapper) so the app reaches the login GUI session even though the MCP server
+/// is spawned outside it — a direct `exec` there is killed by AppKit before a
+/// window appears. Elsewhere a direct detached spawn is fine.
+#[cfg(target_os = "macos")]
+fn launch(bin: PathBuf, port: u16, repo_root: &Path) -> Launch {
+    let bundle = match ensure_bundle(&bin) {
+        Ok(b) => b,
+        Err(_) => return launch_direct(bin, port, repo_root),
+    };
+    let log = log_path(repo_root);
+    let _ = open_log(repo_root); // ensure .darkrun/ exists for open's redirect
+    // `open` blocks only until LaunchServices accepts the launch, so a non-zero
+    // status is a real "couldn't start" signal — unlike a bare fork succeeding.
+    let ok = Command::new("open")
+        .arg("-n")
+        .arg(&bundle)
+        .arg("--env")
+        .arg(format!("DARKRUN_PORT={port}"))
+        .arg("--stdout")
+        .arg(&log)
+        .arg("--stderr")
+        .arg(&log)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        Launch::Launched(bin)
+    } else {
+        Launch::NotFound
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launch(bin: PathBuf, port: u16, repo_root: &Path) -> Launch {
+    launch_direct(bin, port, repo_root)
+}
+
+/// Direct detached spawn (non-macOS, or the macOS bundle fallback). Output goes
+/// to the launch log so a crash is traceable.
+fn launch_direct(bin: PathBuf, port: u16, repo_root: &Path) -> Launch {
+    let (out, err) = log_stdio(repo_root);
     let ok = Command::new(&bin)
         .env("DARKRUN_PORT", port.to_string())
         .env_remove("DARKRUN_SESSION_ID")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(out)
+        .stderr(err)
         .spawn()
         .is_ok();
     if ok {
@@ -156,22 +311,22 @@ pub fn spawn(repo_root: &Path, port: u16) -> Launch {
     if let Ok(p) = std::env::var("DARKRUN_DESKTOP") {
         let p = PathBuf::from(p);
         if p.is_file() {
-            return launch(p, port);
+            return launch(p, port, repo_root);
         }
     }
     // Dev: always the local version — build it for this arch if absent.
     if let Some((ws, profile)) = dev_workspace() {
         let bin = ws.join("target").join(&profile).join(bin_name());
         if bin.is_file() {
-            return launch(bin, port);
+            return launch(bin, port, repo_root);
         }
-        if spawn_build_then_launch(&ws, &profile, &bin, port) {
+        if spawn_build_then_launch(&ws, &profile, &bin, port, repo_root) {
             return Launch::Building;
         }
     }
     // Installed plugin: sibling of the engine binary, or the project target dir.
     match find(repo_root) {
-        Some(bin) => launch(bin, port),
+        Some(bin) => launch(bin, port, repo_root),
         None => Launch::NotFound,
     }
 }
