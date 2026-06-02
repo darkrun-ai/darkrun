@@ -126,10 +126,15 @@ elaborate (discovery + decompose; elaboration.md verified)
   → PRE-exec review:  spec (serial, global prompt injection) → adversarial fan-out
   → brief.md (phase:pre)                         ← before the REVIEW user gate
   → user_gate{spec}  = the REVIEW gate
-  → manufacture (Pass loop per unit: Make→Challenge→Resolve; unit→station merge)
+  → manufacture (Pass loop per unit: Make→Challenge→Resolve)
+       → quality_gates run when the LAST worker in the loop lands (at advance),
+         BEFORE the unit→station merge                ← QUALITY GATE #1
   → POST-exec approval:  spec → adversarial fan-out → quality_gates → brief.md(phase:post)
+       → the quality_gates approval actor re-runs them AFTER the reviewers
+         (certifies the final post-fix state)         ← QUALITY GATE #2
   → user_gate{approval} = the CHECKPOINT                ← final gate, BEFORE merge
   → observations.md                               ← AFTER the checkpoint, before merge
+                                                    (incorporates the user's gate actions)
   → complete_station = the station→run-main merge
 ```
 Then, after the LAST station merges, the **run-level** completion review:
@@ -142,10 +147,17 @@ on <default>).
   station — not a per-station configured reviewer.
 - **adversarial review happens twice**: within each station (after spec), and again
   at the run level with run-level reviewers.
-- **quality gates run at two points**: as the `quality_gates` approval actor (after
-  the station's adversarial fan-out, certifying the FINAL post-fix state), and AGAIN
-  at the run tick (`scope: intent`) after the run-level reviewers. Gates classify
+- **quality gates run at THREE points** (darkrun decision — keep BOTH the
+  per-loop run AND the post-review actor, which the predecessor's v4 collapsed to
+  one): (1) when the **last worker in a unit's Pass loop lands** (at advance, before
+  the unit→station merge); (2) as the **`quality_gates` approval actor** after the
+  station's adversarial reviewers (certifies the final post-fix state); (3) at the
+  **run tick** (`scope: intent`) after the run-level reviewers. Gates classify
   env-unavailable separately and can defer to CI after N non-convergent attempts.
+- **observations come AFTER the checkpoint gate**, committed with the station merge,
+  BY DESIGN: the user's actions/decision at the gate are themselves key signal the
+  station's observations must capture. (The pre-gate artifact is the *outcome* =
+  `brief.md phase:post`.)
 - **the final station checkpoint fires BEFORE the final merge** (the merge is
   unreachable while any approval stamp is null).
 
