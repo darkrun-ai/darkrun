@@ -79,9 +79,9 @@ impl Severity {
     /// neutral so the three dots stay visually distinct.
     pub fn dot_color(self) -> &'static str {
         match self {
-            Severity::Must => tokens::STATUS_DANGER,
-            Severity::Should => tokens::STATUS_WARN,
-            Severity::Nit => tokens::TEXT_FAINT,
+            Severity::Must => tokens::var::STATUS_DANGER,
+            Severity::Should => tokens::var::STATUS_WARN,
+            Severity::Nit => tokens::var::TEXT_FAINT,
         }
     }
 }
@@ -169,8 +169,8 @@ pub fn feedback_row(
     let row_style = format!(
         "display:flex;align-items:center;gap:10px;padding:8px 10px;\
          border:1px solid {border};border-radius:7px;background:{surface};opacity:{opacity};",
-        border = tokens::BORDER,
-        surface = tokens::SURFACE_RAISED,
+        border = tokens::var::BORDER,
+        surface = tokens::var::SURFACE_RAISED,
     );
     let dot_style = format!(
         "width:9px;height:9px;border-radius:50%;flex:none;background:{};",
@@ -179,20 +179,20 @@ pub fn feedback_row(
     let loc_style = format!(
         "font-family:{mono};font-size:12px;color:{text};white-space:nowrap;",
         mono = tokens::FONT_MONO,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let anc_style = format!(
         "color:{faint};margin-left:3px;",
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     let comment_style = format!(
         "flex:1;font-size:12.5px;color:{muted};min-width:0;",
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let who_style = format!(
         "font-family:{mono};font-size:10.5px;color:{faint};",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     let acts_style = "display:flex;gap:6px;";
 
@@ -230,8 +230,8 @@ pub fn feedback_row(
                         let chip = format!(
                             "font-size:11px;color:{muted};border:1px solid {border};\
                              border-radius:5px;padding:2px 7px;cursor:pointer;background:transparent;",
-                            muted = tokens::TEXT_MUTED,
-                            border = tokens::BORDER_STRONG,
+                            muted = tokens::var::TEXT_MUTED,
+                            border = tokens::var::BORDER_STRONG,
                         );
                         rsx! {
                             span {
@@ -281,7 +281,7 @@ pub fn feedback_inbox(
                         "font-family:{mono};font-size:10.5px;letter-spacing:0.08em;\
                          margin-top:6px;color:{faint};",
                         mono = tokens::FONT_MONO,
-                        faint = tokens::TEXT_FAINT,
+                        faint = tokens::var::TEXT_FAINT,
                     );
                     rsx! {
                         if !group.is_empty() {
@@ -342,8 +342,8 @@ mod tests {
 
     #[test]
     fn dot_colors_are_distinct_per_severity() {
-        assert_eq!(Severity::Must.dot_color(), tokens::STATUS_DANGER);
-        assert_eq!(Severity::Should.dot_color(), tokens::STATUS_WARN);
-        assert_eq!(Severity::Nit.dot_color(), tokens::TEXT_FAINT);
+        assert_eq!(Severity::Must.dot_color(), tokens::var::STATUS_DANGER);
+        assert_eq!(Severity::Should.dot_color(), tokens::var::STATUS_WARN);
+        assert_eq!(Severity::Nit.dot_color(), tokens::var::TEXT_FAINT);
     }
 }

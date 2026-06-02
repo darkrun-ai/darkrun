@@ -247,9 +247,98 @@ fn parse_gitlab_state(json: &str) -> MergeState {
     }
 }
 
+/// The outcome of a push-with-NFF-recovery attempt (mechanic #7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushOutcome {
+    /// The branch is on origin (pushed, or already up to date).
+    Pushed,
+    /// Push failed and was not recoverable (or recovery failed). `note` carries
+    /// why — best-effort: the caller reports, never crashes the tick.
+    Failed { note: String },
+}
+
+/// Whether a push-rejection stderr is a GENUINE non-fast-forward (mechanic #7).
+///
+/// Narrow on purpose: a bare "rejected" also matches protected-branch /
+/// pre-receive-hook / permission failures, where rebasing is the WRONG recovery.
+/// We only rebase+retry on the three phrasings git uses for a true NFF.
+pub fn is_non_fast_forward(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("non-fast-forward")
+        || lower.contains("fetch first")
+        || lower.contains("behind the remote")
+}
+
+/// Push `branch`'s head to origin with non-fast-forward recovery (mechanic #7).
+///
+/// 1. Try `push origin HEAD:refs/heads/<branch>` from the worktree on `branch`.
+/// 2. On a NARROW NFF rejection ([`is_non_fast_forward`]): `fetch origin
+///    <branch>` -> `rebase origin/<branch>` -> retry the push once. A rebase
+///    failure aborts the rebase and reports — never leaves a half-rebase.
+/// 3. On a non-NFF rejection (protected branch / hook / permission), report
+///    WITHOUT rebasing — rebasing those would be wrong.
+///
+/// Best-effort: returns a [`PushOutcome`] and never panics. `worktree_path` is a
+/// checkout on `branch` (the engine forks one per station).
+pub fn push_head_with_nff_recovery(
+    git: &dyn darkrun_git::GitBackend,
+    worktree_path: &Path,
+    branch: &str,
+) -> PushOutcome {
+    let first = git.push(worktree_path, branch);
+    let Err(err) = first else {
+        return PushOutcome::Pushed;
+    };
+    let stderr = match &err {
+        darkrun_git::GitError::Command { stderr, .. } => stderr.clone(),
+        other => other.to_string(),
+    };
+    if !is_non_fast_forward(&stderr) {
+        // Protected-branch / hook / permission / other — do NOT rebase.
+        return PushOutcome::Failed {
+            note: format!("push to origin/{branch} rejected (no rebase): {stderr}"),
+        };
+    }
+
+    // Genuine NFF: fetch + rebase onto origin/<branch>, then retry once.
+    let _ = git.fetch(worktree_path, branch);
+    let upstream = format!("origin/{branch}");
+    if let Err(e) = git.rebase_onto(worktree_path, &upstream) {
+        let _ = git.rebase_abort(worktree_path);
+        return PushOutcome::Failed {
+            note: format!("non-fast-forward; rebase onto {upstream} failed: {e}"),
+        };
+    }
+    match git.push(worktree_path, branch) {
+        Ok(()) => PushOutcome::Pushed,
+        Err(e) => PushOutcome::Failed {
+            note: format!("non-fast-forward; retry push after rebase failed: {e}"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nff_matcher_fires_only_on_genuine_nff() {
+        // Genuine NFF phrasings → recover.
+        assert!(is_non_fast_forward(
+            "! [rejected] main -> main (non-fast-forward)"
+        ));
+        assert!(is_non_fast_forward("Updates were rejected; fetch first"));
+        assert!(is_non_fast_forward(
+            "tip of your current branch is behind the remote"
+        ));
+        // NOT a NFF: a bare 'rejected', protected branch, hook, permission.
+        assert!(!is_non_fast_forward("! [remote rejected] main -> main"));
+        assert!(!is_non_fast_forward(
+            "remote: GH006: Protected branch update failed"
+        ));
+        assert!(!is_non_fast_forward("pre-receive hook declined"));
+        assert!(!is_non_fast_forward("permission denied"));
+    }
 
     #[test]
     fn github_state_parses_merged() {

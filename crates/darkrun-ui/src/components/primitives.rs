@@ -25,14 +25,14 @@ pub fn Card(
 ) -> Element {
     let rail = match &accent {
         Some(c) => format!("border-left:3px solid {c};"),
-        None => format!("border-left:1px solid {};", tokens::BORDER),
+        None => format!("border-left:1px solid {};", tokens::var::BORDER),
     };
     let style = format!(
         "background:{surface};border:1px solid {border};{rail}\
          border-radius:8px;padding:{padding}px;color:{text};",
-        surface = tokens::SURFACE_OVERLAY,
-        border = tokens::BORDER,
-        text = tokens::TEXT,
+        surface = tokens::var::SURFACE_OVERLAY,
+        border = tokens::var::BORDER,
+        text = tokens::var::TEXT,
     );
     rsx! {
         div { class: "dr-card", style: "{style}", {children} }
@@ -49,11 +49,11 @@ pub fn Badge(
     #[props(default = false)] filled: bool,
     children: Element,
 ) -> Element {
-    let color = tone.color();
+    let color = tone.color_var();
     let style = if filled {
         format!(
             "background:{color};color:{on};border:1px solid {color};",
-            on = tone.on(),
+            on = tone.on_var(),
         )
     } else {
         format!("background:transparent;color:{color};border:1px solid {color};")
@@ -92,10 +92,10 @@ pub fn Button(
     #[props(default)] on_click: Option<EventHandler<MouseEvent>>,
     children: Element,
 ) -> Element {
-    let color = tone.color();
+    let color = tone.color_var();
     let core = match variant {
         ButtonVariant::Primary => {
-            format!("background:{color};color:{on};border:1px solid {color};", on = tone.on())
+            format!("background:{color};color:{on};border:1px solid {color};", on = tone.on_var())
         }
         ButtonVariant::Secondary => {
             format!("background:transparent;color:{color};border:1px solid {color};")

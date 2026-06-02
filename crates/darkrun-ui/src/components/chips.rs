@@ -27,8 +27,11 @@ pub fn CheckpointBadge(
     let color = checkpoint_hue(kind);
     let style = if filled {
         format!(
+            // The themed ink-on-vivid foreground (near-black in dark, white in
+            // light) — NOT surface-base, which goes near-white in light and washes
+            // the label out on the hue fill.
             "background:{color};color:{on};border:1px solid {color};",
-            on = tokens::SURFACE_BASE,
+            on = tokens::var::ON_ACCENT,
         )
     } else {
         format!("background:transparent;color:{color};border:1px solid {color};")
@@ -60,12 +63,12 @@ pub fn RiskChip(
          color:{danger};background:transparent;\
          border:1px dashed {danger};border-radius:6px;padding:3px 8px;white-space:nowrap;",
         mono = tokens::FONT_MONO,
-        danger = tokens::STATUS_DANGER,
+        danger = tokens::var::STATUS_DANGER,
     );
     let strike = format!(
         "text-decoration:line-through;text-decoration-color:{danger};color:{muted};",
-        danger = tokens::STATUS_DANGER,
-        muted = tokens::TEXT_MUTED,
+        danger = tokens::var::STATUS_DANGER,
+        muted = tokens::var::TEXT_MUTED,
     );
     rsx! {
         span { class: "dr-risk-chip", title: "risk this station eliminates", style: "{style}",
@@ -115,7 +118,7 @@ pub fn RightSizeStrip(
                     let label_style = format!(
                         "min-width:56px;font-size:11px;text-transform:uppercase;\
                          letter-spacing:0.06em;color:{accent};font-weight:700;",
-                        accent = tokens::ACCENT,
+                        accent = tokens::var::ACCENT,
                     );
                     rsx! {
                         div { style: "{row}", "data-tier": "{tier.label}",
@@ -126,16 +129,16 @@ pub fn RightSizeStrip(
                                     let chip = if present {
                                         format!(
                                             "color:{text};border:1px solid {border};background:{surface};",
-                                            text = tokens::TEXT,
-                                            border = tokens::BORDER_STRONG,
-                                            surface = tokens::SURFACE_OVERLAY,
+                                            text = tokens::var::TEXT,
+                                            border = tokens::var::BORDER_STRONG,
+                                            surface = tokens::var::SURFACE_OVERLAY,
                                         )
                                     } else {
                                         format!(
                                             "color:{faint};border:1px dashed {border};background:transparent;\
                                              text-decoration:line-through;",
-                                            faint = tokens::TEXT_FAINT,
-                                            border = tokens::BORDER,
+                                            faint = tokens::var::TEXT_FAINT,
+                                            border = tokens::var::BORDER,
                                         )
                                     };
                                     let chip = format!(

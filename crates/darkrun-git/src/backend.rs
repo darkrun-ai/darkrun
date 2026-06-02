@@ -139,4 +139,42 @@ pub trait GitBackend {
     /// The unresolved (conflicted) paths in the working tree at `worktree_path`
     /// (`git diff --name-only --diff-filter=U`). Read-only.
     fn unresolved_paths(&self, worktree_path: &Path) -> Result<Vec<String>>;
+
+    // ── Merge-debt / no-op loop guard (mechanic #4) ───────────────────────
+
+    /// Whether `ref_a` and `ref_b` resolve to the **identical tree**
+    /// (`<ref>^{tree}` equal for both). Read-only.
+    ///
+    /// The backing query for the merge-debt short-circuit: a `--no-ff` merge of
+    /// two refs with identical trees still mints an empty commit, which makes
+    /// the *other* side look "behind" and triggers an alternating no-op merge
+    /// loop. Returns `false` on any git failure (missing ref, not-a-repo) — the
+    /// equality check is an optimization, never a correctness gate, so callers
+    /// fall through to the normal merge path on error.
+    fn refs_have_identical_trees(&self, ref_a: &str, ref_b: &str) -> Result<bool>;
+
+    // ── Remote push + NFF recovery primitives (mechanic #7) ───────────────
+    //
+    // These talk to a remote, so they always route through the shell backend
+    // (network + worktree-cwd semantics). They run non-interactively so an
+    // auth prompt fails fast instead of hanging.
+
+    /// Push `HEAD` of the working tree at `worktree_path` to `origin` as
+    /// `refs/heads/<branch>` (`git -C <wt> push origin HEAD:refs/heads/<branch>`).
+    /// The [`GitError::Command`] carries the remote's stderr so the caller can
+    /// narrowly match a non-fast-forward rejection.
+    fn push(&self, worktree_path: &Path, branch: &str) -> Result<()>;
+
+    /// Fetch `branch` from `origin` (`git -C <wt> fetch origin <branch>`).
+    fn fetch(&self, worktree_path: &Path, branch: &str) -> Result<()>;
+
+    /// Rebase the working tree at `worktree_path` onto `upstream`
+    /// (`git -C <wt> rebase <upstream>`). The NFF-recovery rebase target is
+    /// `origin/<branch>`.
+    fn rebase_onto(&self, worktree_path: &Path, upstream: &str) -> Result<()>;
+
+    /// Abort an in-progress rebase in the working tree at `worktree_path`
+    /// (`git -C <wt> rebase --abort`). Best-effort recovery after a failed
+    /// NFF rebase.
+    fn rebase_abort(&self, worktree_path: &Path) -> Result<()>;
 }

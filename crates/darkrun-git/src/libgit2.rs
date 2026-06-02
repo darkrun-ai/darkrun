@@ -238,6 +238,30 @@ impl GitBackend for Libgit2Backend {
     fn unresolved_paths(&self, worktree_path: &Path) -> Result<Vec<String>> {
         self.shell()?.unresolved_paths(worktree_path)
     }
+
+    fn refs_have_identical_trees(&self, ref_a: &str, ref_b: &str) -> Result<bool> {
+        // Could be done in-process via `revparse_single("<ref>^{tree}").id()`,
+        // but delegating to shell keeps it consistent with the merge trio (the
+        // `^{tree}` peel + comparison the loop guard depends on).
+        self.shell()?.refs_have_identical_trees(ref_a, ref_b)
+    }
+
+    fn push(&self, worktree_path: &Path, branch: &str) -> Result<()> {
+        // Network + worktree-cwd semantics MUST route through the shell.
+        self.shell()?.push(worktree_path, branch)
+    }
+
+    fn fetch(&self, worktree_path: &Path, branch: &str) -> Result<()> {
+        self.shell()?.fetch(worktree_path, branch)
+    }
+
+    fn rebase_onto(&self, worktree_path: &Path, upstream: &str) -> Result<()> {
+        self.shell()?.rebase_onto(worktree_path, upstream)
+    }
+
+    fn rebase_abort(&self, worktree_path: &Path) -> Result<()> {
+        self.shell()?.rebase_abort(worktree_path)
+    }
 }
 
 /// The short branch name of `repo`'s `HEAD`, or `None` when detached.

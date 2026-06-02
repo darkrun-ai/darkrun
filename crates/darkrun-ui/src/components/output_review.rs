@@ -74,7 +74,7 @@ pub fn OutputReview(
                     span {
                         style: format!(
                             "font-family:{};font-size:13px;color:{};",
-                            tokens::FONT_MONO, tokens::TEXT_MUTED,
+                            tokens::FONT_MONO, tokens::var::TEXT_MUTED,
                         ),
                         "{scope_label}"
                     }
@@ -90,7 +90,7 @@ pub fn OutputReview(
                             style: format!(
                                 "margin:6px 0 0;font-family:{};font-size:15px;font-weight:600;\
                                  color:{};line-height:1.35;",
-                                tokens::FONT_SANS, tokens::TEXT,
+                                tokens::FONT_SANS, tokens::var::TEXT,
                             ),
                             "{p}"
                         }
@@ -104,12 +104,12 @@ pub fn OutputReview(
                         class: "dr-review-pin-list",
                         style: format!(
                             "margin:10px 0 0;padding-left:18px;font-family:{};font-size:12px;color:{};",
-                            tokens::FONT_SANS, tokens::TEXT_MUTED,
+                            tokens::FONT_SANS, tokens::var::TEXT_MUTED,
                         ),
                         for (i, pin) in pins.iter().enumerate() {
                             li { style: "margin:2px 0;",
                                 span {
-                                    style: format!("color:{};font-weight:600;", tokens::ACCENT),
+                                    style: format!("color:{};font-weight:600;", tokens::var::ACCENT),
                                     "#{i+1} "
                                 }
                                 "{pin.note}"
@@ -139,8 +139,8 @@ fn screenshot_stage(
         "position:relative;margin-top:12px;width:100%;max-width:640px;\
          border-radius:8px;overflow:hidden;border:1px solid {border};\
          background:{base};cursor:{cursor};",
-        border = tokens::BORDER_STRONG,
-        base = tokens::SURFACE_BASE,
+        border = tokens::var::BORDER_STRONG,
+        base = tokens::var::SURFACE_BASE,
         cursor = if submitted { "default" } else { "crosshair" },
     );
     let resolved = url.map(str::trim).filter(|u| !u.is_empty());
@@ -172,7 +172,7 @@ fn screenshot_stage(
                         style: format!(
                             "aspect-ratio:16 / 10;display:flex;align-items:center;\
                              justify-content:center;font-family:{};font-size:12px;color:{};",
-                            tokens::FONT_MONO, tokens::TEXT_FAINT,
+                            tokens::FONT_MONO, tokens::var::TEXT_FAINT,
                         ),
                         "no screenshot captured"
                     }
@@ -195,9 +195,9 @@ fn pin_marker(index: usize, pin: &PinPoint) -> Element {
          box-shadow:0 1px 3px rgba(0,0,0,0.5);",
         left = pin.left_pct(),
         top = pin.top_pct(),
-        accent = tokens::ACCENT,
-        on = tokens::ON_ACCENT,
-        base = tokens::SURFACE_BASE,
+        accent = tokens::var::ACCENT,
+        on = tokens::var::ON_ACCENT,
+        base = tokens::var::SURFACE_BASE,
         mono = tokens::FONT_MONO,
     );
     rsx! {
@@ -223,9 +223,9 @@ fn comment_box(
         "width:100%;min-height:60px;resize:vertical;padding:8px 10px;border-radius:6px;\
          background:{surface};border:1px solid {border};color:{text};\
          font-family:{sans};font-size:13px;",
-        surface = tokens::SURFACE_BASE,
-        border = tokens::BORDER,
-        text = tokens::TEXT,
+        surface = tokens::var::SURFACE_BASE,
+        border = tokens::var::BORDER,
+        text = tokens::var::TEXT,
         sans = tokens::FONT_SANS,
     );
     rsx! {
@@ -238,7 +238,7 @@ fn comment_box(
                             style: format!(
                                 "padding:8px 10px;border-radius:6px;background:{};border:1px solid {};\
                                  font-family:{};font-size:13px;color:{};",
-                                tokens::SURFACE_RAISED, tokens::BORDER, tokens::FONT_SANS, tokens::TEXT,
+                                tokens::var::SURFACE_RAISED, tokens::var::BORDER, tokens::FONT_SANS, tokens::var::TEXT,
                             ),
                             "{c}"
                         }
@@ -286,17 +286,17 @@ fn submit_bar(
     let bar = format!(
         "display:flex;align-items:center;gap:12px;margin-top:16px;padding-top:14px;\
          border-top:1px solid {border};",
-        border = tokens::BORDER,
+        border = tokens::var::BORDER,
     );
     let status_style = format!(
         "font-family:{mono};font-size:12px;color:{muted};",
         mono = tokens::FONT_MONO,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let hint_style = format!(
         "font-family:{mono};font-size:11px;color:{faint};text-transform:lowercase;",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     rsx! {
         div { class: "dr-review-submit-bar", style: "{bar}",

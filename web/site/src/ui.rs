@@ -133,7 +133,7 @@ pub fn PhaseLegend() -> Element {
         div { style: "{wrap}",
             for phase in Phase::ALL {
                 {
-                    let hue = phase.hue();
+                    let hue = phase.hue_var();
                     let chip = format!(
                         "display:inline-flex;align-items:center;gap:6px;\
                          font-family:{mono};font-size:12px;color:{base};\

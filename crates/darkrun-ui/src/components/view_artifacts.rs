@@ -127,7 +127,7 @@ pub fn ViewArtifacts(
                     span {
                         style: format!(
                             "font-family:{};font-size:13px;color:{};",
-                            tokens::FONT_MONO, tokens::TEXT_MUTED,
+                            tokens::FONT_MONO, tokens::var::TEXT_MUTED,
                         ),
                         "{scope_label}"
                     }
@@ -139,7 +139,7 @@ pub fn ViewArtifacts(
                     p {
                         style: format!(
                             "margin-top:10px;font-family:{};font-size:13px;color:{};",
-                            tokens::FONT_SANS, tokens::TEXT_MUTED,
+                            tokens::FONT_SANS, tokens::var::TEXT_MUTED,
                         ),
                         "No output artifacts to browse yet."
                     }
@@ -166,9 +166,9 @@ fn artifact_tile(
     focused: bool,
     on_focus: Option<EventHandler<String>>,
 ) -> Element {
-    let border = if focused { tokens::ACCENT } else { tokens::BORDER };
+    let border = if focused { tokens::var::ACCENT } else { tokens::var::BORDER };
     let ring = if focused {
-        format!("box-shadow:0 0 0 1px {};", tokens::ACCENT)
+        format!("box-shadow:0 0 0 1px {};", tokens::var::ACCENT)
     } else {
         String::new()
     };
@@ -176,9 +176,9 @@ fn artifact_tile(
         "display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:8px;\
          background:{surface};border:1px solid {border};{ring}cursor:pointer;\
          text-align:left;width:100%;color:{text};transition:border-color .12s ease;",
-        surface = tokens::SURFACE_RAISED,
+        surface = tokens::var::SURFACE_RAISED,
         border = border,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let id = a.id.clone();
     rsx! {
@@ -200,7 +200,7 @@ fn artifact_tile(
                     style: format!(
                         "font-family:{};font-size:13px;font-weight:600;color:{};\
                          overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                        tokens::FONT_SANS, tokens::TEXT,
+                        tokens::FONT_SANS, tokens::var::TEXT,
                     ),
                     "{a.label}"
                 }
@@ -217,8 +217,8 @@ fn tile_preview(a: &ArtifactEntry) -> Element {
         "width:100%;aspect-ratio:4 / 3;border-radius:6px;overflow:hidden;\
          background:{base};border:1px solid {border};display:flex;\
          align-items:center;justify-content:center;",
-        base = tokens::SURFACE_BASE,
-        border = tokens::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        border = tokens::var::BORDER,
     );
     match (a.kind.is_pictorial(), a.thumbnail_url.as_deref().or(a.url.as_deref())) {
         (true, Some(url)) if !url.trim().is_empty() => rsx! {
@@ -234,7 +234,7 @@ fn tile_preview(a: &ArtifactEntry) -> Element {
                 class: "dr-artifact-glyph",
                 style: format!(
                     "{frame}font-family:{};font-size:28px;color:{};",
-                    tokens::FONT_MONO, tokens::TEXT_FAINT,
+                    tokens::FONT_MONO, tokens::var::TEXT_FAINT,
                 ),
                 "{a.kind.glyph()}"
             }
@@ -248,7 +248,7 @@ fn artifact_detail(a: &ArtifactEntry, on_review: Option<EventHandler<String>>) -
     let wrap = format!(
         "margin-top:16px;padding-top:14px;border-top:1px solid {border};\
          display:flex;flex-direction:column;gap:10px;",
-        border = tokens::BORDER,
+        border = tokens::var::BORDER,
     );
     let id = a.id.clone();
     let reviewable = a.kind.is_reviewable();
@@ -259,14 +259,14 @@ fn artifact_detail(a: &ArtifactEntry, on_review: Option<EventHandler<String>>) -
                 span {
                     style: format!(
                         "flex:1;font-family:{};font-size:13px;font-weight:600;color:{};",
-                        tokens::FONT_SANS, tokens::TEXT,
+                        tokens::FONT_SANS, tokens::var::TEXT,
                     ),
                     "{a.label}"
                 }
                 span {
                     style: format!(
                         "font-family:{};font-size:11px;color:{};",
-                        tokens::FONT_MONO, tokens::TEXT_FAINT,
+                        tokens::FONT_MONO, tokens::var::TEXT_FAINT,
                     ),
                     "{a.path}"
                 }
@@ -307,7 +307,7 @@ fn kind_viewer(a: &ArtifactEntry) -> Element {
 fn picture_viewer(a: &ArtifactEntry) -> Element {
     let frame = format!(
         "width:100%;max-width:640px;border-radius:8px;border:1px solid {};display:block;",
-        tokens::BORDER_STRONG,
+        tokens::var::BORDER_STRONG,
     );
     match a.url.as_deref().or(a.thumbnail_url.as_deref()) {
         Some(url) if !url.trim().is_empty() => rsx! {
@@ -325,9 +325,9 @@ fn picture_viewer(a: &ArtifactEntry) -> Element {
                     "{frame}aspect-ratio:16 / 10;display:flex;align-items:center;\
                      justify-content:center;background:{base};font-family:{mono};\
                      font-size:12px;color:{faint};",
-                    base = tokens::SURFACE_BASE,
+                    base = tokens::var::SURFACE_BASE,
                     mono = tokens::FONT_MONO,
-                    faint = tokens::TEXT_FAINT,
+                    faint = tokens::var::TEXT_FAINT,
                 ),
                 "no preview"
             }
@@ -347,9 +347,9 @@ fn text_viewer(a: &ArtifactEntry, lang: &str) -> Element {
          background:{base};border:1px solid {border};color:{text};\
          font-family:{mono};font-size:12px;line-height:1.55;white-space:pre-wrap;\
          word-break:break-word;",
-        base = tokens::SURFACE_BASE,
-        border = tokens::BORDER,
-        text = tokens::TEXT,
+        base = tokens::var::SURFACE_BASE,
+        border = tokens::var::BORDER,
+        text = tokens::var::TEXT,
         mono = tokens::FONT_MONO,
     );
     rsx! {
@@ -367,20 +367,20 @@ fn file_viewer(a: &ArtifactEntry) -> Element {
     let panel = format!(
         "display:flex;align-items:center;gap:12px;padding:14px;border-radius:8px;\
          background:{base};border:1px solid {border};",
-        base = tokens::SURFACE_BASE,
-        border = tokens::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        border = tokens::var::BORDER,
     );
     rsx! {
         div { class: "dr-artifact-file", style: "{panel}",
             span {
-                style: format!("font-family:{};font-size:24px;color:{};", tokens::FONT_MONO, tokens::TEXT_FAINT),
+                style: format!("font-family:{};font-size:24px;color:{};", tokens::FONT_MONO, tokens::var::TEXT_FAINT),
                 "{ArtifactKind::File.glyph()}"
             }
             div { style: "flex:1;min-width:0;",
                 div {
                     style: format!(
                         "font-family:{};font-size:13px;font-weight:600;color:{};",
-                        tokens::FONT_SANS, tokens::TEXT,
+                        tokens::FONT_SANS, tokens::var::TEXT,
                     ),
                     "{a.label}"
                 }
@@ -388,7 +388,7 @@ fn file_viewer(a: &ArtifactEntry) -> Element {
                     style: format!(
                         "font-family:{};font-size:11px;color:{};overflow:hidden;\
                          text-overflow:ellipsis;white-space:nowrap;",
-                        tokens::FONT_MONO, tokens::TEXT_FAINT,
+                        tokens::FONT_MONO, tokens::var::TEXT_FAINT,
                     ),
                     "{a.path}"
                 }
@@ -401,7 +401,7 @@ fn file_viewer(a: &ArtifactEntry) -> Element {
                     rel: "noopener",
                     style: format!(
                         "font-family:{};font-size:12px;font-weight:600;color:{};text-decoration:none;",
-                        tokens::FONT_SANS, tokens::ACCENT,
+                        tokens::FONT_SANS, tokens::var::ACCENT,
                     ),
                     "open ↗"
                 }

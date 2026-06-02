@@ -67,15 +67,14 @@ pub fn Wordmark(
 
     if interactive {
         let mut state = use_signal(|| "rest");
-        // Constant stroke + paint-order inline; the fill color + glow come from
-        // THEME_CSS keyed on data-anim (rest -> lit -> flicker), so the keyframes
-        // can override without fighting an inline `color`.
-        let dark_const = format!(
-            "font-weight:800;paint-order:stroke;\
-             -webkit-text-stroke:1.5px {accent};text-stroke:1.5px {accent};",
-            accent = tokens::ACCENT,
-        );
-        let run_style = format!("color:{};font-weight:500;", tokens::TEXT);
+        // The "dark" fill, stroke, and glow ALL come from THEME_CSS keyed on
+        // data-anim (rest -> lit -> flicker) so they can flip per theme: dark gets
+        // the lights-out cyan-stroked glyphs, light renders solid black with no
+        // stroke or glow. Only the weight is fixed inline here. "run" follows
+        // `--dr-wm-run` (white in dark, teal accent in light), like the static
+        // themed wordmark.
+        let dark_const = "font-weight:800;".to_string();
+        let run_style = "color:var(--dr-wm-run);font-weight:500;".to_string();
         return rsx! {
             span {
                 class: "dr-wordmark dr-wordmark-anim",
@@ -98,8 +97,8 @@ pub fn Wordmark(
     let themed = matches!(variant, WordmarkVariant::OutlinedSolidRun);
     let (dark_style, run_style) = match variant {
         WordmarkVariant::Filled => (
-            format!("color:{};font-weight:800;", tokens::ACCENT),
-            format!("color:{};font-weight:400;", tokens::TEXT),
+            format!("color:{};font-weight:800;", tokens::var::ACCENT),
+            format!("color:{};font-weight:400;", tokens::var::TEXT),
         ),
         WordmarkVariant::Outlined => (
             // Transparent fill + accent stroke via text-stroke (webkit) with a
@@ -107,12 +106,12 @@ pub fn Wordmark(
             format!(
                 "color:transparent;font-weight:800;\
                  -webkit-text-stroke:1px {accent};text-stroke:1px {accent};",
-                accent = tokens::ACCENT
+                accent = tokens::var::ACCENT
             ),
             format!(
                 "color:transparent;font-weight:400;\
                  -webkit-text-stroke:1px {muted};text-stroke:1px {muted};",
-                muted = tokens::TEXT_MUTED
+                muted = tokens::var::TEXT_MUTED
             ),
         ),
         // Outlined "dark" paired with a solid, medium-weight "run". The fill,

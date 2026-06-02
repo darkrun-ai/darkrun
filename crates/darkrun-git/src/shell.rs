@@ -263,6 +263,45 @@ impl GitBackend for ShellBackend {
             .filter(|l| !l.is_empty())
             .collect())
     }
+
+    fn refs_have_identical_trees(&self, ref_a: &str, ref_b: &str) -> Result<bool> {
+        // `<ref>^{tree}` resolves the tree object behind a commit; identical
+        // tree OIDs mean a merge would be a pure no-op. Any failure (missing
+        // ref) means "not identical" → fall through to the normal merge path.
+        let tree_a = format!("{ref_a}^{{tree}}");
+        let tree_b = format!("{ref_b}^{{tree}}");
+        let a = self.run(&["rev-parse", &tree_a]);
+        let b = self.run(&["rev-parse", &tree_b]);
+        match (a, b) {
+            (Ok(a), Ok(b)) => Ok(a.trim() == b.trim() && !a.trim().is_empty()),
+            _ => Ok(false),
+        }
+    }
+
+    fn push(&self, worktree_path: &Path, branch: &str) -> Result<()> {
+        let wt = worktree_path.to_string_lossy().to_string();
+        let refspec = format!("HEAD:refs/heads/{branch}");
+        run_net(&wt, &["push", "origin", &refspec])?;
+        Ok(())
+    }
+
+    fn fetch(&self, worktree_path: &Path, branch: &str) -> Result<()> {
+        let wt = worktree_path.to_string_lossy().to_string();
+        run_net(&wt, &["fetch", "origin", branch])?;
+        Ok(())
+    }
+
+    fn rebase_onto(&self, worktree_path: &Path, upstream: &str) -> Result<()> {
+        let wt = worktree_path.to_string_lossy().to_string();
+        run_in(&wt, &["rebase", upstream])?;
+        Ok(())
+    }
+
+    fn rebase_abort(&self, worktree_path: &Path) -> Result<()> {
+        let wt = worktree_path.to_string_lossy().to_string();
+        let _ = run_in(&wt, &["rebase", "--abort"]);
+        Ok(())
+    }
 }
 
 /// Run `git -C <dir> <args>` against an arbitrary working tree (not the
@@ -273,6 +312,33 @@ fn run_in(dir: &str, args: &[&str]) -> Result<String> {
         .arg("-C")
         .arg(dir)
         .args(args)
+        .output()
+        .map_err(GitError::BareIo)?;
+    if !output.status.success() {
+        return Err(GitError::Command {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run `git -C <dir> <args>` against a remote, non-interactively. Credential
+/// and SSH prompts are suppressed so an auth prompt or unresponsive remote
+/// fails fast instead of hanging the manager. Returns the same
+/// [`GitError::Command`] (with the remote's stderr) as [`run_in`] so the
+/// NFF matcher can inspect the message.
+fn run_net(dir: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        // Never prompt for credentials / SSH passphrases on a non-interactive
+        // tick — fail fast and let the caller report rather than wedge.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes")
+        .env("GCM_INTERACTIVE", "never")
         .output()
         .map_err(GitError::BareIo)?;
     if !output.status.success() {

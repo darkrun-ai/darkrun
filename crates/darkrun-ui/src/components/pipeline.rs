@@ -63,21 +63,21 @@ pub fn StationPipeline(
             "aria-label": "station pipeline",
             for (i, dot) in dots.iter().enumerate() {
                 {
-                    let hue = dot.phase.hue();
+                    let hue = dot.phase.hue_var();
                     let dim = matches!(dot.step, Step::Pending);
-                    let glyph_color = if dim { tokens::TEXT_FAINT } else { hue.base };
+                    let glyph_color = if dim { tokens::var::TEXT_FAINT } else { hue.base };
                     let weight = if matches!(dot.step, Step::Active) { "700" } else { "400" };
                     let glyph_style = format!(
                         "color:{glyph_color};font-size:{size}px;font-weight:{weight};line-height:1;"
                     );
                     let item_style = "display:inline-flex;flex-direction:column;align-items:center;gap:3px;";
-                    let label_color = if dim { tokens::TEXT_FAINT } else { tokens::TEXT_MUTED };
+                    let label_color = if dim { tokens::var::TEXT_FAINT } else { tokens::var::TEXT_MUTED };
                     let label_style = format!("color:{label_color};font-size:10px;line-height:1;");
                     // A muted arrow between phases (phase flows left to right),
                     // mirroring the station strip's connectors. Not before the first.
                     let arrow_style = format!(
                         "color:{};font-size:{}px;line-height:1;",
-                        tokens::TEXT_FAINT,
+                        tokens::var::TEXT_FAINT,
                         size * 0.7,
                     );
                     rsx! {

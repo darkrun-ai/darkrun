@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 
 use darkrun_core::StateStore;
-use darkrun_git::{engine_protected_merge, GitBackend, Git};
+use darkrun_git::{engine_protected_merge, has_no_merge_debt, GitBackend, Git};
 
 /// The branch prefix the engine forks run work onto (`darkrun/...`).
 pub const BRANCH_PREFIX: &str = "darkrun";
@@ -71,6 +71,25 @@ pub fn resolve_base_branch(store: &StateStore) -> String {
     "main".to_string()
 }
 
+/// Which downstream-sync step (mechanic #5) surfaced a conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncConflictStep {
+    /// base/mainline -> run-main (step 1).
+    MainlineToRunMain,
+    /// run-main -> the active station branch (step 2).
+    RunMainToStation,
+}
+
+impl SyncConflictStep {
+    /// The stable tag used in notes / actions.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SyncConflictStep::MainlineToRunMain => "mainline_to_run_main",
+            SyncConflictStep::RunMainToStation => "run_main_to_station",
+        }
+    }
+}
+
 /// The structured result of a lifecycle operation. Never an error from the
 /// manager's perspective — `note` carries why a step was a no-op or partial.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -81,6 +100,10 @@ pub struct LifecycleOutcome {
     pub note: Option<String>,
     /// When a merge surfaced genuine agent-content conflicts, the paths.
     pub conflict_paths: Vec<String>,
+    /// The branch the conflict is in-tree on (for the recovery to target).
+    pub conflict_branch: Option<String>,
+    /// Which downstream-sync step conflicted (mechanic #5), when applicable.
+    pub conflict_step: Option<SyncConflictStep>,
 }
 
 impl LifecycleOutcome {
@@ -88,15 +111,19 @@ impl LifecycleOutcome {
         Self {
             performed: false,
             note: Some(note.into()),
-            conflict_paths: Vec::new(),
+            ..Default::default()
         }
     }
     fn done(note: impl Into<String>) -> Self {
         Self {
             performed: true,
             note: Some(note.into()),
-            conflict_paths: Vec::new(),
+            ..Default::default()
         }
+    }
+    /// Whether this outcome carries unresolved agent-content conflicts.
+    pub fn has_conflicts(&self) -> bool {
+        !self.conflict_paths.is_empty()
     }
 }
 
@@ -193,11 +220,26 @@ pub fn land_station(store: &StateStore, slug: &str, station: &str) -> LifecycleO
     };
     let branch = station_branch(slug, station);
     let run_main = run_main_branch(slug);
+    // #8 "complete but never merged": short-circuit to a no-op ONLY when there
+    // is genuinely nothing to merge — the branch is absent, OR it's already an
+    // ancestor of run-main (its commits already landed). A present branch with
+    // unmerged commits whose worktree happens to be gone must STILL merge the
+    // durable branch below, never silently report done.
     if !git.branch_exists(&branch).unwrap_or(false) {
         return LifecycleOutcome::noop(format!("{branch} not found; nothing to land"));
     }
     if !git.branch_exists(&run_main).unwrap_or(false) {
         return LifecycleOutcome::noop(format!("{run_main} not found; cannot land"));
+    }
+    if git.is_ancestor(&branch, &run_main).unwrap_or(false) {
+        // Already merged (or an empty fork at run-main's commit) — truly nothing
+        // to land. Retire any leftover worktree, then no-op.
+        let wt_name = format!("{slug}-{station}");
+        let wt_path = station_worktree_path(&root, slug, station);
+        let _ = git.remove_worktree(&wt_name, true);
+        let _ = std::fs::remove_dir_all(&wt_path);
+        let _ = delete_branch(&root, &branch);
+        return LifecycleOutcome::noop(format!("{branch} already in {run_main}; nothing to land"));
     }
 
     let wt_path = station_worktree_path(&root, slug, station);
@@ -250,14 +292,68 @@ pub fn land_run(store: &StateStore, slug: &str) -> LifecycleOutcome {
     )
 }
 
-/// Merge `source` into `target` through a temporary DETACHED worktree at
-/// `target`'s commit, guarded by the engine-protected merge, then fast-update
-/// the `target` branch ref to the merge result.
+/// Where a merge should run: in-place on the primary/existing checkout of the
+/// target, or in a detached temp worktree so the agent's tree is untouched.
+enum MergeSite {
+    /// Merge in-place at `path` (the engine is already on `target` there). When
+    /// `path` is the repo root this is the primary checkout; otherwise it's a
+    /// foreign clean worktree already on `target`. Either way `branch -f` would
+    /// refuse, so we merge directly in that tree.
+    InPlace { path: PathBuf },
+    /// Merge in a detached temp worktree at `path`, then fast-update `target`.
+    Temp { path: PathBuf },
+    /// The target checkout is dirty and can't be reused — `note` names the fix.
+    Refused { note: String },
+}
+
+/// Pick the merge site for `target` (mechanic #6).
 ///
-/// The worktree is detached (not checked out on `target`) so this works even
-/// when `target` is the branch checked out in the primary working tree (the
-/// run-main -> base case) — the primary checkout is never touched, mirroring the
-/// reference's ephemeral-worktree merge. Cleans up the temporary worktree after.
+/// - If a worktree (primary or foreign) is already on `target`, merge IN-PLACE
+///   there — a detached temp worktree can't fast-update a branch ref that's
+///   checked out elsewhere (`branch -f` refuses it). Refuse a dirty such tree,
+///   naming the remediation.
+/// - Otherwise no checkout holds `target`, so make a detached temp worktree at
+///   `target`'s commit and merge there, leaving the agent's tree alone.
+fn merge_site(git: &Git, root: &Path, target: &str, slug: &str) -> MergeSite {
+    // Find any worktree already on `target` (primary or station/foreign).
+    let existing = git
+        .list_worktrees()
+        .ok()
+        .and_then(|ws| ws.into_iter().find(|w| w.branch.as_deref() == Some(target)));
+    if let Some(wt) = existing {
+        let dirty = git_at(&wt.path, &["status", "--porcelain"])
+            .map(|o| !o.trim().is_empty())
+            .unwrap_or(true);
+        if dirty {
+            return MergeSite::Refused {
+                note: format!(
+                    "branch '{target}' is checked out at '{}' with uncommitted or untracked \
+                     changes — commit or stash them (and add or clean untracked files) so the \
+                     engine can merge into it",
+                    wt.path.display()
+                ),
+            };
+        }
+        return MergeSite::InPlace { path: wt.path };
+    }
+    let merge_wt = root
+        .join(".darkrun")
+        .join("worktrees")
+        .join(slug)
+        .join(format!("_merge-{}", sanitize(target)));
+    MergeSite::Temp { path: merge_wt }
+}
+
+/// Merge `source` into `target` (mechanics #4 + #6), guarded by the
+/// engine-protected merge.
+///
+/// #4: short-circuit when there is no merge debt (identical trees OR `source`
+/// already an ancestor of `target`) so a `--no-ff` no-op can never mint an
+/// empty commit that triggers the alternating-sync loop.
+///
+/// #6: pick the merge site via [`merge_site`] — in-place when the engine is
+/// already on `target`, else a detached temp worktree so the agent's tree is
+/// never disturbed; the temp worktree's merge result fast-updates `target`.
 fn merge_into_branch(
     _store: &StateStore,
     git: &Git,
@@ -267,79 +363,75 @@ fn merge_into_branch(
     slug: &str,
     message: &str,
 ) -> LifecycleOutcome {
-    // Already merged → clean no-op.
-    if git.is_ancestor(source, target).unwrap_or(false) {
-        return LifecycleOutcome::noop(format!("{source} already in {target}"));
+    // #4: no merge debt → clean no-op (identical trees OR already an ancestor).
+    if has_no_merge_debt(git, source, target) {
+        return LifecycleOutcome::noop(format!("{source} already in {target} (no merge debt)"));
     }
 
-    // When `target` is the branch checked out in the PRIMARY tree (the run-main
-    // -> base case where base is the operator's working branch), merge into the
-    // primary checkout directly — a detached worktree can't fast-update the
-    // checked-out branch ref (`branch -f` refuses the current branch). This is
-    // the one place the working tree is intentionally advanced: the run is
-    // landing on the base the operator asked for. The engine guard still holds
-    // `.darkrun` state to the target side.
-    let primary_branch = git.current_branch().ok().flatten();
-    if primary_branch.as_deref() == Some(target) {
-        // Refuse to clobber a dirty primary tree.
-        if !git.is_clean().unwrap_or(false) {
-            return LifecycleOutcome::noop(format!(
-                "primary tree on {target} is dirty; skipping in-process land"
-            ));
+    match merge_site(git, root, target, slug) {
+        MergeSite::Refused { note } => LifecycleOutcome::noop(note),
+        MergeSite::InPlace { path } => {
+            // Merge directly in the tree that holds `target` (primary or a
+            // foreign clean checkout). No ref fast-update needed — the merge
+            // commit advances `target` in place.
+            let result = engine_protected_merge(git, &path, source, slug, message);
+            merge_result_outcome(result, source, target)
         }
-        let result = engine_protected_merge(git, root, source, slug, message);
-        return match result {
-            Ok(o) if o.ok && o.performed => {
-                LifecycleOutcome::done(format!("merged {source} -> {target}"))
+        MergeSite::Temp { path: merge_wt } => {
+            let merge_wt_str = merge_wt.to_string_lossy().to_string();
+            if let Some(parent) = merge_wt.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
-            Ok(o) if o.ok => {
-                LifecycleOutcome::noop(format!("{source} already up to date with {target}"))
+            // Detached worktree at the target's commit — works even when the
+            // target branch is checked out elsewhere.
+            if git_at(root, &["worktree", "add", "--detach", &merge_wt_str, target]).is_err() {
+                return LifecycleOutcome::noop(format!(
+                    "could not create merge worktree for {target}"
+                ));
             }
-            Ok(o) => LifecycleOutcome {
-                performed: false,
-                note: o
-                    .message
-                    .or_else(|| Some(format!("merge {source} -> {target} left conflicts"))),
-                conflict_paths: o.conflict_paths,
-            },
-            Err(e) => LifecycleOutcome::noop(format!("merge {source} -> {target} failed: {e}")),
-        };
-    }
 
-    let merge_wt = root
-        .join(".darkrun")
-        .join("worktrees")
-        .join(slug)
-        .join(format!("_merge-{}", sanitize(target)));
-    let merge_wt_str = merge_wt.to_string_lossy().to_string();
-
-    if let Some(parent) = merge_wt.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Detached worktree at the target's current commit — works even when the
-    // target branch is checked out in the primary tree.
-    if git_at(root, &["worktree", "add", "--detach", &merge_wt_str, target]).is_err() {
-        return LifecycleOutcome::noop(format!("could not create merge worktree for {target}"));
-    }
-
-    let result = engine_protected_merge(git, &merge_wt, source, slug, message);
-
-    // On a clean merge, advance the target branch ref to the merge commit so the
-    // land is durable, then tear down the temp worktree.
-    let outcome = match result {
-        Ok(o) if o.ok && o.performed => {
-            // Resolve the merge worktree's HEAD and point `target` at it.
-            match git_at(&merge_wt, &["rev-parse", "HEAD"]) {
-                Ok(head) => {
-                    let head = head.trim();
-                    let _ = git_at(root, &["branch", "-f", target, head]);
-                    LifecycleOutcome::done(format!("merged {source} -> {target}"))
+            let result = engine_protected_merge(git, &merge_wt, source, slug, message);
+            // #3: a genuine conflict must be left IN-TREE for resolution — do
+            // NOT tear down the temp worktree, or the agent has nothing to
+            // resolve. The mid-merge guard suspension lets the agent write the
+            // conflicted files there; the next land re-uses this same worktree.
+            let conflicted = matches!(&result, Ok(o) if !o.ok && !o.conflict_paths.is_empty());
+            let outcome = match &result {
+                Ok(o) if o.ok && o.performed => {
+                    // Advance the target branch ref to the merge commit.
+                    match git_at(&merge_wt, &["rev-parse", "HEAD"]) {
+                        Ok(head) => {
+                            let _ = git_at(root, &["branch", "-f", target, head.trim()]);
+                            LifecycleOutcome::done(format!("merged {source} -> {target}"))
+                        }
+                        Err(e) => LifecycleOutcome::noop(format!(
+                            "merged {source} -> {target} but could not resolve HEAD: {e}"
+                        )),
+                    }
                 }
-                Err(e) => LifecycleOutcome::noop(format!(
-                    "merged {source} -> {target} but could not resolve HEAD: {e}"
-                )),
+                _ => merge_result_outcome(result, source, target),
+            };
+
+            if !conflicted {
+                // Tear down the temp worktree only on a clean / no-op outcome.
+                let _ = git_at(root, &["worktree", "remove", "--force", &merge_wt_str]);
+                let _ = std::fs::remove_dir_all(&merge_wt);
             }
+            outcome
         }
+    }
+}
+
+/// Fold a raw [`engine_protected_merge`] result into a [`LifecycleOutcome`],
+/// carrying conflict paths + the conflict branch (`target`) when the merge left
+/// genuine agent-content conflicts in-tree.
+fn merge_result_outcome(
+    result: darkrun_git::Result<darkrun_git::MergeOutcome>,
+    source: &str,
+    target: &str,
+) -> LifecycleOutcome {
+    match result {
+        Ok(o) if o.ok && o.performed => LifecycleOutcome::done(format!("merged {source} -> {target}")),
         Ok(o) if o.ok => {
             LifecycleOutcome::noop(format!("{source} already up to date with {target}"))
         }
@@ -349,14 +441,152 @@ fn merge_into_branch(
                 .message
                 .or_else(|| Some(format!("merge {source} -> {target} left conflicts"))),
             conflict_paths: o.conflict_paths,
+            conflict_branch: Some(target.to_string()),
+            conflict_step: None,
         },
         Err(e) => LifecycleOutcome::noop(format!("merge {source} -> {target} failed: {e}")),
-    };
+    }
+}
 
-    // Tear down the temp worktree regardless of outcome.
-    let _ = git_at(root, &["worktree", "remove", "--force", &merge_wt_str]);
-    let _ = std::fs::remove_dir_all(&merge_wt);
-    outcome
+/// Run `fn` with a checkout of `branch` available (mechanic #6): reuse an
+/// existing clean worktree on `branch` if one is registered, refuse a dirty one
+/// with a named remediation, else create a detached temp worktree at `branch`'s
+/// commit. The closure receives the worktree path. Cleans up a temp worktree.
+///
+/// Returned to mirror the reference `withWorktreeOnBranch`; the land/sync paths
+/// route their merges through [`merge_into_branch`] which inlines the same
+/// in-place-vs-temp choice via [`merge_site`]. This is the standalone helper for
+/// callers that need the path directly.
+pub fn with_worktree_on_branch<T>(
+    git: &Git,
+    root: &Path,
+    branch: &str,
+    slug: &str,
+    f: impl FnOnce(&Path) -> T,
+) -> std::result::Result<T, String> {
+    // Reuse a registered checkout of `branch` when it's clean.
+    let existing = git
+        .list_worktrees()
+        .ok()
+        .and_then(|ws| ws.into_iter().find(|w| w.branch.as_deref() == Some(branch)));
+    if let Some(wt) = existing {
+        // Inspect that specific worktree's cleanliness via status in its dir.
+        let dirty = git_at(&wt.path, &["status", "--porcelain"])
+            .map(|o| !o.trim().is_empty())
+            .unwrap_or(true);
+        if dirty {
+            return Err(format!(
+                "branch '{branch}' is checked out at '{}' with uncommitted or untracked \
+                 changes — commit or stash them (and add or clean untracked files) so the \
+                 engine can merge into it",
+                wt.path.display()
+            ));
+        }
+        return Ok(f(&wt.path));
+    }
+
+    // No existing checkout → detached temp worktree at the branch commit.
+    let temp = root
+        .join(".darkrun")
+        .join("worktrees")
+        .join(slug)
+        .join(format!("_wt-{}", sanitize(branch)));
+    let temp_str = temp.to_string_lossy().to_string();
+    if let Some(parent) = temp.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if git_at(root, &["worktree", "add", "--detach", &temp_str, branch]).is_err() {
+        return Err(format!("could not create a worktree on '{branch}'"));
+    }
+    let out = f(&temp);
+    let _ = git_at(root, &["worktree", "remove", "--force", &temp_str]);
+    let _ = std::fs::remove_dir_all(&temp);
+    Ok(out)
+}
+
+/// Downstream sync before merging up (mechanic #5): keep the station fresh by
+/// merging DOWN first, in two debt-gated, engine-protected steps:
+///
+/// 1. base/mainline -> run-main, then
+/// 2. run-main -> the active station branch.
+///
+/// Run each tick before a land so land-time conflicts shrink. Each step is
+/// gated on [`has_no_merge_debt`] (#4) and goes through the engine-protected
+/// merge (#1). On a conflict the outcome carries `conflict_step` (which step)
+/// and `conflict_branch` (where the merge is left in-tree for resolution).
+/// No-op outside a git repo or when there's nothing to sync.
+pub fn sync_branch_downstream(store: &StateStore, slug: &str, station: &str) -> LifecycleOutcome {
+    let Some((git, root)) = open_git(store) else {
+        return LifecycleOutcome::noop("not a git repo");
+    };
+    let run_main = run_main_branch(slug);
+    let branch = station_branch(slug, station);
+    let base = store
+        .read_state(slug)
+        .ok()
+        .flatten()
+        .and_then(|s| s.base_branch)
+        .unwrap_or_else(|| resolve_base_branch(store));
+
+    let mut performed = false;
+
+    // Step 1: base -> run-main (only when both exist and there's debt).
+    if git.branch_exists(&run_main).unwrap_or(false)
+        && git.branch_exists(&base).unwrap_or(false)
+        && !has_no_merge_debt(&git, &base, &run_main)
+    {
+        let out = merge_into_branch(
+            store,
+            &git,
+            &root,
+            &run_main,
+            &base,
+            slug,
+            &format!("darkrun: sync {base} -> {run_main} (pre-land)"),
+        );
+        if out.has_conflicts() {
+            return LifecycleOutcome {
+                performed,
+                note: out.note,
+                conflict_paths: out.conflict_paths,
+                conflict_branch: Some(run_main.clone()),
+                conflict_step: Some(SyncConflictStep::MainlineToRunMain),
+            };
+        }
+        performed |= out.performed;
+    }
+
+    // Step 2: run-main -> station branch (only when both exist and there's debt).
+    if git.branch_exists(&run_main).unwrap_or(false)
+        && git.branch_exists(&branch).unwrap_or(false)
+        && !has_no_merge_debt(&git, &run_main, &branch)
+    {
+        let out = merge_into_branch(
+            store,
+            &git,
+            &root,
+            &branch,
+            &run_main,
+            slug,
+            &format!("darkrun: sync {run_main} -> {branch} (pre-land)"),
+        );
+        if out.has_conflicts() {
+            return LifecycleOutcome {
+                performed,
+                note: out.note,
+                conflict_paths: out.conflict_paths,
+                conflict_branch: Some(branch.clone()),
+                conflict_step: Some(SyncConflictStep::RunMainToStation),
+            };
+        }
+        performed |= out.performed;
+    }
+
+    if performed {
+        LifecycleOutcome::done(format!("synced {base} -> {run_main} -> {branch}"))
+    } else {
+        LifecycleOutcome::noop("nothing to sync (branches fresh)")
+    }
 }
 
 /// Run `git -C <dir> <args>`, returning trimmed stdout on success. Used for the
@@ -543,5 +773,151 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "shipped.txt should be on base (main)");
+    }
+
+    /// #4: a land with no merge debt (identical trees) is a clean no-op — no new
+    /// commit minted on run-main, so the alternating no-op-merge loop can't start.
+    #[test]
+    fn land_with_no_merge_debt_is_noop() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        // Enter a station but do NO work: the station branch's tree is identical
+        // to run-main. A land must short-circuit (no debt) rather than commit.
+        enter_station(&store, "r", "build");
+        let before = git_rev(&root, "darkrun/r/main");
+        let land = land_station(&store, "r", "build");
+        assert!(!land.performed, "no-debt land must not perform: {land:?}");
+        let after = git_rev(&root, "darkrun/r/main");
+        assert_eq!(before, after, "run-main HEAD must be unchanged (no empty commit)");
+    }
+
+    /// #8: the station worktree is gone but its branch still carries unmerged
+    /// commits — land_station must merge the durable branch, not report done.
+    #[test]
+    fn land_station_merges_when_worktree_gone_but_branch_unmerged() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+        let wt = station_worktree_path(&root, "r", "build");
+        std::fs::write(wt.join("late.txt"), "shipped\n").unwrap();
+        let git_wt = |args: &[&str]| {
+            Command::new("git").arg("-C").arg(&wt).args(args).status().unwrap().success()
+        };
+        assert!(git_wt(&["add", "-A"]));
+        assert!(git_wt(&["commit", "-q", "-m", "late station work"]));
+
+        // Remove ONLY the worktree (simulate a crash) — the branch + its
+        // unmerged commit survive.
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["worktree", "remove", "--force", wt.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(!wt.exists());
+        assert!(branch_exists(&root, "darkrun/r/build"), "branch survives the crash");
+
+        let land = land_station(&store, "r", "build");
+        assert!(land.performed, "must still merge the durable branch: {land:?}");
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["show", "darkrun/r/main:late.txt"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "late.txt must reach run-main");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "shipped\n");
+    }
+
+    /// #6: when the engine is NOT on the target, the merge runs in a detached
+    /// temp worktree and the primary checkout is never disturbed.
+    #[test]
+    fn merge_isolation_leaves_primary_tree_untouched() {
+        let (_d, root, store) = init_repo();
+        // Primary tree stays on `main` the whole time.
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+        let wt = station_worktree_path(&root, "r", "build");
+        std::fs::write(wt.join("iso.txt"), "iso\n").unwrap();
+        let git_wt = |args: &[&str]| {
+            Command::new("git").arg("-C").arg(&wt).args(args).status().unwrap().success()
+        };
+        assert!(git_wt(&["add", "-A"]));
+        assert!(git_wt(&["commit", "-q", "-m", "iso work"]));
+
+        // Land build -> run-main. Primary is on `main` (not run-main), so the
+        // merge happens in a temp worktree.
+        let land = land_station(&store, "r", "build");
+        assert!(land.performed, "{land:?}");
+        // Primary tree is still on main and clean — never touched.
+        let head = git_rev_branch(&root);
+        assert_eq!(head.as_deref(), Some("main"), "primary checkout untouched");
+        let clean = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&clean.stdout).trim().is_empty(), "primary clean");
+        // No `iso.txt` in the primary working tree.
+        assert!(!root.join("iso.txt").exists(), "merge did not leak into primary tree");
+    }
+
+    /// #5: sync_branch_downstream merges base -> run-main -> station, fresh.
+    #[test]
+    fn sync_downstream_freshens_station_before_land() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+
+        // Advance base (main) with a commit the station hasn't seen.
+        std::fs::write(root.join("base-new.txt"), "from base\n").unwrap();
+        let git_root = |args: &[&str]| {
+            Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success()
+        };
+        assert!(git_root(&["add", "-A"]));
+        assert!(git_root(&["commit", "-q", "-m", "base advanced"]));
+
+        let sync = sync_branch_downstream(&store, "r", "build");
+        assert!(sync.performed, "should merge base down to the station: {sync:?}");
+        assert!(sync.conflict_step.is_none(), "clean sync has no conflict step");
+
+        // The station branch now carries the base's new file.
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["show", "darkrun/r/build:base-new.txt"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "base-new.txt must reach the station branch");
+
+        // A second sync is a clean no-op (branches now fresh).
+        let again = sync_branch_downstream(&store, "r", "build");
+        assert!(!again.performed, "second sync is a no-op: {again:?}");
+    }
+
+    fn git_rev(root: &Path, refname: &str) -> String {
+        String::from_utf8_lossy(
+            &Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["rev-parse", refname])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string()
+    }
+
+    fn git_rev_branch(root: &Path) -> Option<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .unwrap();
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() || s == "HEAD" { None } else { Some(s) }
     }
 }

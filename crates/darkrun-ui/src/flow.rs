@@ -125,7 +125,7 @@ pub struct FlowLayout {
 /// assembly line. The first six stations map 1:1 onto the canonical phase order
 /// (`spec`-grey, `review`-blue, …), the seventh wraps back to grey, and so on.
 pub fn station_hue(index: usize) -> Hue {
-    Phase::ALL[index % Phase::ALL.len()].hue()
+    Phase::ALL[index % Phase::ALL.len()].hue_var()
 }
 
 /// Lay the stations out left-to-right. `active` selects the current node: every
@@ -236,8 +236,12 @@ pub enum Beat {
     Spec,
     /// An adversarial reviewer pass (review, audit).
     Adversarial,
-    /// Produce / read the closing-brief summary artifact (review, checkpoint).
+    /// Produce / read the PRE-execution brief — the work planned for the station
+    /// (review gate).
     Brief,
+    /// Produce / read the POST-execution outcome — what the station actually
+    /// produced (checkpoint gate).
+    Outcome,
     /// A genuine user input / decision step (review, checkpoint).
     User,
     /// Plan: decide the approach for the unit before building (manufacture).
@@ -261,6 +265,7 @@ impl Beat {
             Beat::Spec => "spec",
             Beat::Adversarial => "adversarial",
             Beat::Brief => "brief",
+            Beat::Outcome => "outcome",
             Beat::User => "user",
             Beat::Plan => "plan",
             Beat::Make => "make",
@@ -277,7 +282,8 @@ impl Beat {
             Beat::Explore => "run Explorers + decompose into units",
             Beat::Spec => "verify against the locked spec",
             Beat::Adversarial => "an adversarial reviewer pass",
-            Beat::Brief => "produce/read the closing-brief summary artifact",
+            Beat::Brief => "produce/read the pre-execution brief — the planned work",
+            Beat::Outcome => "produce/read the post-execution outcome — what was built",
             Beat::User => "a genuine user input / decision step",
             Beat::Plan => "decide the approach from spec + design; name the riskiest assumption",
             Beat::Make => "produce the candidate output",
@@ -301,7 +307,7 @@ pub fn phase_beats(phase: Phase) -> Vec<Beat> {
         Phase::Manufacture => vec![Beat::Plan, Beat::Make, Beat::Challenge, Beat::Resolve],
         Phase::Audit => vec![Beat::Spec, Beat::Adversarial],
         Phase::Reflect => vec![Beat::Agentic],
-        Phase::Checkpoint => vec![Beat::Brief, Beat::User],
+        Phase::Checkpoint => vec![Beat::Outcome, Beat::User],
     }
 }
 
@@ -446,10 +452,10 @@ pub const TICKS_PER_STATION: usize = 15;
 /// success-green; ask/await as caution; external as info.
 pub fn checkpoint_hue(kind: CheckpointKind) -> &'static str {
     match kind {
-        CheckpointKind::Auto => tokens::STATUS_OK,
-        CheckpointKind::Ask => tokens::STATUS_WARN,
-        CheckpointKind::Await => tokens::STATUS_WARN,
-        CheckpointKind::External => tokens::STATUS_INFO,
+        CheckpointKind::Auto => tokens::var::STATUS_OK,
+        CheckpointKind::Ask => tokens::var::STATUS_WARN,
+        CheckpointKind::Await => tokens::var::STATUS_WARN,
+        CheckpointKind::External => tokens::var::STATUS_INFO,
     }
 }
 
@@ -514,10 +520,10 @@ mod tests {
 
     #[test]
     fn station_hue_cycles_phase_hues() {
-        assert_eq!(station_hue(0), Phase::Spec.hue());
-        assert_eq!(station_hue(5), Phase::Checkpoint.hue());
-        assert_eq!(station_hue(6), Phase::Spec.hue()); // wraps
-        assert_eq!(station_hue(7), Phase::Review.hue());
+        assert_eq!(station_hue(0), Phase::Spec.hue_var());
+        assert_eq!(station_hue(5), Phase::Checkpoint.hue_var());
+        assert_eq!(station_hue(6), Phase::Spec.hue_var()); // wraps
+        assert_eq!(station_hue(7), Phase::Review.hue_var());
     }
 
     #[test]
@@ -582,7 +588,7 @@ mod tests {
         );
         assert_eq!(phase_beats(Phase::Audit), vec![Beat::Spec, Beat::Adversarial]);
         assert_eq!(phase_beats(Phase::Reflect), vec![Beat::Agentic]);
-        assert_eq!(phase_beats(Phase::Checkpoint), vec![Beat::Brief, Beat::User]);
+        assert_eq!(phase_beats(Phase::Checkpoint), vec![Beat::Outcome, Beat::User]);
     }
 
     #[test]
@@ -676,10 +682,10 @@ mod tests {
 
     #[test]
     fn checkpoint_hue_maps_each_kind() {
-        assert_eq!(checkpoint_hue(CheckpointKind::Auto), tokens::STATUS_OK);
-        assert_eq!(checkpoint_hue(CheckpointKind::Ask), tokens::STATUS_WARN);
-        assert_eq!(checkpoint_hue(CheckpointKind::Await), tokens::STATUS_WARN);
-        assert_eq!(checkpoint_hue(CheckpointKind::External), tokens::STATUS_INFO);
+        assert_eq!(checkpoint_hue(CheckpointKind::Auto), tokens::var::STATUS_OK);
+        assert_eq!(checkpoint_hue(CheckpointKind::Ask), tokens::var::STATUS_WARN);
+        assert_eq!(checkpoint_hue(CheckpointKind::Await), tokens::var::STATUS_WARN);
+        assert_eq!(checkpoint_hue(CheckpointKind::External), tokens::var::STATUS_INFO);
     }
 
     #[test]

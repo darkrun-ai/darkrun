@@ -32,19 +32,19 @@ pub fn FactoryCard(
     #[props(default = "active".to_string())]
     status_label: String,
 ) -> Element {
-    let accent = phase.map(|p| p.hue().base.to_string());
+    let accent = phase.map(|p| p.hue_var().base.to_string());
     let header =
         "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;";
     let title_style = format!(
         "font-family:{sans};font-size:15px;font-weight:700;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let meta_style = format!(
         "display:flex;align-items:center;gap:8px;margin-bottom:12px;\
          font-family:{mono};font-size:12px;color:{muted};",
         mono = tokens::FONT_MONO,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     rsx! {
         Card { accent: accent,
@@ -89,19 +89,19 @@ pub fn UnitRow(
     let row = format!(
         "display:flex;align-items:center;gap:10px;padding:8px 10px;\
          border:1px solid {border};border-radius:6px;background:{surface};",
-        border = tokens::BORDER,
-        surface = tokens::SURFACE_RAISED,
+        border = tokens::var::BORDER,
+        surface = tokens::var::SURFACE_RAISED,
     );
     let title_style = format!(
         "flex:1;min-width:0;font-family:{sans};font-size:13px;color:{text};\
          overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let pass_style = format!(
         "font-family:{mono};font-size:11px;color:{faint};",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     rsx! {
         div { class: "dr-unit-row", style: "{row}",
@@ -167,19 +167,19 @@ pub fn CheckpointBar(
     #[props(default)]
     on_hold: Option<EventHandler<MouseEvent>>,
 ) -> Element {
-    let hue = Phase::Checkpoint.hue();
+    let hue = Phase::Checkpoint.hue_var();
     let bar = format!(
         "display:flex;align-items:center;gap:12px;padding:10px 14px;\
          background:{surface};border:1px solid {border};\
          border-left:3px solid {accent};border-radius:8px;",
-        surface = tokens::SURFACE_OVERLAY,
-        border = tokens::BORDER,
+        surface = tokens::var::SURFACE_OVERLAY,
+        border = tokens::var::BORDER,
         accent = hue.base,
     );
     let prompt_style = format!(
         "flex:1;min-width:0;font-family:{sans};font-size:13px;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     // Auto/external gates are informational; ask/await invite a decision.
     let interactive = matches!(kind, CheckpointKind::Ask | CheckpointKind::Await);

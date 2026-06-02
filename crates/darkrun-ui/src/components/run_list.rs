@@ -97,7 +97,7 @@ pub fn RunList(
 /// fires `on_select(slug)`.
 #[component]
 pub fn RunCard(run: RunCardData, on_select: EventHandler<String>) -> Element {
-    let accent = run.phase.map(|p| p.hue().base.to_string());
+    let accent = run.phase.map(|p| p.hue_var().base.to_string());
     let tone = run_status_tone(&run.status);
 
     let header = "display:flex;align-items:flex-start;justify-content:space-between;\
@@ -106,18 +106,18 @@ pub fn RunCard(run: RunCardData, on_select: EventHandler<String>) -> Element {
         "font-family:{sans};font-size:14px;font-weight:700;color:{text};\
          overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let meta_style = format!(
         "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;\
          font-family:{mono};font-size:11px;color:{muted};",
         mono = tokens::FONT_MONO,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let progress_style = format!(
         "font-family:{mono};font-size:11px;color:{faint};margin-top:8px;",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
 
     let slug = run.slug.clone();

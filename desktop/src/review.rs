@@ -88,23 +88,14 @@ pub fn ReviewApp(cfg: ConnConfig) -> Element {
         }
     });
 
-    let shell = "padding:24px;display:flex;flex-direction:column;gap:16px;\
+    let shell = "padding:20px 24px;display:flex;flex-direction:column;gap:16px;\
                  max-width:880px;margin:0 auto;";
-    // Translucent surface so content blurs *through* the sticky header.
-    let header_style = format!(
-        "display:flex;align-items:center;justify-content:space-between;gap:12px;\
-         position:sticky;top:0;z-index:10;padding:12px 0;\
-         backdrop-filter:blur(8px);background:{base}ee;\
-         border-bottom:1px solid {border};",
-        base = tokens::SURFACE_BASE,
-        border = tokens::BORDER,
-    );
 
     rsx! {
         div { style: "{shell}",
-            header {
-                style: "{header_style}",
-                Wordmark { variant: WordmarkVariant::OutlinedSolidRun, size: 28.0 }
+            // The wordmark + app chrome live in the shell toolbar now, so the
+            // review pane shows only its content plus a slim connection indicator.
+            div { style: "display:flex;justify-content:flex-end;align-items:center;",
                 LinkBadge { link: link.read().clone() }
             }
             match payload.read().clone() {
@@ -331,24 +322,24 @@ fn ReviewHeader(
     let title_style = format!(
         "font-family:{sans};font-size:15px;font-weight:700;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let sub_style = format!(
         "display:flex;align-items:center;gap:10px;margin-top:10px;\
          font-family:{mono};font-size:12px;color:{muted};",
         mono = tokens::FONT_MONO,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let (fb_bg, fb_fg) = if feedback_alert {
         ("#f8514922", "#f5a3a3")
     } else {
-        (tokens::SURFACE_OVERLAY, tokens::TEXT_MUTED)
+        (tokens::var::SURFACE_OVERLAY, tokens::var::TEXT_MUTED)
     };
     let fb_btn = format!(
         "background:{fb_bg};color:{fb_fg};border:1px solid {border};\
          font-family:{sans};font-size:12px;border-radius:6px;padding:5px 11px;\
          cursor:pointer;display:flex;align-items:center;gap:6px;",
-        border = tokens::BORDER_STRONG,
+        border = tokens::var::BORDER_STRONG,
         sans = tokens::FONT_SANS,
     );
     rsx! {
@@ -367,7 +358,7 @@ fn ReviewHeader(
                                 "font-family:{};border-radius:999px;padding:0 6px;\
                                  background:{};color:{};",
                                 tokens::FONT_MONO,
-                                if feedback_alert { "#f8514933" } else { tokens::SURFACE_BASE },
+                                if feedback_alert { "#f8514933" } else { tokens::var::SURFACE_BASE },
                                 fb_fg,
                             ),
                             "{feedback_count}"
@@ -562,8 +553,8 @@ fn row_actions(on_review: impl FnMut(MouseEvent) + 'static) -> Element {
     let chip = format!(
         "font-size:11px;color:{muted};border:1px solid {border};\
          border-radius:5px;padding:3px 9px;cursor:pointer;background:transparent;",
-        muted = tokens::TEXT_MUTED,
-        border = tokens::BORDER_STRONG,
+        muted = tokens::var::TEXT_MUTED,
+        border = tokens::var::BORDER_STRONG,
     );
     rsx! {
         button {
@@ -1105,8 +1096,8 @@ fn annotate_stage(
         "position:relative;flex:0 0 360px;min-height:220px;border-radius:8px;\
          border:1px solid {border};background:{base};overflow:hidden;\
          {cursor}",
-        border = tokens::BORDER,
-        base = tokens::SURFACE_BASE,
+        border = tokens::var::BORDER,
+        base = tokens::var::SURFACE_BASE,
         cursor = if visual { "cursor:crosshair;" } else { "" },
     );
     let is_pen = active == AnnotateTool::Pen;
@@ -1362,9 +1353,9 @@ fn checkpoint_section(
                     "width:100%;box-sizing:border-box;min-height:54px;padding:9px 12px;\
                      border-radius:6px;border:1px solid {border};background:{base};\
                      color:{text};font-family:{sans};font-size:13px;resize:vertical;",
-                    border = tokens::BORDER,
-                    base = tokens::SURFACE_BASE,
-                    text = tokens::TEXT,
+                    border = tokens::var::BORDER,
+                    base = tokens::var::SURFACE_BASE,
+                    text = tokens::var::TEXT,
                     sans = tokens::FONT_SANS,
                 ),
                 placeholder: "Station note (ships with Request changes)…",

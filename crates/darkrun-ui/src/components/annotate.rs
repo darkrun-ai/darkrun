@@ -138,8 +138,8 @@ pub fn AnnotateToolbar(
     let palette = format!(
         "display:inline-flex;gap:4px;align-items:center;background:{surface};\
          border:1px solid {border};border-radius:9px;padding:4px;",
-        surface = tokens::SURFACE_OVERLAY,
-        border = tokens::BORDER,
+        surface = tokens::var::SURFACE_OVERLAY,
+        border = tokens::var::BORDER,
     );
     rsx! {
         div {
@@ -154,11 +154,11 @@ pub fn AnnotateToolbar(
                     let core = if on {
                         format!(
                             "background:{accent};color:{on_accent};",
-                            accent = tokens::ACCENT,
-                            on_accent = tokens::ON_ACCENT,
+                            accent = tokens::var::ACCENT,
+                            on_accent = tokens::var::ON_ACCENT,
                         )
                     } else {
-                        format!("background:transparent;color:{};", tokens::TEXT_MUTED)
+                        format!("background:transparent;color:{};", tokens::var::TEXT_MUTED)
                     };
                     let btn = format!(
                         "{core}width:30px;height:28px;border-radius:6px;border:none;\
@@ -204,8 +204,8 @@ pub fn PinMarker(
          box-shadow:0 2px 8px #000a;transform:translate(-50%,-50%);",
         left = point.left_pct(),
         top = point.top_pct(),
-        accent = tokens::ACCENT,
-        on = tokens::ON_ACCENT,
+        accent = tokens::var::ACCENT,
+        on = tokens::var::ON_ACCENT,
     );
     rsx! {
         div { class: "dr-annotate-pin", "data-n": "{number}", style: "{style}", "{number}" }
@@ -236,13 +236,13 @@ pub fn BoxMarker(
         top = y * 100.0,
         width = w * 100.0,
         height = h * 100.0,
-        accent = tokens::ACCENT,
+        accent = tokens::var::ACCENT,
     );
     let tag = format!(
         "position:absolute;top:-11px;left:-2px;background:{accent};color:{on};\
          font-family:{mono};font-size:10px;font-weight:700;border-radius:4px;padding:0 5px;",
-        accent = tokens::ACCENT,
-        on = tokens::ON_ACCENT,
+        accent = tokens::var::ACCENT,
+        on = tokens::var::ON_ACCENT,
         mono = tokens::FONT_MONO,
     );
     rsx! {
@@ -289,7 +289,7 @@ pub fn ArrowMarker(
                     "markerWidth": "6",
                     "markerHeight": "6",
                     "orient": "auto-start-reverse",
-                    path { d: "M0,0 L10,5 L0,10 z", fill: tokens::ACCENT }
+                    path { d: "M0,0 L10,5 L0,10 z", fill: tokens::var::ACCENT }
                 }
             }
             line {
@@ -297,7 +297,7 @@ pub fn ArrowMarker(
                 y1: "{y1}",
                 x2: "{x2}",
                 y2: "{y2}",
-                stroke: tokens::ACCENT,
+                stroke: tokens::var::ACCENT,
                 "stroke-width": "0.7",
                 "vector-effect": "non-scaling-stroke",
                 "marker-end": "url(#{head_id})",
@@ -337,7 +337,7 @@ pub fn PathMarker(
             polyline {
                 points: "{pts}",
                 fill: "none",
-                stroke: tokens::ACCENT,
+                stroke: tokens::var::ACCENT,
                 "stroke-width": "0.7",
                 "stroke-linejoin": "round",
                 "stroke-linecap": "round",
@@ -372,13 +372,14 @@ pub fn HighlightMarker(
         top = y * 100.0,
         width = w * 100.0,
         height = h * 100.0,
+        // Hex (not the var) so the `33`/`66` alpha suffix forms a valid 8-digit color.
         accent = tokens::ACCENT,
     );
     let tag = format!(
         "position:absolute;top:-11px;left:-2px;background:{accent};color:{on};\
          font-family:{mono};font-size:10px;font-weight:700;border-radius:4px;padding:0 5px;",
-        accent = tokens::ACCENT,
-        on = tokens::ON_ACCENT,
+        accent = tokens::var::ACCENT,
+        on = tokens::var::ON_ACCENT,
         mono = tokens::FONT_MONO,
     );
     rsx! {
@@ -455,23 +456,23 @@ pub fn CommentPanel(
     let h2 = format!(
         "margin:0;font-size:13px;font-weight:700;color:{text};\
          text-transform:uppercase;letter-spacing:0.04em;",
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let input = format!(
         "width:100%;box-sizing:border-box;padding:9px 12px;border-radius:6px;\
          border:1px solid {border};background:{base};color:{text};\
          font-family:{sans};font-size:13px;",
-        border = tokens::BORDER,
-        base = tokens::SURFACE_BASE,
-        text = tokens::TEXT,
+        border = tokens::var::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        text = tokens::var::TEXT,
         sans = tokens::FONT_SANS,
     );
     let submit = format!(
         "background:{accent};color:{on};border:1px solid {accent};\
          font-family:{sans};font-size:13px;font-weight:600;\
          padding:7px 14px;border-radius:6px;cursor:pointer;",
-        accent = tokens::ACCENT,
-        on = tokens::ON_ACCENT,
+        accent = tokens::var::ACCENT,
+        on = tokens::var::ON_ACCENT,
         sans = tokens::FONT_SANS,
     );
     // The replacement-diff box is monospaced — it carries source the agent applies.
@@ -479,16 +480,16 @@ pub fn CommentPanel(
         "width:100%;box-sizing:border-box;padding:9px 12px;border-radius:6px;\
          border:1px solid {border};background:{base};color:{text};\
          font-family:{mono};font-size:12.5px;min-height:64px;resize:vertical;",
-        border = tokens::BORDER,
-        base = tokens::SURFACE_BASE,
-        text = tokens::TEXT,
+        border = tokens::var::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        text = tokens::var::TEXT,
         mono = tokens::FONT_MONO,
     );
     let replace_label = format!(
         "font-family:{mono};font-size:10.5px;text-transform:uppercase;\
          letter-spacing:0.04em;color:{faint};",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     rsx! {
         div { class: "dr-comment-panel", style: "{wrap}",
@@ -498,10 +499,10 @@ pub fn CommentPanel(
                     let cmt = format!(
                         "font-size:12.5px;color:{muted};padding:7px 0;\
                          border-bottom:1px solid {border};display:flex;gap:8px;",
-                        muted = tokens::TEXT_MUTED,
-                        border = tokens::BORDER,
+                        muted = tokens::var::TEXT_MUTED,
+                        border = tokens::var::BORDER,
                     );
-                    let num = format!("color:{accent};font-weight:700;", accent = tokens::ACCENT);
+                    let num = format!("color:{accent};font-weight:700;", accent = tokens::var::ACCENT);
                     rsx! {
                         div { class: "dr-comment", style: "{cmt}",
                             span { style: "{num}", "{c.number}" }

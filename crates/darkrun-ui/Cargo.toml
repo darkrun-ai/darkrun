@@ -13,3 +13,8 @@ publish = false
 # renderer. The `lib` feature is the same set the desktop app pulls transitively,
 # and it compiles cleanly for both native and wasm32-unknown-unknown.
 dioxus = { version = "0.7", default-features = false, features = ["lib"] }
+
+[dev-dependencies]
+# Native server-side render, used only by the `theme_snapshot` example to dump the
+# real components to an HTML file for visual theme/layout verification.
+dioxus-ssr = "0.7"

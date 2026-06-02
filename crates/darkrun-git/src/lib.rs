@@ -41,6 +41,7 @@ pub use clone::{clone_repo, default_clone_dest, repo_name_from_url};
 pub use error::{GitError, Result};
 pub use libgit2::Libgit2Backend;
 pub use merge::{engine_protected_merge, is_engine_owned_state_path, ENGINE_STATE_PREFIX};
+// `has_no_merge_debt` + `is_merge_in_progress` are defined below in this module.
 pub use shell::ShellBackend;
 
 /// The recommended entry point: a [`GitBackend`] facade over a repository.
@@ -144,6 +145,93 @@ impl GitBackend for Git {
     fn unresolved_paths(&self, worktree_path: &Path) -> Result<Vec<String>> {
         self.inner.unresolved_paths(worktree_path)
     }
+
+    fn refs_have_identical_trees(&self, ref_a: &str, ref_b: &str) -> Result<bool> {
+        self.inner.refs_have_identical_trees(ref_a, ref_b)
+    }
+
+    fn push(&self, worktree_path: &Path, branch: &str) -> Result<()> {
+        self.inner.push(worktree_path, branch)
+    }
+
+    fn fetch(&self, worktree_path: &Path, branch: &str) -> Result<()> {
+        self.inner.fetch(worktree_path, branch)
+    }
+
+    fn rebase_onto(&self, worktree_path: &Path, upstream: &str) -> Result<()> {
+        self.inner.rebase_onto(worktree_path, upstream)
+    }
+
+    fn rebase_abort(&self, worktree_path: &Path) -> Result<()> {
+        self.inner.rebase_abort(worktree_path)
+    }
+}
+
+/// Whether merging `source` into `target` would discharge no merge debt — i.e.
+/// the merge is a pure no-op (mechanic #4, the loop guard).
+///
+/// True when either:
+///
+/// - `source` and `target` have **identical trees** (a `--no-ff` merge would
+///   mint an empty commit), OR
+/// - `source` is already an **ancestor** of `target` ("already up to date" —
+///   trees differ only because `target` accreted later commits elsewhere).
+///
+/// Either case means emitting a merge would re-execute a no-op and re-dispatch
+/// the cursor, producing the alternating no-op-merge loop. Callers MUST gate
+/// BOTH the cursor's land synthesis AND the in-handler merge on this so the
+/// loop can't fire from either side. Read-only; defaults to `false` (there IS
+/// debt; do the merge) on any git failure.
+pub fn has_no_merge_debt(git: &dyn GitBackend, source: &str, target: &str) -> bool {
+    if git.refs_have_identical_trees(source, target).unwrap_or(false) {
+        return true;
+    }
+    git.is_ancestor(source, target).unwrap_or(false)
+}
+
+/// The `$GIT_DIR` mid-merge state markers (mechanic #3). Any of these present
+/// means the working tree carries a half-applied merge/rebase/cherry-pick/revert
+/// whose engine-owned files may hold conflict markers the write guards would
+/// otherwise refuse to let the agent touch.
+const MERGE_IN_PROGRESS_MARKERS: &[&str] = &[
+    "MERGE_HEAD",
+    "REBASE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "rebase-merge",
+    "rebase-apply",
+];
+
+/// Whether the working tree at `cwd` is mid-merge (or mid-rebase / cherry-pick /
+/// revert), keyed on the full `$GIT_DIR` marker set (mechanic #3).
+///
+/// This is BROADER than [`GitBackend::merge_in_progress`] (which checks only
+/// `MERGE_HEAD`, the precise signal the engine-protected merge's no-op
+/// detection depends on). The write-guard path keys ownership / lifecycle /
+/// branch-enforcement suspension on THIS predicate so the agent can write the
+/// conflicted engine files to resolve any in-flight merge — schema validation
+/// stays on regardless. Falls back to `false` (not merging) outside a git repo.
+pub fn is_merge_in_progress(cwd: &Path) -> bool {
+    let git_dir = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(git_dir) = git_dir else {
+        return false;
+    };
+    let abs = if Path::new(&git_dir).is_absolute() {
+        PathBuf::from(&git_dir)
+    } else {
+        cwd.join(&git_dir)
+    };
+    MERGE_IN_PROGRESS_MARKERS
+        .iter()
+        .any(|m| abs.join(m).exists())
 }
 
 #[cfg(test)]

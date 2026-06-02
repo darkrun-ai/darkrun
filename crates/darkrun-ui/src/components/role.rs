@@ -86,12 +86,12 @@ pub fn ExpandableRole(
     let mut expanded = use_signal(|| open);
 
     let tone = kind.tone();
-    let rail = tone.color();
+    let rail = tone.color_var();
     let card = format!(
         "background:{surface};border:1px solid {border};border-left:3px solid {rail};\
          border-radius:8px;overflow:hidden;",
-        surface = tokens::SURFACE_OVERLAY,
-        border = tokens::BORDER,
+        surface = tokens::var::SURFACE_OVERLAY,
+        border = tokens::var::BORDER,
     );
     let header = format!(
         "display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;\
@@ -100,18 +100,18 @@ pub fn ExpandableRole(
     );
     let name_style = format!(
         "font-size:14px;font-weight:700;color:{text};",
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let summary_style = format!(
         "flex:1;min-width:0;font-size:12px;color:{muted};overflow:hidden;\
          text-overflow:ellipsis;white-space:nowrap;",
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let caret = if expanded() { "▾" } else { "▸" };
-    let caret_style = format!("color:{};font-size:12px;width:12px;", tokens::TEXT_FAINT);
+    let caret_style = format!("color:{};font-size:12px;width:12px;", tokens::var::TEXT_FAINT);
     let body_wrap = format!(
         "padding:16px 20px 18px;border-top:1px solid {border};",
-        border = tokens::BORDER,
+        border = tokens::var::BORDER,
     );
 
     rsx! {
@@ -169,24 +169,24 @@ pub fn ArtifactCard(
     #[props(default = true)]
     locked: bool,
 ) -> Element {
-    let hue = if locked { tokens::PHASE_CHECKPOINT.base } else { tokens::TEXT_FAINT };
+    let hue = if locked { tokens::var::PHASE_CHECKPOINT } else { tokens::var::TEXT_FAINT };
     let card = format!(
         "display:flex;align-items:center;gap:10px;padding:10px 12px;\
          background:{surface};border:1px solid {border};border-left:3px solid {hue};\
          border-radius:8px;",
-        surface = tokens::SURFACE_OVERLAY,
-        border = tokens::BORDER,
+        surface = tokens::var::SURFACE_OVERLAY,
+        border = tokens::var::BORDER,
     );
     let glyph = if locked { "🔒" } else { "🔓" };
     let name_style = format!(
         "font-family:{mono};font-size:13px;font-weight:600;color:{text};",
         mono = tokens::FONT_MONO,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let desc_style = format!(
         "font-family:{sans};font-size:12px;color:{muted};",
         sans = tokens::FONT_SANS,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     rsx! {
         div { class: "dr-artifact-card", "data-locked": "{locked}", style: "{card}",

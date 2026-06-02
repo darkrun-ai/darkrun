@@ -58,6 +58,23 @@ impl Phase {
         }
     }
 
+    /// The **themed** hue this phase owns: `base` is the phase's CSS custom
+    /// property (flips with the active theme) and `on` is the generic
+    /// ink-on-vivid foreground (`--dr-on-accent`: near-black in dark, white in
+    /// light). Use this in inline `style:`/SVG so phase coloring follows the
+    /// theme; use [`Phase::hue`] only where a computed hex value is required.
+    pub fn hue_var(self) -> Hue {
+        let base = match self {
+            Phase::Spec => tokens::var::PHASE_SPEC,
+            Phase::Review => tokens::var::PHASE_REVIEW,
+            Phase::Manufacture => tokens::var::PHASE_MANUFACTURE,
+            Phase::Audit => tokens::var::PHASE_AUDIT,
+            Phase::Reflect => tokens::var::PHASE_REFLECT,
+            Phase::Checkpoint => tokens::var::PHASE_CHECKPOINT,
+        };
+        Hue { base, on: tokens::var::ON_ACCENT }
+    }
+
     /// Parse a phase name (case-insensitive). Unknown names yield `None`.
     pub fn from_name(name: &str) -> Option<Phase> {
         Phase::ALL.into_iter().find(|p| p.name().eq_ignore_ascii_case(name))
@@ -124,6 +141,29 @@ impl Tone {
             Tone::Neutral => tokens::TEXT,
             // The status hues are bright enough to take a near-black foreground.
             _ => tokens::SURFACE_BASE,
+        }
+    }
+
+    /// The **themed** primary color for this tone (CSS custom property). Use in
+    /// inline `style:` so the tone follows the active theme.
+    pub fn color_var(self) -> &'static str {
+        match self {
+            Tone::Accent => tokens::var::ACCENT,
+            Tone::Neutral => tokens::var::TEXT_MUTED,
+            Tone::Ok => tokens::var::STATUS_OK,
+            Tone::Warn => tokens::var::STATUS_WARN,
+            Tone::Danger => tokens::var::STATUS_DANGER,
+            Tone::Info => tokens::var::STATUS_INFO,
+        }
+    }
+
+    /// The **themed** foreground on top of [`Tone::color_var`] used as a fill.
+    pub fn on_var(self) -> &'static str {
+        match self {
+            Tone::Neutral => tokens::var::TEXT,
+            // Every vivid hue (accent + status) takes the themed ink-on-vivid
+            // foreground: near-black in dark, white in light.
+            _ => tokens::var::ON_ACCENT,
         }
     }
 }

@@ -324,10 +324,17 @@ html,body{
   text-stroke:var(--dr-wm-dark-stroke-width) var(--dr-wm-dark-stroke);
 }
 .dr-wordmark-themed .dr-wordmark-run{ color:var(--dr-wm-run); }
-/* Lights-out wordmark (interactive site logo): rest dark, glow on hover, flicker
-   out on blur. The "dark" glyphs carry a constant cyan stroke painted under the
-   fill; only the fill color + glow change per data-anim state. */
-.dr-wordmark-anim .dr-wordmark-dark{ color:#07090c; text-shadow:none; }
+/* Lights-out wordmark (interactive site logo).
+   DARK theme: the "dark" glyphs sit near-black with a cyan stroke painted under
+   the fill — invisible-until-lit on the near-black header — then glow on hover and
+   flicker out on blur (the "lights out" motif).
+   LIGHT theme: there is nothing to hide on a paper background, so it renders as the
+   static brand wordmark — solid black "dark", no stroke, no glow/flicker. */
+.dr-wordmark-anim .dr-wordmark-dark{
+  paint-order:stroke;
+  color:#07090c; text-shadow:none;
+  -webkit-text-stroke:1.5px #5fd7ff; text-stroke:1.5px #5fd7ff;
+}
 .dr-wordmark-anim[data-anim="lit"] .dr-wordmark-dark{
   color:#5fd7ff; text-shadow:0 0 22px #5fd7ffcc, 0 0 6px #5fd7ff;
   transition:color .12s ease, text-shadow .12s ease;
@@ -345,11 +352,103 @@ html,body{
   64%  { color:#07090c; text-shadow:none; }
   100% { color:#07090c; text-shadow:none; }
 }
+/* Light theme: solid black glyphs, stroke + glow + flicker all suppressed. Both
+   the media query (System on a light OS) and the manual [data-theme="light"]
+   override neutralize the lights-out treatment. */
+.dr-wordmark-anim.dr-light-static .dr-wordmark-dark,
+:root[data-theme="light"] .dr-wordmark-anim .dr-wordmark-dark{
+  color:var(--dr-text) !important;
+  -webkit-text-stroke:0 !important; text-stroke:0 !important;
+  text-shadow:none !important; animation:none !important;
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme="dark"]) .dr-wordmark-anim .dr-wordmark-dark{
+    color:var(--dr-text) !important;
+    -webkit-text-stroke:0 !important; text-stroke:0 !important;
+    text-shadow:none !important; animation:none !important;
+  }
+}
 @media (prefers-reduced-motion:reduce){
   .dr-wordmark-anim[data-anim="flicker"] .dr-wordmark-dark{ animation:none; color:#07090c; }
   .dr-wordmark-anim[data-anim="lit"] .dr-wordmark-dark{ transition:none; }
 }
 "#;
+
+/// CSS custom-property references (`var(--dr-*)`) — the **theme-aware twins** of
+/// the hex constants above.
+///
+/// Use these wherever a value is handed straight to the DOM/SVG as a color
+/// (inline `style:` strings, SVG `fill`/`stroke`) so it flips automatically when
+/// the active theme changes. Reach for the **hex constants** only where a value
+/// must be computed before the browser resolves a custom property — alpha math
+/// (`"{accent}33"`), `<canvas>`, or a `.icns`/raster pipeline.
+///
+/// A `Hue` whose `base`/`on` reference these properties is produced by
+/// [`Hue::var`]; the per-phase var hues come from [`crate::kinds::Phase::hue_var`].
+pub mod var {
+    /// Near-black canvas — the deepest layer (themed).
+    pub const SURFACE_BASE: &str = "var(--dr-surface-base)";
+    /// The default panel surface (themed).
+    pub const SURFACE_RAISED: &str = "var(--dr-surface-raised)";
+    /// A card/inset surface (themed).
+    pub const SURFACE_OVERLAY: &str = "var(--dr-surface-overlay)";
+    /// A recessed/sink surface — sidebars, wells (themed).
+    pub const SURFACE_SINK: &str = "var(--dr-surface-sink)";
+    /// A hairline border (themed).
+    pub const BORDER: &str = "var(--dr-border)";
+    /// A stronger border for focus and active edges (themed).
+    pub const BORDER_STRONG: &str = "var(--dr-border-strong)";
+    /// Primary text (themed).
+    pub const TEXT: &str = "var(--dr-text)";
+    /// Secondary / supporting text (themed).
+    pub const TEXT_MUTED: &str = "var(--dr-text-muted)";
+    /// Dimmed text for metadata and disabled states (themed).
+    pub const TEXT_FAINT: &str = "var(--dr-text-faint)";
+    /// The brand accent (themed: cool-cyan dark, teal-blue light).
+    pub const ACCENT: &str = "var(--dr-accent)";
+    /// A pressed/active variant of the accent (themed).
+    pub const ACCENT_STRONG: &str = "var(--dr-accent-strong)";
+    /// A foreground that reads on top of the accent — and, more generally, the
+    /// readable ink to drop on **any** vivid hue used as a fill (near-black in
+    /// dark, white in light), so it doubles as the phase/status `on` color.
+    pub const ON_ACCENT: &str = "var(--dr-on-accent)";
+
+    /// `spec` phase base (themed).
+    pub const PHASE_SPEC: &str = "var(--dr-phase-spec)";
+    /// `review` phase base (themed).
+    pub const PHASE_REVIEW: &str = "var(--dr-phase-review)";
+    /// `manufacture` phase base (themed).
+    pub const PHASE_MANUFACTURE: &str = "var(--dr-phase-manufacture)";
+    /// `audit` phase base (themed).
+    pub const PHASE_AUDIT: &str = "var(--dr-phase-audit)";
+    /// `reflect` phase base (themed).
+    pub const PHASE_REFLECT: &str = "var(--dr-phase-reflect)";
+    /// `checkpoint` phase base (themed).
+    pub const PHASE_CHECKPOINT: &str = "var(--dr-phase-checkpoint)";
+
+    /// Success / completed (themed).
+    pub const STATUS_OK: &str = "var(--dr-status-ok)";
+    /// Caution / awaiting a decision (themed).
+    pub const STATUS_WARN: &str = "var(--dr-status-warn)";
+    /// Blocked / failed (themed).
+    pub const STATUS_DANGER: &str = "var(--dr-status-danger)";
+    /// Informational / in progress (themed).
+    pub const STATUS_INFO: &str = "var(--dr-status-info)";
+
+    /// The themed var twin of a phase name's base color, case-insensitive.
+    /// `None` for an unknown phase (mirrors [`super::phase_hue`]).
+    pub fn phase(name: &str) -> Option<&'static str> {
+        Some(match () {
+            _ if name.eq_ignore_ascii_case("spec") => PHASE_SPEC,
+            _ if name.eq_ignore_ascii_case("review") => PHASE_REVIEW,
+            _ if name.eq_ignore_ascii_case("manufacture") => PHASE_MANUFACTURE,
+            _ if name.eq_ignore_ascii_case("audit") => PHASE_AUDIT,
+            _ if name.eq_ignore_ascii_case("reflect") => PHASE_REFLECT,
+            _ if name.eq_ignore_ascii_case("checkpoint") => PHASE_CHECKPOINT,
+            _ => return None,
+        })
+    }
+}
 
 /// The six station phases, in canonical order, each with its name and hue.
 ///

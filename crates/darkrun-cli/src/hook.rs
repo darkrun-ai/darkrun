@@ -1,12 +1,21 @@
 //! Plugin hook handlers (`darkrun hook <name>`).
 //!
-//! Claude Code invokes these from `plugin/hooks/hooks.json` on tool use. They
-//! are ADVISORY: fast, and they must **never block** a tool. On any unknown
+//! Claude Code invokes these from `plugin/hooks/hooks.json` on tool use. Almost
+//! all of them are ADVISORY: fast, and they never block a tool — on any unknown
 //! hook, malformed input, or internal error they simply drain stdin and exit 0
 //! (allow). Handlers may emit advisory JSON (`additionalContext`) or a plain
-//! advisory line, but they never set a deny/block decision and never exit
-//! non-zero — even where the predecessor's equivalents did. Side effects
-//! (e.g. the drift-witness log) are best-effort and silent on error.
+//! advisory line. Side effects (e.g. the drift-witness log) are best-effort and
+//! silent on error.
+//!
+//! The ONE exception is `guard-workflow-fields` (mechanic #3): it enforces the
+//! engine-ownership boundary by BLOCKING a generic `Write`/`Edit`/`MultiEdit`
+//! on engine-owned `.darkrun/<slug>/…` paths — it emits a redirect message to
+//! stderr and exits **2** so Claude Code denies the tool and the agent is
+//! funnelled through the `darkrun_*` MCP tools instead. That block is SUSPENDED
+//! while a merge is in progress (`MERGE_HEAD`/`REBASE_HEAD`/`CHERRY_PICK_HEAD`/
+//! `REVERT_HEAD`/`rebase-merge`/`rebase-apply`) so the agent can write the
+//! conflicted engine files to resolve the merge — schema validation downstream
+//! stays on regardless. All other hooks remain non-blocking.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -24,6 +33,17 @@ pub fn run(name: &str) {
     let input: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // The one BLOCKING hook (mechanic #3): a denial emits a redirect message to
+    // stderr and exits 2. An allow returns None and falls through to the
+    // advisory path below (it never emits on allow).
+    if name == "guard-workflow-fields" {
+        if let Some(redirect) = guard_workflow_fields(&input, &cwd) {
+            eprint!("{redirect}");
+            std::process::exit(2);
+        }
+        return;
+    }
 
     // Each handler returns an optional advisory string to print on stdout.
     // None means a silent allow. We print here (not inside the handlers) so
@@ -44,8 +64,8 @@ pub fn run(name: &str) {
             stamp_agent_write(&input, &cwd);
             None
         }
-        // redirect-plan-mode, guard-workflow-fields — and anything
-        // unrecognized — are advisory no-ops (allow).
+        // redirect-plan-mode — and anything unrecognized — are advisory
+        // no-ops (allow). (guard-workflow-fields is handled above, blocking.)
         _ => None,
     };
 
@@ -78,6 +98,111 @@ fn inject_state_file(cwd: &Path) -> Option<String> {
         run.frontmatter.factory, run.frontmatter.active_station,
     );
     Some(additional_context(&ctx))
+}
+
+// ─── guard-workflow-fields (the one blocking hook, mechanic #3) ──────────────
+
+/// How a path under `.darkrun/<slug>/` is classified for the ownership guard.
+/// `None` means the path is NOT engine-owned state (the guard allows it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnginePathKind {
+    /// A Unit spec (`units/*.md`) — authored via `darkrun_unit_*`.
+    Unit,
+    /// A feedback record (`feedback/*.md`) — via `darkrun_feedback_*`.
+    Feedback,
+    /// The run doc or derived state (`run.md` / `state.json`) — engine-internal.
+    EngineState,
+}
+
+impl EnginePathKind {
+    /// The MCP tool family to redirect a blocked write to.
+    fn redirect(&self) -> &'static str {
+        match self {
+            EnginePathKind::Unit => {
+                "use the `darkrun_unit_*` tools (darkrun_unit_create / darkrun_unit_update)"
+            }
+            EnginePathKind::Feedback => {
+                "use the `darkrun_feedback_*` tools (darkrun_feedback_create / _resolve / _move)"
+            }
+            EnginePathKind::EngineState => {
+                "the run document + state are engine-managed — drive them with `darkrun_run_next` \
+                 / `darkrun_checkpoint_decide`, never a raw write"
+            }
+        }
+    }
+}
+
+/// Classify a path relative to the `.darkrun/<slug>/` state tree. Returns `None`
+/// when the path is not engine-owned (agent code, `.darkrun/settings.yml`,
+/// `.darkrun/prompts/…`, scaffolds, etc. — all freely writable).
+fn classify_engine_path(path: &str) -> Option<EnginePathKind> {
+    // Locate the `.darkrun/` segment, then require a `<slug>/` after it.
+    let rel = match path.find("/.darkrun/") {
+        Some(idx) => &path[idx + "/.darkrun/".len()..],
+        None => path.strip_prefix(".darkrun/")?,
+    };
+    // rel is now `<slug>/<...>`. A bare top-level file (settings.yml) or a
+    // non-run subtree (prompts/, factories/, worktrees/) is not run state.
+    let mut parts = rel.splitn(2, '/');
+    let slug = parts.next().unwrap_or("");
+    // No `/` after the slug → a bare top-level file → not a per-run path.
+    let tail = parts.next()?;
+    if slug.is_empty() || tail.is_empty() {
+        return None;
+    }
+    // Non-run subtrees that happen to sit under `.darkrun/` are not run state.
+    if matches!(slug, "prompts" | "factories" | "workers" | "reviewers" | "worktrees") {
+        return None;
+    }
+    if tail.starts_with("units/") && tail.ends_with(".md") {
+        Some(EnginePathKind::Unit)
+    } else if tail.starts_with("feedback/") && tail.ends_with(".md") {
+        Some(EnginePathKind::Feedback)
+    } else if tail == "run.md" || tail == "state.json" {
+        Some(EnginePathKind::EngineState)
+    } else {
+        // Other engine-owned run state (drift/, reflections/, proof/, …) — the
+        // whole run subtree is engine-owned, so block generic writes broadly.
+        Some(EnginePathKind::EngineState)
+    }
+}
+
+/// PreToolUse (Read|Write|Edit|MultiEdit): the engine-ownership write guard
+/// (mechanic #3). Returns `Some(redirect_message)` to BLOCK (the caller exits 2)
+/// or `None` to allow.
+///
+/// - Only `Write` / `Edit` / `MultiEdit` are gated — `Read` is always allowed.
+/// - Only engine-owned `.darkrun/<slug>/…` paths are gated (see
+///   [`classify_engine_path`]); agent code is never blocked.
+/// - The block is SUSPENDED while a merge is in progress (the broad `$GIT_DIR`
+///   marker set via [`darkrun_git::is_merge_in_progress`]) so the agent can
+///   write the conflicted engine files to resolve a merge. Schema validation in
+///   the MCP tools stays on regardless, so a malformed resolution still fails.
+fn guard_workflow_fields(input: &Value, cwd: &Path) -> Option<String> {
+    let tool = tool_name(input);
+    if tool != "Write" && tool != "Edit" && tool != "MultiEdit" {
+        return None; // Read (and anything else) is never blocked.
+    }
+    let path = file_path(input);
+    if path.is_empty() {
+        return None;
+    }
+    let kind = classify_engine_path(path)?;
+
+    // Mid-merge suspension: while a merge/rebase/cherry-pick/revert is in flight,
+    // the agent MUST be able to write the conflicted engine files to resolve it.
+    // The suspension is unconditional across engine-owned paths during a merge.
+    if darkrun_git::is_merge_in_progress(cwd) {
+        return None;
+    }
+
+    Some(format!(
+        "guard-workflow-fields: `{path}` is engine-owned darkrun state — a generic {tool} is \
+         blocked so the lifecycle, frontmatter validity, and integrity sealing stay enforced. \
+         Instead, {}. (This guard is suspended automatically while a merge is in progress so you \
+         can resolve conflict markers.)\n",
+        kind.redirect()
+    ))
 }
 
 // ─── Shared payload helpers ──────────────────────────────────────────────────
@@ -356,6 +481,86 @@ mod tests {
             // Should not panic; empty stdin parses to Null and no-ops.
             run(name);
         }
+    }
+
+    // ── guard-workflow-fields (mechanic #3) ──────────────────────────────
+
+    fn write_to(path: &str) -> Value {
+        json!({ "tool_name": "Write", "tool_input": { "file_path": path, "content": "x" } })
+    }
+
+    #[test]
+    fn guard_blocks_generic_write_to_engine_unit() {
+        // NOT mid-merge (a non-git tempdir): a generic Write to a unit spec is
+        // blocked with a redirect to the MCP tools.
+        let tmp = TempDir::new().unwrap();
+        let input = write_to("/repo/.darkrun/run-1/units/u1.md");
+        let msg = guard_workflow_fields(&input, tmp.path()).expect("should block");
+        assert!(msg.contains("guard-workflow-fields"));
+        assert!(msg.contains("darkrun_unit_"), "redirects to the unit tools: {msg}");
+    }
+
+    #[test]
+    fn guard_blocks_feedback_and_engine_state() {
+        let tmp = TempDir::new().unwrap();
+        assert!(guard_workflow_fields(&write_to(".darkrun/r/feedback/fb.md"), tmp.path())
+            .unwrap()
+            .contains("darkrun_feedback_"));
+        assert!(guard_workflow_fields(&write_to(".darkrun/r/state.json"), tmp.path()).is_some());
+        assert!(guard_workflow_fields(&write_to(".darkrun/r/run.md"), tmp.path()).is_some());
+    }
+
+    #[test]
+    fn guard_allows_reads_and_non_engine_paths() {
+        let tmp = TempDir::new().unwrap();
+        // Read is never blocked, even on an engine path.
+        let read = json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": ".darkrun/r/units/u.md" },
+        });
+        assert!(guard_workflow_fields(&read, tmp.path()).is_none());
+        // Agent code is never blocked.
+        assert!(guard_workflow_fields(&write_to("src/main.rs"), tmp.path()).is_none());
+        // settings.yml / prompts / factories under .darkrun are NOT run state.
+        assert!(guard_workflow_fields(&write_to(".darkrun/settings.yml"), tmp.path()).is_none());
+        assert!(guard_workflow_fields(
+            &write_to(".darkrun/prompts/phases/spec.md"),
+            tmp.path()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn guard_suspends_block_mid_merge() {
+        // In a real git repo with MERGE_HEAD planted, the guard suspends so the
+        // agent can resolve the conflicted engine files.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t.co"]);
+        git(&["config", "user.name", "t"]);
+        fs::write(root.join("r.md"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        let input = write_to(".darkrun/r/units/u1.md");
+        // Not mid-merge → blocked.
+        assert!(guard_workflow_fields(&input, root).is_some());
+        // Plant MERGE_HEAD → suspended (allowed).
+        fs::write(root.join(".git").join("MERGE_HEAD"), "ref\n").unwrap();
+        assert!(
+            guard_workflow_fields(&input, root).is_none(),
+            "mid-merge must suspend the block"
+        );
     }
 
     // ── prompt-guard ─────────────────────────────────────────────────────

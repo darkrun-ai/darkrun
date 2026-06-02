@@ -126,26 +126,26 @@ pub fn StationStrip(
                         StationStatus::Done => (
                             format!(
                                 "background:{ok};color:{on};border:2px solid {ok};",
-                                ok = tokens::STATUS_OK,
+                                ok = tokens::var::STATUS_OK,
                                 on = "#04140a",
                             ),
-                            tokens::TEXT,
+                            tokens::var::TEXT,
                         ),
                         StationStatus::Current => (
                             format!(
                                 "color:{accent};border:2px solid {accent};\
                                  box-shadow:0 0 0 4px #5fd7ff22;transform:rotate(45deg);",
-                                accent = tokens::ACCENT,
+                                accent = tokens::var::ACCENT,
                             ),
-                            tokens::TEXT,
+                            tokens::var::TEXT,
                         ),
                         StationStatus::Pending => (
                             format!(
                                 "color:{faint};border:2px solid {border};",
-                                faint = tokens::TEXT_FAINT,
-                                border = tokens::BORDER_STRONG,
+                                faint = tokens::var::TEXT_FAINT,
+                                border = tokens::var::BORDER_STRONG,
                             ),
-                            tokens::TEXT_FAINT,
+                            tokens::var::TEXT_FAINT,
                         ),
                     };
                     let mark_style = format!(
@@ -156,21 +156,21 @@ pub fn StationStrip(
                         mono = tokens::FONT_MONO,
                         // current keeps a base fill behind the glow; done overrides above.
                         base = if matches!(status, StationStatus::Done) {
-                            tokens::STATUS_OK
+                            tokens::var::STATUS_OK
                         } else {
-                            tokens::SURFACE_BASE
+                            tokens::var::SURFACE_BASE
                         },
                     );
 
                     // The connector to the next station, hued by this station's status.
                     let conn_bg = match status {
-                        StationStatus::Done => tokens::STATUS_OK.to_string(),
+                        StationStatus::Done => tokens::var::STATUS_OK.to_string(),
                         StationStatus::Current => format!(
                             "linear-gradient(90deg,{accent},{border})",
-                            accent = tokens::ACCENT,
-                            border = tokens::BORDER_STRONG,
+                            accent = tokens::var::ACCENT,
+                            border = tokens::var::BORDER_STRONG,
                         ),
-                        StationStatus::Pending => tokens::BORDER_STRONG.to_string(),
+                        StationStatus::Pending => tokens::var::BORDER_STRONG.to_string(),
                     };
                     let conn_style = format!(
                         "position:absolute;top:16px;left:50%;width:100%;height:3px;z-index:1;\
@@ -216,8 +216,8 @@ pub fn StationStrip(
                                     class: "dr-station-fbdot",
                                     title: "pending feedback",
                                     style: "position:absolute;top:-2px;right:34px;width:10px;height:10px;\
-                                            border-radius:50%;background:{tokens::STATUS_WARN};\
-                                            border:2px solid {tokens::SURFACE_BASE};z-index:3;",
+                                            border-radius:50%;background:{tokens::var::STATUS_WARN};\
+                                            border:2px solid {tokens::var::SURFACE_BASE};z-index:3;",
                                 }
                             }
                             div { class: "dr-station-mark", style: "{mark_style}",

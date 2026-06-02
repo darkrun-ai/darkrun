@@ -56,7 +56,7 @@ pub fn RunWalkthrough(
             div {
                 style: format!(
                     "font-family:{};color:{};padding:16px;",
-                    tokens::FONT_MONO, tokens::TEXT_MUTED,
+                    tokens::FONT_MONO, tokens::var::TEXT_MUTED,
                 ),
                 "No stations to walk."
             }
@@ -88,6 +88,9 @@ pub fn RunWalkthrough(
     let active_station = cur.station_index;
     let active_phase = cur.phase;
     let active_beat = cur.pass_beat();
+    // The generalized current sub-step, so the phase ring steps through one beat
+    // at a time for every phase (not just Manufacture).
+    let active_step = cur.beat;
     let narration = cur.narration();
 
     let panel = format!(
@@ -101,16 +104,16 @@ pub fn RunWalkthrough(
          border:1px solid {border};border-left:3px solid {accent};border-radius:8px;\
          padding:10px 14px;transition:opacity .2s ease;",
         mono = tokens::FONT_MONO,
-        text = tokens::TEXT,
-        surface = tokens::SURFACE_RAISED,
-        border = tokens::BORDER,
-        accent = active_phase.hue().base,
+        text = tokens::var::TEXT,
+        surface = tokens::var::SURFACE_RAISED,
+        border = tokens::var::BORDER,
+        accent = active_phase.hue_var().base,
     );
     let controls = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
     let counter_style = format!(
         "font-family:{mono};font-size:12px;color:{faint};margin-left:auto;",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
 
     rsx! {
@@ -123,7 +126,7 @@ pub fn RunWalkthrough(
                 }
                 // Phase machine below — full width, ring centered.
                 div { style: "width:100%;",
-                    PhaseMachine { active: Some(active_phase), active_beat, size: 300.0, full_width: true }
+                    PhaseMachine { active: Some(active_phase), active_beat, active_step: Some(active_step), size: 300.0, full_width: true }
                 }
             }
 
@@ -133,7 +136,7 @@ pub fn RunWalkthrough(
                 class: "dr-walk-narration",
                 "aria-live": "polite",
                 style: "{narration_style}",
-                span { style: format!("color:{};", active_phase.hue().base), "{tokens::GLYPH_ACTIVE} " }
+                span { style: format!("color:{};", active_phase.hue_var().base), "{tokens::GLYPH_ACTIVE} " }
                 "{narration}"
             }
 

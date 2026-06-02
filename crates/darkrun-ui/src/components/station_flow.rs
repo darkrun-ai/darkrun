@@ -50,8 +50,8 @@ pub fn StationFlow(
     let svg_style = format!(
         "background:{surface};border:1px solid {border};border-radius:10px;\
          display:block;{width_rule};height:auto;font-family:{mono};margin:0 auto;",
-        surface = tokens::SURFACE_RAISED,
-        border = tokens::BORDER,
+        surface = tokens::var::SURFACE_RAISED,
+        border = tokens::var::BORDER,
         mono = tokens::FONT_MONO,
     );
 
@@ -69,7 +69,7 @@ pub fn StationFlow(
             // Connectors first so nodes paint over them.
             for conn in layout.connectors.iter() {
                 {
-                    let stroke = if conn.flowed { tokens::ACCENT } else { tokens::BORDER_STRONG };
+                    let stroke = if conn.flowed { tokens::var::ACCENT } else { tokens::var::BORDER_STRONG };
                     let w = if conn.flowed { "2.5" } else { "1.5" };
                     rsx! {
                         line {
@@ -87,22 +87,22 @@ pub fn StationFlow(
                 {
                     let is_hover = hovered() == Some(s.index);
                     let dim = matches!(s.step, Step::Pending);
-                    let ring = if dim && !is_hover { tokens::BORDER_STRONG } else { s.hue.base };
+                    let ring = if dim && !is_hover { tokens::var::BORDER_STRONG } else { s.hue.base };
                     let fill = if matches!(s.step, Step::Active) {
                         s.hue.base
                     } else {
-                        tokens::SURFACE_OVERLAY
+                        tokens::var::SURFACE_OVERLAY
                     };
                     let glyph_color = if matches!(s.step, Step::Active) {
                         s.hue.on
                     } else if dim {
-                        tokens::TEXT_FAINT
+                        tokens::var::TEXT_FAINT
                     } else {
                         s.hue.base
                     };
                     let r = if is_hover { s.r + 3.0 } else { s.r };
                     let stroke_w = if is_hover || matches!(s.step, Step::Active) { "2.5" } else { "1.5" };
-                    let label_color = if dim { tokens::TEXT_FAINT } else { tokens::TEXT };
+                    let label_color = if dim { tokens::var::TEXT_FAINT } else { tokens::var::TEXT };
                     let label_y = s.cy + s.r + 16.0;
                     let mark_y = s.cy + s.r + 28.0;
                     let idx = s.index;
@@ -131,9 +131,13 @@ pub fn StationFlow(
                                 fill: "{fill}", stroke: "{ring}", stroke_width: "{stroke_w}",
                             }
                             text {
-                                x: "{s.cx}", y: "{s.cy + 5.0}",
+                                // Center the glyph geometrically on the node:
+                                // `dominant-baseline:central` removes the
+                                // font-metric guesswork a fixed baseline nudge left
+                                // behind (the inner ○ rode slightly off-center).
+                                x: "{s.cx}", y: "{s.cy}",
                                 fill: "{glyph_color}", font_size: "18",
-                                text_anchor: "middle",
+                                text_anchor: "middle", dominant_baseline: "central",
                                 "{s.glyph}"
                             }
                             text {
@@ -144,7 +148,7 @@ pub fn StationFlow(
                             }
                             text {
                                 x: "{s.cx}", y: "{mark_y}",
-                                fill: tokens::TEXT_FAINT, font_size: "9",
+                                fill: tokens::var::TEXT_FAINT, font_size: "9",
                                 text_anchor: "middle",
                                 "◇ {checkpoint_mark(s.checkpoint)}"
                             }

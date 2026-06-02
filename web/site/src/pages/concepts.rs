@@ -45,6 +45,15 @@ fn factory_flows() -> Vec<FlowStation> {
 #[component]
 pub fn Methodology() -> Element {
     let flows = factory_flows();
+    // The diagrams double as navigation: a station opens its detail page, a phase
+    // node opens that phase's methodology page.
+    let nav = use_navigator();
+    let on_station = move |station: String| {
+        nav.push(Route::StationDetail { factory: "software".to_string(), station });
+    };
+    let on_phase = move |phase: Phase| {
+        nav.push(Route::PhaseDetail { phase: phase.name().to_string() });
+    };
     rsx! {
         {concept("methodology")}
 
@@ -58,7 +67,7 @@ pub fn Methodology() -> Element {
                      it catches."
                 }
                 div { style: "overflow-x:auto;",
-                    StationFlow { stations: flows.clone() }
+                    StationFlow { stations: flows.clone(), on_select: on_station }
                 }
             }
         }
@@ -72,7 +81,7 @@ pub fn Methodology() -> Element {
                      pass-loop (make → challenge → resolve) → review → checkpoint → lock."
                 }
                 div { style: "display:flex;justify-content:center;",
-                    PhaseMachine { active: Some(Phase::Manufacture), active_beat: Some(PassBeat::Challenge), size: 340.0 }
+                    PhaseMachine { active: Some(Phase::Manufacture), active_beat: Some(PassBeat::Challenge), size: 340.0, on_select: on_phase }
                 }
             }
         }
@@ -100,7 +109,7 @@ pub fn Methodology() -> Element {
 /// A single phase tile linking to its detail page.
 #[component]
 fn PhaseCard(phase: Phase) -> Element {
-    let hue = phase.hue();
+    let hue = phase.hue_var();
     let slug = phase.name().to_string();
     rsx! {
         Link {
@@ -146,8 +155,13 @@ pub fn PhaseDetail(phase: String) -> Element {
     let idx = Phase::ALL.iter().position(|x| *x == p).unwrap_or(0);
     let prev = idx.checked_sub(1).map(|i| Phase::ALL[i]);
     let next = Phase::ALL.get(idx + 1).copied();
-    let hue = p.hue();
+    let hue = p.hue_var();
     let is_manufacture = p == Phase::Manufacture;
+    // The ring navigates: clicking another phase opens its page.
+    let nav = use_navigator();
+    let on_phase = move |phase: Phase| {
+        nav.push(Route::PhaseDetail { phase: phase.name().to_string() });
+    };
 
     rsx! {
         div { style: "margin-bottom:8px;",
@@ -181,6 +195,7 @@ pub fn PhaseDetail(phase: String) -> Element {
                     active: Some(p),
                     active_beat: if is_manufacture { Some(PassBeat::Make) } else { None },
                     size: 340.0,
+                    on_select: on_phase,
                 }
             }
         }

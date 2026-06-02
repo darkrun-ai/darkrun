@@ -37,6 +37,7 @@ use darkrun_core::domain::{
     StationPhase, Status, Unit,
 };
 use darkrun_core::{RunState, StateStore};
+use darkrun_git::{Git, GitBackend};
 use serde::Serialize;
 
 use crate::error::{McpError, Result};
@@ -171,6 +172,20 @@ pub enum RunAction {
     },
     /// Every station is locked and the run is sealed.
     Sealed { run: String },
+    /// A land (or downstream sync) left genuine agent-content conflicts in-tree
+    /// (mechanic #3). The merge is NOT aborted — `MERGE_HEAD` stays set and the
+    /// conflict markers are present on `branch` for the agent/human to resolve.
+    /// The next tick re-derives this action until the merge is no longer in
+    /// progress. While it holds, the write-guard suspends ownership / lifecycle /
+    /// branch-enforcement guards so the conflicted engine files can be written.
+    MergeConflict {
+        run: String,
+        station: String,
+        /// The branch the conflicted merge is left in-tree on.
+        branch: String,
+        /// The unresolved (agent-content) conflict paths.
+        conflict_paths: Vec<String>,
+    },
     /// Nothing to do this tick (mid-wave; outstanding subagents still working).
     Noop { run: String, message: String },
 }
@@ -249,6 +264,12 @@ pub struct PromptContext {
     /// The external review target, for `ExternalReviewRequested`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// The branch a conflicted merge is left in-tree on, for `MergeConflict`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The unresolved conflict paths, for `MergeConflict`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conflict_paths: Vec<String>,
     /// A human-readable reason, for `Escalate` / `SafeRepair`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -670,6 +691,20 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
         }
     };
 
+    // ── Mid-merge preemption (mechanic #3) ───────────────────────────────
+    // A land / downstream sync that left genuine agent-content conflicts is
+    // still in progress in-tree (MERGE_HEAD set). It preempts EVERYTHING: the
+    // agent must resolve the conflict markers before the run can advance. The
+    // write-guard suspends ownership / lifecycle / branch-enforcement guards
+    // while this holds so the conflicted engine files can be written. We
+    // re-derive this every tick until the merge is no longer in progress.
+    if let Some(action) = merge_conflict_action(store, slug, &station)? {
+        return Ok(Position {
+            track: Track::Run,
+            action: Some(action),
+        });
+    }
+
     // ── Track C: drift ───────────────────────────────────────────────────
     // Witnessed artifact drift preempts everything. The sweep that deposits
     // drift entries is a future darkrun-core concern (see `deferred`); until
@@ -863,6 +898,105 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
     })
 }
 
+/// Derive a [`RunAction::MergeConflict`] when a land / sync left a merge in
+/// progress in-tree (mechanic #3), else `None`.
+///
+/// Scans the worktrees a land/sync merges into — any registered worktree on the
+/// station branch or run-main, plus the primary checkout — for an in-progress
+/// merge (`darkrun_git::is_merge_in_progress`, the broad `$GIT_DIR` marker set).
+/// The first one found yields the conflicted branch + its unresolved paths.
+/// Outside a git repo this is always `None`.
+fn merge_conflict_action(
+    store: &StateStore,
+    slug: &str,
+    station: &str,
+) -> Result<Option<RunAction>> {
+    let repo_root = cascade_repo_root(store);
+    let git = match Git::open(&repo_root) {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+    let station_b = crate::lifecycle::station_branch(slug, station);
+    let run_main_b = crate::lifecycle::run_main_branch(slug);
+
+    // Candidate worktrees, each tagged with the branch the merge targets:
+    //   - every registered worktree (covers the DETACHED temp merge worktree a
+    //     conflicting land left in-tree, plus any station/run-main checkout); a
+    //     detached merge worktree's target is inferred from its path; and
+    //   - the primary checkout (the run-main -> base land target).
+    let mut candidates: Vec<(std::path::PathBuf, String)> = Vec::new();
+    if let Ok(worktrees) = git.list_worktrees() {
+        for wt in worktrees {
+            let branch = match wt.branch.as_deref() {
+                Some(b) => b.to_string(),
+                // A detached merge worktree lives at `_merge-<sanitized-target>`;
+                // recover the target branch label from its directory name.
+                None => {
+                    let name = wt.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if let Some(rest) = name.strip_prefix("_merge-") {
+                        if rest.ends_with("-main") {
+                            run_main_b.clone()
+                        } else {
+                            station_b.clone()
+                        }
+                    } else {
+                        // Some other detached tree — attribute to the station.
+                        station_b.clone()
+                    }
+                }
+            };
+            candidates.push((wt.path, branch));
+        }
+    }
+    // The primary checkout itself (run-main -> base lands merge here when the
+    // operator's branch is the target).
+    candidates.push((repo_root.clone(), run_main_b.clone()));
+
+    for (path, branch) in candidates {
+        if darkrun_git::is_merge_in_progress(&path) {
+            let conflict_paths = git.unresolved_paths(&path).unwrap_or_default();
+            // Only surface when there ARE unresolved agent-content paths — a
+            // bare MERGE_HEAD with everything staged is mid-commit, not a
+            // conflict the agent must resolve.
+            if !conflict_paths.is_empty() {
+                return Ok(Some(RunAction::MergeConflict {
+                    run: slug.to_string(),
+                    station: station.to_string(),
+                    branch,
+                    conflict_paths,
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the station branch carries merge debt against run-main (mechanic
+/// #4) — i.e. a land would actually do something.
+///
+/// `true` when there IS debt (a real merge), `false` when the branches have
+/// identical trees or the station is already an ancestor of run-main (a land
+/// would mint an empty --no-ff commit). Defaults to `true` (land it) outside a
+/// git repo or when a branch is missing — the lifecycle land then no-ops
+/// cleanly, so the cursor never wedges on a false negative.
+fn station_has_merge_debt(store: &StateStore, slug: &str, station: &str) -> bool {
+    let repo_root = cascade_repo_root(store);
+    let git = match Git::open(&repo_root) {
+        Ok(g) => g,
+        Err(_) => return true, // non-git: let the lifecycle no-op decide.
+    };
+    let station_b = crate::lifecycle::station_branch(slug, station);
+    let run_main_b = crate::lifecycle::run_main_branch(slug);
+    // Only meaningful when both branches exist; otherwise let the land path
+    // (which guards branch existence) handle it.
+    if !git.branch_exists(&station_b).unwrap_or(false)
+        || !git.branch_exists(&run_main_b).unwrap_or(false)
+    {
+        return true;
+    }
+    !darkrun_git::has_no_merge_debt(&git, &station_b, &run_main_b)
+}
+
 /// The repo root the prompt cascade resolves overrides against.
 ///
 /// The [`StateStore`] is rooted at `<repo_root>/.darkrun`, so the repo root is
@@ -898,6 +1032,7 @@ pub fn action_tag(action: &RunAction) -> &'static str {
         RunAction::ExternalReviewRequested { .. } => "external_review_requested",
         RunAction::PendingSeal { .. } => "pending_seal",
         RunAction::Sealed { .. } => "sealed",
+        RunAction::MergeConflict { .. } => "merge_conflict",
         RunAction::Noop { .. } => "noop",
     }
 }
@@ -925,6 +1060,7 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         | RunAction::Escalate { station, .. }
         | RunAction::SafeRepair { station, .. }
         | RunAction::ReviseUnitSpecs { station, .. }
+        | RunAction::MergeConflict { station, .. }
         | RunAction::ExternalReviewRequested { station, .. } => Some(station.clone()),
         RunAction::PendingSeal { .. } | RunAction::Sealed { .. } | RunAction::Noop { .. } => None,
     };
@@ -1012,6 +1148,10 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         RunAction::ExternalReviewRequested { target, .. } => {
             ctx.target = Some(target.clone());
             ctx.kind = Some(CheckpointKind::External);
+        }
+        RunAction::MergeConflict { branch, conflict_paths, .. } => {
+            ctx.branch = Some(branch.clone());
+            ctx.conflict_paths = conflict_paths.clone();
         }
         RunAction::PendingSeal { kind, .. } => {
             ctx.seal = Some(kind.as_str().to_string());
@@ -1106,6 +1246,17 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
             }
             let head = crate::lifecycle::station_branch(slug, &station);
             let base = crate::lifecycle::run_main_branch(slug);
+            // #7: the head branch must be on origin before the PR can open.
+            // Push it with non-fast-forward recovery (best-effort — a push
+            // failure leaves the gate holding rather than crashing the tick).
+            let repo_root = cascade_repo_root(store);
+            if let Ok(git) = Git::open(&repo_root) {
+                let wt = crate::lifecycle::station_worktree_path(&repo_root, slug, &station);
+                // Push from the station's own worktree when it exists, else the
+                // repo root (the branch ref still resolves there).
+                let from = if wt.exists() { wt } else { repo_root.clone() };
+                let _ = crate::hosting::push_head_with_nff_recovery(&git, &from, &head);
+            }
             let req = crate::hosting::OpenRequest {
                 head,
                 base,
@@ -1182,6 +1333,11 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
     // Discrete gate: open / poll the station's PR before deriving, so a merge
     // detected this tick advances the cursor immediately.
     resolve_discrete_gate(store, slug, hosting)?;
+    // #5: downstream sync before merge-up — merge base -> run-main -> station
+    // each tick so the branches stay fresh and land-time conflicts shrink. A
+    // sync conflict is left in-tree; the derive below catches it as a
+    // MergeConflict action via `merge_conflict_action`.
+    sync_downstream_before_land(store, slug);
     let position = derive_position(store, slug)?;
 
     let action = match &position.action {
@@ -1209,6 +1365,30 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
     })
 }
 
+/// Run the downstream sync (mechanic #5) for the active station before a tick
+/// derives. Best-effort + non-fatal: any failure or non-git project no-ops, and
+/// a conflict is left in-tree for the derive's [`merge_conflict_action`] to
+/// surface. Skipped when there is no active station (run complete / unseeded).
+fn sync_downstream_before_land(store: &StateStore, slug: &str) {
+    let Ok(run) = store.read_run(slug) else {
+        return;
+    };
+    let Some(factory) = resolve_factory(&run.frontmatter.factory) else {
+        return;
+    };
+    let Ok(Some(state)) = store.read_state(slug) else {
+        return;
+    };
+    // Discrete runs land via the human PR merge, not in-process — the sync only
+    // matters for the in-process land path.
+    if state.discrete {
+        return;
+    }
+    if let Some(station) = current_station(&factory, &state) {
+        let _ = crate::lifecycle::sync_branch_downstream(store, slug, &station);
+    }
+}
+
 /// Stamp the station phase forward based on the action just emitted.
 fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<()> {
     let run = store.read_run(slug)?;
@@ -1229,6 +1409,9 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
     // derive_position; they run on the side once state.json is written.
     let mut entered_station: Option<String> = None;
     let mut landed_station: Option<String> = None;
+    // Whether an auto-checkpoint just COMPLETED a station (independent of
+    // whether that station carried merge debt to land). Drives run completion.
+    let mut auto_completed = false;
 
     match action {
         RunAction::Spec { station, .. } => {
@@ -1280,12 +1463,17 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
             // checkpoint_decide.
             if matches!(kind, CheckpointKind::Auto) {
                 complete_station(&mut state, &factory, station, &now)?;
+                auto_completed = true;
                 // Snapshot the locked artifacts so the sweep can witness drift.
                 crate::drift::record_station_witnesses(store, slug, station)?;
                 // Non-discrete in-process land: the verified station branch
                 // merges to run-main here. (Discrete stations resolve on a human
                 // PR merge — a later phase — and don't land in-process.)
-                if !state.discrete {
+                // #4: gate the land synthesis on merge debt — a station whose
+                // branch is identical to / already an ancestor of run-main has
+                // nothing to merge, and enqueuing a land would mint an empty
+                // --no-ff commit that triggers the alternating no-op-merge loop.
+                if !state.discrete && station_has_merge_debt(store, slug, station) {
                     landed_station = Some(station.clone());
                 }
             }
@@ -1308,8 +1496,11 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
     }
 
     // Did completing a station empty the plan? If so the run is ready to seal,
-    // so the run-main -> base land follows the final station's land.
-    let run_now_complete = landed_station.is_some()
+    // so the run-main -> base land follows the final station's land. Keyed on
+    // the auto-completion (not the land) so a no-debt final station still lands
+    // the run onto base — #4 only suppresses the empty per-station merge.
+    let run_now_complete = auto_completed
+        && !state.discrete
         && current_station(&factory, &state).is_none();
 
     store.write_state(slug, &state)?;
@@ -1526,7 +1717,14 @@ pub fn checkpoint_decide(
         // Non-discrete in-process land of the just-verified station; discrete
         // stations land via the human's PR merge (a later phase).
         if !state.discrete {
-            landed_station = Some(station.clone());
+            // #4: only enqueue the station land when there's merge debt — a
+            // no-debt station has nothing to merge, and a land would mint an
+            // empty --no-ff commit that triggers the alternating-sync loop.
+            if station_has_merge_debt(store, slug, &station) {
+                landed_station = Some(station.clone());
+            }
+            // Run completion is independent of the per-station land (the run can
+            // complete even when the last station was a no-op merge).
             run_now_complete = current_station(&factory, &state).is_none();
         }
     } else {
@@ -1741,7 +1939,19 @@ mod tests {
                     };
                     store.write_unit("q", &unit).expect("write unit");
                 }
-                RunAction::Manufacture { units, .. } => {
+                RunAction::Manufacture { station, units, .. } => {
+                    // Commit real code on the station's worktree so the branch
+                    // carries merge debt — otherwise #4 (no-debt no-op guard)
+                    // correctly skips the land and the branch never collapses.
+                    let wt = crate::lifecycle::station_worktree_path(root, "q", station);
+                    if wt.exists() {
+                        std::fs::write(wt.join(format!("{station}.txt")), "work\n").unwrap();
+                        let git_wt = |args: &[&str]| {
+                            Command::new("git").arg("-C").arg(&wt).args(args).status().unwrap().success()
+                        };
+                        let _ = git_wt(&["add", "-A"]);
+                        let _ = git_wt(&["commit", "-q", "-m", "station work"]);
+                    }
                     for u in units {
                         let mut done = store.read_unit("q", u).unwrap();
                         done.frontmatter.status = Status::Completed;
@@ -2400,5 +2610,124 @@ mod tests {
         assert!(hosting.opened.borrow().is_empty(), "no PR opened without hosting");
         let state = store.read_state("d").unwrap().unwrap();
         assert!(state.stations["frame"].pr_ref.is_none());
+    }
+
+    // ── git-backed merge mechanics (#3, #4) ──────────────────────────────
+
+    /// A git-backed store: the StateStore lives at `<root>/.darkrun`, so the
+    /// repo root is the tempdir.
+    fn git_store() -> (tempfile::TempDir, std::path::PathBuf, StateStore) {
+        let dir = tempdir().expect("tmp");
+        let root = dir.path().to_path_buf();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@darkrun.ai"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join(".gitignore"), ".darkrun/\n").unwrap();
+        std::fs::write(root.join("README.md"), "# x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let store = StateStore::new(&root);
+        (dir, root, store)
+    }
+
+    /// #4: a station branch identical to run-main carries no merge debt, so the
+    /// cursor must NOT enqueue a land that would mint an empty --no-ff commit.
+    #[test]
+    fn no_merge_debt_means_no_land_synthesis() {
+        let (_d, root, store) = git_store();
+        crate::lifecycle::ensure_run_main(&store, "r");
+        // Enter a station but do NO work — its branch == run-main (no debt).
+        crate::lifecycle::enter_station(&store, "r", "build");
+        assert!(
+            !station_has_merge_debt(&store, "r", "build"),
+            "identical-tree station has no merge debt"
+        );
+
+        // Do real work on the station worktree → now there IS debt.
+        let wt = crate::lifecycle::station_worktree_path(&root, "r", "build");
+        std::fs::write(wt.join("work.txt"), "work\n").unwrap();
+        let git_wt = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&wt)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(git_wt(&["add", "-A"]));
+        assert!(git_wt(&["commit", "-q", "-m", "station work"]));
+        assert!(
+            station_has_merge_debt(&store, "r", "build"),
+            "a station with new commits has merge debt"
+        );
+    }
+
+    /// #3: a land that leaves agent-content conflicts surfaces as a
+    /// `MergeConflict` action and the merge is left in-tree (MERGE_HEAD set, not
+    /// aborted); the next derive keeps re-deriving it until the merge clears.
+    #[test]
+    fn conflicting_land_surfaces_merge_conflict_left_in_tree() {
+        let (_d, root, store) = git_store();
+        crate::lifecycle::ensure_run_main(&store, "r");
+        crate::lifecycle::enter_station(&store, "r", "build");
+
+        // run-main gets a code file with one value…
+        let git_root = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        };
+        // Advance run-main on its own branch (checked out nowhere) by committing
+        // through a temp worktree.
+        let rmwt = root.join(".darkrun/rm");
+        assert!(git_root(&["worktree", "add", "-q", rmwt.to_str().unwrap(), "darkrun/r/main"]));
+        std::fs::write(rmwt.join("conflict.txt"), "RUN-MAIN SIDE\n").unwrap();
+        let git_rm = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&rmwt).args(args).status().unwrap().success()
+        };
+        assert!(git_rm(&["add", "-A"]));
+        assert!(git_rm(&["commit", "-q", "-m", "run-main conflict line"]));
+        assert!(git_root(&["worktree", "remove", "--force", rmwt.to_str().unwrap()]));
+
+        // …and the station edits the SAME file differently → a real conflict.
+        let wt = crate::lifecycle::station_worktree_path(&root, "r", "build");
+        std::fs::write(wt.join("conflict.txt"), "STATION SIDE\n").unwrap();
+        let git_wt = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&wt).args(args).status().unwrap().success()
+        };
+        assert!(git_wt(&["add", "-A"]));
+        assert!(git_wt(&["commit", "-q", "-m", "station conflict line"]));
+
+        // Land it — engine-protected merge leaves the conflict in-tree.
+        let outcome = crate::lifecycle::land_station(&store, "r", "build");
+        assert!(!outcome.performed, "a conflicting land does not perform: {outcome:?}");
+        assert!(outcome.has_conflicts(), "conflict paths surface: {outcome:?}");
+
+        // derive_position now surfaces a MergeConflict for the station.
+        let action = merge_conflict_action(&store, "r", "build")
+            .expect("ok")
+            .expect("a merge conflict action");
+        match &action {
+            RunAction::MergeConflict { branch, conflict_paths, .. } => {
+                assert!(!conflict_paths.is_empty(), "names the conflicted paths");
+                assert!(conflict_paths.iter().any(|p| p.contains("conflict.txt")));
+                assert!(!branch.is_empty());
+            }
+            other => panic!("expected MergeConflict, got {other:?}"),
+        }
     }
 }

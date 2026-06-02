@@ -52,16 +52,16 @@ pub fn UnitGraph(
             .iter()
             .find(|u| u.node.id == id)
             .and_then(|u| u.tone)
-            .map(|t| t.color())
-            .unwrap_or(tokens::ACCENT)
+            .map(|t| t.color_var())
+            .unwrap_or(tokens::var::ACCENT)
     };
 
     let view_box = format!("0 0 {} {}", result.width, result.height);
     let svg_style = format!(
         "background:{surface};border:1px solid {border};border-radius:8px;\
          display:block;max-width:100%;height:auto;font-family:{mono};",
-        surface = tokens::SURFACE_RAISED,
-        border = tokens::BORDER,
+        surface = tokens::var::SURFACE_RAISED,
+        border = tokens::var::BORDER,
         mono = tokens::FONT_MONO,
     );
 
@@ -86,7 +86,7 @@ pub fn UnitGraph(
                     marker_width: "7",
                     marker_height: "7",
                     orient: "auto-start-reverse",
-                    path { d: "M0,0 L10,5 L0,10 z", fill: tokens::BORDER_STRONG }
+                    path { d: "M0,0 L10,5 L0,10 z", fill: tokens::var::BORDER_STRONG }
                 }
             }
 
@@ -109,7 +109,7 @@ pub fn UnitGraph(
                         path {
                             d: "{d}",
                             fill: "none",
-                            stroke: tokens::BORDER_STRONG,
+                            stroke: tokens::var::BORDER_STRONG,
                             stroke_width: "1.5",
                             marker_end: "url(#dr-arrow)",
                         }
@@ -130,14 +130,14 @@ pub fn UnitGraph(
                                 width: "{node.width}",
                                 height: "{node.height}",
                                 rx: "6",
-                                fill: tokens::SURFACE_OVERLAY,
+                                fill: tokens::var::SURFACE_OVERLAY,
                                 stroke: "{color}",
                                 stroke_width: "1.5",
                             }
                             text {
                                 x: "{node.cx()}",
                                 y: "{label_y}",
-                                fill: tokens::TEXT,
+                                fill: tokens::var::TEXT,
                                 font_size: "12",
                                 text_anchor: "middle",
                                 "{node.label}"

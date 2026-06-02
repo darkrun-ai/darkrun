@@ -54,7 +54,7 @@ pub fn TabBar(
 ) -> Element {
     let row = format!(
         "display:flex;gap:4px;border-bottom:1px solid {border};margin-bottom:2px;",
-        border = tokens::BORDER,
+        border = tokens::var::BORDER,
     );
     rsx! {
         div {
@@ -70,9 +70,9 @@ pub fn TabBar(
                     let alert = tab.alert;
                     let handler = on_select;
                     let (color, border_color, weight) = if on {
-                        (tokens::TEXT, tokens::ACCENT, "600")
+                        (tokens::var::TEXT, tokens::var::ACCENT, "600")
                     } else {
-                        (tokens::TEXT_MUTED, "transparent", "400")
+                        (tokens::var::TEXT_MUTED, "transparent", "400")
                     };
                     let tab_style = format!(
                         "padding:8px 14px;font-size:13px;color:{color};\
@@ -103,8 +103,8 @@ pub fn TabBar(
                                     } else {
                                         format!(
                                             "background:{surface};color:{faint};",
-                                            surface = tokens::SURFACE_OVERLAY,
-                                            faint = tokens::TEXT_FAINT,
+                                            surface = tokens::var::SURFACE_OVERLAY,
+                                            faint = tokens::var::TEXT_FAINT,
                                         )
                                     };
                                     let pill = format!(

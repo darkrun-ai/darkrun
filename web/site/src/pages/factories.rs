@@ -253,7 +253,7 @@ fn StationCard(
     reviewers: Vec<String>,
 ) -> Element {
     let phase = phase_for_index(index);
-    let accent = phase.map(|p| p.hue().base.to_string());
+    let accent = phase.map(|p| p.hue_var().base.to_string());
     rsx! {
         Link {
             to: Route::StationDetail { factory: factory.clone(), station: station.clone() },
@@ -326,7 +326,6 @@ fn StationBody(
     let factory_data = factory_data();
     let station = station();
     let idx = station_index(&factory_data, station.name()).unwrap_or(0);
-    let phase = phase_for_index(idx);
 
     let fm = &station.frontmatter;
     let checkpoint = checkpoint_label(station.checkpoint());
@@ -388,20 +387,6 @@ fn StationBody(
                 for input in inputs.iter() {
                     Badge { tone: Tone::Neutral, "{input}" }
                 }
-            }
-        }
-
-        // The within-station phase machine, fixed on this station's phase slot.
-        Panel { label: "phase machine".to_string(),
-            div { style: "display:flex;justify-content:center;",
-                PhaseMachine { active: phase, size: 340.0 }
-            }
-            p {
-                style: format!(
-                    "font-family:{};font-size:12px;color:{};margin:8px 0 0;text-align:center;",
-                    tokens::FONT_MONO, theme::TEXT_FAINT,
-                ),
-                "spec → review → manufacture → audit → tests → checkpoint"
             }
         }
 
@@ -473,7 +458,7 @@ fn PhaseSection(
     if roles.is_empty() {
         return rsx! {};
     }
-    let accent = phase.map(|p| p.hue().base).unwrap_or(theme::ACCENT);
+    let accent = phase.map(|p| p.hue_var().base).unwrap_or(theme::ACCENT);
     rsx! {
         section { style: "margin:28px 0;",
             h2 {

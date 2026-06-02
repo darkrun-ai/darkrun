@@ -93,6 +93,7 @@ fn action_station(a: &RunAction) -> Option<&str> {
         | RunAction::Escalate { station, .. }
         | RunAction::SafeRepair { station, .. }
         | RunAction::ReviseUnitSpecs { station, .. }
+        | RunAction::MergeConflict { station, .. }
         | RunAction::ExternalReviewRequested { station, .. } => Some(station),
         RunAction::PendingSeal { .. } | RunAction::Sealed { .. } | RunAction::Noop { .. } => None,
     }

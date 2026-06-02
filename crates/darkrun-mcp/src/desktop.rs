@@ -352,14 +352,19 @@ pub fn spawn(repo_root: &Path, port: u16, session: Option<&str>) -> Launch {
             return launch(p, port, repo_root, session);
         }
     }
-    // Dev: always the local version — build it for this arch if absent.
+    // Dev: always the local version, and ALWAYS rebuild it first so the launched
+    // app reflects the latest source — `cargo build` is incremental, so it's a
+    // near-instant no-op when nothing changed, and correctly recompiles when the
+    // UI did. (Previously a once-built binary was launched as-is, so edits to the
+    // desktop/UI crates never showed up until the binary was manually deleted.)
+    // If the builder can't even be spawned, fall back to launching whatever exists.
     if let Some((ws, profile)) = dev_workspace() {
         let bin = ws.join("target").join(&profile).join(bin_name());
-        if bin.is_file() {
-            return launch(bin, port, repo_root, session);
-        }
         if spawn_build_then_launch(&ws, &profile, &bin, port, repo_root, session) {
             return Launch::Building;
+        }
+        if bin.is_file() {
+            return launch(bin, port, repo_root, session);
         }
     }
     // Installed plugin: sibling of the engine binary, or the project target dir.

@@ -111,12 +111,14 @@ fn glyph_follows_step_state() {
 
 #[test]
 fn station_hue_cycles_the_six_phase_hues() {
+    // Station hues are the THEMED (CSS-variable) phase hues so the pipeline flips
+    // with the active theme.
     for i in 0..Phase::ALL.len() {
-        assert_eq!(station_hue(i), Phase::ALL[i].hue());
+        assert_eq!(station_hue(i), Phase::ALL[i].hue_var());
     }
     // wraps after six
-    assert_eq!(station_hue(6), Phase::Spec.hue());
-    assert_eq!(station_hue(11), Phase::Checkpoint.hue());
+    assert_eq!(station_hue(6), Phase::Spec.hue_var());
+    assert_eq!(station_hue(11), Phase::Checkpoint.hue_var());
 }
 
 #[test]
@@ -282,7 +284,7 @@ fn phase_beats_follow_the_named_sub_step_table() {
     );
     assert_eq!(phase_beats(Phase::Audit), vec![Beat::Spec, Beat::Adversarial]);
     assert_eq!(phase_beats(Phase::Reflect), vec![Beat::Agentic]);
-    assert_eq!(phase_beats(Phase::Checkpoint), vec![Beat::Brief, Beat::User]);
+    assert_eq!(phase_beats(Phase::Checkpoint), vec![Beat::Outcome, Beat::User]);
 }
 
 #[test]
@@ -396,24 +398,25 @@ fn first_and_last_tick_make_sense() {
 fn checkpoint_hue_maps_every_kind_to_valid_hue() {
     for k in [CheckpointKind::Auto, CheckpointKind::Ask, CheckpointKind::External, CheckpointKind::Await] {
         let hue = checkpoint_hue(k);
-        assert!(hue.starts_with('#') && hue.len() == 7);
+        // Themed: a `var(--dr-status-*)` custom-property reference, not raw hex.
+        assert!(hue.starts_with("var(--dr-status-") && hue.ends_with(')'));
     }
 }
 
 #[test]
 fn checkpoint_hue_auto_is_ok_green() {
-    assert_eq!(checkpoint_hue(CheckpointKind::Auto), tokens::STATUS_OK);
+    assert_eq!(checkpoint_hue(CheckpointKind::Auto), tokens::var::STATUS_OK);
 }
 
 #[test]
 fn checkpoint_hue_ask_and_await_are_warn() {
-    assert_eq!(checkpoint_hue(CheckpointKind::Ask), tokens::STATUS_WARN);
-    assert_eq!(checkpoint_hue(CheckpointKind::Await), tokens::STATUS_WARN);
+    assert_eq!(checkpoint_hue(CheckpointKind::Ask), tokens::var::STATUS_WARN);
+    assert_eq!(checkpoint_hue(CheckpointKind::Await), tokens::var::STATUS_WARN);
 }
 
 #[test]
 fn checkpoint_hue_external_is_info() {
-    assert_eq!(checkpoint_hue(CheckpointKind::External), tokens::STATUS_INFO);
+    assert_eq!(checkpoint_hue(CheckpointKind::External), tokens::var::STATUS_INFO);
 }
 
 // ===========================================================================

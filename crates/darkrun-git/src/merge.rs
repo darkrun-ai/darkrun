@@ -128,6 +128,124 @@ fn restore_engine_state_from_base(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{has_no_merge_debt, Git, GitBackend};
+    use std::path::PathBuf;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    /// Build a throwaway repo with one commit on `main`.
+    fn init_repo() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@darkrun.ai"]);
+        git(&["config", "user.name", "darkrun test"]);
+        std::fs::write(root.join("README.md"), "# smoke\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        (dir, root)
+    }
+
+    fn git_in(root: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// Identical-tree branches compare equal; a diverged branch does not.
+    fn refs_identical_trees(open: fn(&std::path::Path) -> Result<Git>) {
+        let (_d, root) = init_repo();
+        // Two branches forked at the SAME commit → identical trees.
+        git_in(&root, &["branch", "a", "main"]);
+        git_in(&root, &["branch", "b", "main"]);
+        let git = open(&root).expect("open");
+        assert!(git.refs_have_identical_trees("a", "b").unwrap());
+        assert!(git.refs_have_identical_trees("a", "main").unwrap());
+
+        // Advance `b` with a new commit → trees diverge.
+        git_in(&root, &["checkout", "-q", "b"]);
+        std::fs::write(root.join("new.txt"), "diverge\n").unwrap();
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-q", "-m", "b work"]);
+        assert!(!git.refs_have_identical_trees("a", "b").unwrap());
+
+        // A missing ref resolves to "not identical" (false), never an error.
+        assert!(!git.refs_have_identical_trees("a", "does-not-exist").unwrap());
+    }
+
+    #[test]
+    fn libgit2_refs_identical_trees() {
+        refs_identical_trees(|p| Git::open(p));
+    }
+
+    #[test]
+    fn shell_refs_identical_trees() {
+        refs_identical_trees(|p| Git::open_shell(p));
+    }
+
+    /// `has_no_merge_debt` is true for identical trees, true for an ancestor,
+    /// and false for a genuine divergence (where a real merge has work to do).
+    #[test]
+    fn merge_debt_predicate() {
+        let (_d, root) = init_repo();
+        // identical-tree fork.
+        git_in(&root, &["branch", "twin", "main"]);
+        // ancestor: main is an ancestor of `ahead` once `ahead` advances.
+        git_in(&root, &["checkout", "-q", "-b", "ahead"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-q", "-m", "ahead work"]);
+        // diverged: a separate branch off main with its own commit.
+        git_in(&root, &["checkout", "-q", "-b", "side", "main"]);
+        std::fs::write(root.join("s.txt"), "s\n").unwrap();
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-q", "-m", "side work"]);
+
+        let git = Git::open(&root).expect("open");
+
+        // Identical trees → no debt.
+        assert!(has_no_merge_debt(&git, "twin", "main"));
+        // main is an ancestor of `ahead` → merging main into ahead is a no-op.
+        assert!(has_no_merge_debt(&git, "main", "ahead"));
+        // `side` diverged from `ahead` → there IS debt (a real merge).
+        assert!(!has_no_merge_debt(&git, "side", "ahead"));
+    }
+
+    #[test]
+    fn merge_in_progress_marker_set() {
+        use crate::is_merge_in_progress;
+        let (_d, root) = init_repo();
+        // No merge in flight on a clean repo.
+        assert!(!is_merge_in_progress(&root));
+
+        // Plant each marker in $GIT_DIR and confirm the broad predicate fires.
+        let git_dir = root.join(".git");
+        for marker in ["MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] {
+            std::fs::write(git_dir.join(marker), "ref\n").unwrap();
+            assert!(is_merge_in_progress(&root), "{marker} should register");
+            std::fs::remove_file(git_dir.join(marker)).unwrap();
+        }
+        for dir_marker in ["rebase-merge", "rebase-apply"] {
+            std::fs::create_dir_all(git_dir.join(dir_marker)).unwrap();
+            assert!(is_merge_in_progress(&root), "{dir_marker} should register");
+            std::fs::remove_dir_all(git_dir.join(dir_marker)).unwrap();
+        }
+        // Cleared again.
+        assert!(!is_merge_in_progress(&root));
+    }
 
     #[test]
     fn engine_owned_predicate_scopes_to_run() {

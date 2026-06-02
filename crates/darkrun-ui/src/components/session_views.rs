@@ -139,8 +139,8 @@ fn image_or_placeholder(url: Option<&str>, alt: &str, aspect: &str) -> Element {
         "width:100%;aspect-ratio:{aspect};border-radius:6px;overflow:hidden;\
          background:{base};border:1px solid {border};display:block;",
         aspect = aspect,
-        base = tokens::SURFACE_BASE,
-        border = tokens::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        border = tokens::var::BORDER,
     );
     match url.map(str::trim).filter(|u| !u.is_empty()) {
         Some(u) => rsx! {
@@ -157,9 +157,9 @@ fn image_or_placeholder(url: Option<&str>, alt: &str, aspect: &str) -> Element {
                  font-family:{mono};font-size:11px;color:{faint};\
                  background:repeating-linear-gradient(45deg,{base},{base} 10px,{raised} 10px,{raised} 20px);",
                 mono = tokens::FONT_MONO,
-                faint = tokens::TEXT_FAINT,
-                base = tokens::SURFACE_BASE,
-                raised = tokens::SURFACE_RAISED,
+                faint = tokens::var::TEXT_FAINT,
+                base = tokens::var::SURFACE_BASE,
+                raised = tokens::var::SURFACE_RAISED,
             );
             rsx! {
                 div { class: "dr-img-placeholder", style: "{ph}", role: "img", "aria-label": "{alt}",
@@ -176,7 +176,7 @@ fn heading(text: &str) -> Element {
         "margin:0;font-family:{sans};font-size:13px;font-weight:700;color:{text};\
          text-transform:uppercase;letter-spacing:0.04em;",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     rsx! { h2 { style: "{style}", "{text}" } }
 }
@@ -186,12 +186,12 @@ fn prompt_block(prompt: &str, context: Option<&str>) -> Element {
     let prompt_style = format!(
         "margin:0;font-family:{sans};font-size:16px;font-weight:600;color:{text};line-height:1.35;",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let ctx_style = format!(
         "margin:6px 0 0;font-family:{sans};font-size:13px;color:{muted};line-height:1.45;",
         sans = tokens::FONT_SANS,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     rsx! {
         div {
@@ -266,7 +266,7 @@ pub fn QuestionView(
                     span {
                         style: format!(
                             "font-family:{};font-size:13px;color:{};",
-                            tokens::FONT_MONO, tokens::TEXT_MUTED,
+                            tokens::FONT_MONO, tokens::var::TEXT_MUTED,
                         ),
                         "{t}"
                     }
@@ -310,9 +310,9 @@ fn option_card(
     answered: bool,
     on_toggle: Option<EventHandler<String>>,
 ) -> Element {
-    let border = if selected { tokens::ACCENT } else { tokens::BORDER };
+    let border = if selected { tokens::var::ACCENT } else { tokens::var::BORDER };
     let ring = if selected {
-        format!("box-shadow:0 0 0 1px {};", tokens::ACCENT)
+        format!("box-shadow:0 0 0 1px {};", tokens::var::ACCENT)
     } else {
         String::new()
     };
@@ -321,20 +321,20 @@ fn option_card(
         "display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:8px;\
          background:{surface};border:1px solid {border};{ring}cursor:{cursor};\
          text-align:left;width:100%;color:{text};transition:border-color .12s ease;",
-        surface = tokens::SURFACE_RAISED,
+        surface = tokens::var::SURFACE_RAISED,
         border = border,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let label_style = format!(
         "display:flex;align-items:center;justify-content:space-between;gap:8px;\
          font-family:{sans};font-size:13px;font-weight:600;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let desc_style = format!(
         "margin:0;font-family:{sans};font-size:12px;color:{muted};line-height:1.4;",
         sans = tokens::FONT_SANS,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let id = opt.id.clone();
     rsx! {
@@ -432,7 +432,7 @@ pub fn DirectionView(
                     span {
                         style: format!(
                             "font-family:{};font-size:13px;color:{};",
-                            tokens::FONT_MONO, tokens::TEXT_MUTED,
+                            tokens::FONT_MONO, tokens::var::TEXT_MUTED,
                         ),
                         "{t}"
                     }
@@ -473,9 +473,9 @@ fn archetype_card(
     decided: bool,
     on_choose: Option<EventHandler<String>>,
 ) -> Element {
-    let border = if chosen { tokens::ACCENT } else { tokens::BORDER };
+    let border = if chosen { tokens::var::ACCENT } else { tokens::var::BORDER };
     let ring = if chosen {
-        format!("box-shadow:0 0 0 1px {};", tokens::ACCENT)
+        format!("box-shadow:0 0 0 1px {};", tokens::var::ACCENT)
     } else {
         String::new()
     };
@@ -484,20 +484,20 @@ fn archetype_card(
         "display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:8px;\
          background:{surface};border:1px solid {border};{ring}cursor:{cursor};\
          text-align:left;width:100%;color:{text};transition:border-color .12s ease;",
-        surface = tokens::SURFACE_RAISED,
+        surface = tokens::var::SURFACE_RAISED,
         border = border,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let label_style = format!(
         "display:flex;align-items:center;justify-content:space-between;gap:8px;\
          font-family:{sans};font-size:13px;font-weight:600;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let desc_style = format!(
         "margin:0;font-family:{sans};font-size:12px;color:{muted};line-height:1.4;",
         sans = tokens::FONT_SANS,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let id = arch.id.clone();
     rsx! {
@@ -539,7 +539,7 @@ fn annotation_layer(
     let wrap = format!(
         "margin-top:16px;padding-top:14px;border-top:1px solid {border};\
          display:flex;flex-direction:column;gap:10px;",
-        border = tokens::BORDER,
+        border = tokens::var::BORDER,
     );
     // The clickable preview: clicking emits the pixel offset + box size so the
     // caller can normalize into a 0..1 pin via `selection::place_pin`.
@@ -547,8 +547,8 @@ fn annotation_layer(
         "position:relative;width:100%;max-width:520px;aspect-ratio:4 / 3;\
          border-radius:8px;overflow:hidden;border:1px solid {border};\
          background:{base};cursor:{cursor};",
-        border = tokens::BORDER_STRONG,
-        base = tokens::SURFACE_BASE,
+        border = tokens::var::BORDER_STRONG,
+        base = tokens::var::SURFACE_BASE,
         cursor = if decided { "default" } else { "crosshair" },
     );
     let img_style = "position:absolute;inset:0;width:100%;height:100%;\
@@ -589,12 +589,12 @@ fn annotation_layer(
                 ul {
                     style: format!(
                         "margin:0;padding-left:18px;font-family:{};font-size:12px;color:{};",
-                        tokens::FONT_SANS, tokens::TEXT_MUTED,
+                        tokens::FONT_SANS, tokens::var::TEXT_MUTED,
                     ),
                     for (i, pin) in pins.iter().enumerate() {
                         li { style: "margin:2px 0;",
                             span {
-                                style: format!("color:{};font-weight:600;", tokens::ACCENT),
+                                style: format!("color:{};font-weight:600;", tokens::var::ACCENT),
                                 "#{i+1} "
                             }
                             "{pin.note}"
@@ -617,9 +617,9 @@ fn pin_marker(index: usize, pin: &PinPoint) -> Element {
          box-shadow:0 1px 3px rgba(0,0,0,0.5);",
         left = pin.left_pct(),
         top = pin.top_pct(),
-        accent = tokens::ACCENT,
-        on = tokens::ON_ACCENT,
-        base = tokens::SURFACE_BASE,
+        accent = tokens::var::ACCENT,
+        on = tokens::var::ON_ACCENT,
+        base = tokens::var::SURFACE_BASE,
         mono = tokens::FONT_MONO,
     );
     rsx! {
@@ -645,9 +645,9 @@ fn comment_box(
         "width:100%;min-height:60px;resize:vertical;padding:8px 10px;border-radius:6px;\
          background:{surface};border:1px solid {border};color:{text};\
          font-family:{sans};font-size:13px;",
-        surface = tokens::SURFACE_BASE,
-        border = tokens::BORDER,
-        text = tokens::TEXT,
+        surface = tokens::var::SURFACE_BASE,
+        border = tokens::var::BORDER,
+        text = tokens::var::TEXT,
         sans = tokens::FONT_SANS,
     );
     rsx! {
@@ -660,7 +660,7 @@ fn comment_box(
                             style: format!(
                                 "padding:8px 10px;border-radius:6px;background:{};border:1px solid {};\
                                  font-family:{};font-size:13px;color:{};",
-                                tokens::SURFACE_RAISED, tokens::BORDER, tokens::FONT_SANS, tokens::TEXT,
+                                tokens::var::SURFACE_RAISED, tokens::var::BORDER, tokens::FONT_SANS, tokens::var::TEXT,
                             ),
                             "{c}"
                         }
@@ -726,12 +726,12 @@ pub fn PickerView(
     let title_style = format!(
         "margin:0;font-family:{sans};font-size:16px;font-weight:700;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let prompt_style = format!(
         "margin:6px 0 0;font-family:{sans};font-size:13px;color:{muted};line-height:1.4;",
         sans = tokens::FONT_SANS,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     rsx! {
         Card {
@@ -761,29 +761,29 @@ fn picker_row(
     on_select: Option<EventHandler<String>>,
 ) -> Element {
     let rail = if selected {
-        format!("border-left:3px solid {};", tokens::ACCENT)
+        format!("border-left:3px solid {};", tokens::var::ACCENT)
     } else {
         "border-left:3px solid transparent;".to_string()
     };
-    let border = if selected { tokens::ACCENT } else { tokens::BORDER };
+    let border = if selected { tokens::var::ACCENT } else { tokens::var::BORDER };
     let cursor = if decided { "default" } else { "pointer" };
     let row = format!(
         "display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:6px;\
          background:{surface};border:1px solid {border};{rail}cursor:{cursor};\
          text-align:left;width:100%;color:{text};transition:border-color .12s ease;",
-        surface = tokens::SURFACE_RAISED,
+        surface = tokens::var::SURFACE_RAISED,
         border = border,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let label_style = format!(
         "font-family:{sans};font-size:14px;font-weight:600;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let desc_style = format!(
         "margin:2px 0 0;font-family:{sans};font-size:12px;color:{muted};",
         sans = tokens::FONT_SANS,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let id = opt.id.clone();
     rsx! {
@@ -811,7 +811,7 @@ fn picker_row(
                 span {
                     style: format!(
                         "font-family:{};font-size:12px;color:{};",
-                        tokens::FONT_MONO, tokens::TEXT_FAINT,
+                        tokens::FONT_MONO, tokens::var::TEXT_FAINT,
                     ),
                     "{s}"
                 }
@@ -840,17 +840,17 @@ fn submit_bar(
     let bar = format!(
         "display:flex;align-items:center;gap:12px;margin-top:16px;padding-top:14px;\
          border-top:1px solid {border};",
-        border = tokens::BORDER,
+        border = tokens::var::BORDER,
     );
     let status_style = format!(
         "font-family:{mono};font-size:12px;color:{muted};",
         mono = tokens::FONT_MONO,
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let hint_style = format!(
         "font-family:{mono};font-size:11px;color:{faint};text-transform:lowercase;",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     rsx! {
         div { class: "dr-submit-bar", style: "{bar}",

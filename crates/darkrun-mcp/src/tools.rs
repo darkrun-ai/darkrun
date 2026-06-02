@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use darkrun_core::domain::{FeedbackStatus, Status};
 use darkrun_core::StateStore;
+use darkrun_git::GitBackend;
 
 use darkrun_http::SessionRegistry;
 
@@ -105,6 +106,55 @@ impl DarkrunServer {
         StateStore::new(self.repo_root.as_ref())
     }
 
+    /// Resolve which run a slug-optional command (e.g. `darkrun_run_show`) targets.
+    ///
+    /// Priority, so a user standing in a run's worktree never has to name it:
+    /// 1. an explicit, non-empty `given` slug wins;
+    /// 2. otherwise the **current git branch** — a `darkrun/<slug>/<…>` branch
+    ///    names its run, so being on it *is* selecting it;
+    /// 3. otherwise the recorded **active run** pointer;
+    /// 4. otherwise, if exactly one non-archived run exists, that one.
+    ///
+    /// `None` only when there is genuinely nothing to disambiguate to.
+    fn resolve_run_slug(&self, store: &StateStore, given: Option<&str>) -> Option<String> {
+        if let Some(s) = given {
+            let s = s.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+        // 2. The branch we're on. `darkrun/<slug>/main` or `darkrun/<slug>/<station>`.
+        if let Ok(git) = darkrun_git::Git::open(self.repo_root.as_ref()) {
+            if let Ok(Some(branch)) = git.current_branch() {
+                if let Some(slug) = slug_from_branch(&branch) {
+                    if store.read_run(&slug).is_ok() {
+                        return Some(slug);
+                    }
+                }
+            }
+        }
+        // 3. The active-run pointer.
+        if let Ok(Some(active)) = store.active_run() {
+            return Some(active);
+        }
+        // 4. A sole non-archived run is unambiguous.
+        if let Ok(slugs) = store.list_runs() {
+            let live: Vec<String> = slugs
+                .into_iter()
+                .filter(|s| {
+                    store
+                        .read_run(s)
+                        .map(|r| !r.frontmatter.archived.unwrap_or(false))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if let [only] = live.as_slice() {
+                return Some(only.clone());
+            }
+        }
+        None
+    }
+
     /// Adapt a tick's engine-rendered prompt to the active harness (appends the
     /// "Harness note" with the execution-model differences) before it goes back
     /// to the agent. A no-op under Claude Code.
@@ -179,6 +229,30 @@ fn default_mode() -> String {
 pub struct RunRef {
     /// The run slug.
     pub slug: String,
+}
+
+/// Input for `darkrun_run_show`, where the slug is **optional**: omit it and the
+/// run is inferred from the current `darkrun/<slug>/…` branch, the active-run
+/// pointer, or the sole run — so a user in a run's worktree need not name it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RunShowRef {
+    /// The run slug. Omit to infer it from the current branch / active run.
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+/// Extract a run slug from a `darkrun/<slug>/<segment>` branch name. Returns
+/// `None` for any branch that is not a darkrun run branch (so an ordinary feature
+/// branch never masquerades as a run).
+fn slug_from_branch(branch: &str) -> Option<String> {
+    let rest = branch.strip_prefix("darkrun/")?;
+    let (slug, _segment) = rest.split_once('/')?;
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.to_string())
+    }
 }
 
 /// Input for `darkrun_checkpoint_decide`.
@@ -866,29 +940,35 @@ impl DarkrunServer {
     /// Show a run's frontmatter, derived state, and current position.
     #[tool(
         name = "darkrun_run_show",
-        description = "Show a run: frontmatter, derived station state, and the current cursor position."
+        description = "Show a run: frontmatter, derived station state, and the current cursor position. Omit `slug` to infer the run from the current darkrun/<slug>/… branch, the active run, or the sole run."
     )]
     pub fn darkrun_run_show(
         &self,
-        Parameters(input): Parameters<RunRef>,
+        Parameters(input): Parameters<RunShowRef>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
-        let run = match store.read_run(&input.slug) {
+        let Some(slug) = self.resolve_run_slug(&store, input.slug.as_deref()) else {
+            return Ok(err_text(
+                "No run given and none could be inferred — pass a slug, or run this \
+                 from a darkrun/<slug>/… worktree (no active run is set).",
+            ));
+        };
+        let run = match store.read_run(&slug) {
             Ok(r) => r,
             Err(e) => return Ok(err_text(e)),
         };
-        let state = store.read_state(&input.slug).ok().flatten();
-        let position = crate::position::derive_position(&store, &input.slug).ok();
+        let state = store.read_state(&slug).ok().flatten();
+        let position = crate::position::derive_position(&store, &slug).ok();
         // Bring up the desktop interface: raise the run's review surface, then
         // LAUNCH the desktop app pointed at it when none is already connected.
         // The desktop is the only interactive surface darkrun drives. The
         // structured state is returned too, for the agent.
-        let _ = crate::sessions::create_show(&self.sessions, &store, &input.slug);
+        let _ = crate::sessions::create_show(&self.sessions, &store, &slug);
         let desktop = if self.sessions.live_connections() > 0 {
             // A desktop is already connected; its home poller navigates to the run.
             serde_json::json!({ "status": "connected" })
         } else if let Some(addr) = self.announced_addr {
-            match crate::desktop::spawn(self.repo_root.as_ref(), addr.port(), Some(&input.slug)) {
+            match crate::desktop::spawn(self.repo_root.as_ref(), addr.port(), Some(&slug)) {
                 crate::desktop::Launch::Launched(bin) => serde_json::json!({
                     "status": "launched",
                     "bin": bin.to_string_lossy(),
@@ -911,7 +991,7 @@ impl DarkrunServer {
             "position": position,
             "showing": {
                 "surface": "desktop",
-                "session_id": input.slug,
+                "session_id": slug,
                 "port": self.announced_addr.map(|a| a.port()),
                 "desktop": desktop,
             },

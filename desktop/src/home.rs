@@ -99,10 +99,22 @@ enum Selection {
 /// that project's live engine if present and opens its run list. With no
 /// `project_path` the shell opens with nothing selected (the welcome surface).
 #[component]
-pub fn HomeApp(cfg: ConnConfig, project_path: Option<PathBuf>) -> Element {
+pub fn HomeApp(
+    cfg: ConnConfig,
+    project_path: Option<PathBuf>,
+    /// When the engine launched us pinned to a run, its slug — the shell opens
+    /// with that run pre-selected (its Review in the main pane) instead of the
+    /// welcome surface. The focus poller refines the project label on its first
+    /// tick.
+    #[props(default)]
+    initial_session: Option<String>,
+) -> Element {
     // A pinned project_path is reserved for a future deep-link; discovery already
     // surfaces every live project, so the shell opens on the full tree.
     let _ = &project_path;
+    // The engine's launch port — used to seed a pinned run's selection before the
+    // poller has discovered which project owns it.
+    let launch_port = cfg.port;
 
     // Every live engine discovered under `~/.darkrun`, refreshed on launch and
     // re-polled. The sidebar projects render from this merged with the registry.
@@ -112,8 +124,17 @@ pub fn HomeApp(cfg: ConnConfig, project_path: Option<PathBuf>) -> Element {
     // fetcher. The sidebar nests these under each live project.
     let runs_by_project = use_signal(BTreeMap::<String, Vec<RunSummary>>::new);
 
-    // What the main pane shows.
-    let selection = use_signal(|| Selection::None);
+    // What the main pane shows. A pinned launch opens straight to that run (the
+    // project label is filled in by the focus poller's first tick); otherwise the
+    // shell opens with nothing selected.
+    let selection = use_signal(move || match initial_session {
+        Some(ref slug) => Selection::Run {
+            port: launch_port,
+            slug: slug.clone(),
+            project: String::new(),
+        },
+        None => Selection::None,
+    });
 
     // The Mine/All sidebar filter — defaults to Mine per the mockup, scoping the
     // run list to runs the current git identity authored (`authored_by_me`).
@@ -275,15 +296,15 @@ fn Toolbar(drawer_open: Signal<bool>) -> Element {
     let bar = format!(
         "height:44px;flex:none;display:flex;align-items:center;gap:12px;\
          padding:0 14px;background:{overlay};border-bottom:1px solid {border};",
-        overlay = tokens::SURFACE_OVERLAY,
-        border = tokens::BORDER,
+        overlay = tokens::var::SURFACE_OVERLAY,
+        border = tokens::var::BORDER,
     );
     let burger = format!(
         "appearance:none;background:transparent;border:1px solid {border};\
          border-radius:7px;width:30px;height:26px;align-items:center;\
          justify-content:center;color:{muted};font-size:15px;cursor:pointer;",
-        border = tokens::BORDER_STRONG,
-        muted = tokens::TEXT_MUTED,
+        border = tokens::var::BORDER_STRONG,
+        muted = tokens::var::TEXT_MUTED,
     );
 
     let mut drawer_open = drawer_open;
@@ -341,8 +362,8 @@ fn ThemeControl() -> Element {
         "display:inline-flex;align-items:center;gap:2px;\
          border:1px solid {border};border-radius:999px;padding:2px;\
          background:{raised};",
-        border = tokens::BORDER_STRONG,
-        raised = tokens::SURFACE_RAISED,
+        border = tokens::var::BORDER_STRONG,
+        raised = tokens::var::SURFACE_RAISED,
     );
 
     rsx! {
@@ -356,8 +377,8 @@ fn ThemeControl() -> Element {
                          padding:4px 10px;border-radius:999px;line-height:1;\
                          color:{fg};background:{bg};",
                         mono = tokens::FONT_MONO,
-                        fg = if active { tokens::ON_ACCENT } else { tokens::TEXT_MUTED },
-                        bg = if active { tokens::ACCENT } else { "transparent" },
+                        fg = if active { tokens::var::ON_ACCENT } else { tokens::var::TEXT_MUTED },
+                        bg = if active { tokens::var::ACCENT } else { "transparent" },
                     );
                     rsx! {
                         button {
@@ -402,18 +423,18 @@ fn Sidebar(
         "margin:0;font-family:{sans};font-size:11px;font-weight:700;\
          text-transform:uppercase;letter-spacing:0.05em;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let foot = format!(
         "padding:8px 12px;border-top:1px solid {border};font-family:{mono};\
          font-size:11px;color:{faint};display:flex;align-items:center;gap:7px;",
-        border = tokens::BORDER,
+        border = tokens::var::BORDER,
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     let dot_live = format!(
         "width:7px;height:7px;border-radius:50%;flex:none;background:{ok};",
-        ok = tokens::STATUS_OK,
+        ok = tokens::var::STATUS_OK,
     );
 
     let mut drawer_open_close = drawer_open;
@@ -518,7 +539,7 @@ fn MineAllFilter(mine_only: Signal<bool>) -> Element {
     let seg = format!(
         "display:flex;margin:2px 12px 8px;border:1px solid {border};\
          border-radius:8px;overflow:hidden;font-size:12px;",
-        border = tokens::BORDER_STRONG,
+        border = tokens::var::BORDER_STRONG,
     );
     let mine = *mine_only.read();
 
@@ -527,13 +548,13 @@ fn MineAllFilter(mine_only: Signal<bool>) -> Element {
             format!(
                 "flex:1;text-align:center;padding:5px 0;cursor:pointer;\
                  background:{accent};color:{on_accent};font-weight:700;",
-                accent = tokens::ACCENT,
-                on_accent = tokens::ON_ACCENT,
+                accent = tokens::var::ACCENT,
+                on_accent = tokens::var::ON_ACCENT,
             )
         } else {
             format!(
                 "flex:1;text-align:center;padding:5px 0;cursor:pointer;color:{muted};",
-                muted = tokens::TEXT_MUTED,
+                muted = tokens::var::TEXT_MUTED,
             )
         }
     };
@@ -562,19 +583,19 @@ fn SidebarSearch(search: Signal<String>) -> Element {
         "margin:0 12px 10px;display:flex;align-items:center;gap:7px;\
          padding:6px 9px;border:1px solid {border};border-radius:8px;\
          background:{raised};",
-        border = tokens::BORDER,
-        raised = tokens::SURFACE_RAISED,
+        border = tokens::var::BORDER,
+        raised = tokens::var::SURFACE_RAISED,
     );
     let input = format!(
         "flex:1;appearance:none;border:0;background:transparent;outline:none;\
          color:{text};font-family:{sans};font-size:12px;",
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
         sans = tokens::FONT_SANS,
     );
     let mut search = search;
     rsx! {
         div { style: "{wrap}",
-            span { style: format!("color:{};font-size:12px;", tokens::TEXT_FAINT), "\u{2315}" }
+            span { style: format!("color:{};font-size:12px;", tokens::var::TEXT_FAINT), "\u{2315}" }
             input {
                 style: "{input}",
                 placeholder: "search \u{b7} name, author, status, station\u{2026}",
@@ -590,7 +611,7 @@ fn SidebarSearch(search: Signal<String>) -> Element {
 fn SidebarEmpty(mine_only: Signal<bool>, has_projects: bool) -> Element {
     let style = format!(
         "padding:14px 12px;font-size:12px;color:{faint};line-height:1.5;",
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     let msg = if !has_projects {
         "No projects yet \u{2014} add one from the main pane."
@@ -632,20 +653,20 @@ fn ProjectSection(
     let ph = format!(
         "display:flex;align-items:center;gap:7px;padding:6px 8px;border-radius:7px;\
          font-size:13px;font-weight:600;color:{text};cursor:pointer;",
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let car = format!(
         "color:{faint};font-size:10px;width:10px;",
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     let ct = format!(
         "margin-left:auto;font-family:{mono};font-size:10.5px;color:{faint};",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     let runs_wrap = format!(
         "margin:1px 0 4px 14px;border-left:1px solid {border};padding-left:6px;",
-        border = tokens::BORDER,
+        border = tokens::var::BORDER,
     );
 
     // Clicking the header of a NO-ENGINE project opens its one-step view; for a
@@ -681,7 +702,7 @@ fn ProjectSection(
                         style: format!(
                             "margin-left:auto;font-family:{};font-size:9px;color:{};\
                              border:1px solid {};border-radius:4px;padding:0 4px;",
-                            tokens::FONT_MONO, tokens::STATUS_WARN, tokens::STATUS_WARN,
+                            tokens::FONT_MONO, tokens::var::STATUS_WARN, tokens::var::STATUS_WARN,
                         ),
                         "idle"
                     }
@@ -731,13 +752,13 @@ fn RunRow(
             "display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;\
              font-size:12.5px;cursor:pointer;background:{sel};color:{text};",
             sel = run_sel_bg(),
-            text = tokens::TEXT,
+            text = tokens::var::TEXT,
         )
     } else {
         format!(
             "display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;\
              font-size:12.5px;cursor:pointer;color:{muted};",
-            muted = tokens::TEXT_MUTED,
+            muted = tokens::var::TEXT_MUTED,
         )
     };
     let dot = format!(
@@ -748,7 +769,7 @@ fn RunRow(
         "margin-left:auto;font-size:9px;font-family:{mono};color:{ink};\
          border:1px solid {ink};border-radius:4px;padding:0 4px;",
         mono = tokens::FONT_MONO,
-        ink = tokens::ACCENT_STRONG,
+        ink = tokens::var::ACCENT_STRONG,
     );
 
     let slug = run.slug.clone();
@@ -783,7 +804,7 @@ fn RunRow(
 /// The translucent selected-row background. The mockup uses an accent tint; we
 /// approximate it with the accent at low alpha (works in both themes).
 fn run_sel_bg() -> String {
-    format!("{}1f", tokens::ACCENT)
+    format!("{}1f", tokens::var::ACCENT)
 }
 
 /// The status-dot color for a run row: ok/green for an active (live) run, amber
@@ -791,9 +812,9 @@ fn run_sel_bg() -> String {
 /// live / needs-review / idle dots.
 fn run_dot_color(status: &str) -> &'static str {
     match status {
-        "active" | "in_progress" | "completed" => tokens::STATUS_OK,
-        "blocked" | "changes_requested" | "pending" | "review" => tokens::STATUS_WARN,
-        _ => tokens::TEXT_FAINT,
+        "active" | "in_progress" | "completed" => tokens::var::STATUS_OK,
+        "blocked" | "changes_requested" | "pending" | "review" => tokens::var::STATUS_WARN,
+        _ => tokens::var::TEXT_FAINT,
     }
 }
 
@@ -805,7 +826,7 @@ fn NewRunRow(name: String, path: String, selection: Signal<Selection>) -> Elemen
     let row = format!(
         "display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;\
          font-size:12.5px;cursor:pointer;color:{ink};",
-        ink = tokens::ACCENT_STRONG,
+        ink = tokens::var::ACCENT_STRONG,
     );
     let mut selection = selection;
     rsx! {
@@ -860,16 +881,16 @@ fn MainHeader(name: String, crumb: String) -> Element {
     let bar = format!(
         "padding:11px 16px;border-bottom:1px solid {border};display:flex;\
          align-items:center;gap:10px;",
-        border = tokens::BORDER,
+        border = tokens::var::BORDER,
     );
     let nm = format!(
         "font-weight:700;font-size:14px;color:{text};",
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let cr = format!(
         "color:{faint};font-size:12px;font-family:{mono};\
          overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
         mono = tokens::FONT_MONO,
     );
     rsx! {
@@ -890,13 +911,13 @@ fn Welcome(projects: Vec<Project>, refresh: Signal<u32>) -> Element {
                  max-width:920px;margin:0 auto;";
     let lead = format!(
         "font-size:13.5px;line-height:1.55;color:{muted};margin:0;max-width:640px;",
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let heading = format!(
         "margin:0;font-family:{sans};font-size:13px;font-weight:700;\
          text-transform:uppercase;letter-spacing:0.04em;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let grid = "display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));\
                 gap:12px;";
@@ -936,17 +957,17 @@ fn ProjectCard(proj: Project) -> Element {
         "font-family:{sans};font-size:15px;font-weight:700;color:{text};\
          overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let path_style = format!(
         "font-family:{mono};font-size:11px;color:{faint};\
          overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
     let meta_style = format!(
         "font-size:12px;color:{muted};margin-top:6px;",
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
 
     let path_label = proj.path.display().to_string();
@@ -1025,20 +1046,20 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
         "margin:0;font-family:{sans};font-size:13px;font-weight:700;\
          text-transform:uppercase;letter-spacing:0.04em;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let input_style = format!(
         "flex:1;box-sizing:border-box;padding:9px 12px;border-radius:6px;\
          border:1px solid {border};background:{base};color:{text};\
          font-family:{sans};font-size:13px;",
-        border = tokens::BORDER,
-        base = tokens::SURFACE_BASE,
-        text = tokens::TEXT,
+        border = tokens::var::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        text = tokens::var::TEXT,
         sans = tokens::FONT_SANS,
     );
     let note_style = format!(
         "font-size:11.5px;color:{faint};margin:8px 0 0;line-height:1.5;",
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
 
     let current = *mode.read();
@@ -1118,7 +1139,7 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
                     style: format!(
                         "font-family:{mono};font-size:11.5px;color:{accent};margin:8px 0 0;",
                         mono = tokens::FONT_MONO,
-                        accent = tokens::ACCENT,
+                        accent = tokens::var::ACCENT,
                     ),
                     "{msg}"
                 }
@@ -1134,8 +1155,8 @@ fn AddProjectCard() -> Element {
         "display:flex;align-items:center;justify-content:center;\
          border:1px dashed {border};border-radius:10px;padding:14px 16px;\
          color:{faint};font-family:{sans};font-size:13px;min-height:96px;",
-        border = tokens::BORDER_STRONG,
-        faint = tokens::TEXT_FAINT,
+        border = tokens::var::BORDER_STRONG,
+        faint = tokens::var::TEXT_FAINT,
         sans = tokens::FONT_SANS,
     );
     rsx! {
@@ -1238,16 +1259,19 @@ fn ModeTab(label: String, active: bool, on_pick: EventHandler<MouseEvent>) -> El
     let style = if active {
         format!(
             "padding:6px 12px;border-radius:7px;border:1px solid {accent};\
-             background:{accent}14;color:{text};font-size:12.5px;cursor:pointer;",
-            accent = tokens::ACCENT,
-            text = tokens::TEXT,
+             background:{accent_bg}14;color:{text};font-size:12.5px;cursor:pointer;",
+            accent = tokens::var::ACCENT,
+            // Hex (not the var) so the `14` alpha suffix is a valid 8-digit color;
+            // a faint static tint behind the active tab reads on both themes.
+            accent_bg = tokens::ACCENT,
+            text = tokens::var::TEXT,
         )
     } else {
         format!(
             "padding:6px 12px;border-radius:7px;border:1px solid {border};\
              background:transparent;color:{muted};font-size:12.5px;cursor:pointer;",
-            border = tokens::BORDER_STRONG,
-            muted = tokens::TEXT_MUTED,
+            border = tokens::var::BORDER_STRONG,
+            muted = tokens::var::TEXT_MUTED,
         )
     };
     rsx! {
@@ -1279,48 +1303,48 @@ fn NoEngine(name: String, path: String, #[props(default)] run: Option<String>) -
     let card_style = format!(
         "background:{raised};border:1px solid {border};border-top:2px solid {warn};\
          border-radius:8px;padding:16px 18px;",
-        raised = tokens::SURFACE_RAISED,
-        border = tokens::BORDER,
-        warn = tokens::STATUS_WARN,
+        raised = tokens::var::SURFACE_RAISED,
+        border = tokens::var::BORDER,
+        warn = tokens::var::STATUS_WARN,
     );
     let head_style = "display:flex;align-items:center;justify-content:space-between;gap:10px;";
     let title_style = format!(
         "font-family:{sans};font-size:16px;font-weight:700;color:{text};",
         sans = tokens::FONT_SANS,
-        text = tokens::TEXT,
+        text = tokens::var::TEXT,
     );
     let body_style = format!(
         "font-size:13.5px;line-height:1.55;color:{muted};margin:10px 0 14px;",
-        muted = tokens::TEXT_MUTED,
+        muted = tokens::var::TEXT_MUTED,
     );
     let path_style = format!(
         "font-family:{mono};color:{faint};",
         mono = tokens::FONT_MONO,
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
 
     let toggle_bar = format!(
         "display:flex;align-items:center;justify-content:space-between;gap:10px;\
          padding:10px 12px;border:1px solid {border};border-radius:8px;\
          background:{overlay};margin-bottom:12px;",
-        border = tokens::BORDER_STRONG,
-        overlay = tokens::SURFACE_OVERLAY,
+        border = tokens::var::BORDER_STRONG,
+        overlay = tokens::var::SURFACE_OVERLAY,
     );
     let pill_style = if auto {
         format!(
             "font-family:{mono};font-size:11px;background:{ok};color:{on};\
              border-radius:999px;padding:3px 11px;font-weight:700;cursor:pointer;",
             mono = tokens::FONT_MONO,
-            ok = tokens::STATUS_OK,
-            on = tokens::SURFACE_BASE,
+            ok = tokens::var::STATUS_OK,
+            on = tokens::var::SURFACE_BASE,
         )
     } else {
         format!(
             "font-family:{mono};font-size:11px;border:1px solid {border};color:{muted};\
              border-radius:999px;padding:3px 11px;font-weight:700;cursor:pointer;",
             mono = tokens::FONT_MONO,
-            border = tokens::BORDER_STRONG,
-            muted = tokens::TEXT_MUTED,
+            border = tokens::var::BORDER_STRONG,
+            muted = tokens::var::TEXT_MUTED,
         )
     };
 
@@ -1329,14 +1353,14 @@ fn NoEngine(name: String, path: String, #[props(default)] run: Option<String>) -
         "display:flex;align-items:center;justify-content:space-between;gap:12px;\
          padding:12px 14px;border-radius:8px;background:{base};\
          border:1px solid {border};font-family:{mono};font-size:13px;color:{accent};",
-        base = tokens::SURFACE_BASE,
-        border = tokens::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        border = tokens::var::BORDER,
         mono = tokens::FONT_MONO,
-        accent = tokens::ACCENT,
+        accent = tokens::var::ACCENT,
     );
     let foot_style = format!(
         "font-size:11.5px;color:{faint};margin:12px 0 0;line-height:1.5;",
-        faint = tokens::TEXT_FAINT,
+        faint = tokens::var::TEXT_FAINT,
     );
 
     let command = launch_command(active_harness, &path, auto, run.as_deref());
@@ -1394,7 +1418,7 @@ fn NoEngine(name: String, path: String, #[props(default)] run: Option<String>) -
                 p {
                     style: format!(
                         "font-size:11.5px;color:{faint};margin:10px 0 0;line-height:1.5;",
-                        faint = tokens::TEXT_FAINT,
+                        faint = tokens::var::TEXT_FAINT,
                     ),
                     {format!(
                         "{} has no autonomy CLI flag \u{2014} enable its auto-run / turbo setting \
@@ -1477,16 +1501,19 @@ fn HarnessTab(label: String, active: bool, on_pick: EventHandler<MouseEvent>) ->
     let style = if active {
         format!(
             "padding:6px 12px;border-radius:7px;border:1px solid {accent};\
-             background:{accent}14;color:{text};font-size:12.5px;cursor:pointer;",
-            accent = tokens::ACCENT,
-            text = tokens::TEXT,
+             background:{accent_bg}14;color:{text};font-size:12.5px;cursor:pointer;",
+            accent = tokens::var::ACCENT,
+            // Hex (not the var) so the `14` alpha suffix is a valid 8-digit color;
+            // a faint static tint behind the active tab reads on both themes.
+            accent_bg = tokens::ACCENT,
+            text = tokens::var::TEXT,
         )
     } else {
         format!(
             "padding:6px 12px;border-radius:7px;border:1px solid {border};\
              background:transparent;color:{muted};font-size:12.5px;cursor:pointer;",
-            border = tokens::BORDER_STRONG,
-            muted = tokens::TEXT_MUTED,
+            border = tokens::var::BORDER_STRONG,
+            muted = tokens::var::TEXT_MUTED,
         )
     };
     rsx! {
