@@ -74,7 +74,13 @@ pub fn Wordmark(
         // `--dr-wm-run` (white in dark, teal accent in light), like the static
         // themed wordmark.
         let dark_const = "font-weight:800;".to_string();
-        let run_style = "color:var(--dr-wm-run);font-weight:500;".to_string();
+        // "run" carries the same outline treatment as the static wordmark (white
+        // stroke over a base fill in dark, solid teal in light) so it matches the
+        // outlined "dark" at the same visual weight.
+        let run_style = "color:var(--dr-wm-run-fill);font-weight:500;paint-order:stroke;\
+             -webkit-text-stroke:var(--dr-wm-run-stroke-width) var(--dr-wm-run-stroke);\
+             text-stroke:var(--dr-wm-run-stroke-width) var(--dr-wm-run-stroke);"
+            .to_string();
         return rsx! {
             span {
                 class: "dr-wordmark dr-wordmark-anim",

@@ -211,6 +211,11 @@ pub const THEME_CSS: &str = r#":root{
   --dr-wm-dark-stroke:var(--dr-accent);
   --dr-wm-dark-stroke-width:1.5px;
   --dr-wm-run:var(--dr-text);
+  /* "run" gets the SAME outline treatment as "dark" (white stroke over a base
+     fill at the matching width) so the two words read at the same visual weight. */
+  --dr-wm-run-fill:var(--dr-surface-base);
+  --dr-wm-run-stroke:var(--dr-text);
+  --dr-wm-run-stroke-width:1.5px;
   color-scheme:dark;
 }
 /* The light tokens, factored out so both the media query and the manual override
@@ -277,6 +282,11 @@ pub const THEME_CSS: &str = r#":root{
   --dr-wm-dark-stroke:var(--dr-accent);
   --dr-wm-dark-stroke-width:1.5px;
   --dr-wm-run:var(--dr-text);
+  /* "run" gets the SAME outline treatment as "dark" (white stroke over a base
+     fill at the matching width) so the two words read at the same visual weight. */
+  --dr-wm-run-fill:var(--dr-surface-base);
+  --dr-wm-run-stroke:var(--dr-text);
+  --dr-wm-run-stroke-width:1.5px;
   color-scheme:dark;
 }
 :root[data-theme="light"]{
@@ -306,6 +316,11 @@ pub const THEME_CSS: &str = r#":root{
   --dr-wm-dark-stroke:transparent;
   --dr-wm-dark-stroke-width:0;
   --dr-wm-run:var(--dr-accent);
+  /* Light: "run" stays solid teal (no outline) — nothing to match against a
+     solid-black "dark". */
+  --dr-wm-run-fill:var(--dr-accent);
+  --dr-wm-run-stroke:transparent;
+  --dr-wm-run-stroke-width:0;
   color-scheme:light;
 }
 html,body{
@@ -323,7 +338,12 @@ html,body{
   -webkit-text-stroke:var(--dr-wm-dark-stroke-width) var(--dr-wm-dark-stroke);
   text-stroke:var(--dr-wm-dark-stroke-width) var(--dr-wm-dark-stroke);
 }
-.dr-wordmark-themed .dr-wordmark-run{ color:var(--dr-wm-run); }
+.dr-wordmark-themed .dr-wordmark-run{
+  color:var(--dr-wm-run-fill);
+  paint-order:stroke;
+  -webkit-text-stroke:var(--dr-wm-run-stroke-width) var(--dr-wm-run-stroke);
+  text-stroke:var(--dr-wm-run-stroke-width) var(--dr-wm-run-stroke);
+}
 /* Lights-out wordmark (interactive site logo).
    DARK theme: the "dark" glyphs sit near-black with a cyan stroke painted under
    the fill — invisible-until-lit on the near-black header — then glow on hover and
