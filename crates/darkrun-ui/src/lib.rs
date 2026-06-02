@@ -66,8 +66,9 @@ pub mod prelude {
         CheckpointBadge, RightSizeStrip, RightSizeTier, RiskChip,
     };
     pub use crate::components::annotate::{
-        AnnotateTool, AnnotateToolbar, BoxMarker, CommentPanel, PinMarker,
-        SurfaceKind, ThreadComment,
+        AnnotateTool, AnnotateToolbar, ArrowMarker, BoxMarker, CommentDraft,
+        CommentPanel, HighlightMarker, PathMarker, PinMarker, SurfaceKind,
+        ThreadComment,
     };
     pub use crate::components::feedback::{
         counts_by_severity, feedback_inbox, feedback_row, FeedbackAction,
@@ -109,7 +110,8 @@ pub mod prelude {
     pub use crate::graph::view::{UnitGraph, UnitGraphNode};
     pub use crate::kinds::{Phase, Step, Tone};
     pub use crate::selection::{
-        place_pin, PinPoint, SelectMode, SelectionModel,
+        place_box, place_pin, NormBox, PinPoint, SelectMode, SelectionModel,
+        VisualMark,
     };
     pub use crate::tokens;
     pub use crate::view::{

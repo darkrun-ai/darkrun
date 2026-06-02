@@ -26,6 +26,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use darkrun_core::domain::ProjectRecord;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -306,6 +307,123 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// The project-record filename written inside a slug directory.
+const PROJECT_RECORD_FILE: &str = "project.json";
+
+/// Register `repo_root` as a project under the default `~/.darkrun` tree.
+///
+/// Derives the slug from `repo_root` (the SAME [`slug_for`] logic the engine
+/// uses, so a later engine boot lands in the same `<slug>` directory), then
+/// writes a durable [`ProjectRecord`] to `~/.darkrun/<slug>/project.json`. The
+/// record persists independently of any live engine, so the desktop can list
+/// registered-but-idle projects.
+///
+/// `name` is an optional display label; `added_at` is stamped now. Returns the
+/// record that was written. Fails when the home directory can't be resolved.
+pub fn register_project(repo_root: &Path, name: Option<String>) -> io::Result<ProjectRecord> {
+    let root = default_root().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "could not resolve home directory for the darkrun discovery registry",
+        )
+    })?;
+    register_project_in(&root, repo_root, name)
+}
+
+/// Like [`register_project`] but under an explicit registry `root`. Used by
+/// tests to point the tree at a temp dir.
+pub fn register_project_in(
+    root: &Path,
+    repo_root: &Path,
+    name: Option<String>,
+) -> io::Result<ProjectRecord> {
+    let slug = slug_for(repo_root);
+    let record = ProjectRecord {
+        slug: slug.clone(),
+        path: repo_root.to_path_buf(),
+        name,
+        added_at: Some(now_rfc3339()),
+    };
+    write_project_record_in(root, &slug, &record)?;
+    Ok(record)
+}
+
+/// Write `record` to `<root>/<slug>/project.json`, creating the slug directory
+/// if needed. Overwrites any existing record (re-registering is idempotent).
+pub fn write_project_record_in(
+    root: &Path,
+    slug: &str,
+    record: &ProjectRecord,
+) -> io::Result<()> {
+    let dir = root.join(slug);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_vec_pretty(record)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(PROJECT_RECORD_FILE), json)
+}
+
+/// Read the [`ProjectRecord`] for `slug` from `<root>/<slug>/project.json`.
+///
+/// Returns `Ok(None)` when no record exists for that slug (the directory may
+/// hold only engine descriptors, or not exist at all). A malformed record is a
+/// hard error so callers can surface a corrupt registry; bulk scans use
+/// [`list_projects_in`] which skips malformed entries instead.
+pub fn read_project_record_in(root: &Path, slug: &str) -> io::Result<Option<ProjectRecord>> {
+    let path = root.join(slug).join(PROJECT_RECORD_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let record = serde_json::from_slice::<ProjectRecord>(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(Some(record))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// List every registered project under the default `~/.darkrun` tree.
+///
+/// Scans each `<slug>/project.json` and returns the deserialized records — the
+/// durable counterpart to [`list_live_engines`] (which surfaces only LIVE
+/// engines). Idle projects (a `project.json` with no running engine) appear
+/// here; the desktop overlays live status by matching on slug. Returns an empty
+/// list when the tree doesn't exist.
+pub fn list_projects() -> io::Result<Vec<ProjectRecord>> {
+    match default_root() {
+        Some(root) => list_projects_in(&root),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Like [`list_projects`] but scans an explicit `root`. Used by tests.
+///
+/// Robust to a partly-populated tree: a slug dir without a `project.json`, or
+/// one whose record is malformed, is skipped rather than failing the whole scan
+/// (legacy engine-only directories pre-date project registration).
+pub fn list_projects_in(root: &Path) -> io::Result<Vec<ProjectRecord>> {
+    let mut projects = Vec::new();
+    let slug_dirs = match fs::read_dir(root) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(projects),
+        Err(e) => return Err(e),
+    };
+    for slug_entry in slug_dirs.flatten() {
+        let slug_path = slug_entry.path();
+        if !slug_path.is_dir() {
+            continue;
+        }
+        let record_path = slug_path.join(PROJECT_RECORD_FILE);
+        let Ok(bytes) = fs::read(&record_path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<ProjectRecord>(&bytes) else {
+            continue;
+        };
+        projects.push(record);
+    }
+    Ok(projects)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +519,92 @@ mod tests {
 
         // mark_stale is idempotent.
         registry.mark_stale().unwrap();
+    }
+
+    #[test]
+    fn test_register_project_writes_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "/Users/dev/storefront";
+        let record =
+            register_project_in(tmp.path(), Path::new(repo), Some("Storefront".to_string()))
+                .unwrap();
+
+        // The record's slug matches the slug the engine would derive, and the
+        // file lands in that slug directory.
+        assert_eq!(record.slug, slug_for(Path::new(repo)));
+        assert_eq!(record.path, PathBuf::from(repo));
+        assert_eq!(record.name.as_deref(), Some("Storefront"));
+        assert!(record.added_at.is_some(), "added_at should be stamped");
+
+        let on_disk = tmp.path().join(&record.slug).join(PROJECT_RECORD_FILE);
+        assert!(on_disk.exists(), "project.json should be written");
+    }
+
+    #[test]
+    fn test_read_project_record_roundtrip_and_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "/Users/dev/api-gateway";
+        let written = register_project_in(tmp.path(), Path::new(repo), None).unwrap();
+
+        // Reading by slug returns the same record.
+        let read = read_project_record_in(tmp.path(), &written.slug)
+            .unwrap()
+            .expect("record should exist");
+        assert_eq!(read, written);
+
+        // A slug with no record reads as None, not an error.
+        let absent = read_project_record_in(tmp.path(), "no-such-slug-deadbeef").unwrap();
+        assert!(absent.is_none());
+    }
+
+    #[test]
+    fn test_list_projects_scans_all_and_skips_non_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        register_project_in(tmp.path(), Path::new("/Users/dev/alpha"), None).unwrap();
+        register_project_in(tmp.path(), Path::new("/Users/dev/beta"), None).unwrap();
+
+        // A legacy slug dir with only an engine descriptor (no project.json) and
+        // a slug dir with a malformed record must both be skipped, not crash.
+        let engine_only = EngineRegistry::with_root(tmp.path(), "/Users/dev/engine-only");
+        engine_only.announce(sample_addr(), "claude").unwrap();
+
+        let bad_dir = tmp.path().join("garbage-00000000");
+        fs::create_dir_all(&bad_dir).unwrap();
+        fs::write(bad_dir.join(PROJECT_RECORD_FILE), b"not json").unwrap();
+
+        let mut projects = list_projects_in(tmp.path()).unwrap();
+        projects.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(projects.len(), 2, "only valid records: {projects:?}");
+        assert_eq!(projects[0].path, PathBuf::from("/Users/dev/alpha"));
+        assert_eq!(projects[1].path, PathBuf::from("/Users/dev/beta"));
+    }
+
+    #[test]
+    fn test_list_projects_empty_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Point at a non-existent subdir: an absent tree lists empty, not error.
+        let missing = tmp.path().join("never-created");
+        assert!(list_projects_in(&missing).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_register_then_list_overlays_with_live_engine() {
+        // A project registered then served by a live engine for the SAME repo
+        // shares a slug — proving the desktop can overlay live status on the
+        // project record by slug match.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "/Users/dev/served";
+        let record = register_project_in(tmp.path(), Path::new(repo), None).unwrap();
+
+        let engine = EngineRegistry::with_root(tmp.path(), repo);
+        engine.announce(sample_addr(), "claude").unwrap();
+
+        let projects = list_projects_in(tmp.path()).unwrap();
+        let live = list_live_engines_in(tmp.path()).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(live.len(), 1);
+        // Same slug => the overlay key matches.
+        assert_eq!(projects[0].slug, live[0].slug);
+        assert_eq!(record.slug, live[0].slug);
     }
 }

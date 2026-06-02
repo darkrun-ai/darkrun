@@ -112,6 +112,8 @@ impl Harness {
                     model_param: false,
                 },
                 autonomous_launch_args: Some("--dangerously-skip-permissions"),
+                // NOTE: per the product spec; re-verify Claude Code exposes this flag.
+                worktree_flag: Some("--worktree"),
             },
             Harness::Cursor => Capabilities {
                 harness: self,
@@ -138,6 +140,7 @@ impl Harness {
                 },
                 // GUI-driven — autonomous mode lives in Cursor's settings, no CLI flag.
                 autonomous_launch_args: None,
+                worktree_flag: None,
             },
             Harness::Windsurf => Capabilities {
                 harness: self,
@@ -164,6 +167,7 @@ impl Harness {
                 },
                 // GUI-driven — autonomous mode lives in Windsurf's settings, no CLI flag.
                 autonomous_launch_args: None,
+                worktree_flag: None,
             },
             Harness::GeminiCli => Capabilities {
                 harness: self,
@@ -189,6 +193,7 @@ impl Harness {
                     model_param: false,
                 },
                 autonomous_launch_args: Some("--yolo"),
+                worktree_flag: None,
             },
             Harness::Opencode => Capabilities {
                 harness: self,
@@ -215,6 +220,7 @@ impl Harness {
                 },
                 // No known autonomous-mode CLI flag — update to Some(...) if one lands.
                 autonomous_launch_args: None,
+                worktree_flag: None,
             },
             Harness::Kiro => Capabilities {
                 harness: self,
@@ -241,6 +247,7 @@ impl Harness {
                 },
                 // GUI-driven — autonomous mode lives in Kiro's settings, no CLI flag.
                 autonomous_launch_args: None,
+                worktree_flag: None,
             },
             // Conservative profile. Codex reads the MCP `instructions` field and
             // serves STDIO/HTTP MCP servers, but its docs don't confirm MCP
@@ -273,6 +280,7 @@ impl Harness {
                     model_param: false,
                 },
                 autonomous_launch_args: Some("--full-auto"),
+                worktree_flag: None,
             },
         }
     }
@@ -345,6 +353,11 @@ pub struct Capabilities {
     /// autonomous-mode flag (OpenCode). These flag names are canonical for the
     /// current harness versions and should be re-verified against release notes.
     pub autonomous_launch_args: Option<&'static str>,
+    /// The flag a harness takes to open/create a named git worktree on launch
+    /// (e.g. Claude Code's `--worktree <name>`). `None` when the harness has no
+    /// such flag; the start command then just `cd`s into the project dir. When
+    /// set, the command appends `<flag> darkrun-<run>` so a Run gets its own tree.
+    pub worktree_flag: Option<&'static str>,
 }
 
 impl Capabilities {

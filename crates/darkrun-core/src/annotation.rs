@@ -312,8 +312,10 @@ fn line_col_at(text: &str, offset: usize) -> (u32, u32) {
 /// found result re-bases the range (and leaves the status untouched on exact,
 /// flips it to `Shifted` only when not found). Non-text annotations carry
 /// version-relative coords, so this only re-pins the `version_sha` for them —
-/// the re-crop is the caller's concern. Returns the [`ReAnchor`] outcome for
-/// text annotations, `None` for non-text.
+/// the pixel re-crop is the caller's concern (it owns the image codec); see
+/// [`pixel_region`] and [`flag_scene_changed`] for the pieces a pixel re-anchor
+/// uses. Returns the [`ReAnchor`] outcome for text annotations, `None` for
+/// non-text.
 pub fn reanchor_annotation(annotation: &mut Annotation, new_bytes: &[u8]) -> Option<ReAnchor> {
     let new_sha = hash_bytes(new_bytes);
     if let Some(artifact) = annotation.artifact.as_mut() {
@@ -345,6 +347,93 @@ pub fn reanchor_annotation(annotation: &mut Annotation, new_bytes: &[u8]) -> Opt
         }
     }
     Some(outcome)
+}
+
+// ─── Pixel (image / pdf) re-anchor ────────────────────────────────────────────
+
+/// The normalized region an image/pdf annotation pinned — the rect to re-crop
+/// out of a new artifact version. Text/html/svg/video anchors (and pin/path/
+/// arrow-less marks) have no single pixel region to re-crop, so they yield
+/// `None`.
+///
+/// A pdf anchor carries its `rect` directly; an image anchor carries a
+/// [`PixelMark`] whose `rect` (or arrow bounding box) is the region — the same
+/// rule the crop path uses at submit time.
+pub fn pixel_region(annotation: &Annotation) -> Option<darkrun_api::annotation::NormRect> {
+    use darkrun_api::annotation::Anchor as A;
+    match annotation.anchor.as_ref()? {
+        A::Image { mark } => mark_rect(mark),
+        A::Pdf { rect, .. } => Some(*rect),
+        _ => None,
+    }
+}
+
+/// The rectangle of a pixel mark — the explicit `rect`, or the bounding box of
+/// an arrow's two endpoints. `None` for pin/path (no single region).
+fn mark_rect(mark: &darkrun_api::annotation::PixelMark) -> Option<darkrun_api::annotation::NormRect> {
+    use darkrun_api::annotation::NormRect;
+    if let Some(rect) = mark.rect {
+        return Some(rect);
+    }
+    if let (Some(from), Some(to)) = (mark.arrow_from, mark.arrow_to) {
+        return Some(NormRect {
+            x: from.x.min(to.x),
+            y: from.y.min(to.y),
+            w: (from.x - to.x).abs(),
+            h: (from.y - to.y).abs(),
+        });
+    }
+    None
+}
+
+/// Whether a pinned normalized region falls (substantially) outside the unit
+/// square — i.e. the rect no longer lands on the artifact, so re-cropping it
+/// would yield a clamped, mis-aligned region. A small epsilon tolerates the
+/// rounding a normalize/denormalize round-trip introduces.
+pub fn region_out_of_bounds(rect: &darkrun_api::annotation::NormRect) -> bool {
+    const EPS: f64 = 1e-3;
+    rect.x < -EPS
+        || rect.y < -EPS
+        || rect.x + rect.w > 1.0 + EPS
+        || rect.y + rect.h > 1.0 + EPS
+        || rect.w <= 0.0
+        || rect.h <= 0.0
+}
+
+/// Whether a new artifact version changed the image's aspect ratio materially
+/// enough that a normalized region can no longer be trusted to frame the same
+/// content — a "scene changed". Pure size (both dims scaled the same) keeps the
+/// normalized rect valid; a ratio shift past `tol` (default ~5%) does not.
+///
+/// `(old_w, old_h)` is the render size the mark was drawn over (from the stored
+/// [`PixelMark`], or the pdf page's prior crop); `(new_w, new_h)` is the new
+/// version's decoded size. A zero in either pair is treated as a scene change
+/// (we can't reason about it).
+pub fn scene_changed(old_w: u32, old_h: u32, new_w: u32, new_h: u32, tol: f64) -> bool {
+    if old_w == 0 || old_h == 0 || new_w == 0 || new_h == 0 {
+        return true;
+    }
+    let old_ar = old_w as f64 / old_h as f64;
+    let new_ar = new_w as f64 / new_h as f64;
+    (old_ar - new_ar).abs() / old_ar > tol
+}
+
+/// Flag a pixel annotation whose region no longer frames the same content under
+/// a new version: shift its status to [`AnnotationStatus::Shifted`] and prefix
+/// its comment with a one-line "scene changed" note (idempotent — re-runs don't
+/// stack notes). Returns whether anything changed.
+pub fn flag_scene_changed(annotation: &mut Annotation, why: &str) -> bool {
+    const MARKER: &str = "[scene changed]";
+    let mut changed = false;
+    if annotation.status != AnnotationStatus::Shifted {
+        annotation.status = AnnotationStatus::Shifted;
+        changed = true;
+    }
+    if !annotation.comment.starts_with(MARKER) {
+        annotation.comment = format!("{MARKER} {why} — {}", annotation.comment);
+        changed = true;
+    }
+    changed
 }
 
 // ─── Severity aggregation ────────────────────────────────────────────────────

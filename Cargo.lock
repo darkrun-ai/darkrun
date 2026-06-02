@@ -1108,10 +1108,13 @@ name = "darkrun-desktop"
 version = "0.1.0"
 dependencies = [
  "darkrun-api",
+ "darkrun-core",
+ "darkrun-git",
  "darkrun-harness",
  "darkrun-mcp",
  "darkrun-ui",
  "dioxus",
+ "dirs",
  "futures-util",
  "serde",
  "serde_json",

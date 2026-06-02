@@ -29,8 +29,9 @@ pub mod state;
 pub mod witness;
 
 pub use annotation::{
-    checkpoint_button_state, count_open_by_severity, reanchor_annotation, reanchor_text,
-    CheckpointButton, OpenSeverityCounts, ReAnchor,
+    checkpoint_button_state, count_open_by_severity, flag_scene_changed, pixel_region,
+    reanchor_annotation, reanchor_text, region_out_of_bounds, scene_changed, CheckpointButton,
+    OpenSeverityCounts, ReAnchor,
 };
 pub use dag::Dag;
 pub use error::{CoreError, Result};

@@ -196,6 +196,150 @@ fn clamp01(v: f64) -> f64 {
     }
 }
 
+/// The geometry a placed visual mark carries, in normalized `0..1` space.
+///
+/// One variant per annotate shape: a `pin` is a point, a `box`/`highlight` is a
+/// rectangle, an `arrow` is a tail→head segment, and a `pen` stroke is a
+/// polyline. The host maps these directly onto the wire's `ImageShape`
+/// (`pin`/`rect`/`arrow`/`path`/`highlight`) — this module owns only the math so
+/// it stays renderer- and wire-agnostic. The `note` rides along for the comment
+/// thread, exactly like [`PinPoint::note`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum VisualMark {
+    /// A single point — the `pin` tool.
+    Pin {
+        /// The pin point, `0..1`.
+        point: PinPoint,
+    },
+    /// A rectangle region — the `box` tool.
+    Rect {
+        /// The drawn region, `0..1`.
+        rect: NormBox,
+    },
+    /// A translucent highlight sweep — the `highlight` tool. Geometrically a
+    /// rectangle; kept distinct so the host can pick the `highlight` shape.
+    Highlight {
+        /// The swept region, `0..1`.
+        rect: NormBox,
+    },
+    /// An arrow from a tail to a head — the `arrow` tool.
+    Arrow {
+        /// The tail (drag start), `0..1`.
+        from: PinPoint,
+        /// The head (drag end), `0..1`.
+        to: PinPoint,
+    },
+    /// A freehand polyline — the `pen` tool.
+    Path {
+        /// The captured stroke points, in draw order, each `0..1`.
+        points: Vec<PinPoint>,
+    },
+}
+
+impl VisualMark {
+    /// The lowercase shape slug — the same vocabulary the wire's `ImageShape`
+    /// uses (`pin`/`rect`/`arrow`/`path`/`highlight`), so the host maps it 1:1.
+    pub fn shape_slug(&self) -> &'static str {
+        match self {
+            VisualMark::Pin { .. } => "pin",
+            VisualMark::Rect { .. } => "rect",
+            VisualMark::Highlight { .. } => "highlight",
+            VisualMark::Arrow { .. } => "arrow",
+            VisualMark::Path { .. } => "path",
+        }
+    }
+
+    /// A single representative point for the mark, used where only one anchor
+    /// coordinate is carried (e.g. the legacy pin channel): a pin's point, a
+    /// rect/highlight's top-left, an arrow's head, or a path's first point.
+    pub fn anchor_point(&self) -> PinPoint {
+        match self {
+            VisualMark::Pin { point } => point.clone(),
+            VisualMark::Rect { rect } | VisualMark::Highlight { rect } => {
+                PinPoint::new(rect.x, rect.y, String::new())
+            }
+            VisualMark::Arrow { to, .. } => to.clone(),
+            VisualMark::Path { points } => {
+                points.first().cloned().unwrap_or_else(|| PinPoint::new(0.0, 0.0, String::new()))
+            }
+        }
+    }
+
+    /// The note carried with the mark, for the comment thread.
+    pub fn note(&self) -> &str {
+        match self {
+            VisualMark::Pin { point } => &point.note,
+            VisualMark::Arrow { to, .. } => &to.note,
+            VisualMark::Rect { rect } | VisualMark::Highlight { rect } => &rect.note,
+            VisualMark::Path { points } => points.last().map(|p| p.note.as_str()).unwrap_or(""),
+        }
+    }
+}
+
+/// A normalized rectangle in `0..1` space — top-left `(x, y)` plus size
+/// `(w, h)`, each a fraction of the stage — with a note. Mirrors the wire's
+/// `NormRect`, kept here so the UI math has no `darkrun-api` dependency.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormBox {
+    /// Left edge, `0..1`.
+    pub x: f64,
+    /// Top edge, `0..1`.
+    pub y: f64,
+    /// Width, `0..1`.
+    pub w: f64,
+    /// Height, `0..1`.
+    pub h: f64,
+    /// The note attached to this region.
+    pub note: String,
+}
+
+impl NormBox {
+    /// Construct a box, clamping the origin into `0..1` and the size so the box
+    /// never runs past the stage edge.
+    pub fn new(x: f64, y: f64, w: f64, h: f64, note: impl Into<String>) -> Self {
+        let x = clamp01(x);
+        let y = clamp01(y);
+        Self {
+            x,
+            y,
+            w: clamp01(w).min(1.0 - x),
+            h: clamp01(h).min(1.0 - y),
+            note: note.into(),
+        }
+    }
+
+    /// Build a box from two opposite corner points (a drag), normalizing so the
+    /// origin is the top-left regardless of drag direction.
+    pub fn from_corners(ax: f64, ay: f64, bx: f64, by: f64, note: impl Into<String>) -> Self {
+        let x0 = ax.min(bx);
+        let y0 = ay.min(by);
+        let w = (ax - bx).abs();
+        let h = (ay - by).abs();
+        Self::new(x0, y0, w, h, note)
+    }
+}
+
+/// Convert a pixel-space drag rectangle inside a preview of size
+/// `(width, height)` into a normalized [`NormBox`]. The two pixel corners may be
+/// given in any order. Degenerate dimensions degrade to `0.0` per axis.
+pub fn place_box(
+    px: f64,
+    py: f64,
+    qx: f64,
+    qy: f64,
+    width: f64,
+    height: f64,
+    note: impl Into<String>,
+) -> NormBox {
+    NormBox::from_corners(
+        normalize(px, width),
+        normalize(py, height),
+        normalize(qx, width),
+        normalize(qy, height),
+        note,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +524,91 @@ mod tests {
         // A pin placed at 1/4 width should render at 25%.
         let p = place_pin(40.0, 0.0, 160.0, 90.0, "q");
         assert_eq!(p.left_pct(), "25.0000%");
+    }
+
+    // --- normalized box / drag rectangles ----------------------------------
+
+    #[test]
+    fn norm_box_clamps_size_to_the_stage_edge() {
+        // A box whose width would run past the right edge is trimmed to fit.
+        let b = NormBox::new(0.8, 0.9, 0.5, 0.5, "n");
+        assert!((b.w - 0.2).abs() < 1e-9);
+        assert!((b.h - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn norm_box_from_corners_normalizes_drag_direction() {
+        // Dragging bottom-right → top-left yields the same box as the reverse.
+        let a = NormBox::from_corners(0.6, 0.7, 0.2, 0.3, "n");
+        let b = NormBox::from_corners(0.2, 0.3, 0.6, 0.7, "n");
+        assert!((a.x - 0.2).abs() < 1e-9 && (a.y - 0.3).abs() < 1e-9);
+        assert!((a.w - 0.4).abs() < 1e-9 && (a.h - 0.4).abs() < 1e-9);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn place_box_normalizes_pixel_corners() {
+        // A drag from (40,0) to (120,45) over a 160×90 preview spans 25%..75% x.
+        let b = place_box(40.0, 0.0, 120.0, 45.0, 160.0, 90.0, "drag");
+        assert!((b.x - 0.25).abs() < 1e-9);
+        assert!((b.y - 0.0).abs() < 1e-9);
+        assert!((b.w - 0.5).abs() < 1e-9);
+        assert!((b.h - 0.5).abs() < 1e-9);
+    }
+
+    // --- visual mark shape mapping -----------------------------------------
+
+    #[test]
+    fn visual_mark_shape_slugs_match_the_wire_vocabulary() {
+        let pin = VisualMark::Pin { point: PinPoint::new(0.5, 0.5, "p") };
+        let rect = VisualMark::Rect { rect: NormBox::new(0.1, 0.1, 0.2, 0.2, "r") };
+        let hi = VisualMark::Highlight { rect: NormBox::new(0.1, 0.1, 0.2, 0.2, "h") };
+        let arrow = VisualMark::Arrow {
+            from: PinPoint::new(0.1, 0.1, ""),
+            to: PinPoint::new(0.4, 0.4, "a"),
+        };
+        let path = VisualMark::Path {
+            points: vec![PinPoint::new(0.1, 0.1, ""), PinPoint::new(0.2, 0.3, "pen")],
+        };
+        assert_eq!(pin.shape_slug(), "pin");
+        assert_eq!(rect.shape_slug(), "rect");
+        assert_eq!(hi.shape_slug(), "highlight");
+        assert_eq!(arrow.shape_slug(), "arrow");
+        assert_eq!(path.shape_slug(), "path");
+    }
+
+    #[test]
+    fn visual_mark_anchor_point_picks_the_representative_coordinate() {
+        // A rect anchors on its top-left; an arrow on its head; a path on its
+        // first point.
+        let rect = VisualMark::Rect { rect: NormBox::new(0.3, 0.4, 0.2, 0.2, "r") };
+        assert_eq!(rect.anchor_point().x, 0.3);
+        assert_eq!(rect.anchor_point().y, 0.4);
+
+        let arrow = VisualMark::Arrow {
+            from: PinPoint::new(0.1, 0.1, ""),
+            to: PinPoint::new(0.7, 0.6, "a"),
+        };
+        assert_eq!(arrow.anchor_point().x, 0.7);
+        assert_eq!(arrow.anchor_point().y, 0.6);
+
+        let path = VisualMark::Path {
+            points: vec![PinPoint::new(0.2, 0.25, ""), PinPoint::new(0.9, 0.9, "")],
+        };
+        assert_eq!(path.anchor_point().x, 0.2);
+        assert_eq!(path.anchor_point().y, 0.25);
+    }
+
+    #[test]
+    fn visual_mark_carries_its_note() {
+        let arrow = VisualMark::Arrow {
+            from: PinPoint::new(0.1, 0.1, ""),
+            to: PinPoint::new(0.7, 0.6, "point here"),
+        };
+        assert_eq!(arrow.note(), "point here");
+        let path = VisualMark::Path {
+            points: vec![PinPoint::new(0.1, 0.1, ""), PinPoint::new(0.2, 0.2, "trace")],
+        };
+        assert_eq!(path.note(), "trace");
     }
 }

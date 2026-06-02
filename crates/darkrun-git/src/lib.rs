@@ -16,6 +16,7 @@
 //! point.
 
 mod backend;
+mod clone;
 mod error;
 mod libgit2;
 mod shell;
@@ -23,6 +24,7 @@ mod shell;
 use std::path::{Path, PathBuf};
 
 pub use backend::{CreateOptions, GitBackend, WorktreeInfo};
+pub use clone::{clone_repo, default_clone_dest, repo_name_from_url};
 pub use error::{GitError, Result};
 pub use libgit2::Libgit2Backend;
 pub use shell::ShellBackend;

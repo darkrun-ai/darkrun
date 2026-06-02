@@ -13,6 +13,8 @@
 //!
 //! Hierarchy: Factory > Station > Unit > Pass.
 
+use std::path::PathBuf;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -502,6 +504,36 @@ pub struct Feedback {
     /// RFC3339 creation timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+}
+
+/// A registered project: the persisted record the desktop enumerates to list
+/// projects that exist on disk regardless of whether a live engine is serving
+/// them.
+///
+/// Written to `~/.darkrun/<slug>/project.json`, alongside the transient
+/// `engine-<pid>.json` descriptors in the SAME slug directory (see
+/// `darkrun_mcp::registry`). Where an `EngineDescriptor` is the LIVE record of a
+/// running engine, a `ProjectRecord` is the DURABLE record of a registered
+/// working tree — it persists when no engine is running, so the home can show
+/// registered-but-idle projects.
+///
+/// `path` is stored absolute at write time and is NOT portable across machines
+/// (a project copied to another host carries a stale path); the desktop treats
+/// it as a local-filesystem pointer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectRecord {
+    /// The registry slug for this project — matches the `<slug>` directory name
+    /// the record lives under (derived from `path` via the registry's slug
+    /// logic).
+    pub slug: String,
+    /// Absolute repo root of the registered working tree.
+    pub path: PathBuf,
+    /// Optional human display name; falls back to the slug when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// RFC3339 timestamp the project was registered at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<String>,
 }
 
 /// The kind of artifact a Drift entry witnessed mutating.

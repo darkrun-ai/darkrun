@@ -287,6 +287,15 @@ pub struct PromptContext {
     /// snapshot (tui / cli) — the Prove prompt routes to an output snapshot.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub terminal_surface: bool,
+    /// The resolved re-reference bundle for the active station's OPEN
+    /// annotations, auto-surfaced when the agent re-enters a unit/output —
+    /// especially as rework after a Request-changes. Bounded (a count summary
+    /// plus the active station's open items, station-note first); absent when
+    /// the station carries no open marks. This closes the human->agent loop on
+    /// the tick: the agent receives `file:line` + crop + comment + suggestion
+    /// without having to call `darkrun_annotation_payload` itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<crate::annotation::AgentReReferencePayload>,
 }
 
 /// Whether a unit is "past" — no further cursor work needed at its position.
@@ -321,6 +330,12 @@ fn station_units<'a>(units: &'a [Unit], station: &str) -> Vec<&'a Unit> {
 /// past this is escalated rather than looped forever — the darkrun parity for
 /// the predecessor's `loop_halted` / `escalate` runaway guard.
 const MAX_PASSES: u32 = 8;
+
+/// How many OPEN annotations the manager resolves into the next action's
+/// re-reference bundle. The severity tally still reflects every open ask; this
+/// only bounds the *resolved* items (station-note first, then by descending
+/// severity) so a noisy station can't blow the rendered prompt.
+const RE_REFERENCE_CAP: usize = 12;
 
 /// Structural validation of a station's decomposition, as a pure function of
 /// the units on disk. Returns the first problem found as `(problem_tag,
@@ -868,6 +883,7 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
 
     // Resolve the station def for the roster / kills / artifact / checkpoint.
     if let Some(station) = station.as_deref() {
+        let repo_root = cascade_repo_root(store);
         let run = store.read_run(slug)?;
         // Surface-routed verification flags: the run's classified surface
         // decides which proof the Prove/Audit prompts demand, and whether the
@@ -895,6 +911,20 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
             .collect();
         slugs.sort();
         ctx.units = slugs;
+
+        // Auto-surface the station's OPEN annotations as a resolved
+        // re-reference bundle. The manager pushes this into the agent's next
+        // action so the human->agent loop closes on the tick — the agent
+        // doesn't have to know to call `darkrun_annotation_payload`. Bounded by
+        // `RE_REFERENCE_CAP`: the severity tally reflects every open ask, but
+        // only the highest-steering items (station-note first) are resolved so
+        // a noisy station can't blow the prompt. Most load-bearing when a unit
+        // re-enters as rework after Request-changes.
+        let bundle =
+            crate::annotation::station_re_reference(store, &repo_root, slug, station, RE_REFERENCE_CAP)?;
+        if !bundle.items.is_empty() {
+            ctx.annotations = Some(bundle);
+        }
     }
 
     // Overlay the action-specific fields (these win over station-derived ones).
@@ -1629,6 +1659,96 @@ mod tests {
         assert!(doc.contains("station: frame"));
         assert!(doc.contains("station note"));
         assert!(doc.contains("spec.md"));
+    }
+
+    /// A station carrying OPEN annotations auto-surfaces the resolved
+    /// re-reference bundle in the next action's PromptContext — the agent
+    /// receives `file:line` + comment + suggestion on the tick without having to
+    /// call `darkrun_annotation_payload`. This is the human->agent loop closing
+    /// on re-entry (e.g. a unit re-entering as rework after Request-changes).
+    #[test]
+    fn open_annotations_surface_in_next_action_context() {
+        use darkrun_api::annotation::{
+            Anchor, Annotation, AnnotationStatus, ArtifactInfo, ArtifactType, Ask, AskKind,
+            AskSeverity, TextRange, WorkItem, WorkItemKind,
+        };
+        use darkrun_api::common::AuthorType;
+
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+
+        // An OPEN per-artifact mark on a unit in the active `frame` station.
+        let mark = Annotation {
+            id: "anno_mark".into(),
+            created_at: "2026-05-31T00:00:00Z".into(),
+            author: AuthorType::Human,
+            work_item: WorkItem {
+                kind: WorkItemKind::Output,
+                id: "spec.md".into(),
+                station: "frame".into(),
+            },
+            artifact: Some(ArtifactInfo {
+                id: "spec.md".into(),
+                path: "spec.md".into(),
+                artifact_type: ArtifactType::Text,
+                version_sha: "aa".into(),
+            }),
+            anchor: Some(Anchor::Text {
+                range: TextRange {
+                    start_line: 7,
+                    start_col: 0,
+                    end_line: 7,
+                    end_col: 4,
+                },
+                quote: "todo".into(),
+                prefix: String::new(),
+                suffix: String::new(),
+            }),
+            expression: None,
+            comment: "spell out the framing constraint".into(),
+            ask: Ask {
+                kind: AskKind::Change,
+                severity: AskSeverity::Must,
+            },
+            suggestion: None,
+            status: AnnotationStatus::Open,
+        };
+        store.write_annotation("r", &mark).unwrap();
+
+        // The next action on the active station carries the resolved bundle.
+        let action = derive_position(&store, "r")
+            .expect("pos")
+            .action
+            .expect("action");
+        let ctx = build_prompt_context(&store, "r", &action).expect("ctx");
+        let bundle = ctx
+            .annotations
+            .expect("open annotations must surface in the next action");
+        assert_eq!(bundle.items.len(), 1);
+        assert_eq!(bundle.must, 1);
+        let item = &bundle.items[0];
+        assert_eq!(item.comment, "spell out the framing constraint");
+        match &item.source {
+            crate::annotation::ResolvedSource::Text { path, start_line, .. } => {
+                assert_eq!(path, "spec.md");
+                assert_eq!(*start_line, 7);
+            }
+            other => panic!("expected resolved text source, got {other:?}"),
+        }
+    }
+
+    /// A station with no open annotations leaves the bundle absent — the field
+    /// is skipped, not an empty payload, so quiet stations stay quiet.
+    #[test]
+    fn no_annotations_means_no_bundle_in_context() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+        let action = derive_position(&store, "r")
+            .expect("pos")
+            .action
+            .expect("action");
+        let ctx = build_prompt_context(&store, "r", &action).expect("ctx");
+        assert!(ctx.annotations.is_none());
     }
 
     // ── Surface routing into the rendered prompt ─────────────────────────────

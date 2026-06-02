@@ -81,6 +81,25 @@ impl AnnotateTool {
         }
     }
 
+    /// The `ImageShape` slug a *visual* tool draws + submits, matching the
+    /// wire's `pin`/`rect`/`arrow`/`path`/`highlight` vocabulary. `None` for
+    /// non-drawing tools (`Cursor`) and text-surface tools, which don't carry a
+    /// pixel shape. The host uses this to route a placed [`crate::selection::VisualMark`]
+    /// onto the correct anchor shape.
+    pub fn image_shape(self) -> Option<&'static str> {
+        match self {
+            AnnotateTool::Pin => Some("pin"),
+            AnnotateTool::Box => Some("rect"),
+            AnnotateTool::Arrow => Some("arrow"),
+            AnnotateTool::Pen => Some("path"),
+            AnnotateTool::Highlight => Some("highlight"),
+            AnnotateTool::Cursor
+            | AnnotateTool::Select
+            | AnnotateTool::Strike
+            | AnnotateTool::Suggest => None,
+        }
+    }
+
     /// The tools offered for a given surface, in palette order. The leading
     /// `Cursor` is the neutral tool; the rest are surface-specific.
     pub fn for_surface(kind: SurfaceKind) -> &'static [AnnotateTool] {
@@ -233,6 +252,142 @@ pub fn BoxMarker(
     }
 }
 
+/// An arrow overlay, drawn from a normalized tail to a normalized head.
+///
+/// Renders as a full-stage SVG (`viewBox 0 0 100 100`, so coords are percent)
+/// laid absolutely over the artifact stage; the parent must be
+/// `position:relative`. A `<line>` carries the shaft and a `<marker>` paints the
+/// arrowhead at the head end. `pointer-events:none` so it never eats stage clicks.
+#[component]
+pub fn ArrowMarker(
+    /// Tail point, `0..1`.
+    from: PinPoint,
+    /// Head point, `0..1`.
+    to: PinPoint,
+    /// The 1-based number shown at the tail.
+    number: usize,
+) -> Element {
+    // A per-marker arrowhead id so multiple arrows don't collide in one DOM.
+    let head_id = format!("dr-arrowhead-{number}");
+    let (x1, y1) = (from.x * 100.0, from.y * 100.0);
+    let (x2, y2) = (to.x * 100.0, to.y * 100.0);
+    let wrap = "position:absolute;inset:0;width:100%;height:100%;\
+                pointer-events:none;overflow:visible;";
+    rsx! {
+        svg {
+            class: "dr-annotate-arrow",
+            "data-n": "{number}",
+            style: "{wrap}",
+            view_box: "0 0 100 100",
+            preserve_aspect_ratio: "none",
+            defs {
+                marker {
+                    id: "{head_id}",
+                    "viewBox": "0 0 10 10",
+                    "refX": "8",
+                    "refY": "5",
+                    "markerWidth": "6",
+                    "markerHeight": "6",
+                    "orient": "auto-start-reverse",
+                    path { d: "M0,0 L10,5 L0,10 z", fill: tokens::ACCENT }
+                }
+            }
+            line {
+                x1: "{x1}",
+                y1: "{y1}",
+                x2: "{x2}",
+                y2: "{y2}",
+                stroke: tokens::ACCENT,
+                "stroke-width": "0.7",
+                "vector-effect": "non-scaling-stroke",
+                "marker-end": "url(#{head_id})",
+            }
+        }
+    }
+}
+
+/// A freehand path overlay: a polyline over a sequence of normalized points.
+///
+/// Like [`ArrowMarker`], a full-stage percent-space SVG. A single `<polyline>`
+/// traces the captured stroke; fewer than two points draws nothing.
+#[component]
+pub fn PathMarker(
+    /// The stroke points, in draw order, each `0..1`.
+    points: Vec<PinPoint>,
+    /// The 1-based number for the stroke.
+    number: usize,
+) -> Element {
+    if points.len() < 2 {
+        return rsx! {};
+    }
+    let pts = points
+        .iter()
+        .map(|p| format!("{:.4},{:.4}", p.x * 100.0, p.y * 100.0))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let wrap = "position:absolute;inset:0;width:100%;height:100%;\
+                pointer-events:none;overflow:visible;";
+    rsx! {
+        svg {
+            class: "dr-annotate-path",
+            "data-n": "{number}",
+            style: "{wrap}",
+            view_box: "0 0 100 100",
+            preserve_aspect_ratio: "none",
+            polyline {
+                points: "{pts}",
+                fill: "none",
+                stroke: tokens::ACCENT,
+                "stroke-width": "0.7",
+                "stroke-linejoin": "round",
+                "stroke-linecap": "round",
+                "vector-effect": "non-scaling-stroke",
+            }
+        }
+    }
+}
+
+/// A translucent highlight overlay over a normalized `0..1` rectangle.
+///
+/// Like [`BoxMarker`] but a filled sweep (no hard border) — the `highlight`
+/// tool's softer mark. The numbered tag rides the top-left corner.
+#[component]
+pub fn HighlightMarker(
+    /// Left edge, `0..1`.
+    x: f64,
+    /// Top edge, `0..1`.
+    y: f64,
+    /// Width, `0..1`.
+    w: f64,
+    /// Height, `0..1`.
+    h: f64,
+    /// The 1-based number shown on the tag.
+    number: usize,
+) -> Element {
+    let style = format!(
+        "position:absolute;left:{left:.4}%;top:{top:.4}%;width:{width:.4}%;height:{height:.4}%;\
+         background:{accent}33;border:1px solid {accent}66;border-radius:3px;box-sizing:border-box;\
+         pointer-events:none;",
+        left = x * 100.0,
+        top = y * 100.0,
+        width = w * 100.0,
+        height = h * 100.0,
+        accent = tokens::ACCENT,
+    );
+    let tag = format!(
+        "position:absolute;top:-11px;left:-2px;background:{accent};color:{on};\
+         font-family:{mono};font-size:10px;font-weight:700;border-radius:4px;padding:0 5px;",
+        accent = tokens::ACCENT,
+        on = tokens::ON_ACCENT,
+        mono = tokens::FONT_MONO,
+    );
+    rsx! {
+        div { class: "dr-annotate-highlight", "data-n": "{number}", style: "{style}",
+            span { class: "dr-annotate-highlight-tag", style: "{tag}", "{number}" }
+        }
+    }
+}
+
 /// One comment in the thread side panel: a number badge + the comment text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadComment {
@@ -249,12 +404,37 @@ impl ThreadComment {
     }
 }
 
+/// What the comment panel hands up on submit: the typed comment plus, when the
+/// `suggest` tool authored a replacement, the suggestion body. The host folds the
+/// suggestion onto the annotation's `suggestion` slot (a diff on the span).
+///
+/// A plain `Vec`-free struct that derives `PartialEq` so it round-trips through an
+/// `EventHandler` without forcing the panel off `#[component]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommentDraft {
+    /// The free-form comment text (the *why*).
+    pub comment: String,
+    /// The proposed replacement text, when the `suggest` tool was used. Empty
+    /// when the panel is in plain-comment mode or the field was left blank.
+    pub suggestion: String,
+}
+
+impl CommentDraft {
+    /// Whether this draft carries a non-empty suggestion replacement.
+    pub fn has_suggestion(&self) -> bool {
+        !self.suggestion.trim().is_empty()
+    }
+}
+
 /// The comment side panel: the thread of comments tied to the placed marks, plus
 /// a draft input. The input is *controlled* by a panel-local draft signal, so the
 /// typed text is captured and handed up on submit.
 ///
-/// Fires `on_submit` with the current (trimmed) draft text. The host threads that
-/// string into the annotation it records. The draft clears after a submit.
+/// When `suggest` is set (the text surface's `suggest` tool is active), a second
+/// textarea is revealed for a replacement diff. Both fields ride up together as a
+/// [`CommentDraft`]; the host stores the replacement on the annotation's
+/// `suggestion` slot. Fires `on_submit` with the trimmed draft. The draft clears
+/// after a submit.
 #[component]
 pub fn CommentPanel(
     /// The thread, in mark order.
@@ -262,11 +442,15 @@ pub fn CommentPanel(
     /// Placeholder for the draft input.
     #[props(default = "comment on the last pin…".to_string())]
     placeholder: String,
-    /// Fired when the submit button is pressed, carrying the typed draft text.
+    /// Whether the `suggest` tool is active — reveals the replacement-diff input.
     #[props(default)]
-    on_submit: Option<EventHandler<String>>,
+    suggest: bool,
+    /// Fired when the submit button is pressed, carrying the typed draft.
+    #[props(default)]
+    on_submit: Option<EventHandler<CommentDraft>>,
 ) -> Element {
     let mut draft = use_signal(String::new);
+    let mut replacement = use_signal(String::new);
     let wrap = "display:flex;flex-direction:column;gap:8px;min-width:0;";
     let h2 = format!(
         "margin:0;font-size:13px;font-weight:700;color:{text};\
@@ -289,6 +473,22 @@ pub fn CommentPanel(
         accent = tokens::ACCENT,
         on = tokens::ON_ACCENT,
         sans = tokens::FONT_SANS,
+    );
+    // The replacement-diff box is monospaced — it carries source the agent applies.
+    let replace_input = format!(
+        "width:100%;box-sizing:border-box;padding:9px 12px;border-radius:6px;\
+         border:1px solid {border};background:{base};color:{text};\
+         font-family:{mono};font-size:12.5px;min-height:64px;resize:vertical;",
+        border = tokens::BORDER,
+        base = tokens::SURFACE_BASE,
+        text = tokens::TEXT,
+        mono = tokens::FONT_MONO,
+    );
+    let replace_label = format!(
+        "font-family:{mono};font-size:10.5px;text-transform:uppercase;\
+         letter-spacing:0.04em;color:{faint};",
+        mono = tokens::FONT_MONO,
+        faint = tokens::TEXT_FAINT,
     );
     rsx! {
         div { class: "dr-comment-panel", style: "{wrap}",
@@ -317,15 +517,35 @@ pub fn CommentPanel(
                 value: "{draft}",
                 oninput: move |evt| draft.set(evt.value()),
             }
+            // The replacement-diff authoring box — revealed only for the `suggest`
+            // tool, captured into the draft's suggestion slot on submit.
+            if suggest {
+                div { class: "dr-suggest-label", style: "{replace_label}", "Suggested replacement" }
+                textarea {
+                    class: "dr-suggest-input",
+                    style: "{replace_input}",
+                    placeholder: "type the replacement text for the selected span…",
+                    value: "{replacement}",
+                    oninput: move |evt| replacement.set(evt.value()),
+                }
+            }
             div { style: "display:flex;gap:8px;margin-top:4px;",
                 button {
                     class: "dr-comment-submit",
                     style: "{submit}",
                     onclick: move |_| {
                         if let Some(h) = &on_submit {
-                            h.call(draft.read().trim().to_string());
+                            h.call(CommentDraft {
+                                comment: draft.read().trim().to_string(),
+                                suggestion: if suggest {
+                                    replacement.read().trim().to_string()
+                                } else {
+                                    String::new()
+                                },
+                            });
                         }
                         draft.set(String::new());
+                        replacement.set(String::new());
                     },
                     "Submit feedback"
                 }
@@ -363,6 +583,52 @@ mod tests {
     }
 
     #[test]
+    fn every_visual_tool_maps_to_a_drawable_shape() {
+        use crate::selection::{NormBox, PinPoint, VisualMark};
+        // Each non-cursor visual tool resolves to an `ImageShape` slug, and the
+        // slug matches the `VisualMark` the tool produces — the host's routing
+        // contract.
+        for tool in AnnotateTool::for_surface(SurfaceKind::Visual) {
+            match tool {
+                AnnotateTool::Cursor => assert!(tool.image_shape().is_none()),
+                _ => assert!(tool.image_shape().is_some(), "{:?} draws a shape", tool),
+            }
+        }
+        assert_eq!(AnnotateTool::Pin.image_shape(), Some("pin"));
+        assert_eq!(AnnotateTool::Box.image_shape(), Some("rect"));
+        assert_eq!(AnnotateTool::Arrow.image_shape(), Some("arrow"));
+        assert_eq!(AnnotateTool::Pen.image_shape(), Some("path"));
+        assert_eq!(AnnotateTool::Highlight.image_shape(), Some("highlight"));
+
+        // The tool's shape slug equals the mark it builds — pin/rect/arrow/path.
+        assert_eq!(
+            AnnotateTool::Pin.image_shape(),
+            Some(VisualMark::Pin { point: PinPoint::new(0.5, 0.5, "") }.shape_slug()),
+        );
+        assert_eq!(
+            AnnotateTool::Arrow.image_shape(),
+            Some(
+                VisualMark::Arrow {
+                    from: PinPoint::new(0.1, 0.1, ""),
+                    to: PinPoint::new(0.2, 0.2, ""),
+                }
+                .shape_slug()
+            ),
+        );
+        assert_eq!(
+            AnnotateTool::Box.image_shape(),
+            Some(VisualMark::Rect { rect: NormBox::new(0.1, 0.1, 0.2, 0.2, "") }.shape_slug()),
+        );
+    }
+
+    #[test]
+    fn text_tools_carry_no_pixel_shape() {
+        for tool in [AnnotateTool::Select, AnnotateTool::Strike, AnnotateTool::Suggest] {
+            assert!(tool.image_shape().is_none(), "{:?} is a span tool", tool);
+        }
+    }
+
+    #[test]
     fn tool_slugs_and_glyphs_are_set() {
         for tool in [
             AnnotateTool::Cursor,
@@ -380,5 +646,27 @@ mod tests {
         let c = ThreadComment::new(2, "total is misaligned");
         assert_eq!(c.number, 2);
         assert_eq!(c.text, "total is misaligned");
+    }
+
+    #[test]
+    fn comment_draft_detects_a_suggestion() {
+        let plain = CommentDraft {
+            comment: "tighten this".into(),
+            suggestion: String::new(),
+        };
+        assert!(!plain.has_suggestion());
+
+        let with_fix = CommentDraft {
+            comment: "use the declined path".into(),
+            suggestion: "fn charge(card: Card) -> Result<(), Error>".into(),
+        };
+        assert!(with_fix.has_suggestion());
+
+        // Whitespace-only replacements don't count as a suggestion.
+        let blank = CommentDraft {
+            comment: "nit".into(),
+            suggestion: "   \n".into(),
+        };
+        assert!(!blank.has_suggestion());
     }
 }

@@ -4,11 +4,14 @@
 //! browser. A project groups runs and maps to a working dir / `.darkrun`. The
 //! home:
 //!
-//!   1. **Projects** — scans `~/.darkrun` for live engines via
-//!      [`wire::discover_live_engines`] and lists one card per project (name,
-//!      path, run-count when known, live/idle status). A header switcher jumps
-//!      between projects; an **add-a-project** card offers two entry points —
-//!      clone a Git URL, or point at a local git repo.
+//!   1. **Projects** — lists one card per project by merging the durable
+//!      project registry (`~/.darkrun/<slug>/project.json`, every registered
+//!      project) with the live engines discovered via
+//!      [`wire::discover_live_engines`] (which flip a card to live and supply its
+//!      port). A header switcher jumps between projects; an **add-a-project**
+//!      card offers two entry points — clone a Git URL (cloned into
+//!      `~/darkrun/<name>` then registered) or point at a local git repo
+//!      (validated then registered).
 //!   2. **Runs** — drilling into a project binds that project's live engine (its
 //!      discovered port) and renders the existing run browser ([`RunBrowser`]).
 //!      With **no** live engine, the project shows the no-engine ONE-STEP start
@@ -33,10 +36,11 @@ use crate::wire::{self, ConnConfig, DiscoveredEngine};
 /// A project the home can drill into: a working dir keyed by its `~/.darkrun`
 /// slug, optionally backed by a live engine (its discovered port).
 ///
-/// Derived from [`wire::discover_live_engines`] today — every live engine is a
-/// project. Projects that exist on disk but have no live engine (recents /
-/// registered-only) are not yet enumerable from the desktop; see the TODO in
-/// [`load_projects`].
+/// Sourced two ways and merged by [`load_projects`]: the durable project
+/// registry (`~/.darkrun/<slug>/project.json`, every registered project — live
+/// or idle) overlaid with [`wire::discover_live_engines`] (the running engines,
+/// which contribute the `port`/`harness` and flip a card to "live"). A live
+/// engine with no registry record still surfaces as a card.
 #[derive(Clone, PartialEq)]
 struct Project {
     /// Display name — the registry slug (the working-tree dir name carries the
@@ -95,6 +99,10 @@ pub fn HomeApp(cfg: ConnConfig, project_path: Option<PathBuf>) -> Element {
 
     // The session id of the run currently opened into Review, if any.
     let mut opened = use_signal(|| None::<String>);
+
+    // Bumped after a clone/register so the projects grid re-reads the on-disk
+    // registry immediately, rather than waiting for the next discovery tick.
+    let refresh = use_signal(|| 0u32);
 
     // Discover live engines once on launch, then (if a project was pinned) drill
     // straight into it. Discovery failure leaves an empty grid — the projects
@@ -201,7 +209,10 @@ pub fn HomeApp(cfg: ConnConfig, project_path: Option<PathBuf>) -> Element {
         Nav::Runs(_) => ("no engine".to_string(), Tone::Warn),
     };
 
-    // Build the switcher options (every discovered project) once per render.
+    // Build the switcher options (every registered + live project) once per
+    // render. Reading `refresh` here ties a re-render to a clone/register so the
+    // freshly-written `project.json` shows without waiting for the poller.
+    let _ = refresh.read();
     let projects = load_projects(&engines.read());
 
     rsx! {
@@ -216,7 +227,7 @@ pub fn HomeApp(cfg: ConnConfig, project_path: Option<PathBuf>) -> Element {
             }
             match nav.read().clone() {
                 Nav::Projects => rsx! {
-                    ProjectsGrid { projects: projects.clone(), nav }
+                    ProjectsGrid { projects: projects.clone(), nav, refresh }
                 },
                 Nav::Runs(proj) => rsx! {
                     RunsSurface { cfg: cfg.clone(), proj, nav, opened }
@@ -226,16 +237,54 @@ pub fn HomeApp(cfg: ConnConfig, project_path: Option<PathBuf>) -> Element {
     }
 }
 
-/// Project the discovered live engines into the project cards the home renders.
+/// Merge the on-disk project registry with the live engines into the project
+/// cards the home renders.
 ///
-/// TODO(projects-on-disk): this only surfaces projects with a *live* engine.
-/// Recents and registered-but-idle projects (a `~/.darkrun/<slug>/` that exists
-/// without a running engine) aren't enumerable from the desktop yet — the
-/// registry exposes only live descriptors. When a "list registered projects"
-/// endpoint lands, merge it here so idle projects show with `port: None` (the
-/// no-engine card already handles that path).
+/// Two sources, keyed by registry slug:
+///   1. **Registered projects** — every `~/.darkrun/<slug>/project.json` (read
+///      via [`registry::list_projects`]), live or idle. These carry the durable
+///      name/path even when no engine is running, so registered-but-idle
+///      projects show as cards (with `port: None`, which the no-engine card
+///      already handles).
+///   2. **Live engines** — every running engine ([`DiscoveredEngine`]). When an
+///      engine's slug matches a registered project, its port + harness are
+///      OVERLAID onto that project (flipping it to "live"). A live engine with
+///      NO registered record (an engine booted in a never-registered repo) is
+///      still surfaced so it isn't lost — discovery has always shown these.
+///
+/// Idempotent on slug: a project that is both registered and live yields ONE
+/// card, not two. Returns cards sorted by name for a stable grid order.
 fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
-    engines.iter().map(Project::from_engine).collect()
+    use std::collections::BTreeMap;
+
+    // Start from the durable registry: every registered project as an idle card.
+    let mut by_slug: BTreeMap<String, Project> = darkrun_mcp::registry::list_projects()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|rec| {
+            let project = Project {
+                name: rec.name.clone().unwrap_or_else(|| rec.slug.clone()),
+                path: rec.path,
+                port: None,
+                harness: None,
+            };
+            (rec.slug, project)
+        })
+        .collect();
+
+    // Overlay live engines: flip a matching registered project to live, or add a
+    // standalone card for an engine with no registry record.
+    for e in engines {
+        by_slug
+            .entry(e.slug.clone())
+            .and_modify(|p| {
+                p.port = Some(e.port);
+                p.harness = Some(e.harness.clone());
+            })
+            .or_insert_with(|| Project::from_engine(e));
+    }
+
+    by_slug.into_values().collect()
 }
 
 /// The header project switcher — a native `select` over every discovered
@@ -298,7 +347,7 @@ fn ProjectSwitcher(projects: Vec<Project>, nav: Signal<Nav>) -> Element {
 /// The projects grid (mockup B): one card per project + an add-a-project card,
 /// followed by the add-a-project form.
 #[component]
-fn ProjectsGrid(projects: Vec<Project>, nav: Signal<Nav>) -> Element {
+fn ProjectsGrid(projects: Vec<Project>, nav: Signal<Nav>, refresh: Signal<u32>) -> Element {
     let heading = format!(
         "margin:0;font-family:{sans};font-size:13px;font-weight:700;\
          text-transform:uppercase;letter-spacing:0.04em;color:{text};",
@@ -316,7 +365,7 @@ fn ProjectsGrid(projects: Vec<Project>, nav: Signal<Nav>) -> Element {
             }
             AddProjectCard {}
         }
-        AddProjectForm {}
+        AddProjectForm { refresh }
     }
 }
 
@@ -398,16 +447,21 @@ fn AddProjectCard() -> Element {
 /// register) and a **Local repo** (pick an existing git checkout). Both must be
 /// git repos; the slug + `.darkrun/` live in the working tree.
 ///
-/// The actual clone/register is not yet wired to an engine endpoint — see the
-/// TODO in [`add_project`]. The UI is fully present and validates locally.
+/// Both paths execute for real (see [`add_project`]): a Git URL clones into
+/// `~/darkrun/<name>` then writes a [`ProjectRecord`]; a local path validates
+/// the repo and writes the record. On success `refresh` is bumped so the grid
+/// re-reads the registry and the new card appears immediately.
 #[component]
-fn AddProjectForm() -> Element {
+fn AddProjectForm(refresh: Signal<u32>) -> Element {
     // Which entry point is selected (`git` URL vs `local` path).
     let mut mode = use_signal(|| AddMode::Git);
     // The current input value (a URL or a path, depending on `mode`).
     let mut value = use_signal(String::new);
-    // A status line after a submit attempt (success TODO note or validation).
+    // A status line after a submit attempt (working note, success, or error).
     let mut status = use_signal(|| None::<String>);
+    // True while a clone/register is in flight — disables re-submit and shows a
+    // working note (a clone can take a while over the network).
+    let mut busy = use_signal(|| false);
 
     let heading = format!(
         "margin:0;font-family:{sans};font-size:13px;font-weight:700;\
@@ -439,13 +493,43 @@ fn AddProjectForm() -> Element {
         AddMode::Local => "Add repo",
     };
 
+    // Submit clones/registers off the UI thread (a clone is blocking + network-
+    // bound) via `spawn_blocking`, then bumps `refresh` so the grid re-reads the
+    // registry. `busy` guards against a double-submit while in flight.
+    let mut refresh = refresh;
     let on_submit = move |_| {
-        let raw = value.read().trim().to_string();
-        match add_project(current, &raw) {
-            Ok(note) => status.set(Some(note)),
-            Err(err) => status.set(Some(err)),
+        if *busy.peek() {
+            return;
         }
+        let raw = value.read().trim().to_string();
+        // Validate synchronously for instant feedback before doing any work.
+        if let Err(err) = validate_add_input(current, &raw) {
+            status.set(Some(err));
+            return;
+        }
+        busy.set(true);
+        status.set(Some(match current {
+            AddMode::Git => "Cloning\u{2026}".to_string(),
+            AddMode::Local => "Registering\u{2026}".to_string(),
+        }));
+        spawn(async move {
+            let result = tokio::task::spawn_blocking(move || add_project(current, &raw))
+                .await
+                .unwrap_or_else(|e| Err(format!("internal error: {e}")));
+            match result {
+                Ok(note) => {
+                    status.set(Some(note));
+                    // A new `project.json` is on disk — nudge the grid to re-read.
+                    let n = *refresh.peek();
+                    refresh.set(n.wrapping_add(1));
+                    value.set(String::new());
+                }
+                Err(err) => status.set(Some(err)),
+            }
+            busy.set(false);
+        });
     };
+    let busy_now = *busy.read();
 
     rsx! {
         Card {
@@ -468,8 +552,9 @@ fn AddProjectForm() -> Element {
                 Button {
                     variant: ButtonVariant::Primary,
                     tone: Tone::Accent,
+                    disabled: busy_now,
                     on_click: on_submit,
-                    "{action_label}"
+                    if busy_now { "Working\u{2026}" } else { "{action_label}" }
                 }
             }
             p { style: "{note_style}",
@@ -500,14 +585,11 @@ enum AddMode {
     Local,
 }
 
-/// Validate an add-a-project request and (eventually) hand it to the engine.
-///
-/// TODO(add-project-endpoint): the engine has no "clone + register" / "register
-/// local repo" HTTP endpoint yet, so this only validates the input and returns a
-/// human-readable note describing what *would* happen. When the endpoint lands
-/// (e.g. `POST /api/projects` with `{ "git_url" }` or `{ "path" }`), call it via
-/// a new `wire::register_project(...)` and refresh discovery on success.
-fn add_project(mode: AddMode, raw: &str) -> Result<String, String> {
+/// Cheap, synchronous validation of an add-a-project input — run on the UI
+/// thread before any blocking work so the operator gets instant feedback on an
+/// empty/obviously-wrong value. The heavy lifting (clone, repo check) happens in
+/// [`add_project`].
+fn validate_add_input(mode: AddMode, raw: &str) -> Result<(), String> {
     if raw.is_empty() {
         return Err(match mode {
             AddMode::Git => "Enter a git URL to clone.".to_string(),
@@ -518,22 +600,74 @@ fn add_project(mode: AddMode, raw: &str) -> Result<String, String> {
         AddMode::Git => {
             let looks_like_url = raw.contains("://") || raw.starts_with("git@");
             if !looks_like_url {
-                return Err("That doesn't look like a git URL (expected https:// or git@).".to_string());
+                return Err(
+                    "That doesn't look like a git URL (expected https:// or git@).".to_string(),
+                );
             }
-            Ok(format!(
-                "Would clone {raw} and register it. (engine clone/register endpoint pending — TODO)"
-            ))
         }
         AddMode::Local => {
             let path = PathBuf::from(raw);
             if !path.is_absolute() {
                 return Err("Use an absolute path to the git checkout.".to_string());
             }
+        }
+    }
+    Ok(())
+}
+
+/// Perform an add-a-project request for real. **Blocking** — runs off the UI
+/// thread (a clone is network-bound). Returns a human-readable success note or
+/// an error string suitable for the status line.
+///
+/// - **Git URL**: clone into `~/darkrun/<repo-name>` (the editable default
+///   clone root) via [`darkrun_git::clone_repo`], then derive the slug and write
+///   a [`ProjectRecord`] to `~/.darkrun/<slug>/project.json` so the project
+///   enumerates whether or not an engine is later serving it.
+/// - **Local repo**: validate it's a git checkout, then register it (write the
+///   record) without cloning.
+///
+/// Registration is idempotent — re-adding an already-registered repo just
+/// rewrites its record.
+fn add_project(mode: AddMode, raw: &str) -> Result<String, String> {
+    validate_add_input(mode, raw)?;
+    match mode {
+        AddMode::Git => {
+            // Default clone root is ~/darkrun; fall back to the cwd if home can't
+            // be resolved (degraded, but never silently writes somewhere odd).
+            let base = dirs::home_dir()
+                .map(|h| h.join("darkrun"))
+                .unwrap_or_else(|| PathBuf::from("darkrun"));
+            let dest = darkrun_git::default_clone_dest(&base, raw);
+            if dest.exists() {
+                return Err(format!(
+                    "{} already exists — remove it or register it as a local repo.",
+                    dest.display()
+                ));
+            }
+            let cloned = darkrun_git::clone_repo(raw, &dest)
+                .map_err(|e| format!("Clone failed: {e}"))?;
+            let record = darkrun_mcp::registry::register_project(cloned.repo_root(), None)
+                .map_err(|e| format!("Cloned, but registering failed: {e}"))?;
+            Ok(format!(
+                "Cloned into {} and registered as \u{201c}{}\u{201d}.",
+                dest.display(),
+                record.slug
+            ))
+        }
+        AddMode::Local => {
+            let path = PathBuf::from(raw);
             if !path.join(".git").exists() {
                 return Err("No .git found at that path — point at a git repo.".to_string());
             }
+            // Confirm it really opens as a repo (a stray `.git` file isn't one).
+            darkrun_git::Git::open(&path)
+                .map_err(|e| format!("Not a usable git repo: {e}"))?;
+            let record = darkrun_mcp::registry::register_project(&path, None)
+                .map_err(|e| format!("Register failed: {e}"))?;
             Ok(format!(
-                "Would register {raw} as a project. (engine register endpoint pending — TODO)"
+                "Registered {} as \u{201c}{}\u{201d}.",
+                path.display(),
+                record.slug
             ))
         }
     }
@@ -618,7 +752,7 @@ fn RunsSurface(
 /// the harness's permission-bypass flag (from
 /// [`Capabilities::autonomous_launch_args`]).
 #[component]
-fn NoEngine(name: String, path: String) -> Element {
+fn NoEngine(name: String, path: String, #[props(default)] run: Option<String>) -> Element {
     // Per-project autonomous mode — default ON (the permission boundary moves to
     // the checkpoint, not per-tool prompts). Toggling off drops the bypass flag.
     let mut autonomous = use_signal(|| true);
@@ -695,7 +829,7 @@ fn NoEngine(name: String, path: String) -> Element {
         faint = tokens::TEXT_FAINT,
     );
 
-    let command = launch_command(active_harness, &path, auto);
+    let command = launch_command(active_harness, &path, auto, run.as_deref());
 
     rsx! {
         div { style: "{card_style}",
@@ -804,21 +938,37 @@ fn harness_binary(h: Harness) -> Option<&'static str> {
     }
 }
 
-/// Build the ONE-STEP start command for a harness in a project dir. When
-/// `autonomous` is on the harness's bypass flag (if any) is spliced in. GUI
+/// Single-quote a path for a POSIX shell so the copied `cd` survives spaces and
+/// other shell-special characters in the project path.
+fn sh_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+/// Build the ONE-STEP start command for a harness in a project dir. The path is
+/// shell-quoted so the copied command `cd`s into the correct dir even when the
+/// path has spaces. When `autonomous` is on the harness's bypass flag (if any)
+/// is spliced in. When the harness exposes a worktree flag and `run` is given,
+/// `<flag> darkrun-<run>` is appended so the Run gets its own git worktree. GUI
 /// harnesses (no CLI binary) get an open-the-editor instruction.
-fn launch_command(h: Harness, path: &str, autonomous: bool) -> String {
+fn launch_command(h: Harness, path: &str, autonomous: bool, run: Option<&str>) -> String {
     let caps = h.capabilities();
+    let dir = sh_quote(path);
     match harness_binary(h) {
         Some(bin) => {
-            let flag = if autonomous { caps.autonomous_launch_args() } else { "" };
-            if flag.is_empty() {
-                format!("cd {path} && {bin}")
-            } else {
-                format!("cd {path} && {bin} {flag}")
+            let mut cmd = format!("cd {dir} && {bin}");
+            if autonomous {
+                let flag = caps.autonomous_launch_args();
+                if !flag.is_empty() {
+                    cmd.push(' ');
+                    cmd.push_str(flag);
+                }
             }
+            if let (Some(wt), Some(run)) = (caps.worktree_flag, run) {
+                cmd.push_str(&format!(" {wt} darkrun-{run}"));
+            }
+            cmd
         }
-        None => format!("open {} in {path}, then enable its MCP plugin", caps.display_name),
+        None => format!("open {} in {dir}, then enable its MCP plugin", caps.display_name),
     }
 }
 

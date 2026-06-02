@@ -32,7 +32,10 @@ use darkrun_api::annotation::{
     NormRect, PixelMark, Suggestion, WorkItem, WorkItemKind,
 };
 use darkrun_api::common::AuthorType;
-use darkrun_core::annotation::{checkpoint_button_state, count_open_by_severity, CheckpointButton};
+use darkrun_core::annotation::{
+    checkpoint_button_state, count_open_by_severity, flag_scene_changed, pixel_region,
+    reanchor_annotation, region_out_of_bounds, scene_changed, CheckpointButton,
+};
 use darkrun_core::StateStore;
 
 use crate::error::{McpError, Result};
@@ -261,6 +264,163 @@ pub fn crop_image_region(img: &image::DynamicImage, rect: NormRect) -> image::Dy
     img.crop_imm(px.min(w.saturating_sub(1)), py.min(h.saturating_sub(1)), cw, ch)
 }
 
+// ─── New-version re-anchor (text + image/pdf re-crop in one pass) ─────────────
+
+/// What re-anchoring one annotation against a new artifact version did. The
+/// engine logs/surfaces these; a `SceneChanged` means the region no longer
+/// frames the same content, so the annotation was flagged for re-placement
+/// rather than silently mis-cropped.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VersionReAnchor {
+    /// A text annotation re-anchored (exact or shifted-but-found / not-found —
+    /// the core text pass owns that distinction and the status).
+    Text,
+    /// An image/pdf region re-cropped cleanly against the new bytes; the crop
+    /// file and `version_sha` were rewritten.
+    ReCropped,
+    /// The pinned region no longer lands on the new version (out of bounds or a
+    /// materially different image shape): the annotation was flagged `shifted`
+    /// with a "scene changed" note instead of being mis-cropped.
+    SceneChanged,
+    /// Nothing to do (a pin/path mark with no region, a bare station note, or a
+    /// non-pixel/non-text anchor) — only `version_sha` was re-pinned.
+    Repinned,
+}
+
+/// The decoded dimensions a stored pixel mark was drawn over, when the anchor
+/// carries them. Image marks record `render_w`/`render_h`; a pdf rect has no
+/// recorded render size, so it can't be compared for a scene change.
+fn marked_render_dims(annotation: &Annotation) -> Option<(u32, u32)> {
+    match annotation.anchor.as_ref()? {
+        Anchor::Image { mark } => Some((mark.render_w, mark.render_h)),
+        _ => None,
+    }
+}
+
+/// Re-anchor every annotation on one artifact path against its new version
+/// bytes, refreshing text spans AND image/pdf region crops in a single pass.
+///
+/// This is the version-update hook the engine runs when a locked artifact's new
+/// version is accepted: text annotations re-anchor by the core line-hash / quote
+/// search; image and pdf annotations RE-CROP their stored normalized rect out of
+/// the new bytes and rewrite `<id>__crop.png`, re-pinning `version_sha`. If a
+/// region now falls outside the artifact or the image's shape changed materially
+/// (a "scene changed"), the annotation is flagged `shifted` with a note instead
+/// of being silently mis-cropped.
+///
+/// `repo_root` roots the artifact path; `new_bytes` is the new version's content
+/// (already on disk at `repo_root/<path>` — passed in so callers that already
+/// read it don't re-read). Only OPEN/SHIFTED records are touched; resolved or
+/// dismissed annotations are left alone. Best-effort per annotation: an
+/// undecodable image skips its re-crop rather than failing the whole pass.
+pub fn reanchor_artifact_version(
+    store: &StateStore,
+    repo_root: &Path,
+    run: &str,
+    artifact_path: &str,
+    new_bytes: &[u8],
+) -> Result<Vec<(String, VersionReAnchor)>> {
+    let mut outcomes = Vec::new();
+    // Decode the new image once (if it is one) so every pixel annotation on this
+    // artifact re-crops and scene-checks against the same decoded bytes.
+    let new_img = image::load_from_memory(new_bytes).ok();
+
+    for mut annotation in store.list_annotations(run)? {
+        // Only annotations pinned to THIS artifact, and only live ones.
+        let on_this = annotation
+            .artifact
+            .as_ref()
+            .map(|a| a.path == artifact_path)
+            .unwrap_or(false);
+        if !on_this {
+            continue;
+        }
+        if !matches!(
+            annotation.status,
+            AnnotationStatus::Open | AnnotationStatus::Shifted
+        ) {
+            continue;
+        }
+
+        let outcome = reanchor_one(store, repo_root, run, &mut annotation, new_bytes, new_img.as_ref());
+        store.write_annotation(run, &annotation)?;
+        outcomes.push((annotation.id.clone(), outcome));
+    }
+    Ok(outcomes)
+}
+
+/// Re-anchor a single annotation in place against the new version, returning
+/// what happened. Text delegates to the core pass; image/pdf re-crop here.
+fn reanchor_one(
+    store: &StateStore,
+    repo_root: &Path,
+    run: &str,
+    annotation: &mut Annotation,
+    new_bytes: &[u8],
+    new_img: Option<&image::DynamicImage>,
+) -> VersionReAnchor {
+    // Text annotations re-anchor (and re-pin version_sha) via the core pass.
+    if let Some(Anchor::Text { .. }) = annotation.anchor.as_ref() {
+        reanchor_annotation(annotation, new_bytes);
+        return VersionReAnchor::Text;
+    }
+
+    // Everything else: re-pin the version_sha up front (mirrors the text pass),
+    // then handle a pixel region if there is one.
+    if let Some(artifact) = annotation.artifact.as_mut() {
+        artifact.version_sha = darkrun_core::hash_bytes(new_bytes);
+    }
+
+    let Some(rect) = pixel_region(annotation) else {
+        // A pin/path/arrow-less mark, or a non-pixel anchor: nothing to re-crop.
+        return VersionReAnchor::Repinned;
+    };
+
+    // The region must still land on the artifact.
+    if region_out_of_bounds(&rect) {
+        flag_scene_changed(
+            annotation,
+            "annotated region now falls outside the artifact",
+        );
+        return VersionReAnchor::SceneChanged;
+    }
+
+    // For images, decode and re-crop. A pdf has no codec here, so it only
+    // re-pins (the document viewer owns pdf rendering).
+    let Some(img) = new_img else {
+        return VersionReAnchor::Repinned;
+    };
+
+    // A materially different image shape means the normalized rect can't be
+    // trusted to frame the same content.
+    if let Some((old_w, old_h)) = marked_render_dims(annotation) {
+        if scene_changed(old_w, old_h, img.width(), img.height(), 0.05) {
+            flag_scene_changed(
+                annotation,
+                "image dimensions changed materially since the mark was made",
+            );
+            return VersionReAnchor::SceneChanged;
+        }
+    }
+
+    // Clean re-crop: rewrite the crop file from the new bytes.
+    let cropped = crop_image_region(img, rect);
+    let out = crop_file_path(store, run, &annotation.id);
+    let wrote = (|| -> Result<()> {
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| McpError::InvalidInput(format!("crop dir: {e}")))?;
+        }
+        cropped
+            .save_with_format(&out, image::ImageFormat::Png)
+            .map_err(|e| McpError::InvalidInput(format!("crop write: {e}")))?;
+        Ok(())
+    })();
+    let _ = wrote; // best-effort: a write fault leaves the stale crop, not a hard fail
+    let _ = repo_root; // path is resolved via the store-relative crop file
+    VersionReAnchor::ReCropped
+}
+
 // ─── List (feedback-inbox data) ──────────────────────────────────────────────
 
 /// The feedback-inbox read for one work item (or a station): the annotations
@@ -423,6 +583,27 @@ pub struct AgentReReferencePayload {
     pub bar_label: Option<String>,
 }
 
+/// Parse and normalize an opt-in `data-darkrun-src` value into a real
+/// `file:line` source. The web layer copies this string verbatim off the marked
+/// element's attribute, so it can be anything: blank, a bare path with no line,
+/// or a real `file:line`. We accept only `"<non-empty path>:<1-based line>"`
+/// (line ≥ 1), trimming surrounding whitespace; everything else returns `None`
+/// so the agent degrades to the selector + provenance rather than chasing a
+/// bogus location.
+///
+/// Paths may themselves contain colons (rare, but Windows drive letters and URLs
+/// do), so we split on the *last* colon and require the tail to be a line number.
+fn parse_source_map(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    let (file, line) = s.rsplit_once(':')?;
+    let file = file.trim();
+    let line: u32 = line.trim().parse().ok()?;
+    if file.is_empty() || line == 0 {
+        return None;
+    }
+    Some(format!("{file}:{line}"))
+}
+
 /// Resolve one annotation's source for the agent, given the repo root (to test
 /// whether a crop exists) and the run.
 fn resolve_source(
@@ -471,9 +652,14 @@ fn resolve_source(
             rect: rect_of(mark),
         },
         Anchor::Html { dom, .. } => {
-            let resolved = dom.src.is_some();
+            // The opt-in source map is just a string the project injected into
+            // `data-darkrun-src`; trust nothing about its shape. Only a real
+            // `file:line` resolves — an empty/blank/garbage value degrades to
+            // the selector + provenance, same as if no map were present.
+            let src = dom.src.as_deref().and_then(parse_source_map);
+            let resolved = src.is_some();
             ResolvedSource::Html {
-                src: dom.src.clone(),
+                src,
                 selector: dom.selector.clone(),
                 outer_html: dom.outer_html.clone(),
                 crop_path: crop,
@@ -492,6 +678,24 @@ fn resolve_source(
     }
 }
 
+/// Resolve one OPEN annotation into its actionable agent bundle. Shared by the
+/// per-work-item payload and the station-scoped re-reference.
+fn re_reference_item(
+    store: &StateStore,
+    run: &str,
+    repo_root: &Path,
+    a: &Annotation,
+) -> AgentReReferenceItem {
+    AgentReReferenceItem {
+        id: a.id.clone(),
+        source: resolve_source(store, run, repo_root, a),
+        comment: a.comment.clone(),
+        ask_kind: a.ask.kind,
+        severity: a.ask.severity,
+        suggestion: a.suggestion.as_ref().map(|s| s.diff.clone()),
+    }
+}
+
 /// Build the agent re-reference payload for a work item: resolve every OPEN
 /// annotation to an actionable bundle and tally the open-severity steering.
 pub fn agent_re_reference(
@@ -505,14 +709,56 @@ pub fn agent_re_reference(
     let items = all
         .iter()
         .filter(|a| a.status == AnnotationStatus::Open)
-        .map(|a| AgentReReferenceItem {
-            id: a.id.clone(),
-            source: resolve_source(store, run, repo_root, a),
-            comment: a.comment.clone(),
-            ask_kind: a.ask.kind,
-            severity: a.ask.severity,
-            suggestion: a.suggestion.as_ref().map(|s| s.diff.clone()),
-        })
+        .map(|a| re_reference_item(store, run, repo_root, a))
+        .collect();
+    Ok(AgentReReferencePayload {
+        items,
+        must: counts.must,
+        should: counts.should,
+        nit: counts.nit,
+        bar_label: counts.bar_label(),
+    })
+}
+
+/// Build the agent re-reference payload for a whole **station**: every OPEN
+/// annotation hanging on any of the station's work items (the global station
+/// note included), each resolved to an actionable bundle, ordered station-note
+/// first. This is what the manager auto-surfaces on the next action when a unit
+/// re-enters as rework after Request-changes — the agent gets the resolved
+/// `file:line` + crop + comment + suggestion without having to ask for it.
+///
+/// `cap` bounds the resolved items so a noisy station can't blow the prompt: the
+/// severity tally always reflects *every* open ask, but only the first `cap`
+/// items (station note(s) first, then the highest-severity asks) are resolved.
+pub fn station_re_reference(
+    store: &StateStore,
+    repo_root: &Path,
+    run: &str,
+    station: &str,
+    cap: usize,
+) -> Result<AgentReReferencePayload> {
+    let all = store.list_annotations(run)?;
+    // Scope to this station and order: station note(s) lead, then per-artifact
+    // asks by descending severity (must -> should -> nit) so the cap keeps the
+    // ones that steer the checkpoint hardest.
+    let mut open: Vec<&Annotation> = all
+        .iter()
+        .filter(|a| a.work_item.station == station && a.status == AnnotationStatus::Open)
+        .collect();
+    let counts = count_open_by_severity(&all);
+    open.sort_by_key(|a| {
+        let note_rank = if a.is_station_note() { 0 } else { 1 };
+        let sev_rank = match a.ask.severity {
+            AskSeverity::Must => 0,
+            AskSeverity::Should => 1,
+            AskSeverity::Nit => 2,
+        };
+        (note_rank, sev_rank)
+    });
+    let items = open
+        .iter()
+        .take(cap)
+        .map(|a| re_reference_item(store, run, repo_root, a))
         .collect();
     Ok(AgentReReferencePayload {
         items,
@@ -599,7 +845,8 @@ fn describe_anchor(anchor: &Anchor) -> String {
         Anchor::Image { .. } => "image region".into(),
         Anchor::Html { dom, .. } => dom
             .src
-            .clone()
+            .as_deref()
+            .and_then(parse_source_map)
             .unwrap_or_else(|| dom.selector.clone()),
         Anchor::Pdf { page, .. } => format!("pdf page {page}"),
         Anchor::Svg { element_id, xpath, .. } => element_id
@@ -663,9 +910,15 @@ mod tests {
     }
 
     fn write_png(path: &Path, w: u32, h: u32) {
+        write_png_color(path, w, h, [10, 20, 30, 255]);
+    }
+
+    /// Write a uniformly-colored PNG, so a re-crop's pixels prove which version
+    /// they came from.
+    fn write_png_color(path: &Path, w: u32, h: u32, rgba: [u8; 4]) {
         let mut img = RgbaImage::new(w, h);
         for p in img.pixels_mut() {
-            *p = Rgba([10, 20, 30, 255]);
+            *p = Rgba(rgba);
         }
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         img.save_with_format(path, image::ImageFormat::Png).unwrap();
@@ -782,6 +1035,98 @@ mod tests {
         let img = image::open(root.join(&crop)).unwrap();
         assert_eq!(img.width(), (0.18 * 1440.0_f64).round() as u32);
         assert_eq!(img.height(), (0.07 * 900.0_f64).round() as u32);
+    }
+
+    #[test]
+    fn reanchor_new_version_recrops_image_and_repins_version() {
+        let (_d, store, root) = store();
+        // Submit against the original (10,20,30) dashboard so a crop lands.
+        let res = submit(&store, &root, "run", image_args(&root)).unwrap();
+        let id = res.annotation.id.clone();
+        let crop = crop_file_path(&store, "run", &id);
+        // The original crop carries the OLD fill color.
+        let before = image::open(&crop).unwrap().to_rgba8();
+        assert_eq!(before.get_pixel(0, 0).0, [10, 20, 30, 255]);
+        let old_sha = res.annotation.artifact.as_ref().unwrap().version_sha.clone();
+
+        // A new version: same dimensions, a distinct fill color.
+        let path = root.join("shots/dashboard.png");
+        write_png_color(&path, 1440, 900, [200, 40, 60, 255]);
+        let new_bytes = std::fs::read(&path).unwrap();
+
+        let outcomes =
+            reanchor_artifact_version(&store, &root, "run", "shots/dashboard.png", &new_bytes)
+                .unwrap();
+        assert_eq!(outcomes, vec![(id.clone(), VersionReAnchor::ReCropped)]);
+
+        // The crop was re-cut from the NEW bytes...
+        let after = image::open(&crop).unwrap().to_rgba8();
+        assert_eq!(after.get_pixel(0, 0).0, [200, 40, 60, 255]);
+        // ...at the same fraction of the (unchanged) 1440×900 artifact...
+        assert_eq!(after.width(), (0.18 * 1440.0_f64).round() as u32);
+        assert_eq!(after.height(), (0.07 * 900.0_f64).round() as u32);
+
+        // ...and version_sha was re-pinned to the new content.
+        let stored = store.read_annotation("run", &id).unwrap().unwrap();
+        let new_sha = stored.artifact.as_ref().unwrap().version_sha.clone();
+        assert_ne!(new_sha, old_sha);
+        assert_eq!(new_sha, darkrun_core::hash_bytes(&new_bytes));
+        // Still open — a clean re-crop doesn't disturb the lifecycle.
+        assert_eq!(stored.status, AnnotationStatus::Open);
+    }
+
+    #[test]
+    fn reanchor_new_version_flags_scene_change_on_aspect_shift() {
+        let (_d, store, root) = store();
+        let res = submit(&store, &root, "run", image_args(&root)).unwrap();
+        let id = res.annotation.id.clone();
+
+        // A new version with a materially different aspect ratio (square vs 16:10):
+        // the normalized rect can't be trusted to frame the same content.
+        let path = root.join("shots/dashboard.png");
+        write_png_color(&path, 900, 900, [200, 40, 60, 255]);
+        let new_bytes = std::fs::read(&path).unwrap();
+
+        let outcomes =
+            reanchor_artifact_version(&store, &root, "run", "shots/dashboard.png", &new_bytes)
+                .unwrap();
+        assert_eq!(outcomes, vec![(id.clone(), VersionReAnchor::SceneChanged)]);
+
+        let stored = store.read_annotation("run", &id).unwrap().unwrap();
+        // Flagged for re-placement, with a "scene changed" note prefixed.
+        assert_eq!(stored.status, AnnotationStatus::Shifted);
+        assert!(stored.comment.starts_with("[scene changed]"));
+        // version_sha still re-pins so the record points at the new bytes.
+        assert_eq!(
+            stored.artifact.as_ref().unwrap().version_sha,
+            darkrun_core::hash_bytes(&new_bytes)
+        );
+    }
+
+    #[test]
+    fn reanchor_new_version_refreshes_text_in_the_same_pass() {
+        let (_d, store, root) = store();
+        // A text annotation pinned to src/payment.rs at line 42.
+        let res = submit(&store, &root, "run", text_args(AskSeverity::Should)).unwrap();
+        let id = res.annotation.id.clone();
+
+        // New version: the quoted span moved down two lines.
+        let new_bytes = b"// header\n// header2\nfn charge()\n";
+        let outcomes =
+            reanchor_artifact_version(&store, &root, "run", "src/payment.rs", new_bytes).unwrap();
+        assert_eq!(outcomes, vec![(id.clone(), VersionReAnchor::Text)]);
+
+        let stored = store.read_annotation("run", &id).unwrap().unwrap();
+        // version_sha re-pinned and the span re-based onto the new line.
+        assert_eq!(
+            stored.artifact.as_ref().unwrap().version_sha,
+            darkrun_core::hash_bytes(new_bytes)
+        );
+        if let Some(Anchor::Text { range, .. }) = &stored.anchor {
+            assert_eq!(range.start_line, 3);
+        } else {
+            panic!("anchor must still be text");
+        }
     }
 
     #[test]
@@ -985,6 +1330,98 @@ mod tests {
                 resolved, selector, ..
             } => {
                 assert!(!resolved);
+                assert_eq!(selector, ".total-row");
+            }
+            other => panic!("expected html source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_source_map_accepts_only_real_file_line() {
+        // The strong case: a real `file:line` normalizes (and trims).
+        assert_eq!(
+            parse_source_map("web/Summary.tsx:118").as_deref(),
+            Some("web/Summary.tsx:118")
+        );
+        assert_eq!(
+            parse_source_map("  web/Summary.tsx : 118  ").as_deref(),
+            Some("web/Summary.tsx:118")
+        );
+        // A path that itself contains colons splits on the LAST one.
+        assert_eq!(
+            parse_source_map("C:/app/Summary.tsx:42").as_deref(),
+            Some("C:/app/Summary.tsx:42")
+        );
+        // Garbage the opt-in injector might emit all degrade to None.
+        assert_eq!(parse_source_map(""), None);
+        assert_eq!(parse_source_map("   "), None);
+        assert_eq!(parse_source_map("web/Summary.tsx"), None); // no line
+        assert_eq!(parse_source_map("web/Summary.tsx:"), None); // empty line
+        assert_eq!(parse_source_map("web/Summary.tsx:abc"), None); // non-numeric
+        assert_eq!(parse_source_map("web/Summary.tsx:0"), None); // 1-based only
+        assert_eq!(parse_source_map(":118"), None); // empty path
+    }
+
+    /// A blank `data-darkrun-src=""` (the opt-in injector firing on an element it
+    /// couldn't map) must degrade to the selector, not flag a bogus resolve.
+    #[test]
+    fn agent_payload_treats_blank_source_map_as_unresolved() {
+        let (_d, store, root) = store();
+        let args = SubmitArgs {
+            author: AuthorType::Human,
+            work_item: WorkItem {
+                kind: WorkItemKind::Output,
+                id: "cart".into(),
+                station: "shape".into(),
+            },
+            artifact: Some(ArtifactInfo {
+                id: "cart.html".into(),
+                path: "out/cart.html".into(),
+                artifact_type: ArtifactType::Html,
+                version_sha: "aa".into(),
+            }),
+            anchor: Some(Anchor::Html {
+                pixel: PixelMark {
+                    shape: ImageShape::Pin,
+                    point: Some(NormPoint { x: 0.2, y: 0.3 }),
+                    rect: None,
+                    arrow_from: None,
+                    arrow_to: None,
+                    path: vec![],
+                    render_w: 1440,
+                    render_h: 900,
+                },
+                dom: darkrun_api::annotation::DomAnchor {
+                    selector: ".total-row".into(),
+                    // The injector fired but had nothing to map → empty string.
+                    src: Some("   ".into()),
+                    outer_html: Some("<div class=\"total-row\"></div>".into()),
+                },
+            }),
+            expression: None,
+            comment: "the total is wrong".into(),
+            ask: Ask {
+                kind: AskKind::Change,
+                severity: AskSeverity::Must,
+            },
+            suggestion: None,
+        };
+        submit(&store, &root, "run", args).unwrap();
+        let query = WorkItem {
+            kind: WorkItemKind::Output,
+            id: "cart".into(),
+            station: "shape".into(),
+        };
+        let payload = agent_re_reference(&store, &root, "run", &query).unwrap();
+        match &payload.items[0].source {
+            ResolvedSource::Html {
+                src,
+                resolved,
+                selector,
+                ..
+            } => {
+                assert!(!resolved, "a blank source map must not resolve");
+                assert!(src.is_none());
                 assert_eq!(selector, ".total-row");
             }
             other => panic!("expected html source, got {other:?}"),

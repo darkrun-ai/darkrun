@@ -25,8 +25,19 @@ darkrun-harness = { workspace = true }
 
 # Engine discovery — reads the `~/.darkrun/<slug>/engine-<pid>.json` registry to
 # find live engines and the loopback port each serves on, so the desktop can
-# auto-connect without a fixed port / env handshake.
+# auto-connect without a fixed port / env handshake. Also the project registry
+# (list/register projects, persisted as `~/.darkrun/<slug>/project.json`).
 darkrun-mcp = { workspace = true }
+
+# Domain types — the `ProjectRecord` the registry persists and the desktop reads.
+darkrun-core = { workspace = true }
+
+# Clone & register — the desktop clones a Git URL into ~/darkrun/<name> directly
+# (shells out to `git`) and validates local repos before registering them.
+darkrun-git = { workspace = true }
+
+# Home-directory resolution for the default clone root (~/darkrun).
+dirs = { workspace = true }
 
 # UI: Dioxus + the desktop (WebView) renderer, behind the `desktop` feature.
 dioxus = { version = "0.7", features = ["desktop"] }

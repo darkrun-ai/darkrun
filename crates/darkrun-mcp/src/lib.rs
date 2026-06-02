@@ -75,9 +75,9 @@ pub mod units;
 pub mod zap;
 
 pub use annotation::{
-    agent_re_reference, list as list_annotations, render_rework_feedback, station_rework_bundle,
-    submit as submit_annotation, AgentReReferencePayload, AnnotationListing, SubmitArgs,
-    SubmitResult,
+    agent_re_reference, list as list_annotations, reanchor_artifact_version, render_rework_feedback,
+    station_re_reference, station_rework_bundle, submit as submit_annotation,
+    AgentReReferencePayload, AnnotationListing, SubmitArgs, SubmitResult, VersionReAnchor,
 };
 pub use change::{change_request_intent, ChangeRequestIntent};
 pub use error::{McpError, Result};

@@ -270,7 +270,7 @@ fn review_body(
 
         // ── The feedback inbox (severity-grouped), toggled from the header ──
         if inbox_is_open {
-            {feedback_inbox_panel(cfg.clone(), run_slug.clone(), station.clone(), feedback, feedback_entries.clone())}
+            {feedback_inbox_panel(cfg.clone(), run_slug.clone(), station.clone(), feedback, feedback_entries.clone(), &outputs, active_tab, annotate_target, inbox_open)}
         }
 
         // ── The annotate surface, when an artifact is under review ──────────
@@ -669,20 +669,52 @@ fn overview_tab(review: &ReviewSessionPayload) -> Element {
 
 /// The feedback inbox panel, surfaced under the header when the operator opens
 /// it. Resolve / dismiss chips PUT the feedback status back over the wire; a
-/// successful write re-fetches the list so the count updates.
+/// successful write re-fetches the list so the count updates. The jump chip
+/// focuses the artifact the annotation is anchored to — it switches to the
+/// owning tab and opens that artifact's annotate surface at the anchor.
+#[allow(clippy::too_many_arguments)]
 fn feedback_inbox_panel(
     cfg: ConnConfig,
     run: Option<String>,
     station: Option<String>,
     feedback: Signal<Vec<FeedbackItem>>,
     entries: Vec<FeedbackEntry>,
+    outputs: &[OutputArtifact],
+    active_tab: Signal<String>,
+    annotate_target: Signal<Option<AnnotateTarget>>,
+    inbox_open: Signal<bool>,
 ) -> Element {
+    // Snapshot the outputs so the Jump resolver can match a feedback locator to
+    // a declared output (and reuse its visual/path/url) without borrowing.
+    let outputs = outputs.to_vec();
     let on_action = {
         let cfg = cfg.clone();
         let run = run.clone();
         let station = station.clone();
+        let items = feedback.read().clone();
+        let mut active_tab = active_tab;
+        let mut annotate_target = annotate_target;
+        let mut inbox_open = inbox_open;
         move |(id, action): (String, FeedbackAction)| {
-            // Only resolve/dismiss mutate; jump is a no-op surface action.
+            // Jump is a surface action: focus the anchored artifact instead of
+            // mutating the record.
+            if action == FeedbackAction::Jump {
+                if let Some(target) =
+                    jump_target(&items, &id, &outputs)
+                {
+                    // Switch to the owning tab, open the annotate surface on the
+                    // anchored artifact, and close the inbox so it's in view.
+                    active_tab.set(if target.visual {
+                        "outputs".to_string()
+                    } else {
+                        "units".to_string()
+                    });
+                    annotate_target.set(Some(target));
+                    inbox_open.set(false);
+                }
+                return;
+            }
+            // Resolve / dismiss mutate the record's status.
             let new_status = match action {
                 FeedbackAction::Resolve => Some(FeedbackStatus::Addressed),
                 FeedbackAction::Dismiss => Some(FeedbackStatus::NonActionable),
@@ -721,6 +753,52 @@ fn feedback_inbox_panel(
             }
         }
     }
+}
+
+/// Resolve a feedback id to the artifact it's anchored to, building the
+/// [`AnnotateTarget`] the Jump chip opens. The item's `source_ref` (locator) is
+/// matched against the declared outputs first — a match reuses the output's
+/// visual class + path + screenshot URL so the surface opens correctly; anything
+/// else falls back to a text target keyed on the locator (the unit/output id).
+fn jump_target(
+    items: &[FeedbackItem],
+    id: &str,
+    outputs: &[OutputArtifact],
+) -> Option<AnnotateTarget> {
+    let item = items.iter().find(|i| i.feedback_id == id)?;
+    // The locator is the back-reference to the origin artifact; fall back to the
+    // title so a Jump still lands on *something* the operator can recognize.
+    let locator = item
+        .source_ref
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| (!item.title.is_empty()).then(|| item.title.clone()))?;
+
+    // Prefer an exact output match (gives us the visual class + screenshot URL),
+    // then a contains match so a `payment.rs:42` locator still finds `payment.rs`.
+    if let Some(out) = outputs
+        .iter()
+        .find(|o| o.name == locator || o.run_relative_path.as_deref() == Some(locator.as_str()))
+        .or_else(|| outputs.iter().find(|o| locator.contains(&o.name)))
+    {
+        let visual = output_is_visual(out);
+        return Some(AnnotateTarget {
+            label: out.name.clone(),
+            path: out.run_relative_path.clone().unwrap_or_else(|| out.name.clone()),
+            work_id: out.name.clone(),
+            visual,
+            screenshot_url: out.relative_path.clone(),
+        });
+    }
+
+    // No declared output — anchor a text surface on the locator directly.
+    Some(AnnotateTarget {
+        label: locator.clone(),
+        path: locator.clone(),
+        work_id: locator,
+        visual: false,
+        screenshot_url: None,
+    })
 }
 
 /// The annotate surface: the toolbar + overlay + comment panel over the artifact
@@ -765,19 +843,60 @@ fn AnnotateSurface(
 ) -> Element {
     let kind = if visual { SurfaceKind::Visual } else { SurfaceKind::Text };
     let default_tool = if visual { AnnotateTool::Pin } else { AnnotateTool::Select };
-    let mut tool = use_signal(|| default_tool);
-    let mut pins = use_signal(Vec::<PinPoint>::new);
+    let tool = use_signal(|| default_tool);
+    // The placed visual marks (pin/rect/arrow/path/highlight) over the surface.
+    let mut marks = use_signal(Vec::<VisualMark>::new);
     let mut comments = use_signal(Vec::<String>::new);
     let submit = use_signal(|| Submit::Idle);
 
-    let place = move |(x, y, w, h): (f64, f64, f64, f64)| {
-        let note = format!("pin {}", pins.read().len() + 1);
-        let pt = if w > 0.0 && h > 0.0 {
-            place_pin(x, y, w, h, note)
-        } else {
-            PinPoint::new(x, y, note)
+    // Capture a completed gesture for the active tool. The stage forwards the
+    // gesture as normalized `0..1` geometry (start point, end point, and a
+    // freehand point list for the pen) so this only has to wrap the matching
+    // [`VisualMark`].
+    let place = move |gesture: Gesture| {
+        let active = *tool.read();
+        let n = marks.read().len() + 1;
+        let mark = match active {
+            AnnotateTool::Box => {
+                let r = gesture.norm_rect(format!("box {n}"));
+                Some(VisualMark::Rect { rect: r })
+            }
+            AnnotateTool::Highlight => {
+                let r = gesture.norm_rect(format!("highlight {n}"));
+                Some(VisualMark::Highlight { rect: r })
+            }
+            AnnotateTool::Arrow => Some(VisualMark::Arrow {
+                from: PinPoint::new(gesture.start.0, gesture.start.1, String::new()),
+                to: PinPoint::new(gesture.end.0, gesture.end.1, format!("arrow {n}")),
+            }),
+            AnnotateTool::Pen => {
+                let pts: Vec<PinPoint> = gesture
+                    .path
+                    .iter()
+                    .map(|(x, y)| PinPoint::new(*x, *y, String::new()))
+                    .collect();
+                // A stroke needs at least two points to be a path; a stray tap
+                // degrades to a pin so the click still lands a mark.
+                if pts.len() >= 2 {
+                    let mut pts = pts;
+                    if let Some(last) = pts.last_mut() {
+                        last.note = format!("pen {n}");
+                    }
+                    Some(VisualMark::Path { points: pts })
+                } else {
+                    Some(VisualMark::Pin {
+                        point: PinPoint::new(gesture.start.0, gesture.start.1, format!("pin {n}")),
+                    })
+                }
+            }
+            // Pin (and any other/neutral spatial tool) drops a point.
+            _ => Some(VisualMark::Pin {
+                point: PinPoint::new(gesture.start.0, gesture.start.1, format!("pin {n}")),
+            }),
         };
-        pins.write().push(pt);
+        if let Some(mark) = mark {
+            marks.write().push(mark);
+        }
     };
 
     let do_submit = {
@@ -786,29 +905,44 @@ fn AnnotateSurface(
         let station = station.clone();
         let label = label.clone();
         let path = path.clone();
-        move |typed: String| {
+        move |draft: CommentDraft| {
             let cfg = cfg.clone();
             let run = run.clone();
             let station = station.clone();
             let label = label.clone();
             let path = path.clone();
+            let active = *tool.read();
             let mut submit = submit;
             // Capture the comment typed in the panel before reading the thread so
-            // the user's text ships with the annotation, not just the pins/counts.
-            let typed = typed.trim();
+            // the user's text ships with the annotation, not just the marks/counts.
+            let typed = draft.comment.trim();
             if !typed.is_empty() {
                 comments.write().push(typed.to_string());
             }
-            let pin_list = pins.read().clone();
+            // The `suggest` tool authored a replacement; `strike` is a deletion —
+            // both ride the annotation's suggestion slot (a diff on the span).
+            let suggestion = if active == AnnotateTool::Strike {
+                // A strike marks the span for removal — model it as a suggestion
+                // with an empty replacement, consistent with how `suggest` was
+                // wired (resolution → inline fix), so the agent deletes the span.
+                Some(String::new())
+            } else {
+                let s = draft.suggestion.trim().to_string();
+                (!s.is_empty()).then_some(s)
+            };
+            let mark_list = marks.read().clone();
             let comment_list = comments.read().clone();
             spawn(async move {
                 submit.set(Submit::Sending);
                 let result = if visual {
-                    // Visual artifact → record the pin geometry over the
-                    // screenshot via the visual-review annotate path.
-                    let pins = pin_list
+                    // Visual artifact → record each mark's shape + normalized
+                    // geometry over the screenshot. Each mark maps to the wire's
+                    // `ImageShape` (pin/rect/arrow/path/highlight); the legacy pin
+                    // channel carries the anchor point + a structured note so the
+                    // exact geometry ships to the agent.
+                    let pins = mark_list
                         .iter()
-                        .map(|p| VisualReviewPin { x: p.x, y: p.y, note: p.note.clone() })
+                        .map(visual_mark_to_pin)
                         .collect();
                     let req = OutputReviewRequest {
                         annotations: VisualReviewAnnotations { pins, comments: comment_list.clone() },
@@ -821,10 +955,25 @@ fn AnnotateSurface(
                         submit.set(Submit::Failed("no run/station to attach to".into()));
                         return;
                     };
-                    let body = if comment_list.is_empty() {
+                    let mut body = if comment_list.is_empty() {
                         "(no comment)".to_string()
                     } else {
                         comment_list.join("\n")
+                    };
+                    // A suggestion (or a strike's deletion) rides in the body as a
+                    // fenced replacement and flips the resolution to a single
+                    // inline fix the agent applies — the annotation's `suggestion`
+                    // slot, on the wire. `strike` ships an empty replacement, i.e.
+                    // "remove this span".
+                    let resolution = match &suggestion {
+                        Some(repl) => {
+                            if active == AnnotateTool::Strike {
+                                body.push_str("\n\nstrike: remove the selected span.");
+                            }
+                            body.push_str(&format!("\n\n```suggestion\n{repl}\n```"));
+                            Some(darkrun_api::common::FeedbackResolution::InlineFix)
+                        }
+                        None => None,
                     };
                     let req = FeedbackCreateRequest {
                         title: format!("review: {label}"),
@@ -834,15 +983,15 @@ fn AnnotateSurface(
                         source_ref: Some(path.clone()),
                         anchor: None,
                         inline_anchor: None,
-                        resolution: None,
+                        resolution,
                         attachment_data_url: None,
                     };
                     wire::submit_annotation(&cfg, &run, &station, &req).await
                 };
                 match result {
                     Ok(()) => submit.set(Submit::Sent(format!(
-                        "annotation recorded ({} pins · {} comments)",
-                        pin_list.len(),
+                        "annotation recorded ({} marks · {} comments)",
+                        mark_list.len(),
                         comment_list.len(),
                     ))),
                     Err(e) => submit.set(Submit::Failed(e.to_string())),
@@ -858,8 +1007,7 @@ fn AnnotateSurface(
         .map(|(i, c)| ThreadComment::new(i + 1, c.clone()))
         .collect();
     let active_tool = *tool.read();
-    let pin_points = pins.read().clone();
-    let stage_dims = use_signal(|| (0.0_f64, 0.0_f64));
+    let placed = marks.read().clone();
 
     rsx! {
         Card {
@@ -875,16 +1023,21 @@ fn AnnotateSurface(
                 AnnotateToolbar {
                     kind,
                     active: active_tool,
-                    on_pick: move |t| tool.set(t),
+                    on_pick: move |t| {
+                        let mut tool = tool;
+                        tool.set(t);
+                    },
                 }
             }
             div { style: "display:flex;gap:16px;align-items:flex-start;",
-                // The artifact stage — a click drops a pin when a spatial tool is active.
-                {annotate_stage(visual, screenshot_url.clone(), pin_points, stage_dims, place)}
+                // The artifact stage — the active tool's gesture lands the
+                // matching shape (pin/box/arrow/pen/highlight).
+                {annotate_stage(visual, active_tool, screenshot_url.clone(), placed, place)}
                 div { style: "flex:1;min-width:0;",
                     CommentPanel {
                         comments: thread,
                         placeholder: "comment on this artifact…".to_string(),
+                        suggest: !visual && active_tool == AnnotateTool::Suggest,
                         on_submit: do_submit,
                     }
                     SubmitStatus { state: submit.read().clone() }
@@ -899,16 +1052,55 @@ fn AnnotateSurface(
     }
 }
 
+/// The stage's fixed pixel box — the flex-basis width and min-height the gesture
+/// math normalizes against. Kept here so the click→`0..1` mapping is one source.
+const STAGE_W: f64 = 360.0;
+const STAGE_H: f64 = 220.0;
+
+/// A completed pointer gesture over the visual stage, in normalized `0..1` space.
+///
+/// `start`/`end` bracket a click or a drag (equal for a single click); `path` is
+/// the freehand point list the pen accumulates. The active tool decides which of
+/// these it consumes — a [`VisualMark`] is built in the surface's `place`.
+#[derive(Debug, Clone, Default)]
+struct Gesture {
+    /// The gesture's start point (drag tail / click), `0..1`.
+    start: (f64, f64),
+    /// The gesture's end point (drag head / click), `0..1`.
+    end: (f64, f64),
+    /// The freehand stroke points, in draw order, `0..1` (pen only).
+    path: Vec<(f64, f64)>,
+}
+
+impl Gesture {
+    /// The drag rectangle as a normalized [`NormBox`], origin-normalized so the
+    /// drag direction doesn't matter.
+    fn norm_rect(&self, note: impl Into<String>) -> NormBox {
+        NormBox::from_corners(self.start.0, self.start.1, self.end.0, self.end.1, note)
+    }
+}
+
+/// Normalize a stage pixel offset into the `0..1` box.
+fn norm_xy(px: f64, py: f64) -> (f64, f64) {
+    ((px / STAGE_W).clamp(0.0, 1.0), (py / STAGE_H).clamp(0.0, 1.0))
+}
+
 /// The artifact stage the annotate surface paints over — the screenshot (visual)
-/// or a text placeholder. Forwards a click's pixel offset + the stage box so the
-/// caller can normalize the pin.
+/// or a text placeholder. Captures the active tool's gesture (a click for `pin`,
+/// a drag for `box`/`highlight`/`arrow`, a tracked stroke for `pen`) and forwards
+/// it normalized; renders the matching overlay for every placed mark.
 fn annotate_stage(
     visual: bool,
+    active: AnnotateTool,
     screenshot_url: Option<String>,
-    pins: Vec<PinPoint>,
-    _stage_dims: Signal<(f64, f64)>,
-    mut on_place: impl FnMut((f64, f64, f64, f64)) + 'static,
+    marks: Vec<VisualMark>,
+    mut on_place: impl FnMut(Gesture) + 'static,
 ) -> Element {
+    // The in-flight gesture: the press origin and (for the pen) the accumulating
+    // stroke. `None` origin means the pointer is up.
+    let mut origin = use_signal(|| None::<(f64, f64)>);
+    let mut stroke = use_signal(Vec::<(f64, f64)>::new);
+
     let stage = format!(
         "position:relative;flex:0 0 360px;min-height:220px;border-radius:8px;\
          border:1px solid {border};background:{base};overflow:hidden;\
@@ -917,19 +1109,41 @@ fn annotate_stage(
         base = tokens::SURFACE_BASE,
         cursor = if visual { "cursor:crosshair;" } else { "" },
     );
+    let is_pen = active == AnnotateTool::Pen;
     rsx! {
         div {
             class: "dr-annotate-stage",
             style: "{stage}",
-            onclick: move |evt| {
+            onmousedown: move |evt| {
                 if !visual {
                     return;
                 }
-                let coords = evt.element_coordinates();
-                // Width/height are read from the event's element rect when
-                // available; fall back to the fixed flex-basis so the pin still
-                // lands somewhere sensible.
-                on_place((coords.x, coords.y, 360.0, 220.0));
+                let c = evt.element_coordinates();
+                let p = norm_xy(c.x, c.y);
+                origin.set(Some(p));
+                stroke.set(vec![p]);
+            },
+            onmousemove: move |evt| {
+                // Only the pen needs the intermediate points; other tools resolve
+                // from the press origin + the release point.
+                if !visual || !is_pen || origin.read().is_none() {
+                    return;
+                }
+                let c = evt.element_coordinates();
+                stroke.write().push(norm_xy(c.x, c.y));
+            },
+            onmouseup: move |evt| {
+                if !visual {
+                    return;
+                }
+                let Some(start) = *origin.read() else { return };
+                let c = evt.element_coordinates();
+                let end = norm_xy(c.x, c.y);
+                let mut path = stroke.read().clone();
+                path.push(end);
+                on_place(Gesture { start, end, path });
+                origin.set(None);
+                stroke.set(Vec::new());
             },
             if visual {
                 if let Some(url) = screenshot_url {
@@ -941,11 +1155,12 @@ fn annotate_stage(
                     div {
                         style: "display:flex;align-items:center;justify-content:center;\
                                 height:220px;color:var(--dr-text-faint);font-size:12px;",
-                        "drop pins to point at the surface"
+                        "draw on the surface to point at it"
                     }
                 }
-                for (i, pt) in pins.iter().enumerate() {
-                    PinMarker { point: pt.clone(), number: i + 1 }
+                // Render every placed mark with its matching overlay primitive.
+                for (i, mark) in marks.iter().enumerate() {
+                    {render_mark(mark, i + 1)}
                 }
             } else {
                 div {
@@ -957,6 +1172,104 @@ fn annotate_stage(
             }
         }
     }
+}
+
+/// Paint one placed [`VisualMark`] with the overlay primitive matching its shape.
+fn render_mark(mark: &VisualMark, number: usize) -> Element {
+    match mark {
+        VisualMark::Pin { point } => rsx! { PinMarker { point: point.clone(), number } },
+        VisualMark::Rect { rect } => rsx! {
+            BoxMarker { x: rect.x, y: rect.y, w: rect.w, h: rect.h, number }
+        },
+        VisualMark::Highlight { rect } => rsx! {
+            HighlightMarker { x: rect.x, y: rect.y, w: rect.w, h: rect.h, number }
+        },
+        VisualMark::Arrow { from, to } => rsx! {
+            ArrowMarker { from: from.clone(), to: to.clone(), number }
+        },
+        VisualMark::Path { points } => rsx! {
+            PathMarker { points: points.clone(), number }
+        },
+    }
+}
+
+/// Map a placed [`VisualMark`] onto the wire's typed [`PixelMark`]/[`ImageShape`]
+/// geometry, paired with the `0..1` render box. This is the load-bearing
+/// pin→`ImageShape` routing: `pin`→point, `box`→rect, `highlight`→highlight rect,
+/// `arrow`→from/to, `pen`→path. The render dimensions are the fixed stage box.
+fn mark_to_anchor(mark: &VisualMark) -> darkrun_api::Anchor {
+    use darkrun_api::{ImageShape, NormPoint, NormRect, PixelMark};
+    let pt = |p: &PinPoint| NormPoint { x: p.x, y: p.y };
+    let mark = match mark {
+        VisualMark::Pin { point } => PixelMark {
+            shape: ImageShape::Pin,
+            point: Some(pt(point)),
+            rect: None,
+            arrow_from: None,
+            arrow_to: None,
+            path: Vec::new(),
+            render_w: STAGE_W as u32,
+            render_h: STAGE_H as u32,
+        },
+        VisualMark::Rect { rect } => PixelMark {
+            shape: ImageShape::Rect,
+            point: None,
+            rect: Some(NormRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }),
+            arrow_from: None,
+            arrow_to: None,
+            path: Vec::new(),
+            render_w: STAGE_W as u32,
+            render_h: STAGE_H as u32,
+        },
+        VisualMark::Highlight { rect } => PixelMark {
+            shape: ImageShape::Highlight,
+            point: None,
+            rect: Some(NormRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }),
+            arrow_from: None,
+            arrow_to: None,
+            path: Vec::new(),
+            render_w: STAGE_W as u32,
+            render_h: STAGE_H as u32,
+        },
+        VisualMark::Arrow { from, to } => PixelMark {
+            shape: ImageShape::Arrow,
+            point: None,
+            rect: None,
+            arrow_from: Some(pt(from)),
+            arrow_to: Some(pt(to)),
+            path: Vec::new(),
+            render_w: STAGE_W as u32,
+            render_h: STAGE_H as u32,
+        },
+        VisualMark::Path { points } => PixelMark {
+            shape: ImageShape::Path,
+            point: None,
+            rect: None,
+            arrow_from: None,
+            arrow_to: None,
+            path: points.iter().map(pt).collect(),
+            render_w: STAGE_W as u32,
+            render_h: STAGE_H as u32,
+        },
+    };
+    darkrun_api::Anchor::Image { mark }
+}
+
+/// Project a placed [`VisualMark`] onto the legacy [`VisualReviewPin`] channel:
+/// the anchor point carries the representative coordinate, and the note carries
+/// the shape slug plus the serialized [`mark_to_anchor`] geometry so the exact
+/// `ImageShape` ships to the agent even though the pin channel is point-only.
+fn visual_mark_to_pin(mark: &VisualMark) -> VisualReviewPin {
+    let anchor = mark_to_anchor(mark);
+    let geometry = serde_json::to_string(&anchor).unwrap_or_default();
+    let pt = mark.anchor_point();
+    let base = mark.note();
+    let note = if base.is_empty() {
+        format!("[{}] {}", mark.shape_slug(), geometry)
+    } else {
+        format!("{base} [{}] {}", mark.shape_slug(), geometry)
+    };
+    VisualReviewPin { x: pt.x, y: pt.y, note }
 }
 
 /// Whether an output artifact opens the visual (spatial) annotate surface.
@@ -1640,5 +1953,189 @@ fn output_kind(out: &OutputArtifact) -> &'static str {
         Video => "video",
         Code => "code",
         File => "file",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use darkrun_api::common::{AuthorType, FeedbackOrigin, FeedbackStatus};
+    use darkrun_api::session::{OutputArtifact, OutputArtifactType};
+
+    fn item(id: &str, source_ref: Option<&str>, title: &str) -> FeedbackItem {
+        FeedbackItem {
+            feedback_id: id.into(),
+            title: title.into(),
+            body: "b".into(),
+            status: FeedbackStatus::Pending,
+            origin: FeedbackOrigin::UserVisual,
+            severity: None,
+            author: "you".into(),
+            author_type: AuthorType::Human,
+            created_at: "2026-05-31T00:00:00Z".into(),
+            visit: 1,
+            source_ref: source_ref.map(Into::into),
+            closed_by: None,
+            resolution: None,
+            replies: vec![],
+            inline_anchor: None,
+            scope: None,
+            iterations: vec![],
+            closure_reply: None,
+            closure_reply_unread: None,
+        }
+    }
+
+    fn output(name: &str, ty: OutputArtifactType) -> OutputArtifact {
+        OutputArtifact {
+            station: "build".into(),
+            name: name.into(),
+            artifact_type: ty,
+            language: None,
+            directory: None,
+            content: None,
+            relative_path: Some(format!("/api/output/{name}")),
+            run_relative_path: Some(format!("outputs/{name}")),
+        }
+    }
+
+    #[test]
+    fn jump_matches_a_visual_output_and_carries_its_screenshot() {
+        let items = vec![item("FB-01", Some("dashboard.png"), "review: dashboard")];
+        let outputs = vec![output("dashboard.png", OutputArtifactType::Image)];
+        let target = jump_target(&items, "FB-01", &outputs).expect("resolves");
+        assert!(target.visual, "an image output opens the visual surface");
+        assert_eq!(target.work_id, "dashboard.png");
+        assert_eq!(target.path, "outputs/dashboard.png");
+        assert_eq!(target.screenshot_url.as_deref(), Some("/api/output/dashboard.png"));
+    }
+
+    #[test]
+    fn jump_matches_a_text_output_on_the_text_surface() {
+        let items = vec![item("FB-02", Some("payment.rs"), "review: payment")];
+        let outputs = vec![output("payment.rs", OutputArtifactType::Code)];
+        let target = jump_target(&items, "FB-02", &outputs).expect("resolves");
+        assert!(!target.visual, "a code output stays on the text surface");
+        assert_eq!(target.work_id, "payment.rs");
+    }
+
+    #[test]
+    fn jump_finds_the_output_when_the_locator_carries_a_line_suffix() {
+        let items = vec![item("FB-03", Some("payment.rs:42-44"), "review")];
+        let outputs = vec![output("payment.rs", OutputArtifactType::Code)];
+        let target = jump_target(&items, "FB-03", &outputs).expect("resolves via contains");
+        assert_eq!(target.work_id, "payment.rs");
+    }
+
+    #[test]
+    fn jump_falls_back_to_a_text_target_for_an_unmatched_locator() {
+        // No declared output matches — a unit annotation anchors on the locator.
+        let items = vec![item("FB-04", Some("auth-flow"), "review: auth-flow")];
+        let target = jump_target(&items, "FB-04", &[]).expect("resolves to text");
+        assert!(!target.visual);
+        assert_eq!(target.work_id, "auth-flow");
+        assert_eq!(target.label, "auth-flow");
+    }
+
+    #[test]
+    fn jump_falls_back_to_the_title_when_no_source_ref() {
+        let items = vec![item("FB-05", None, "loose note")];
+        let target = jump_target(&items, "FB-05", &[]).expect("resolves to title");
+        assert_eq!(target.label, "loose note");
+    }
+
+    #[test]
+    fn jump_returns_none_for_an_unknown_id() {
+        let items = vec![item("FB-06", Some("x"), "t")];
+        assert!(jump_target(&items, "FB-99", &[]).is_none());
+    }
+
+    // --- visual mark → ImageShape routing ----------------------------------
+
+    #[test]
+    fn pin_mark_maps_to_a_point_anchor() {
+        let mark = VisualMark::Pin { point: PinPoint::new(0.4, 0.6, "pin 1") };
+        let darkrun_api::Anchor::Image { mark: pm } = mark_to_anchor(&mark) else {
+            panic!("pin → image anchor");
+        };
+        assert_eq!(pm.shape, darkrun_api::ImageShape::Pin);
+        let p = pm.point.expect("a pin carries a point");
+        assert!((p.x - 0.4).abs() < 1e-9 && (p.y - 0.6).abs() < 1e-9);
+        assert!(pm.rect.is_none() && pm.path.is_empty());
+        assert_eq!(pm.render_w, STAGE_W as u32);
+    }
+
+    #[test]
+    fn box_and_highlight_map_to_their_rect_shapes() {
+        let r = NormBox::new(0.1, 0.2, 0.3, 0.25, "box 1");
+        let darkrun_api::Anchor::Image { mark: pm } =
+            mark_to_anchor(&VisualMark::Rect { rect: r.clone() })
+        else {
+            panic!("rect anchor");
+        };
+        assert_eq!(pm.shape, darkrun_api::ImageShape::Rect);
+        let rect = pm.rect.expect("a rect carries a rect");
+        assert!((rect.w - 0.3).abs() < 1e-9 && (rect.h - 0.25).abs() < 1e-9);
+
+        let darkrun_api::Anchor::Image { mark: hm } =
+            mark_to_anchor(&VisualMark::Highlight { rect: r })
+        else {
+            panic!("highlight anchor");
+        };
+        // Highlight is rect-shaped but tagged distinctly so the agent knows it
+        // was a soft sweep, not a hard box.
+        assert_eq!(hm.shape, darkrun_api::ImageShape::Highlight);
+        assert!(hm.rect.is_some());
+    }
+
+    #[test]
+    fn arrow_mark_carries_tail_and_head() {
+        let mark = VisualMark::Arrow {
+            from: PinPoint::new(0.1, 0.1, ""),
+            to: PinPoint::new(0.8, 0.7, "arrow 1"),
+        };
+        let darkrun_api::Anchor::Image { mark: pm } = mark_to_anchor(&mark) else {
+            panic!("arrow anchor");
+        };
+        assert_eq!(pm.shape, darkrun_api::ImageShape::Arrow);
+        let from = pm.arrow_from.expect("tail");
+        let to = pm.arrow_to.expect("head");
+        assert!((from.x - 0.1).abs() < 1e-9);
+        assert!((to.x - 0.8).abs() < 1e-9 && (to.y - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pen_mark_carries_the_full_path() {
+        let mark = VisualMark::Path {
+            points: vec![
+                PinPoint::new(0.1, 0.1, ""),
+                PinPoint::new(0.2, 0.3, ""),
+                PinPoint::new(0.4, 0.5, "pen 1"),
+            ],
+        };
+        let darkrun_api::Anchor::Image { mark: pm } = mark_to_anchor(&mark) else {
+            panic!("path anchor");
+        };
+        assert_eq!(pm.shape, darkrun_api::ImageShape::Path);
+        assert_eq!(pm.path.len(), 3);
+        assert!((pm.path[2].y - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn visual_pin_anchor_point_and_note_carry_the_shape() {
+        // The legacy pin channel keeps the representative point and embeds the
+        // shape slug + serialized geometry in the note, so a rect still ships its
+        // full geometry to the agent.
+        let mark = VisualMark::Rect { rect: NormBox::new(0.2, 0.25, 0.4, 0.3, "box 1") };
+        let pin = visual_mark_to_pin(&mark);
+        // Anchor point is the rect's top-left.
+        assert!((pin.x - 0.2).abs() < 1e-9 && (pin.y - 0.25).abs() < 1e-9);
+        assert!(pin.note.contains("[rect]"), "note tags the shape: {}", pin.note);
+        assert!(pin.note.contains("box 1"));
+        // The embedded geometry round-trips back to an image anchor.
+        let json_start = pin.note.find('{').expect("embeds json");
+        let anchor: darkrun_api::Anchor =
+            serde_json::from_str(&pin.note[json_start..]).expect("geometry parses");
+        assert_eq!(anchor.artifact_type(), darkrun_api::ArtifactType::Image);
     }
 }

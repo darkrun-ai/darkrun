@@ -104,12 +104,15 @@ pub fn sweep(store: &StateStore, run: &str) -> Result<()> {
 }
 
 /// Accept an intentional change to a locked artifact: re-witness it to its
-/// current content hash and clear the drift entry. Returns `false` if the path
-/// isn't witnessed or the file is unreadable. (The other resolution — reverting
-/// the artifact — needs no tool: the next [`sweep`] clears the drift on its own.)
+/// current content hash, re-anchor every annotation pinned to it against the new
+/// version (text re-anchors; image/pdf regions re-crop), and clear the drift
+/// entry. Returns `false` if the path isn't witnessed or the file is unreadable.
+/// (The other resolution — reverting the artifact — needs no tool: the next
+/// [`sweep`] clears the drift on its own.)
 pub fn accept(store: &StateStore, run: &str, path: &str) -> Result<bool> {
     let root = repo_root(store);
-    let Some(hash) = hash_file(&root.join(path)) else {
+    let full = root.join(path);
+    let Some(hash) = hash_file(&full) else {
         return Ok(false);
     };
     let mut witnesses = store.read_witnesses(run)?;
@@ -123,6 +126,13 @@ pub fn accept(store: &StateStore, run: &str, path: &str) -> Result<bool> {
     if found {
         store.write_witnesses(run, &witnesses)?;
         clear(store, run, &drift_id_for(path))?;
+        // Refresh the annotations on this artifact against the new version in
+        // one pass: text spans re-anchor, image/pdf region crops are re-cut from
+        // the new bytes, and a region that no longer frames the same content is
+        // flagged rather than silently mis-cropped.
+        if let Ok(bytes) = fs::read(&full) {
+            crate::annotation::reanchor_artifact_version(store, &root, run, path, &bytes)?;
+        }
     }
     Ok(found)
 }
