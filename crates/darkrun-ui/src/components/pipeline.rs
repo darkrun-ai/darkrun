@@ -61,7 +61,7 @@ pub fn StationPipeline(
             style: "{root}",
             role: "img",
             "aria-label": "station pipeline",
-            for dot in dots.iter() {
+            for (i, dot) in dots.iter().enumerate() {
                 {
                     let hue = dot.phase.hue();
                     let dim = matches!(dot.step, Step::Pending);
@@ -73,7 +73,17 @@ pub fn StationPipeline(
                     let item_style = "display:inline-flex;flex-direction:column;align-items:center;gap:3px;";
                     let label_color = if dim { tokens::TEXT_FAINT } else { tokens::TEXT_MUTED };
                     let label_style = format!("color:{label_color};font-size:10px;line-height:1;");
+                    // A muted arrow between phases (phase flows left to right),
+                    // mirroring the station strip's connectors. Not before the first.
+                    let arrow_style = format!(
+                        "color:{};font-size:{}px;line-height:1;",
+                        tokens::TEXT_FAINT,
+                        size * 0.7,
+                    );
                     rsx! {
+                        if i > 0 {
+                            span { class: "dr-pipeline-arrow", "aria-hidden": "true", style: "{arrow_style}", "\u{2192}" }
+                        }
                         span {
                             class: "dr-pipeline-step",
                             "data-phase": dot.phase.name(),

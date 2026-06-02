@@ -96,6 +96,13 @@ impl Authorship {
         darkrun_git::branch_authored_by(&self.repo_root, &self.base, &run_branch(slug), email)
             .unwrap_or(false)
     }
+
+    /// The run branch's author NAME (the run owner), for display + author search.
+    fn author(&self, slug: &str) -> Option<String> {
+        darkrun_git::branch_author(&self.repo_root, &self.base, &run_branch(slug))
+            .ok()
+            .flatten()
+    }
 }
 
 /// Render a `serde`-enum value (e.g. [`Status`]) to its wire string. Falls back
@@ -142,7 +149,12 @@ fn active_phase(run: &Run, state: Option<&RunState>) -> Option<String> {
 /// `authored_by_me` is the engine's "Mine" predicate for this run's branch; the
 /// caller resolves it once via [`Authorship`] and threads it in so the
 /// projection stays a pure function.
-fn summarize(run: &Run, state: Option<&RunState>, authored_by_me: bool) -> RunSummary {
+fn summarize(
+    run: &Run,
+    state: Option<&RunState>,
+    authored_by_me: bool,
+    author: Option<String>,
+) -> RunSummary {
     RunSummary {
         slug: run.slug.clone(),
         title: run.title.clone(),
@@ -153,9 +165,7 @@ fn summarize(run: &Run, state: Option<&RunState>, authored_by_me: bool) -> RunSu
         progress: progress_from_state(state),
         started_at: run.frontmatter.started_at.clone(),
         authored_by_me,
-        // The list path resolves authorship by identity match rather than
-        // pulling the branch's author signature, so leave `author` unset here.
-        author: None,
+        author,
     }
 }
 
@@ -203,7 +213,8 @@ pub async fn list_runs(State(state): State<AppState>) -> Response {
             }
             let state = store.read_state(&slug).ok().flatten();
             let mine = authorship.mine(&slug);
-            summaries.push(summarize(&run, state.as_ref(), mine));
+            let author = authorship.author(&slug);
+            summaries.push(summarize(&run, state.as_ref(), mine, author));
         }
     }
 

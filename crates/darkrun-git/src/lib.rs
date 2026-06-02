@@ -24,7 +24,9 @@ mod shell;
 
 use std::path::{Path, PathBuf};
 
-pub use authorship::{branch_authored_by, current_identity_email, run_authored_by_me};
+pub use authorship::{
+    branch_author, branch_authored_by, current_identity_email, run_authored_by_me,
+};
 pub use backend::{CreateOptions, GitBackend, WorktreeInfo};
 pub use clone::{clone_repo, default_clone_dest, repo_name_from_url};
 pub use error::{GitError, Result};

@@ -100,6 +100,38 @@ pub fn branch_authored_by(
     Ok(false)
 }
 
+/// The author NAME of the most recent commit on `head` beyond `base` — the owner
+/// of the run's branch, for display and author search. `None` when the branch is
+/// missing or carries none of its own commits.
+pub fn branch_author(
+    repo_root: impl AsRef<Path>,
+    base: &str,
+    head: &str,
+) -> Result<Option<String>> {
+    let repo = Repository::discover(repo_root.as_ref())
+        .map_err(|_| GitError::NotARepo(repo_root.as_ref().to_path_buf()))?;
+    let Some(head_oid) = resolve(&repo, head) else {
+        return Ok(None);
+    };
+    let mut walk = repo.revwalk()?;
+    walk.set_sorting(Sort::TIME)?;
+    walk.push(head_oid)?;
+    if let Some(base_oid) = resolve(&repo, base) {
+        walk.hide(base_oid)?;
+    }
+    for oid in walk {
+        let commit = repo.find_commit(oid?)?;
+        let author = commit.author();
+        if let Some(name) = author.name() {
+            let n = name.trim();
+            if !n.is_empty() {
+                return Ok(Some(n.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Whether the current git identity authored any commit on a run's branch.
 ///
 /// Convenience wrapper over [`current_identity_email`] + [`branch_authored_by`]
