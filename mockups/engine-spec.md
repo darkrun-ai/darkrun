@@ -7,8 +7,13 @@ Worker; Run; Checkpoint; Reviewer; Explorer). Companion to `merge-engine.md`
 
 The single load-bearing idea everything else hangs on: **a Run's state is a pure
 function of on-disk signals + git branch topology, computed live every tick.**
-There is no authoritative `state.json` snapshot to keep in sync — derive, don't
-store. `state.json` (if kept at all) is a disposable read-through cache.
+There is **no `state.json`** — the predecessor's migrator *deletes* any pre-existing
+file and the engine never reads or writes it for phase (verified:
+`current-state.ts:66` "readStageState removed (v4)", `parser.ts:229` "v4 contract:
+state.json is gone", `repair-agent.ts:201` "the v0→v4 migrator deletes the file").
+darkrun must drop `state.json` entirely — NOT keep it as a cache. Phase/status/gate
+outcome are derived on demand from per-unit FM (`iterations[]`, `reviews{}`,
+`approvals{}`) + feedback `closed_at` + branch-merge state.
 
 ---
 
@@ -246,7 +251,8 @@ dispatch-build time; one slot per logical prompt, overwrite-on-rerun.
 2. Locked artifacts never written → persist under `stations/<station>/artifacts/`.
 3. Brief/outcome only a viz label → real `brief.md` (phase pre/post) + observations.
 4. Units carry no `reviews`/`approvals`/`iterations`/`input_witnesses` → add them.
-5. `state.json` snapshot → derive phase from on-disk signals (cache at most).
+5. `state.json` snapshot → DROP it entirely; derive phase from on-disk signals
+   (the predecessor's migrator deletes the file — there is no cache).
 6. Run-level `witnesses.json` → per-slot witnesses.
 7. No `decisions.jsonl`, no `elaboration.md`, no per-station `knowledge`/`discovery`.
 8. No three-track cursor priority / no multi-layer loop guards.
