@@ -60,21 +60,26 @@ pub fn phase(p: RunPhase) -> Phase {
 /// finished station.
 fn station_status(
     info: &StationStateInfo,
-    current_station: Option<&str>,
+    index: usize,
+    active_index: Option<usize>,
 ) -> StationStatus {
+    // A merged station is authoritatively Done regardless of position.
     if info.merged_into_main {
         return StationStatus::Done;
     }
     if let Some(tok) = info.status.as_deref() {
-        let parsed = StationStatus::parse(tok);
-        if matches!(parsed, StationStatus::Done) {
+        if matches!(StationStatus::parse(tok), StationStatus::Done) {
             return StationStatus::Done;
         }
     }
-    if current_station == Some(info.station.as_str()) {
-        return StationStatus::Current;
+    // Otherwise the index-relative ordering comes from the SHARED
+    // `darkrun_core::derive::station_status` — the same pure logic the engine and
+    // HTTP run — so the desktop strip can't disagree with the other surfaces.
+    match darkrun_core::derive::station_status(index, active_index) {
+        darkrun_core::domain::Status::Completed => StationStatus::Done,
+        darkrun_core::domain::Status::Active => StationStatus::Current,
+        _ => StationStatus::Pending,
     }
-    StationStatus::Pending
 }
 
 /// Project the review payload's ordered `station_states` into the strip's
@@ -90,10 +95,12 @@ pub fn station_items(
     feedback_stations: &[String],
 ) -> Vec<StationItem> {
     let current = current_state.map(|s| s.station.as_str()).filter(|s| !s.is_empty());
+    let active_index = current.and_then(|c| station_states.iter().position(|s| s.station == c));
     station_states
         .iter()
-        .map(|info| {
-            let status = station_status(info, current);
+        .enumerate()
+        .map(|(i, info)| {
+            let status = station_status(info, i, active_index);
             let has_feedback = feedback_stations.iter().any(|s| s == &info.station);
             StationItem { name: info.station.clone(), status, has_feedback }
         })
