@@ -125,7 +125,7 @@ impl EnginePathKind {
                 "use the `darkrun_feedback_*` tools (darkrun_feedback_create / _resolve / _move)"
             }
             EnginePathKind::EngineState => {
-                "the run document + state are engine-managed — drive them with `darkrun_run_next` \
+                "the run document + state are engine-managed — drive them with `darkrun_tick` \
                  / `darkrun_checkpoint_decide`, never a raw write"
             }
         }

@@ -22,9 +22,9 @@ Write the tight closing brief for whoever holds the decision. It is the durable 
 The gate kind decides *who* clears it. Surface the brief above, then act per the kind:
 
 {% if kind == "auto" %}
-**auto** — no human in the loop. The evidence already justifies the lock. Confirm the criteria are met, lock the station, and call `run_next` to advance.
+**auto** — no human in the loop. The evidence already justifies the lock. Confirm the criteria are met, lock the station, and call `darkrun_tick` to advance.
 {% elif kind == "ask" %}
-**ask** — a human must approve. Present the summary above and **stop**. Do not advance the run until the operator approves. On approval, lock and call `run_next`; on rejection, route their feedback as a fix track.
+**ask** — a human must approve. Present the summary above and **stop**. Do not advance the run until the operator approves. On approval, lock and call `darkrun_tick`; on rejection, route their feedback as a fix track.
 {% elif kind == "external" %}
 **external** — an external system or process must clear this gate (CI, a deploy, a sign-off elsewhere). Surface what's required, trigger or point at it, and hold until it reports back. Lock only on a real external pass.
 {% elif kind == "await" %}
@@ -35,4 +35,4 @@ Unknown checkpoint kind `{{ kind }}` — treat as **ask**: surface the gate to a
 
 ## Done when
 
-The gate is cleared per its kind and the station is locked, or the run is held for a decision. Either way, call `run_next` to record the outcome.
+The gate is cleared per its kind and the station is locked, or the run is held for a decision. Either way, call `darkrun_tick` to record the outcome.

@@ -22,8 +22,8 @@ While this merge is in progress the engine **suspends** its ownership / lifecycl
 1. **Open each conflicted path** and resolve the `<<<<<<<` / `=======` / `>>>>>>>` markers — keep the correct content from both sides.
 2. **Stage** each resolved file (`git add`).
 3. **Commit** the merge (`git commit --no-edit`) to finish it. Do **not** `git merge --abort` — that throws away the land.
-4. Re-run `run_next`. The next tick re-derives this action until the merge is no longer in progress, then resumes the run.
+4. Re-run `darkrun_tick`. The next tick re-derives this action until the merge is no longer in progress, then resumes the run.
 
 ## Done when
 
-Every conflicted path is resolved and staged, the merge is committed (no `MERGE_HEAD`), and `run_next` advances past this action.
+Every conflicted path is resolved and staged, the merge is committed (no `MERGE_HEAD`), and `darkrun_tick` advances past this action.

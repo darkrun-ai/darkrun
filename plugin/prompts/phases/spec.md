@@ -46,4 +46,4 @@ This work touches a **user-facing surface**. For every Unit that renders a scree
 
 ## Done when
 
-The spec names the risk, lists Units with testable completion criteria and dependencies, and marks what's out of scope. Write it to the station's spec artifact, then call `run_next`.
+The spec names the risk, lists Units with testable completion criteria and dependencies, and marks what's out of scope. Write it to the station's spec artifact, then call `darkrun_tick`.

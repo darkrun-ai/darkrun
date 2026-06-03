@@ -57,4 +57,4 @@ When in doubt, **FAIL** — a false PASS ships broken work; a false FAIL costs o
 
 ## Done when
 
-Every reviewer has signed off or filed feedback, the full check suite passes, {% if surface %}the surface-routed objective proof is attached, {% endif %}and the evidence is recorded against the station. Filed feedback becomes a fix-worker track — it does **not** get hand-waved past. Record the audit verdict (PASS only when every check passed and every reviewer cleared), then call `run_next`.
+Every reviewer has signed off or filed feedback, the full check suite passes, {% if surface %}the surface-routed objective proof is attached, {% endif %}and the evidence is recorded against the station. Filed feedback becomes a fix-worker track — it does **not** get hand-waved past. Record the audit verdict (PASS only when every check passed and every reviewer cleared), then call `darkrun_tick`.

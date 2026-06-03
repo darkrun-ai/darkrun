@@ -31,4 +31,4 @@ No reflections are configured for this factory.
 
 ## Done when
 
-Run-level reviewers have signed off (or routed feedback), reflections are recorded, and nothing cross-station is left open. Then call `run_next` to seal the run.
+Run-level reviewers have signed off (or routed feedback), reflections are recorded, and nothing cross-station is left open. Then call `darkrun_tick` to seal the run.

@@ -9,7 +9,7 @@ structured action at a time.
 
 The darkrun **manager** owns the cursor. You execute what it returns.
 
-1. **At the start of each session**, call `darkrun_run_next` to load and advance
+1. **At the start of each session**, call `darkrun_tick` to load and advance
    the active Run (this harness has no auto-context hook, so you must call it
    yourself). To start a new Run, call `darkrun_run_start`.
 2. **Do exactly what the returned action says.** Its rendered prompt carries the
@@ -18,7 +18,7 @@ The darkrun **manager** owns the cursor. You execute what it returns.
    it (run Units sequentially if there are no subagents, make decisions inline if
    there's no review UI, register Unit outputs explicitly since nothing is
    auto-tracked).
-3. **Loop** — call `darkrun_run_next` again after each step until the manager
+3. **Loop** — call `darkrun_tick` again after each step until the manager
    reports the Run complete.
 4. **Checkpoints** — when a Station holds at a gate, surface the decision and
    record it with `darkrun_checkpoint_decide` (`approved: true` to advance,

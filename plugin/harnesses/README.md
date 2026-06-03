@@ -30,7 +30,7 @@ pinned local build.
 
 Outside Claude Code, the hook-driven conveniences become manual:
 
-- **No auto-context injection** — call `darkrun_run_next` yourself at the start
+- **No auto-context injection** — call `darkrun_tick` yourself at the start
   of each session to load the active Run.
 - **No automatic output tracking** — register a Unit's outputs explicitly.
 - **No browser review UI** — review gates fall back to MCP elicitation (where
@@ -38,5 +38,5 @@ Outside Claude Code, the hook-driven conveniences become manual:
 - **No parallel subagents** on some harnesses — Units run sequentially.
 
 The engine still drives the Run; you just do the bookkeeping the hooks would
-have. Each `darkrun_run_next` response carries a "Harness note" spelling out
+have. Each `darkrun_tick` response carries a "Harness note" spelling out
 what applies to your harness.

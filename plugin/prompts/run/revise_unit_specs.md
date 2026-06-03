@@ -20,4 +20,4 @@ The operator has rolled Units back for spec revision. Their criteria were wrong,
 
 ## Done when
 
-Every rolled-back Unit has a corrected, testable spec and its `revise` flag is cleared. Then call `run_next` — the manager re-validates the decomposition and resumes the station.
+Every rolled-back Unit has a corrected, testable spec and its `revise` flag is cleared. Then call `darkrun_tick` — the manager re-validates the decomposition and resumes the station.

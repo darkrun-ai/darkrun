@@ -1,7 +1,7 @@
 //! Cross-tick deadlock guard.
 //!
 //! darkrun's [`run_tick`](crate::position::run_tick) is **single-shot** — the
-//! agent performs the returned action then re-ticks via `darkrun_run_next`. So
+//! agent performs the returned action then re-ticks via `darkrun_tick`. So
 //! the deadlock shape is the INTER-tick one the predecessor hit: the cursor
 //! returns the same action (or alternates between two) across consecutive ticks
 //! with **no progress**, wedging the agent forever — including the worst case

@@ -28,13 +28,13 @@ npm i -g darkrun           # native binary, no JS app
 | Command | MCP tool | Purpose |
 |---|---|---|
 | `/darkrun:darkrun-start` | `darkrun_run_start` | Start a new Run; the manager scaffolds the lifecycle |
-| `/darkrun:darkrun-pickup` | `darkrun_run_next` | Advance — the manager returns the next action |
+| `/darkrun:darkrun-pickup` | `darkrun_tick` | Advance — the manager returns the next action |
 | `/darkrun:darkrun-show` | `darkrun_run_show`, `darkrun_unit_list` | Show Run state, Stations, Units |
 | `/darkrun:darkrun-factories` | `darkrun_factory_list` | List available factories |
 | `/darkrun:darkrun-checkpoint` | `darkrun_checkpoint_decide` | Review and decide a Station's Checkpoint |
 
 The MCP server is started by Claude Code via `.mcp.json` (`darkrun mcp`). The **manager** (the
-run/station loop) drives everything from `darkrun_run_next`; you follow the actions it returns.
+run/station loop) drives everything from `darkrun_tick`; you follow the actions it returns.
 
 ## Software factory stations
 

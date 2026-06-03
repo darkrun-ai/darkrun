@@ -3,7 +3,7 @@
 //!
 //! The orchestrator + state tool handlers, expressed in the factory
 //! vocabulary and reduced to:
-//! `darkrun_run_start`, `darkrun_run_next`, `darkrun_run_show`,
+//! `darkrun_run_start`, `darkrun_tick`, `darkrun_run_show`,
 //! `darkrun_unit_list`, `darkrun_factory_list`, `darkrun_checkpoint_decide`.
 //!
 //! Each tool validates its input (via schemars-typed structs) and returns a
@@ -923,10 +923,10 @@ impl DarkrunServer {
     /// Drive one workflow tick and return the next action the agent should
     /// perform. Three-track priority: drift -> feedback -> run.
     #[tool(
-        name = "darkrun_run_next",
+        name = "darkrun_tick",
         description = "Advance the run one tick; returns the next structured action (drift -> feedback -> run)."
     )]
-    pub fn darkrun_run_next(
+    pub fn darkrun_tick(
         &self,
         Parameters(input): Parameters<RunRef>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
@@ -1990,7 +1990,7 @@ impl ServerHandler for DarkrunServer {
         let mut info = ServerInfo::default();
         let mut instructions = String::from(
             "darkrun manager. Call darkrun_run_start to begin a Run, then \
-             darkrun_run_next repeatedly to walk its factory stations. Each tick returns \
+             darkrun_tick repeatedly to walk its factory stations. Each tick returns \
              a structured next-action instruction — perform it (write artifacts, \
              decompose units, complete passes), then re-tick. Use \
              darkrun_checkpoint_decide to resolve a station's gate.",
@@ -2042,7 +2042,7 @@ mod tests {
         assert!(!adapted.iter().any(|t| t.name == "darkrun_direction"));
         assert!(!adapted.iter().any(|t| t.name == "darkrun_direction_result"));
         // Non-visual tools survive.
-        assert!(adapted.iter().any(|t| t.name == "darkrun_run_next"));
+        assert!(adapted.iter().any(|t| t.name == "darkrun_tick"));
         assert_eq!(adapted.len(), all.len() - VISUAL_TOOL_NAMES.len());
     }
 
@@ -2083,7 +2083,7 @@ mod tests {
             }))
             .unwrap();
         let res = server
-            .darkrun_run_next(Parameters(RunRef { slug: "r".into() }))
+            .darkrun_tick(Parameters(RunRef { slug: "r".into() }))
             .unwrap();
         assert_eq!(res.is_error, Some(false));
         let v = res.structured_content.unwrap();

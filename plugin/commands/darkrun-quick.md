@@ -5,4 +5,4 @@ argument-hint: [the task]
 
 Start a quick single-Station darkrun Run for: $ARGUMENTS
 
-Call `darkrun_run_start`, then advance with `darkrun_run_next` until the Station's Checkpoint resolves. See the `darkrun-quick` skill.
+Call `darkrun_run_start`, then advance with `darkrun_tick` until the Station's Checkpoint resolves. See the `darkrun-quick` skill.

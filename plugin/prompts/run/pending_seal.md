@@ -25,4 +25,4 @@ Every station is locked and the work is done — but the run declares a final **
 
 ## Done when
 
-The delivery gate is satisfied and the run frontmatter is marked complete. Then call `run_next` — the manager seals the run.
+The delivery gate is satisfied and the run frontmatter is marked complete. Then call `darkrun_tick` — the manager seals the run.

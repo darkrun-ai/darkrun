@@ -27,4 +27,4 @@ The decomposition is structurally invalid. Inspect the offending Units, correct 
 
 ## Done when
 
-Every Unit in `{{ station }}` has a valid slug, every `depends_on` resolves to a real Unit, and the dependency graph is acyclic. Then call `run_next` — the manager re-validates and, once clean, releases the first wave.
+Every Unit in `{{ station }}` has a valid slug, every `depends_on` resolves to a real Unit, and the dependency graph is acyclic. Then call `darkrun_tick` — the manager re-validates and, once clean, releases the first wave.

@@ -20,4 +20,4 @@ This is a judgement call, and it's the operator's to make — not another silent
 
 ## Done when
 
-The stalled Unit has a path forward the operator chose — re-spec'd, split, redirected, or accepted — and its pass count no longer trips the budget. Then call `run_next`.
+The stalled Unit has a path forward the operator chose — re-spec'd, split, redirected, or accepted — and its pass count no longer trips the budget. Then call `darkrun_tick`.

@@ -82,10 +82,10 @@ made inline; reasoning effort maps to the `low`/`medium`/`high` tiers.
 ## What every response tells you
 
 Outside Claude Code, the hook-driven conveniences become manual — and each
-`darkrun_run_next` response ends with a **Harness note** spelling out exactly
+`darkrun_tick` response ends with a **Harness note** spelling out exactly
 what applies to your harness:
 
-- **No auto-context injection** — call `darkrun_run_next` at the start of each
+- **No auto-context injection** — call `darkrun_tick` at the start of each
   session to load the active Run.
 - **No automatic output tracking** — register a Unit's outputs explicitly.
 - **No browser review UI** — review gates fall back to elicitation or an inline

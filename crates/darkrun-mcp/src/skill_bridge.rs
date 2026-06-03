@@ -32,7 +32,7 @@ fn status_prompt() -> SkillPrompt {
     SkillPrompt {
         name: "darkrun:status".to_string(),
         description: "Resume darkrun — load and advance the active Run".to_string(),
-        body: "Call `darkrun_run_next` to load and advance the active darkrun Run, then do \
+        body: "Call `darkrun_tick` to load and advance the active darkrun Run, then do \
                exactly what the returned action says. If no Run is active, offer to start one \
                with `darkrun_run_start`."
             .to_string(),
@@ -109,7 +109,7 @@ mod tests {
             .iter()
             .find(|p| p.name == "darkrun:status")
             .expect("status prompt present");
-        assert!(status.body.contains("darkrun_run_next"));
+        assert!(status.body.contains("darkrun_tick"));
     }
 
     #[test]
@@ -120,7 +120,7 @@ mod tests {
         assert!(prompts.iter().any(|p| p.name == "darkrun:darkrun-pickup"));
         let pickup = skill_prompt("darkrun:darkrun-pickup").expect("pickup");
         assert!(!pickup.description.is_empty());
-        assert!(pickup.body.contains("darkrun_run_next"));
+        assert!(pickup.body.contains("darkrun_tick"));
     }
 
     #[test]

@@ -15,4 +15,4 @@ Station `{{ station }}` is locked behind an **external gate**. Its work doesn't 
 
 ## Done when
 
-The external review is open, well-described, and the operator has the link. Then call `run_next` — the station stays held at this gate (awaiting) until the review is decided.
+The external review is open, well-described, and the operator has the link. Then call `darkrun_tick` — the station stays held at this gate (awaiting) until the review is decided.

@@ -27,7 +27,7 @@ The Pass loop is adversarial on purpose: a single confident pass is exactly wher
 - **challenge** — a second pass attacks what make produced: edge cases, missing handling, lazy assumptions. Assume the first pass was optimistic.
 - **resolve** — reconcile make and challenge into a Unit that satisfies its completion criteria with the challenges answered.
 
-Run **only the `{{ worker }}` beat** this tick. When it returns, call `run_next`; the manager advances the loop or releases the next wave. A Unit is locked only after Resolve and its completion criteria pass.
+Run **only the `{{ worker }}` beat** this tick. When it returns, call `darkrun_tick`; the manager advances the loop or releases the next wave. A Unit is locked only after Resolve and its completion criteria pass.
 
 A Unit gets a **bounded pass budget** — the manager escalates a Unit that can't converge within it to the operator rather than grinding forever. Don't paper over a stuck Unit to dodge the escalation; a Unit that needs more passes than the budget allows is a signal the spec, the scope, or the approach is wrong, and that's the operator's call to make.
 
@@ -45,4 +45,4 @@ For non-UI work — internal logic, headless jobs, APIs — there is no surface 
 
 ## Done when
 
-The `{{ worker }}` beat is complete for every Unit in this wave and its output is recorded. Then call `run_next`.
+The `{{ worker }}` beat is complete for every Unit in this wave and its output is recorded. Then call `darkrun_tick`.

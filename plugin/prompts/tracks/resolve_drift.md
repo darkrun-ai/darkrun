@@ -20,4 +20,4 @@ A **locked** artifact changed out from under the line. Drift preempts everything
 
 ## Done when
 
-`{{ path }}` is reconciled (reverted, or accepted via `darkrun_drift_accept`), downstream artifacts are consistent, and the drift entry is cleared. Then call `run_next`.
+`{{ path }}` is reconciled (reverted, or accepted via `darkrun_drift_accept`), downstream artifacts are consistent, and the drift entry is cleared. Then call `darkrun_tick`.

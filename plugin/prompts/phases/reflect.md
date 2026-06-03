@@ -27,4 +27,4 @@ Record the learnings with `darkrun_reflection_record` (pass the `{{ station }}` 
 
 ## Done when
 
-The retrospective is captured via `darkrun_reflection_record`. Then call `run_next` to reach the checkpoint.
+The retrospective is captured via `darkrun_reflection_record`. Then call `darkrun_tick` to reach the checkpoint.

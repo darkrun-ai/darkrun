@@ -19,4 +19,4 @@ Repair conservatively. The goal is to restore a coherent state, not to redesign 
 
 ## Done when
 
-Every Unit references a station its factory defines and the persisted state is coherent again. Then call `run_next` — the manager re-derives the cursor and resumes the normal phase walk.
+Every Unit references a station its factory defines and the persisted state is coherent again. Then call `darkrun_tick` — the manager re-derives the cursor and resumes the normal phase walk.

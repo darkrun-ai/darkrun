@@ -4,4 +4,4 @@
 
 {{ message | default("The line is mid-wave. Outstanding subagents are still working; there is no new action to take this tick.") }}
 
-Do **not** invent work to fill the gap. Let the in-flight work finish, then call `run_next` again for the next real action.
+Do **not** invent work to fill the gap. Let the in-flight work finish, then call `darkrun_tick` again for the next real action.

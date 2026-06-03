@@ -89,7 +89,7 @@ fn started(slug: &str) -> (TempDir, DarkrunServer) {
 
 fn next(server: &DarkrunServer, slug: &str) -> CallToolResult {
     server
-        .darkrun_run_next(Parameters(RunRef { slug: slug.into() }))
+        .darkrun_tick(Parameters(RunRef { slug: slug.into() }))
         .unwrap()
 }
 
@@ -318,7 +318,7 @@ fn run_start_re_start_same_slug_overwrites_title() {
     assert_eq!(body(&res)["title"], "Second");
 }
 
-// ── darkrun_run_next ───────────────────────────────────────────────────────
+// ── darkrun_tick ───────────────────────────────────────────────────────
 
 #[test]
 fn run_next_first_tick_is_spec_on_frame() {

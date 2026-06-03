@@ -15,4 +15,4 @@ Open feedback preempts forward run progress — but this item is a **question**,
 
 ## Done when
 
-`{{ feedback_id }}` carries the operator's answer, the item is resolved, and the decision is applied. Then call `run_next` — if more feedback is open the manager routes the next item; otherwise the run resumes.
+`{{ feedback_id }}` carries the operator's answer, the item is resolved, and the decision is applied. Then call `darkrun_tick` — if more feedback is open the manager routes the next item; otherwise the run resumes.

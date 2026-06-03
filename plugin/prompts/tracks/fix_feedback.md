@@ -16,4 +16,4 @@ Open feedback preempts forward run progress. Something a reviewer or operator fl
 
 ## Done when
 
-`{{ feedback_id }}` is resolved with evidence, the artifact is corrected, and nothing else regressed. Then call `run_next` — if more feedback is open, the manager routes the next item; otherwise the run resumes.
+`{{ feedback_id }}` is resolved with evidence, the artifact is corrected, and nothing else regressed. Then call `darkrun_tick` — if more feedback is open, the manager routes the next item; otherwise the run resumes.

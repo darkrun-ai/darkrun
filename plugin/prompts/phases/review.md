@@ -48,4 +48,4 @@ Surface the brief to the operator and take their input on whether the spec is cl
 
 ## Done when
 
-Every reviewer has signed off or filed addressable concerns, the brief is recorded, and the user has cleared the spec. Then call `run_next`.
+Every reviewer has signed off or filed addressable concerns, the brief is recorded, and the user has cleared the spec. Then call `darkrun_tick`.

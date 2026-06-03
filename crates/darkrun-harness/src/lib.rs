@@ -469,7 +469,7 @@ pub fn adapt_instructions(text: &str, caps: &Capabilities) -> String {
     // Hook-driven automation that this harness lacks.
     if !caps.hooks {
         notes.push(
-            "No hooks on this harness — call `darkrun_run_next` yourself at the start of each \
+            "No hooks on this harness — call `darkrun_tick` yourself at the start of each \
              session and after each step, and register Unit outputs explicitly. Nothing is \
              auto-injected or auto-tracked."
                 .to_string(),
@@ -653,7 +653,7 @@ mod tests {
         let out = adapt_instructions("Do the work.", &caps);
         assert!(out.contains("No subagents"));
         assert!(out.contains("ask inline in plain text"));
-        assert!(out.contains("call `darkrun_run_next` yourself"));
+        assert!(out.contains("call `darkrun_tick` yourself"));
     }
 
     #[test]
