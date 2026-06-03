@@ -21,6 +21,7 @@
 
 pub mod annotation;
 pub mod dag;
+pub mod derive;
 pub mod domain;
 pub mod error;
 pub mod frontmatter;
@@ -34,6 +35,7 @@ pub use annotation::{
     OpenSeverityCounts, ReAnchor,
 };
 pub use dag::Dag;
+pub use derive::{derive_station_phase, station_status, station_units_complete};
 pub use error::{CoreError, Result};
 pub use locks::{LockGuard, LockManager};
 pub use state::{run_is_complete, RunState, StateStore, StationStatus};

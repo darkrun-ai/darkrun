@@ -1347,6 +1347,7 @@ fn unit_frontmatter_full_roundtrip_json() {
         outputs: vec!["impl.rs".into()],
         started_at: Some("t1".into()),
         completed_at: Some("t2".into()),
+        ..Default::default()
     };
     let back = json_round(&fm);
     assert_eq!(back.name.as_deref(), Some("Login"));
@@ -2864,6 +2865,7 @@ fn unit_with_full_frontmatter_yaml_roundtrips() {
             outputs: vec!["auth.rs".into()],
             started_at: Some("t".into()),
             completed_at: None,
+            ..Default::default()
         },
         title: "Auth".into(),
         body: "impl".into(),

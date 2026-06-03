@@ -905,6 +905,7 @@ fn roundtrip_unit_full() {
         outputs: vec!["out/y.md".into(), "out/z.md".into()],
         started_at: Some("2026-05-30T00:00:00Z".into()),
         completed_at: Some("2026-05-30T01:00:00Z".into()),
+        ..Default::default()
     };
     let doc = frontmatter::serialize(&fm, "# Unit\n").expect("ser");
     let (back, _) =

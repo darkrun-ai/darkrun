@@ -285,9 +285,46 @@ impl Run {
     }
 }
 
-/// Frontmatter for a Unit document (`.darkrun/<run>/units/<slug>.md`).
+/// The result of one Pass iteration over a Unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IterationResult {
+    /// The worker advanced (moves to the next worker / completes the loop).
+    Advance,
+    /// The worker rejected — bounces to the nearest preceding build worker.
+    Reject,
+}
+
+/// One recorded Pass iteration on a Unit — the signal the phase derivation reads
+/// to decide whether `Manufacture` is done (the last worker `advance`d).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct UnitIteration {
+    /// The worker that ran this iteration.
+    #[serde(default)]
+    pub worker: String,
+    /// RFC3339 start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// The iteration's result (absent = still in flight).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<IterationResult>,
+    /// The Pass number this iteration belongs to.
+    #[serde(default)]
+    pub pass: u32,
+}
+
+/// A review/approval stamp on a Unit — the witness that a role signed off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Stamp {
+    /// RFC3339 timestamp the role signed.
+    pub at: String,
+}
+
+/// Frontmatter for a Unit document (`.darkrun/<run>/stations/<station>/units/<slug>.md`).
 ///
-/// Carries the unit's passes, its worker assignment, and its station.
+/// Carries the unit's passes, its worker assignment, its station, and — the
+/// signals the **shared phase derivation** ([`crate::derive`]) reads — its
+/// `iterations`, per-role `reviews`/`approvals` stamps, and drift `input_witnesses`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct UnitFrontmatter {
     /// Optional display name.
@@ -331,6 +368,23 @@ pub struct UnitFrontmatter {
     /// RFC3339 completion timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    /// The Pass iteration history — `Manufacture` is done when the LAST iteration
+    /// `advance`d on the station's last worker. Engine-managed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterations: Vec<UnitIteration>,
+    /// PRE-execute review stamps, keyed by reviewer role (`None` = unsigned). The
+    /// `Review` phase holds until every required role is stamped. Engine-managed.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub reviews: std::collections::BTreeMap<String, Option<Stamp>>,
+    /// POST-execute approval stamps, keyed by approval role (`None` = unsigned).
+    /// The `Audit`/`Checkpoint` gate holds until every required role is stamped
+    /// (incl. `user`, `quality_gates`). Engine-managed.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub approvals: std::collections::BTreeMap<String, Option<Stamp>>,
+    /// Per-slot drift witnesses: `path -> sha256` of the inputs each signed slot
+    /// was signed over; a changed witness re-opens that slot. Engine-managed.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub input_witnesses: std::collections::BTreeMap<String, String>,
 }
 
 /// A parsed Unit document: frontmatter + markdown body.
