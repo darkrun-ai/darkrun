@@ -114,16 +114,36 @@ impl RunState {
     /// reports its persisted `status`/`phase`; a station not yet reached
     /// reports `Pending` in the `Spec` phase (the freshly-entered default).
     pub fn station_status_summary(&self, factory_stations: &[String]) -> Vec<StationStatus> {
-        self.ordered_stations(factory_stations)
-            .into_iter()
-            .map(|name| {
-                let (status, phase) = self
+        let ordered = self.ordered_stations(factory_stations);
+        // The per-station lifecycle status is the index-relative ordering shared
+        // by every surface ([`crate::derive::station_status`]) — completed before
+        // the active station, active at it, pending after. (The phase still comes
+        // from the recorded snapshot until the engine stamps the per-unit signals
+        // the pure phase derivation reads.)
+        let active_index = ordered.iter().position(|s| s == &self.active_station);
+        ordered
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                // Completed-before / Pending-after ordering is the shared
+                // index-relative derivation; the ACTIVE station keeps its recorded
+                // status so a `Blocked`/`InProgress` nuance isn't flattened to
+                // `Active`.
+                let status = match crate::derive::station_status(i, active_index) {
+                    Status::Active => self
+                        .stations
+                        .get(name)
+                        .map(|st| st.status)
+                        .unwrap_or(Status::Active),
+                    ordered_status => ordered_status,
+                };
+                let phase = self
                     .stations
-                    .get(&name)
-                    .map(|st| (st.status, st.phase))
-                    .unwrap_or((Status::Pending, StationPhase::Spec));
+                    .get(name)
+                    .map(|st| st.phase)
+                    .unwrap_or(StationPhase::Spec);
                 StationStatus {
-                    station: name,
+                    station: name.clone(),
                     status,
                     phase,
                 }
