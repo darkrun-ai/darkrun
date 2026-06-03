@@ -79,17 +79,28 @@ pub fn ThemeToggle() -> Element {
             for opt in ThemeChoice::ALL {
                 {
                     let active = choice() == opt;
+                    // `font-weight` carries the active state too, so the label
+                    // stays legible even mid-flip before the accent pill repaints
+                    // — and inactive labels use the full text color (not muted)
+                    // so every option reads clearly in both themes.
                     let seg = format!(
                         "appearance:none;border:0;cursor:pointer;\
                          font-family:{mono};font-size:11px;letter-spacing:0.02em;\
                          padding:4px 10px;border-radius:999px;line-height:1;\
+                         white-space:nowrap;font-weight:{weight};\
+                         transition:background-color .15s ease,color .15s ease;\
                          color:{fg};background:{bg};",
                         mono = tokens::FONT_MONO,
-                        fg = if active { theme::ON_ACCENT } else { theme::TEXT_MUTED },
+                        weight = if active { "600" } else { "400" },
+                        fg = if active { theme::ON_ACCENT } else { theme::TEXT },
                         bg = if active { theme::ACCENT } else { "transparent" },
                     );
                     rsx! {
                         button {
+                            // Key by the stable choice label so Dioxus diffs each
+                            // segment in place on re-render (no stale/blank labels
+                            // when the active option changes).
+                            key: "{opt.label()}",
                             style: "{seg}",
                             "aria-pressed": if active { "true" } else { "false" },
                             title: "{opt.display_label()} theme",
