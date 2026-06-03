@@ -47,7 +47,7 @@ never persists it (a miss).
 ## 2. Frontmatter contract — the on-disk schema (the de-facto spec)
 
 There is no version field; the schema IS this protected-field set, enforced by the
-write guard + a checksum tamper detector (§14). These are the signals the
+write guard (§20) + a checksum tamper detector (§14). These are the signals the
 derivation reads — darkrun units/feedback today carry almost none of them.
 
 **unit** (`stations/<station>/units/<unit>.md`):
@@ -392,6 +392,47 @@ await      — block until a decision arrives
 Right-sizing at run start may collapse/skip stations and downgrade checkpoints to
 `auto` — the work decides the shape, no manual mode pick required.
 
+## 19. Locks / concurrency
+
+The engine serializes writes to shared branch state with **advisory `mkdir` locks**
+(atomic on POSIX + Windows, no native deps; the dir's existence IS the lock):
+- `acquireLock(name, tag)` — `mkdir` the lock dir; on contention retry every ~50 ms
+  up to a ~30 s timeout; write a `holder.json` (`{pid, tag, at}`).
+- **Stale recovery** — a lock is stale when its holder pid is dead
+  (`process.kill(pid, 0)` throws) or the dir mtime exceeds a max age; a stale lock is
+  *stolen* (`rm -rf` then re-acquire) so a crashed tick never wedges the run.
+- Scopes used: `withStationLock(run, station)` (unit→station merges, station entry)
+  and `withRunMainLock(run)` (station→run-main merges) — the two points where
+  concurrent ticks/agents could race the same branch.
+- Released in a `finally` (`rm -rf` the lock dir). darkrun should port this (Rust:
+  the same `mkdir`-create-exclusive + pid liveness via `nix::kill(pid, 0)`).
+
+## 20. Write guard / ownership
+
+Engine-managed frontmatter fields are **agent-unwritable**. The guard (a PreToolUse
+hook on harnesses that fire hooks; the schema-tool layer otherwise) rejects any raw
+Write/Edit that would touch an FSM-driven field. The protected sets (the de-facto
+schema, darkrun vocabulary):
+- **run**: `status, active_station, started_at, completed_at, phase,
+  completion_review_*`.
+- **station**: `status, phase, started_at, completed_at, gate_entered_at,
+  gate_outcome` (in darkrun these are *derived*, never stored — so the guard mostly
+  protects them from being faked).
+- **unit**: `status, started_at, completed_at, pass, worker, worker_started_at,
+  reviews, approvals, iterations, input_witnesses, scope_reject_attempts`.
+  Agent-authorable exceptions: `inputs`, `depends_on`, `title`, `model`, and —
+  uniquely — `outputs`/`quality_gates` stay editable AFTER the unit is active (the
+  sanctioned path to repair a gate command / missed output).
+- Engine-owned **paths** (units, feedback, run.md, the station artifacts the engine
+  stamps) go through the schema-validating MCP tools, not raw writes.
+
+**Mid-merge suspension (critical):** while a git merge is in progress
+(`MERGE_HEAD`/`REBASE_HEAD`/`CHERRY_PICK_HEAD`/`REVERT_HEAD`/rebase markers), the
+ownership/lifecycle guards are **suspended** so the agent *can* edit the conflicted
+engine files to resolve them — but **schema validation stays on**, so a malformed
+resolution still fails loudly. Without the suspension the guard would refuse the very
+writes needed to finish the merge. (This is mechanic #3 of `merge-engine.md`.)
+
 ---
 
 ## Gap summary (darkrun today → this spec)
@@ -410,3 +451,6 @@ Right-sizing at run start may collapse/skip stations and downgrade checkpoints t
 11. No project-level override cascade for bodies; no run-level adversarial reviewers.
 12. No input/output 3-point verification; no scope validation; no DAG wave scheduler.
 13. No reflection → project-overlay shared-memory loop.
+14. No advisory mkdir lock model (withStationLock/withRunMainLock + stale recovery).
+15. No write-guard/ownership enforcement of FSM fields + mid-merge guard suspension.
+16. No checkpoint-kind→gate-resolution wiring per mode (auto/ask/external/await).
