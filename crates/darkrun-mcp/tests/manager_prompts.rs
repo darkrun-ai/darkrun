@@ -338,7 +338,7 @@ fn project_override_changes_rendered_prompt_through_manager() {
         "override not honored through manager:\n{prompt}"
     );
     // Embedded default copy is gone.
-    assert!(!prompt.contains("Run the explorers"), "embedded default leaked:\n{prompt}");
+    assert!(!prompt.contains("run the explorers in parallel"), "embedded default leaked:\n{prompt}");
     // The structured action is untouched by the override.
     assert!(matches!(&t.action, RunAction::Spec { station, .. } if station == "frame"));
 }
@@ -388,7 +388,26 @@ fn removing_override_falls_back_to_embedded_through_manager() {
     set_phase(&store, "r", "frame", StationPhase::Spec);
     let t2 = run_tick(&store, "r").expect("tick");
     let prompt = t2.prompt.expect("prompt");
-    assert!(prompt.contains("Run the explorers"), "did not fall back to embedded:\n{prompt}");
+    assert!(prompt.contains("run the explorers in parallel"), "did not fall back to embedded:\n{prompt}");
+}
+
+#[test]
+fn spec_prompt_runs_discovery_and_elaboration_in_tandem() {
+    // Mirrors the predecessor's elaborate_loop: when a station opens, the agent
+    // dispatches the explorers IN PARALLEL while it frames the problem — discovery
+    // and elaboration run in tandem, not sequentially.
+    let (_d, store) = fresh("r");
+    at_phase(&store, "r", "frame", StationPhase::Spec);
+    let t = run_tick(&store, "r").expect("tick");
+    let prompt = t.prompt.expect("prompt");
+    // The frame station's explorers are listed for the parallel fan-out.
+    assert!(prompt.contains("context"), "explorer `context` not surfaced:\n{prompt}");
+    // The dynamic is explicitly tandem + parallel, not "explore then decompose".
+    assert!(prompt.contains("in tandem"), "tandem dynamic missing:\n{prompt}");
+    assert!(
+        prompt.contains("run the explorers in parallel"),
+        "parallel explorer fan-out missing:\n{prompt}"
+    );
 }
 
 // ─────────── structured action is preserved alongside the prompt ───────────

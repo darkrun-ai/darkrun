@@ -22,6 +22,10 @@ pub struct StationDef {
     pub artifact: String,
     /// The checkpoint gate that ends the station.
     pub checkpoint: CheckpointKind,
+    /// The Explorers dispatched in the Spec phase — they gather context in
+    /// **tandem** with the elaboration framing (discovery + elaboration run in
+    /// parallel, mirroring the predecessor's `elaborate_loop`), before decompose.
+    pub explorers: Vec<String>,
     /// The ordered Workers run in the Pass loop (Make -> Challenge -> Resolve...).
     pub workers: Vec<String>,
     /// The Reviewers that verify the station's output in the Review phase.
@@ -65,6 +69,7 @@ fn station(
     kills: &str,
     artifact: &str,
     checkpoint: CheckpointKind,
+    explorers: &[&str],
     workers: &[&str],
     reviewers: &[&str],
 ) -> StationDef {
@@ -73,6 +78,7 @@ fn station(
         kills: kills.to_string(),
         artifact: artifact.to_string(),
         checkpoint,
+        explorers: explorers.iter().map(|s| s.to_string()).collect(),
         workers: workers.iter().map(|s| s.to_string()).collect(),
         reviewers: reviewers.iter().map(|s| s.to_string()).collect(),
     }
@@ -90,6 +96,7 @@ pub fn software_factory() -> FactoryDef {
                 "wrong-thing",
                 "frame.md",
                 Ask,
+                &["context", "value"],
                 &["framer", "challenger", "distiller"],
                 &["value", "feasibility"],
             ),
@@ -98,6 +105,7 @@ pub fn software_factory() -> FactoryDef {
                 "ambiguity",
                 "spec.md",
                 Ask,
+                &["contract", "edge_case"],
                 &["spec_writer", "adversary", "tightener"],
                 &["completeness", "testability"],
             ),
@@ -106,6 +114,7 @@ pub fn software_factory() -> FactoryDef {
                 "expensive-structural-reversal",
                 "shape.md",
                 Ask,
+                &["architecture", "risk", "surface"],
                 &["architect", "risk_challenger", "simplifier"],
                 &["soundness", "reversibility"],
             ),
@@ -114,6 +123,7 @@ pub fn software_factory() -> FactoryDef {
                 "implementation-defects",
                 "build.md",
                 Auto,
+                &["integration_point", "reuse"],
                 &["test_author", "builder", "self_reviewer", "reconciler"],
                 &["correctness", "maintainability"],
             ),
@@ -122,6 +132,7 @@ pub fn software_factory() -> FactoryDef {
                 "escaped-defects",
                 "prove.md",
                 Auto,
+                &["regression", "scenario"],
                 &["scenario_author", "prover", "regressor"],
                 &["coverage", "evidence"],
             ),
@@ -130,6 +141,7 @@ pub fn software_factory() -> FactoryDef {
                 "works-in-dev-dies-in-prod",
                 "release.md",
                 External,
+                &["operability", "threat"],
                 &["hardener", "red_teamer", "releaser"],
                 &["security", "readiness"],
             ),

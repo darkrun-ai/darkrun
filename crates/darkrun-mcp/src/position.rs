@@ -279,6 +279,10 @@ pub struct PromptContext {
     /// A free-form message (mid-wave noop).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The station's Explorers — dispatched in the Spec phase in TANDEM with the
+    /// elaboration framing (discovery + elaboration in parallel).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub explorers: Vec<String>,
     /// The station's Workers, in Pass-loop order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub workers: Vec<String>,
@@ -1129,6 +1133,7 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
                 ctx.kills = Some(def.kills.clone());
                 ctx.locked_artifact = Some(def.artifact.clone());
                 ctx.kind = Some(def.checkpoint);
+                ctx.explorers = def.explorers.clone();
                 ctx.workers = def.workers.clone();
                 ctx.reviewers = def.reviewers.clone();
             }
