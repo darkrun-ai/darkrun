@@ -51,6 +51,7 @@
 pub mod annotation;
 pub mod backlog;
 pub mod change;
+pub mod deadlock;
 pub mod debug;
 pub mod desktop;
 pub mod drift;

@@ -76,6 +76,9 @@ pub fn force_station_complete(
         }
     }
     store.write_state(slug, &state)?;
+    // A manual unwedge: clear the deadlock guard's history so the recovered run
+    // starts from a clean count instead of immediately re-halting.
+    crate::deadlock::clear(store, slug);
     Ok(DebugResult {
         op: "force_station_complete".to_string(),
         applied: true,

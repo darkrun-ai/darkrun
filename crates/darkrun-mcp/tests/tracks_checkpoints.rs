@@ -2328,22 +2328,31 @@ fn multiple_runs_feedback_dispatch_correct_id() {
 fn repeated_ticks_while_feedback_open_stay_on_feedback() {
     let (_d, store) = started();
     feedback::create(&store, "r", "frame", "x", None).unwrap();
-    for _ in 0..5 {
+    // The cursor stays on the feedback track while it's open + being worked...
+    for _ in 0..4 {
         let t = run_tick(&store, "r").unwrap();
         assert_eq!(t.position.track, Track::Feedback);
         assert!(matches!(t.action, RunAction::FixFeedback { .. }));
     }
+    // ...but a feedback loop that resolves NOTHING across the threshold is a
+    // wedge — the deadlock guard escalates it to a human instead of spinning.
+    let t = run_tick(&store, "r").unwrap();
+    assert!(matches!(t.action, RunAction::Escalate { .. }));
 }
 
 #[test]
 fn repeated_ticks_while_drift_present_stay_on_drift() {
     let (_d, store) = started();
     record_drift(&store, "r", "d-01", "x.md", "frame");
-    for _ in 0..5 {
+    // Stays on the drift track while the entry is present + being worked...
+    for _ in 0..4 {
         let t = run_tick(&store, "r").unwrap();
         assert_eq!(t.position.track, Track::Drift);
         assert!(matches!(t.action, RunAction::ResolveDrift { .. }));
     }
+    // ...but an unresolved no-progress drift loop is a wedge → escalate.
+    let t = run_tick(&store, "r").unwrap();
+    assert!(matches!(t.action, RunAction::Escalate { .. }));
 }
 
 #[test]

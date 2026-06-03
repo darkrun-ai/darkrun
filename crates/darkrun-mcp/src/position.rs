@@ -1379,7 +1379,7 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
     sync_downstream_before_land(store, slug);
     let position = derive_position(store, slug)?;
 
-    let action = match &position.action {
+    let derived = match &position.action {
         Some(a) => a.clone(),
         None => RunAction::Noop {
             run: slug.to_string(),
@@ -1388,6 +1388,13 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
                     .to_string(),
         },
     };
+
+    // Cross-tick deadlock guard: if the cursor has returned this same action with
+    // NO progress past the threshold (or is churning between two), the run is
+    // wedged — even if the agent already satisfied the requirements. Swap the
+    // wedged action for an Escalate so it surfaces to a human instead of spinning
+    // forever. Best-effort; never blocks a tick.
+    let action = crate::deadlock::check(store, slug, &derived).unwrap_or(derived);
 
     // Render the engine-driven instructions for this action BEFORE advancing
     // state, so the prompt reflects the action exactly as derived.
