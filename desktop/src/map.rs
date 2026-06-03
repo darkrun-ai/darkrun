@@ -551,9 +551,11 @@ mod tests {
 
     #[test]
     fn station_status_honors_explicit_done_token() {
-        // A not-yet-merged station whose status reads "done" still shows done.
+        // A not-yet-merged station whose status reads "done" still shows done
+        // (the explicit-done token path returns before the index-relative logic,
+        // so the index/active here are immaterial).
         let info = station_info("x", false, Some("completed"));
-        assert_eq!(station_status(&info, Some("other")), StationStatus::Done);
+        assert_eq!(station_status(&info, 2, Some(0)), StationStatus::Done);
     }
 
     #[test]
