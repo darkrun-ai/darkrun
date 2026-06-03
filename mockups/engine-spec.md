@@ -25,6 +25,9 @@ outcome are derived on demand from per-unit FM (`iterations[]`, `reviews{}`,
   feedback/NN-slug.md            RUN-LEVEL feedback (final closeout / cross-station) — station:""
   knowledge/**.md                run-scope knowledge (explorer output, run-local)
   reflection.md                  synthesized end-of-run reflection (written before seal)
+  action-log.jsonl               append-only write-attribution journal (drift absorbs agent writes)
+  write-audit.jsonl              append-only audit journal (provenance; never surfaced in the UI)
+  run-tick.json                  run-scope tick counter (bookkeeping)
   stations/<station>/
     STATION.md                   station-definition copy
     elaboration.md               pre-decompose capture; FM verified_at gates elaborate→review
@@ -197,6 +200,19 @@ on <default>).
   station — not a per-station configured reviewer.
 - **adversarial review happens twice**: within each station (after spec), and again
   at the run level with run-level reviewers.
+- **Reviewer role classes** (the role list is built from these, the single source the
+  cursor + dispatch builders share):
+  - **Serial roles** = `{spec, quality_gates, user}` — run one-at-a-time and lead the
+    walk; everything else fans out in **parallel** (one batched dispatch).
+  - **Runtime-observation roles** (e.g. `runtime-verifier`) audit the *built* work
+    (boot the app, drive a browser, run the command). Nothing exists to observe
+    pre-build, so they're **excluded from the PRE-exec review** and fire only
+    POST-exec + at run completion; they get a `proof/` evidence-write carve-out (never
+    source). They **HOLD** (file BLOCKED, never sign) if they can't actually run it.
+  - **PR-interaction roles** read CI/checks and post/resolve PR threads via `gh`/`glab`
+    but never edit source — code fixes flow through feedback + the fix-worker loop.
+  - Engine-built-in adversarial roles (`continuity`, `cross-stage-consistency`) are
+    always present; factory reviewers come from the override cascade (§10).
 - **quality gates run at THREE points** (darkrun decision — keep BOTH the
   per-loop run AND the post-review actor, which the predecessor's v4 collapsed to
   one): (1) when the **last worker in a unit's Pass loop lands** (at advance, before
@@ -373,6 +389,13 @@ derived from `closed_at`, not a separate log. A reviewer finding files feedback 
 **invalidates** the relevant `approvals.<role>` (resets it to null), so the run can't
 seal until reviewers re-sign over the fix.
 
+**The fix loop:** an open feedback dispatches into the owning station's `fix_workers`
+chain (Track B); each trip through the chain is one **Pass** with its own counter.
+A fix unit/Pass declares `closes: [FB-NN]`; landing it (via the per-feedback
+**fix-chain worktree** `darkrun/<run>/fix-<scope>-<FB>`, §5) stamps the feedback's
+`closed_by`/`closed_at`. Drift feedback and reviewer feedback both flow through this
+same loop; the bolt cap + stuck-reject guards (§12) bound it.
+
 ## 18. Checkpoint kinds + gate resolution
 
 A station's `checkpoint:` (its gate kind) and how the `user_gate{approval}` resolves
@@ -389,8 +412,12 @@ await      — block until a decision arrives
   whose `review:` is `external`.
 - **auto(pilot):** per-station `user` gates removed (the cursor drives through);
   `external`/`await` still pause it; the run-level final user gate is always present.
-Right-sizing at run start may collapse/skip stations and downgrade checkpoints to
-`auto` — the work decides the shape, no manual mode pick required.
+Right-sizing is two concrete mechanisms, NOT a magic size oracle: (1) **optional
+stations** — a station marked `optional` is offered for keep-or-drop the first time
+the cursor reaches it (dropping removes it from the run's station plan); (2) the
+**mode-shaped role lists** — `auto` trims the per-station human gates and the
+conversation/verify elaborate signals. The work shape falls out of those, not a
+manual mode pick.
 
 ## 19. Locks / concurrency
 
@@ -433,6 +460,29 @@ engine files to resolve them — but **schema validation stays on**, so a malfor
 resolution still fails loudly. Without the suspension the guard would refuse the very
 writes needed to finish the merge. (This is mechanic #3 of `merge-engine.md`.)
 
+## 21. Human gate / session surface
+
+When the cursor emits a `user_gate` (or a `question`/`direction`/`picker`/`view`
+action), the engine **raises a typed session** that the desktop app (and the HTTP/WS
+feed) renders for the human. The session types (the wire contract darkrun-api
+mirrors):
+- **review** — the station gate: the unit list + completion criteria, declared
+  outputs, the brief/outcome, and approve / request-changes (request-changes files
+  feedback). Both the REVIEW gate (`gate_kind: spec`) and the CHECKPOINT
+  (`gate_kind: approval`) are review sessions.
+- **question** — a free-text question to the operator; the answer threads back.
+- **direction** (design_direction) — pick a design/approach direction.
+- **picker** — choose one of N engine-offered options (e.g. mode, an archetype).
+- **view** — a read-only surface (an artifact/diff to look at, no decision).
+- **visual_review** / **proof** — image/annotate review of a built artifact, and the
+  objective-evidence (`proof/`) captures a runtime-observation reviewer produced.
+
+Sessions are keyed by run slug in an in-memory registry (no repo-persisted gate
+pointer); the engine raises one, the human resolves it in the app, and the resolution
+(approve / answer / pick / merge-the-PR in discrete mode) stamps the corresponding
+`approvals.<role>` / closes feedback, so the next tick advances. The review surface is
+the ONLY interactive face darkrun drives — never a browser/Playwright flow.
+
 ---
 
 ## Gap summary (darkrun today → this spec)
@@ -454,3 +504,8 @@ writes needed to finish the merge. (This is mechanic #3 of `merge-engine.md`.)
 14. No advisory mkdir lock model (withStationLock/withRunMainLock + stale recovery).
 15. No write-guard/ownership enforcement of FSM fields + mid-merge guard suspension.
 16. No checkpoint-kind→gate-resolution wiring per mode (auto/ask/external/await).
+17. No run-root audit journals (action-log/write-audit/run-tick).
+18. No reviewer role classes (serial vs parallel; runtime-observation post-only +
+    proof-write carve-out + HOLD-if-cant-run; PR-interaction).
+19. No unit `closes:` field / fix-chain feedback threading (fix Pass → closed_at).
+20. Right-sizing is only optional-station keep/drop + mode trimming (no size oracle).
