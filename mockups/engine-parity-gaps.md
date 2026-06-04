@@ -8,7 +8,28 @@ is honesty about the gap, not a to-do list yet.
 > Vocabulary: "the predecessor" is the prior TypeScript system. Never write its
 > name into darkrun code, content, or output.
 
-**Verified tally — 44 mechanisms: 3 present · 15 partial · 26 missing.**
+**Verified tally — 44 mechanisms. Start of work: 3 present · 15 partial · 26 missing.
+After this session's burn-down: 16 present · 11 partial · 17 missing.**
+
+## Closed this session (committed to main, each tested)
+
+- **Cluster A — fully closed.** Iterations carry a handoff `note` + `completed_at`;
+  `pass`/active-worker derived from the array (`darkrun_unit_iterate` records a
+  beat; the next dispatch shows the prior handoff). Feedback gained `origin`,
+  `closure_reply`, and `invalidates` (a close re-opens the stamps it undercut).
+  Append-only `action-log.jsonl` audit journal per run.
+- **Cluster B — B1 input/premise drift** (the sweep now witnesses + checks
+  declared inputs, files `DriftKind::Input`); **B3 dedup** (per-(unit,input) id);
+  **B4 cascade breaker** (`DARKRUN_DRIFT_CASCADE_CAP`). B8 (deadlock halt) was
+  already present.
+- **Cluster C — C3 severity-ordered feedback** (questions preempt; blocker before
+  nit; no starvation).
+- **Cluster D — D2 output-existence gate** (a unit can't reach Audit on a declared
+  output that isn't on disk); **D3 input-shape gate** (an `input` that names a
+  unit, not a path, is held).
+
+Still open (next): B2/B5/B6/B7/B9, C1/C2/C4/C5/C6, D1/D4/D5, all of E, F2/F4/F5,
+all of G. A few are deliberate design differences rather than gaps — see notes.
 
 ## The one-paragraph truth (post-verification)
 

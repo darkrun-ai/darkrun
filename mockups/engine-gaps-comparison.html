@@ -98,9 +98,19 @@
 </div>
 
 <div class="scorerow">
-  <div class="score h"><div class="n">3</div><div class="l">present</div></div>
-  <div class="score p"><div class="n">15</div><div class="l">partial</div></div>
-  <div class="score m"><div class="n">26</div><div class="l">missing</div></div>
+  <div class="score h"><div class="n">16</div><div class="l">present</div></div>
+  <div class="score p"><div class="n">11</div><div class="l">partial</div></div>
+  <div class="score m"><div class="n">17</div><div class="l">missing</div></div>
+</div>
+
+<div class="corr" style="border-color:#1c3a25">
+  <h3>closed this session (committed, each tested)</h3>
+  <ul>
+    <li><b>Cluster A — fully closed.</b> Iterations carry a handoff note + completed_at; pass/active-worker derived from the array; <span class="code">darkrun_unit_iterate</span> records a beat and the next dispatch shows the prior handoff. Feedback gained origin, closure_reply, and invalidates (a close re-opens the stamps it undercut). Append-only <span class="code">action-log.jsonl</span>.</li>
+    <li><b>Cluster B</b> — B1 input/premise drift (witness + check declared inputs, <span class="code">DriftKind::Input</span>), B3 per-premise dedup, B4 cascade breaker.</li>
+    <li><b>Cluster C</b> — C3 severity-ordered feedback (questions preempt; blocker before nit; no starvation).</li>
+    <li><b>Cluster D</b> — D2 output-existence gate, D3 input-shape gate.</li>
+  </ul>
 </div>
 
 <div class="corr">
