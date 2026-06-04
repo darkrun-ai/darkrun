@@ -411,6 +411,39 @@ mod tests {
     }
 
     #[test]
+    fn legal_is_a_cross_domain_factory_on_the_same_spine() {
+        // The legal factory is orientation-only content — no engine changes — and
+        // it walks the identical FSSBPH spine with legal labels and no surface.
+        let f = load_validated("legal").expect("legal loads and validates");
+        assert_eq!(f.name(), "legal");
+
+        // Same six positions, in the fixed order.
+        let names: Vec<&str> = f.stations.iter().map(Station::name).collect();
+        assert_eq!(names, vec!["frame", "specify", "shape", "build", "prove", "harden"]);
+
+        // Domain labels ride over the fixed positions.
+        let labels: Vec<&str> = f
+            .stations
+            .iter()
+            .map(|s| s.frontmatter.label.as_deref().unwrap_or(s.name()))
+            .collect();
+        assert_eq!(labels, vec!["Intake", "Position", "Structure", "Draft", "Review", "Execute"]);
+
+        // Proof is human-attested: no measured surface, and the final stations
+        // gate external (counsel/client attest).
+        assert!(f.frontmatter.surfaces.is_empty(), "legal declares no software surface");
+        use darkrun_core::domain::CheckpointKind;
+        assert_eq!(f.station("prove").unwrap().checkpoint(), CheckpointKind::External);
+        assert_eq!(f.station("harden").unwrap().checkpoint(), CheckpointKind::External);
+
+        // Each station carries a real legal roster (its own role files, not
+        // software's) — this is an independent domain corpus.
+        let draft_workers: Vec<&str> =
+            f.station("build").unwrap().workers.iter().map(Role::name).collect();
+        assert_eq!(draft_workers, vec!["clause_drafter", "redline_challenger", "draft_reconciler"]);
+    }
+
+    #[test]
     fn inherits_cycle_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         for (a, b) in [("x", "y"), ("y", "x")] {

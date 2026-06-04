@@ -53,6 +53,19 @@ fn body(res: &CallToolResult) -> Value {
     }
 }
 
+/// The `software` entry from a `darkrun_factory_list` body. The catalog now
+/// ships multiple factories (legal, libdev, software) sorted by slug, so tests
+/// that assert software's specific orientation must select it by name rather
+/// than by list position.
+fn software_entry(list: &Value) -> Value {
+    list.as_array()
+        .expect("factory list array")
+        .iter()
+        .find(|f| f["name"] == "software")
+        .cloned()
+        .expect("software factory in the catalog")
+}
+
 fn is_ok(res: &CallToolResult) -> bool {
     res.is_error == Some(false)
 }
@@ -1728,21 +1741,24 @@ fn factory_list_includes_software() {
 fn factory_list_software_has_six_stations() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    assert_eq!(v[0]["stations"].as_array().unwrap().len(), 6);
+    let sw = software_entry(&v);
+    assert_eq!(sw["stations"].as_array().unwrap().len(), 6);
 }
 
 #[test]
 fn factory_list_first_station_is_frame() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    assert_eq!(v[0]["stations"][0]["name"], "frame");
+    let sw = software_entry(&v);
+    assert_eq!(sw["stations"][0]["name"], "frame");
 }
 
 #[test]
 fn factory_list_stations_in_cost_order() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    let names: Vec<&str> = v[0]["stations"]
+    let sw = software_entry(&v);
+    let names: Vec<&str> = sw["stations"]
         .as_array()
         .unwrap()
         .iter()
@@ -1758,25 +1774,28 @@ fn factory_list_stations_in_cost_order() {
 fn factory_list_station_carries_kills_and_artifact() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    assert_eq!(v[0]["stations"][0]["kills"], "wrong-thing");
-    assert_eq!(v[0]["stations"][0]["artifact"], "frame.md");
+    let sw = software_entry(&v);
+    assert_eq!(sw["stations"][0]["kills"], "wrong-thing");
+    assert_eq!(sw["stations"][0]["artifact"], "frame.md");
 }
 
 #[test]
 fn factory_list_station_carries_checkpoint_kind() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    // Every station gates `ask` by default.
-    assert_eq!(v[0]["stations"][0]["checkpoint"], "ask");
-    assert_eq!(v[0]["stations"][3]["checkpoint"], "ask");
-    assert_eq!(v[0]["stations"][5]["checkpoint"], "ask");
+    let sw = software_entry(&v);
+    // Every software station gates `ask` by default.
+    assert_eq!(sw["stations"][0]["checkpoint"], "ask");
+    assert_eq!(sw["stations"][3]["checkpoint"], "ask");
+    assert_eq!(sw["stations"][5]["checkpoint"], "ask");
 }
 
 #[test]
 fn factory_list_station_carries_workers_and_reviewers() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    let frame = &v[0]["stations"][0];
+    let sw = software_entry(&v);
+    let frame = &sw["stations"][0];
     assert_eq!(frame["workers"][0], "framer");
     assert_eq!(frame["reviewers"][0], "value");
 }
@@ -5286,7 +5305,8 @@ fn run_summary_title_field_present() {
 fn factory_list_frame_reviewers_exact() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    let r = v[0]["stations"][0]["reviewers"].as_array().unwrap();
+    let sw = software_entry(&v);
+    let r = sw["stations"][0]["reviewers"].as_array().unwrap();
     assert_eq!(r[0], "value");
     assert_eq!(r[1], "feasibility");
 }
@@ -5295,7 +5315,8 @@ fn factory_list_frame_reviewers_exact() {
 fn factory_list_specify_reviewers_exact() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    let r = v[0]["stations"][1]["reviewers"].as_array().unwrap();
+    let sw = software_entry(&v);
+    let r = sw["stations"][1]["reviewers"].as_array().unwrap();
     assert_eq!(r[0], "testability");
     assert_eq!(r[1], "completeness");
 }
@@ -5304,7 +5325,8 @@ fn factory_list_specify_reviewers_exact() {
 fn factory_list_harden_reviewers_exact() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    let r = v[0]["stations"][5]["reviewers"].as_array().unwrap();
+    let sw = software_entry(&v);
+    let r = sw["stations"][5]["reviewers"].as_array().unwrap();
     assert_eq!(r[0], "security");
     assert_eq!(r[1], "readiness");
 }
