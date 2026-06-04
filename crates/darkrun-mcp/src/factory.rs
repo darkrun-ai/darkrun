@@ -3,19 +3,23 @@
 //! Given a factory name, resolves its ordered stations, each station's
 //! checkpoint kind, and the universal worker/reviewer slot.
 //!
-//! For this first vertical slice the **software factory** is defined inline
-//! here as the authoritative fallback. Once `darkrun-content` lands its
-//! embedded corpus, [`resolve_factory`] can prefer the embedded definition
-//! and fall back to this table — the manager only consumes the
-//! [`FactoryDef`] shape, so swapping the source is transparent.
+//! The plan's six stations are the fixed `Position::FLOW` spine (a hardcoded
+//! invariant); each station's *orientation* — its risk class, locked artifact,
+//! checkpoint, and role rosters — is loaded from the on-disk
+//! `plugin/factories/<name>/` corpus via `darkrun-content`. There is no inline
+//! factory definition in code: [`resolve_factory`] reads the corpus or returns
+//! `None`.
 
-use darkrun_core::domain::CheckpointKind;
+use darkrun_core::domain::{CheckpointKind, Position};
 
 /// A resolved station within a factory plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StationDef {
-    /// Stable station key (e.g. `"frame"`).
+    /// Stable station key (e.g. `"frame"`) — one of the six FSSBPH positions.
     pub name: String,
+    /// Domain-facing display name shown over the fixed position (legal →
+    /// `Intake`). `None` → the UI shows the position name.
+    pub label: Option<String>,
     /// Human-readable summary of the risk this station eliminates.
     pub kills: String,
     /// The durable artifact the station locks on completion.
@@ -64,105 +68,60 @@ impl FactoryDef {
     }
 }
 
-fn station(
-    name: &str,
-    kills: &str,
-    artifact: &str,
-    checkpoint: CheckpointKind,
-    explorers: &[&str],
-    workers: &[&str],
-    reviewers: &[&str],
-) -> StationDef {
-    StationDef {
-        name: name.to_string(),
-        kills: kills.to_string(),
-        artifact: artifact.to_string(),
-        checkpoint,
-        explorers: explorers.iter().map(|s| s.to_string()).collect(),
-        workers: workers.iter().map(|s| s.to_string()).collect(),
-        reviewers: reviewers.iter().map(|s| s.to_string()).collect(),
+impl FactoryDef {
+    /// Build a `FactoryDef` from a loaded on-disk [`darkrun_content::Factory`].
+    ///
+    /// The stations are taken in the fixed `Position::FLOW` order, not from the
+    /// factory's frontmatter — the spine is a hardcoded invariant. Each station's
+    /// orientation (kills/label/artifact/checkpoint and the role rosters) comes
+    /// from its `STATION.md`.
+    fn from_content(f: &darkrun_content::Factory) -> FactoryDef {
+        let stations = Position::FLOW
+            .iter()
+            .filter_map(|pos| f.station(pos.dir()))
+            .map(StationDef::from_content)
+            .collect();
+        FactoryDef {
+            name: f.name().to_string(),
+            stations,
+        }
     }
 }
 
-/// The software factory — the redesigned station plan ordered by
-/// cost-of-late-discovery: Frame -> Specify -> Shape -> Build -> Prove -> Harden.
-pub fn software_factory() -> FactoryDef {
-    use CheckpointKind::Ask;
-    FactoryDef {
-        name: "software".to_string(),
-        stations: vec![
-            station(
-                "frame",
-                "wrong-thing",
-                "frame.md",
-                Ask,
-                &["context", "value"],
-                &["framer", "challenger", "distiller"],
-                &["value", "feasibility"],
-            ),
-            station(
-                "specify",
-                "ambiguity",
-                "spec.md",
-                Ask,
-                &["contract", "edge_case"],
-                &["spec_writer", "adversary", "tightener"],
-                &["completeness", "testability"],
-            ),
-            station(
-                "shape",
-                "expensive-structural-reversal",
-                "shape.md",
-                Ask,
-                &["architecture", "risk", "surface"],
-                &["architect", "risk_challenger", "simplifier"],
-                &["soundness", "reversibility"],
-            ),
-            station(
-                "build",
-                "implementation-defects",
-                "build.md",
-                Ask,
-                &["integration_point", "reuse"],
-                &["test_author", "builder", "self_reviewer", "reconciler"],
-                &["correctness", "maintainability"],
-            ),
-            station(
-                "prove",
-                "escaped-defects",
-                "prove.md",
-                Ask,
-                &["regression", "scenario"],
-                &["scenario_author", "prover", "regressor"],
-                &["coverage", "evidence"],
-            ),
-            station(
-                "harden",
-                "works-in-dev-dies-in-prod",
-                "release.md",
-                Ask,
-                &["operability", "threat"],
-                &["hardener", "red_teamer", "releaser"],
-                &["security", "readiness"],
-            ),
-        ],
+impl StationDef {
+    /// Build a `StationDef` from a loaded on-disk [`darkrun_content::Station`].
+    fn from_content(s: &darkrun_content::Station) -> StationDef {
+        StationDef {
+            name: s.name().to_string(),
+            label: s.frontmatter.label.clone(),
+            kills: s.frontmatter.kills.clone(),
+            artifact: s.frontmatter.locked_artifact.clone(),
+            checkpoint: s.checkpoint(),
+            explorers: s.frontmatter.explorers.clone(),
+            workers: s.frontmatter.workers.clone(),
+            reviewers: s.frontmatter.reviewers.clone(),
+        }
     }
 }
 
-/// Resolve a factory by name. Returns `None` for unknown factories.
+/// Resolve a factory by name from the on-disk corpus. Returns `None` for an
+/// unknown or structurally-invalid factory.
 ///
-/// Only the software factory ships in this slice; other factories resolve to
-/// `None` until `darkrun-content` provides them.
+/// The source of truth is the embedded `plugin/factories/<name>/` content — there
+/// is no inline definition in code. The six FSSBPH stations are walked in their
+/// fixed `Position::FLOW` order regardless of the factory's own declarations.
 pub fn resolve_factory(name: &str) -> Option<FactoryDef> {
-    match name {
-        "software" => Some(software_factory()),
-        _ => None,
-    }
+    darkrun_content::load_validated(name)
+        .ok()
+        .map(|f| FactoryDef::from_content(&f))
 }
 
-/// Every factory available in this build.
+/// Every factory available in this build, resolved from the corpus.
 pub fn list_factories() -> Vec<FactoryDef> {
-    vec![software_factory()]
+    darkrun_content::list_factories()
+        .into_iter()
+        .filter_map(|name| resolve_factory(&name))
+        .collect()
 }
 
 #[cfg(test)]
@@ -171,7 +130,7 @@ mod tests {
 
     #[test]
     fn software_factory_has_six_ordered_stations() {
-        let f = software_factory();
+        let f = resolve_factory("software").expect("software resolves from the corpus");
         assert_eq!(
             f.station_names(),
             vec!["frame", "specify", "shape", "build", "prove", "harden"]
@@ -179,6 +138,16 @@ mod tests {
         assert_eq!(f.first_station().unwrap().name, "frame");
         assert_eq!(f.next_station("frame").unwrap().name, "specify");
         assert!(f.next_station("harden").is_none());
+    }
+
+    #[test]
+    fn software_station_orientation_loads_from_disk() {
+        let f = resolve_factory("software").unwrap();
+        let build = f.station("build").unwrap();
+        assert_eq!(build.kills, "implementation-defects");
+        assert_eq!(build.artifact, "code");
+        assert_eq!(build.checkpoint, CheckpointKind::Ask);
+        assert_eq!(build.workers, vec!["test_author", "builder", "self_reviewer", "reconciler"]);
     }
 
     #[test]

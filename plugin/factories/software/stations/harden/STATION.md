@@ -1,6 +1,7 @@
 ---
 name: harden
 description: Harden for production — security, operability, and a rollout plan, scoped to what the change actually needs.
+kills: works-in-dev-dies-in-prod
 explorers: [threat, operability]
 workers: [hardener, red_teamer, releaser]
 reviewers: [security, readiness]

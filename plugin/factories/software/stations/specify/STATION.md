@@ -1,6 +1,7 @@
 ---
 name: specify
 description: Specify behavior as testable criteria, contracts, and edge cases — the rubric Prove will grade against.
+kills: ambiguity
 explorers: [contract, edge_case]
 workers: [spec_writer, adversary, tightener]
 reviewers: [testability, completeness]

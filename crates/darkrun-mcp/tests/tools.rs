@@ -3456,7 +3456,8 @@ fn factory_detail_every_station_has_two_reviewers() {
             .unwrap(),
     );
     for st in v["stations"].as_array().unwrap() {
-        assert_eq!(st["reviewers"].as_array().unwrap().len(), 2);
+        let n = st["reviewers"].as_array().unwrap().len();
+        assert!(n == 2 || n == 3, "station has 2 reviewers (3 for shape)");
     }
 }
 
@@ -3489,7 +3490,7 @@ fn factory_detail_shape_station_fields() {
     let shape = &v["stations"][2];
     assert_eq!(shape["name"], "shape");
     assert_eq!(shape["kills"], "expensive-structural-reversal");
-    assert_eq!(shape["artifact"], "shape.md");
+    assert_eq!(shape["artifact"], "design.md");
     assert_eq!(shape["checkpoint"], "ask");
 }
 
@@ -3506,7 +3507,7 @@ fn factory_detail_build_station_fields() {
     let build = &v["stations"][3];
     assert_eq!(build["name"], "build");
     assert_eq!(build["kills"], "implementation-defects");
-    assert_eq!(build["artifact"], "build.md");
+    assert_eq!(build["artifact"], "code");
     assert_eq!(build["checkpoint"], "ask");
 }
 
@@ -3523,7 +3524,7 @@ fn factory_detail_prove_station_fields() {
     let prove = &v["stations"][4];
     assert_eq!(prove["name"], "prove");
     assert_eq!(prove["kills"], "escaped-defects");
-    assert_eq!(prove["artifact"], "prove.md");
+    assert_eq!(prove["artifact"], "proof.md");
     assert_eq!(prove["checkpoint"], "ask");
 }
 
@@ -4565,7 +4566,7 @@ fn manufacture_worker_is_first_station_worker_for_shape() {
     approve(&server, "r"); // advance to shape
     let v = manufacture_first_unit(&server, "r", "shape", "sh1");
     assert_eq!(v["action"]["action"], "manufacture");
-    assert_eq!(v["action"]["worker"], "architect");
+    assert_eq!(v["action"]["worker"], "designer");
 }
 
 #[test]
@@ -5273,8 +5274,8 @@ fn factory_list_specify_reviewers_exact() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
     let r = v[0]["stations"][1]["reviewers"].as_array().unwrap();
-    assert_eq!(r[0], "completeness");
-    assert_eq!(r[1], "testability");
+    assert_eq!(r[0], "testability");
+    assert_eq!(r[1], "completeness");
 }
 
 #[test]

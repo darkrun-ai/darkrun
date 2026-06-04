@@ -431,7 +431,7 @@ fn structured_action_unchanged_by_prompt_layer() {
         RunAction::Review { run, station, reviewers } => {
             assert_eq!(run, "r");
             assert_eq!(station, "specify");
-            assert_eq!(reviewers, &vec!["completeness".to_string(), "testability".to_string()]);
+            assert_eq!(reviewers, &vec!["testability".to_string(), "completeness".to_string()]);
         }
         other => panic!("expected Review, got {other:?}"),
     }

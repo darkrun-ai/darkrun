@@ -44,11 +44,20 @@ pub struct FactoryFrontmatter {
 /// Frontmatter of a `STATION.md` document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StationFrontmatter {
-    /// Station slug (e.g. `frame`).
+    /// Station slug (e.g. `frame`) — must be one of the six FSSBPH positions.
     pub name: String,
     /// One-line description.
     #[serde(default)]
     pub description: String,
+    /// The risk class this station eliminates, in the domain's words
+    /// (`wrong-thing`, `implementation-defects`, …). A prompt variable
+    /// (`{{ kills }}`), not engine logic.
+    #[serde(default)]
+    pub kills: String,
+    /// Optional domain-facing display name shown over the fixed position (legal
+    /// → `Intake`). Display-only; defaults to the position name when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Explorer slugs this station runs in its Explore phase.
     #[serde(default)]
     pub explorers: Vec<String>,

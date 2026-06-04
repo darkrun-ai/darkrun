@@ -1,6 +1,7 @@
 ---
 name: shape
 description: Shape the structure — decide the architecture and prove the risky assumptions cheaply before they get expensive.
+kills: expensive-structural-reversal
 explorers: [surface, architecture, risk]
 workers: [designer, visual_designer, spiker, pressure_tester, resolver]
 reviewers: [fit, reversibility, simplicity]

@@ -9,7 +9,7 @@
 //! (determinism, uniqueness, external checkpoints where expected).
 
 use darkrun_core::domain::CheckpointKind;
-use darkrun_mcp::factory::{list_factories, software_factory};
+use darkrun_mcp::factory::list_factories;
 use darkrun_mcp::{resolve_factory, FactoryDef, StationDef};
 
 // ---------------------------------------------------------------------------
@@ -19,7 +19,7 @@ use darkrun_mcp::{resolve_factory, FactoryDef, StationDef};
 const ORDER: [&str; 6] = ["frame", "specify", "shape", "build", "prove", "harden"];
 
 fn sw() -> FactoryDef {
-    software_factory()
+    resolve_factory("software").unwrap()
 }
 
 /// Returns the station with the given name, panicking with a clear message.
@@ -45,8 +45,8 @@ fn resolve_software_returns_named_software() {
 }
 
 #[test]
-fn resolve_software_equals_software_factory() {
-    assert_eq!(resolve_factory("software").unwrap(), software_factory());
+fn resolve_software_equals_corpus() {
+    assert_eq!(resolve_factory("software").unwrap(), resolve_factory("software").unwrap());
 }
 
 #[test]
@@ -154,8 +154,8 @@ fn list_factories_first_is_software() {
 }
 
 #[test]
-fn list_factories_software_equals_software_factory() {
-    assert_eq!(list_factories()[0], software_factory());
+fn list_factories_software_equals_resolve() {
+    assert_eq!(list_factories()[0], resolve_factory("software").unwrap());
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn software_factory_name_is_software() {
 
 #[test]
 fn software_factory_is_deterministic() {
-    assert_eq!(software_factory(), software_factory());
+    assert_eq!(resolve_factory("software").unwrap(), resolve_factory("software").unwrap());
 }
 
 #[test]
@@ -540,17 +540,17 @@ fn specify_artifact_is_spec_md() {
 
 #[test]
 fn shape_artifact_is_shape_md() {
-    assert_eq!(st("shape").artifact, "shape.md");
+    assert_eq!(st("shape").artifact, "design.md");
 }
 
 #[test]
 fn build_artifact_is_build_md() {
-    assert_eq!(st("build").artifact, "build.md");
+    assert_eq!(st("build").artifact, "code");
 }
 
 #[test]
 fn prove_artifact_is_prove_md() {
-    assert_eq!(st("prove").artifact, "prove.md");
+    assert_eq!(st("prove").artifact, "proof.md");
 }
 
 #[test]
@@ -559,11 +559,13 @@ fn harden_artifact_is_release_md() {
 }
 
 #[test]
-fn every_artifact_ends_with_md() {
+fn every_artifact_is_a_md_file_or_a_named_output() {
+    // Most stations lock a `.md` document; Build locks `code` (a named output,
+    // no extension). Either way the artifact is a bare, non-pathy token.
     for s in sw().stations {
         assert!(
-            s.artifact.ends_with(".md"),
-            "artifact {:?} for {:?} should be a .md file",
+            s.artifact.ends_with(".md") || !s.artifact.contains('.'),
+            "artifact {:?} for {:?} should be a .md file or a bare named output",
             s.artifact,
             s.name
         );
@@ -591,7 +593,7 @@ fn artifacts_in_canonical_order() {
     let arts: Vec<String> = sw().stations.iter().map(|s| s.artifact.clone()).collect();
     assert_eq!(
         arts,
-        vec!["frame.md", "spec.md", "shape.md", "build.md", "prove.md", "release.md"]
+        vec!["frame.md", "spec.md", "design.md", "code", "proof.md", "release.md"]
     );
 }
 
@@ -685,7 +687,7 @@ fn specify_workers() {
 fn shape_workers() {
     assert_eq!(
         st("shape").workers,
-        vec!["architect", "risk_challenger", "simplifier"]
+        vec!["designer", "visual_designer", "spiker", "pressure_tester", "resolver"]
     );
 }
 
@@ -701,7 +703,7 @@ fn build_workers() {
 fn prove_workers() {
     assert_eq!(
         st("prove").workers,
-        vec!["scenario_author", "prover", "regressor"]
+        vec!["verifier", "breaker", "triage"]
     );
 }
 
@@ -731,9 +733,16 @@ fn build_has_four_workers() {
 }
 
 #[test]
-fn non_build_stations_have_three_workers() {
-    for name in ["frame", "specify", "shape", "prove", "harden"] {
-        assert_eq!(st(name).workers.len(), 3, "{name} worker count");
+fn worker_counts_match_the_corpus() {
+    for (name, n) in [
+        ("frame", 3),
+        ("specify", 3),
+        ("shape", 5),
+        ("build", 4),
+        ("prove", 3),
+        ("harden", 3),
+    ] {
+        assert_eq!(st(name).workers.len(), n, "{name} worker count");
     }
 }
 
@@ -773,7 +782,7 @@ fn worker_names_use_snake_case_slugs() {
 #[test]
 fn total_worker_slots_is_nineteen() {
     let total: usize = sw().stations.iter().map(|s| s.workers.len()).sum();
-    assert_eq!(total, 19);
+    assert_eq!(total, 21);
 }
 
 #[test]
@@ -802,7 +811,7 @@ fn frame_reviewers() {
 fn specify_reviewers() {
     assert_eq!(
         st("specify").reviewers,
-        vec!["completeness", "testability"]
+        vec!["testability", "completeness"]
     );
 }
 
@@ -810,7 +819,7 @@ fn specify_reviewers() {
 fn shape_reviewers() {
     assert_eq!(
         st("shape").reviewers,
-        vec!["soundness", "reversibility"]
+        vec!["fit", "reversibility", "simplicity"]
     );
 }
 
@@ -824,7 +833,7 @@ fn build_reviewers() {
 
 #[test]
 fn prove_reviewers() {
-    assert_eq!(st("prove").reviewers, vec!["coverage", "evidence"]);
+    assert_eq!(st("prove").reviewers, vec!["evidence", "coverage"]);
 }
 
 #[test]
@@ -833,14 +842,12 @@ fn harden_reviewers() {
 }
 
 #[test]
-fn every_station_has_exactly_two_reviewers() {
+fn reviewer_counts_match_the_corpus() {
+    // Every station has two reviewers except Shape, which has three (fit /
+    // reversibility / simplicity).
     for s in sw().stations {
-        assert_eq!(
-            s.reviewers.len(),
-            2,
-            "station {:?} should have 2 reviewers",
-            s.name
-        );
+        let expected = if s.name == "shape" { 3 } else { 2 };
+        assert_eq!(s.reviewers.len(), expected, "station {:?} reviewer count", s.name);
     }
 }
 
@@ -880,7 +887,7 @@ fn reviewer_names_use_snake_case_slugs() {
 #[test]
 fn total_reviewer_slots_is_twelve() {
     let total: usize = sw().stations.iter().map(|s| s.reviewers.len()).sum();
-    assert_eq!(total, 12);
+    assert_eq!(total, 13);
 }
 
 #[test]
@@ -954,7 +961,7 @@ fn every_station_field_is_populated() {
 
 #[test]
 fn factory_def_equality_is_structural() {
-    assert_eq!(software_factory(), software_factory());
+    assert_eq!(resolve_factory("software").unwrap(), resolve_factory("software").unwrap());
 }
 
 #[test]

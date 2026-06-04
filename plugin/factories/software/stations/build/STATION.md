@@ -1,6 +1,7 @@
 ---
 name: build
 description: Build the software — write tests first, implement to green, self-review, and merge each Unit clean.
+kills: implementation-defects
 explorers: [reuse, integration_point]
 workers: [test_author, builder, self_reviewer, reconciler]
 reviewers: [correctness, maintainability]

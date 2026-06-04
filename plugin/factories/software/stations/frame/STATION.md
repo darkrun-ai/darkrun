@@ -1,6 +1,7 @@
 ---
 name: frame
 description: Frame the problem — who has it, why it matters, and how we will know it is solved.
+kills: wrong-thing
 explorers: [context, value]
 workers: [framer, challenger, distiller]
 reviewers: [value, feasibility]

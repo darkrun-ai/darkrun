@@ -1191,6 +1191,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "darkrun-api",
+ "darkrun-content",
  "darkrun-core",
  "darkrun-git",
  "darkrun-harness",

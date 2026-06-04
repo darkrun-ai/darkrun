@@ -998,9 +998,9 @@ macro_rules! manufacture_worker_test {
 }
 manufacture_worker_test!(frame_first_worker, "frame", "framer");
 manufacture_worker_test!(specify_first_worker, "specify", "spec_writer");
-manufacture_worker_test!(shape_first_worker, "shape", "architect");
+manufacture_worker_test!(shape_first_worker, "shape", "designer");
 manufacture_worker_test!(build_first_worker, "build", "test_author");
-manufacture_worker_test!(prove_first_worker, "prove", "scenario_author");
+manufacture_worker_test!(prove_first_worker, "prove", "verifier");
 manufacture_worker_test!(harden_first_worker, "harden", "hardener");
 
 // ───── Spec action carries the station's `kills` framing ─────
@@ -1044,11 +1044,31 @@ macro_rules! review_reviewers_test {
         }
     };
 }
+
+// Shape carries THREE reviewers (fit / reversibility / simplicity), in both its
+// Review and Audit actions — the 2-arg macros can't express it.
+macro_rules! shape_three_reviewers {
+    ($name:ident, $variant:ident) => {
+        #[test]
+        fn $name() {
+            let (_d, store) = fresh("r");
+            at_phase(&store, "r", "shape", StationPhase::$variant);
+            let pos = derive_position(&store, "r").expect("pos");
+            match pos.action.unwrap() {
+                RunAction::$variant { reviewers, .. } => {
+                    assert_eq!(reviewers, vec!["fit", "reversibility", "simplicity"]);
+                }
+                other => panic!("got {other:?}"),
+            }
+        }
+    };
+}
+
 review_reviewers_test!(frame_reviewers, "frame", "value", "feasibility");
-review_reviewers_test!(specify_reviewers, "specify", "completeness", "testability");
-review_reviewers_test!(shape_reviewers, "shape", "soundness", "reversibility");
+review_reviewers_test!(specify_reviewers, "specify", "testability", "completeness");
+shape_three_reviewers!(shape_reviewers, Review);
 review_reviewers_test!(build_reviewers, "build", "correctness", "maintainability");
-review_reviewers_test!(prove_reviewers, "prove", "coverage", "evidence");
+review_reviewers_test!(prove_reviewers, "prove", "evidence", "coverage");
 review_reviewers_test!(harden_reviewers, "harden", "security", "readiness");
 
 macro_rules! audit_reviewers_test {
@@ -1068,10 +1088,10 @@ macro_rules! audit_reviewers_test {
     };
 }
 audit_reviewers_test!(frame_audit_reviewers, "frame", "value", "feasibility");
-audit_reviewers_test!(specify_audit_reviewers, "specify", "completeness", "testability");
-audit_reviewers_test!(shape_audit_reviewers, "shape", "soundness", "reversibility");
+audit_reviewers_test!(specify_audit_reviewers, "specify", "testability", "completeness");
+shape_three_reviewers!(shape_audit_reviewers, Audit);
 audit_reviewers_test!(build_audit_reviewers, "build", "correctness", "maintainability");
-audit_reviewers_test!(prove_audit_reviewers, "prove", "coverage", "evidence");
+audit_reviewers_test!(prove_audit_reviewers, "prove", "evidence", "coverage");
 audit_reviewers_test!(harden_audit_reviewers, "harden", "security", "readiness");
 
 // ───── Reflect action carries run + station only ─────
@@ -2142,9 +2162,9 @@ macro_rules! worker_on_multi_wave_test {
 }
 worker_on_multi_wave_test!(multi_worker_frame, "frame", "framer");
 worker_on_multi_wave_test!(multi_worker_specify, "specify", "spec_writer");
-worker_on_multi_wave_test!(multi_worker_shape, "shape", "architect");
+worker_on_multi_wave_test!(multi_worker_shape, "shape", "designer");
 worker_on_multi_wave_test!(multi_worker_build, "build", "test_author");
-worker_on_multi_wave_test!(multi_worker_prove, "prove", "scenario_author");
+worker_on_multi_wave_test!(multi_worker_prove, "prove", "verifier");
 worker_on_multi_wave_test!(multi_worker_harden, "harden", "hardener");
 
 // ───── Checkpoint kind survives a re-derive (no mutation) per station ─────

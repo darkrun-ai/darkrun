@@ -1,6 +1,7 @@
 ---
 name: prove
 description: Prove the software satisfies every spec criterion — independently of the people who built it.
+kills: escaped-defects
 explorers: [scenario, regression]
 workers: [verifier, breaker, triage]
 reviewers: [evidence, coverage]
