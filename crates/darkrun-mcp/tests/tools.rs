@@ -2083,6 +2083,11 @@ fn walk_station_to_checkpoint(server: &DarkrunServer, slug: &str, station: &str)
             depends_on: vec![],
         }))
         .unwrap();
+    // Consume the station's declared inputs so the runtime input-coverage gate
+    // is satisfied (the run's distillation is carried forward).
+    let inputs = darkrun_mcp::resolve_factory("software")
+        .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+        .filter(|i| !i.is_empty());
     server
         .darkrun_unit_update(Parameters(UnitUpdateInput {
             slug: slug.into(),
@@ -2090,7 +2095,7 @@ fn walk_station_to_checkpoint(server: &DarkrunServer, slug: &str, station: &str)
             status: Some("completed".into()),
             depends_on: None,
             worker: None,
-            inputs: None,
+            inputs,
             outputs: None,
         }))
         .unwrap();
@@ -4648,6 +4653,24 @@ fn manufacture_first_unit(server: &DarkrunServer, slug: &str, station: &str, uni
             depends_on: vec![],
         }))
         .unwrap();
+    // Consume the station's declared inputs so the runtime input-coverage gate is
+    // satisfied (the run's distillation is carried forward).
+    if let Some(inputs) = darkrun_mcp::resolve_factory("software")
+        .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+        .filter(|i| !i.is_empty())
+    {
+        server
+            .darkrun_unit_update(Parameters(UnitUpdateInput {
+                slug: slug.into(),
+                unit: unit.into(),
+                status: None,
+                depends_on: None,
+                worker: None,
+                inputs: Some(inputs),
+                outputs: None,
+            }))
+            .unwrap();
+    }
     // If holding at the operator gate, clear it so the wave releases; the
     // checkpoint_decide re-tick returns the Manufacture action directly.
     if phase(server) == "user_gate" {

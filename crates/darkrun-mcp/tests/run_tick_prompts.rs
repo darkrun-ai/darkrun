@@ -226,11 +226,17 @@ fn sealed_run_renders_the_sealed_prompt() {
     // cleanly. (A gate's `checkpoint_decide` re-ticks into the next station's
     // Spec internally, so seeding lazily on the Spec action would miss it.)
     for station in ["frame", "specify", "shape", "build", "prove", "harden"] {
+        // Consume the station's declared inputs so the runtime input-coverage
+        // gate is satisfied (the run's distillation is carried forward).
+        let inputs = darkrun_mcp::resolve_factory("software")
+            .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+            .unwrap_or_default();
         let unit = Unit {
             slug: format!("{station}-u"),
             frontmatter: UnitFrontmatter {
                 status: Status::Completed,
                 station: Some(station.to_string()),
+                inputs,
                 ..Default::default()
             },
             title: station.to_string(),

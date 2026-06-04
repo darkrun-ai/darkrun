@@ -49,6 +49,12 @@ pub struct StationDef {
     /// name. Drives reject-bounce: a reject returns to the nearest preceding
     /// `build` worker. Absent entries default to `build`.
     pub worker_roles: std::collections::BTreeMap<String, String>,
+    /// The upstream artifacts this station carries forward — its declared
+    /// `inputs`. Validated for *template* coverage at content-load (every
+    /// upstream `locked_artifact` is here or consciously waived); the cursor
+    /// additionally enforces that the *run's units* actually consume each of
+    /// these at decomposition, so the distillation isn't dropped at runtime.
+    pub inputs: Vec<String>,
 }
 
 /// A resolved factory: an ordered list of stations.
@@ -171,6 +177,7 @@ impl StationDef {
             role_models,
             role_interpretations,
             worker_roles,
+            inputs: s.frontmatter.inputs.clone(),
         }
     }
 }
@@ -269,6 +276,13 @@ mod tests {
         );
         // A single-gate station carries no options.
         assert!(f.station("frame").unwrap().checkpoint_options.is_empty());
+        // A station's declared inputs flow onto the def (for the runtime
+        // input-coverage gate). frame is the first station — no upstream inputs.
+        assert!(f.station("frame").unwrap().inputs.is_empty());
+        assert_eq!(
+            f.station("build").unwrap().inputs,
+            vec!["frame.md", "spec.md", "design.md"]
+        );
     }
 
     #[test]

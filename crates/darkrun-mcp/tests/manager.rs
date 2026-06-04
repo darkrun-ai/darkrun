@@ -21,13 +21,19 @@ fn store() -> (TempDir, StateStore) {
 }
 
 /// Decompose a single completed unit onto a station so the Manufacture phase
-/// has work to dispatch and immediately clears.
+/// has work to dispatch and immediately clears. The unit consumes the station's
+/// declared inputs so the runtime input-coverage gate is satisfied (the run's
+/// distillation is carried forward, not silently dropped).
 fn seed_completed_unit(store: &StateStore, run: &str, station: &str, slug: &str) {
+    let inputs = darkrun_mcp::resolve_factory("software")
+        .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+        .unwrap_or_default();
     let unit = Unit {
         slug: slug.into(),
         frontmatter: UnitFrontmatter {
             status: Status::Completed,
             station: Some(station.into()),
+            inputs,
             ..Default::default()
         },
         title: slug.into(),

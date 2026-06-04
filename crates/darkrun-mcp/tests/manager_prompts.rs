@@ -59,11 +59,15 @@ const PHASES: [StationPhase; 6] = [
 ];
 
 fn seed_unit(store: &StateStore, run: &str, station: &str, slug: &str, status: Status) {
+    let inputs = darkrun_mcp::resolve_factory("software")
+        .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+        .unwrap_or_default();
     let unit = Unit {
         slug: slug.into(),
         frontmatter: UnitFrontmatter {
             status,
             station: Some(station.into()),
+            inputs,
             ..Default::default()
         },
         title: slug.into(),

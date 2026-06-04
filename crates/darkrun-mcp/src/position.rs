@@ -533,6 +533,75 @@ fn validate_units(all_units: &[Unit], su: &[&Unit]) -> Option<(String, Vec<Strin
     None
 }
 
+/// The artifact basename — the last path segment, so `specify/spec.md` and
+/// `spec.md` compare equal.
+fn artifact_basename(s: &str) -> String {
+    s.trim().rsplit('/').next().unwrap_or(s.trim()).to_string()
+}
+
+/// The station's declared inputs that this RUN is actually obliged to carry —
+/// those produced by an upstream station that runs in *this run's plan*. A
+/// right-sized run (e.g. `quick` = `[build, prove]`) skips earlier stations, so
+/// their artifacts are never produced; requiring a unit to consume an input that
+/// no station in the plan ever creates would wedge the run. An input not
+/// produced by any in-plan upstream station (an external premise, or a skipped
+/// producer) is therefore not required here.
+fn required_station_inputs(factory: &FactoryDef, plan: &[String], station: &str) -> Vec<String> {
+    let def = match factory.station(station) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    // The stations that actually run, in order (empty plan = the full factory).
+    let effective: Vec<String> = if plan.is_empty() {
+        factory.station_names()
+    } else {
+        plan.to_vec()
+    };
+    let idx = match effective.iter().position(|s| s == station) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    // Artifacts produced by the stations that run BEFORE this one in the plan.
+    let produced_upstream: std::collections::HashSet<String> = effective[..idx]
+        .iter()
+        .filter_map(|s| factory.station(s))
+        .map(|d| artifact_basename(&d.artifact))
+        .collect();
+    def.inputs
+        .iter()
+        .filter(|i| produced_upstream.contains(&artifact_basename(i)))
+        .cloned()
+        .collect()
+}
+
+/// The required inputs that NO unit of the station consumes — the distillation
+/// dropped at runtime. The complement of content-validation's D4 check: D4
+/// guarantees the station *template* carries each upstream artifact forward;
+/// this guarantees the run's actual decomposition *uses* the ones the plan
+/// actually produces, so a station can't pass template validation yet quietly
+/// rebuild from scratch.
+///
+/// Coverage is **collective**: a required input is satisfied as soon as ANY unit
+/// lists it (a unit that legitimately doesn't need an input is fine, as long as
+/// some sibling consumes it). Artifacts match by path or basename so `spec.md`
+/// and `specify/spec.md` agree. Returns the uncovered inputs in declared order.
+fn dropped_station_inputs(required_inputs: &[String], su: &[&Unit]) -> Vec<String> {
+    let consumed: std::collections::HashSet<String> = su
+        .iter()
+        .flat_map(|u| u.frontmatter.inputs.iter())
+        .flat_map(|i| {
+            let i = i.trim().to_string();
+            [artifact_basename(&i), i]
+        })
+        .collect();
+    required_inputs
+        .iter()
+        .map(|i| i.trim().to_string())
+        .filter(|i| !i.is_empty())
+        .filter(|i| !consumed.contains(i) && !consumed.contains(&artifact_basename(i)))
+        .collect()
+}
+
 /// Detect a dependency cycle among `units`, returning the slugs on a cycle (in
 /// discovery order) if any. Only edges *within* the set count — edges that
 /// leave it are an unresolved-dep concern, not a cycle.
@@ -1089,6 +1158,26 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
                     station: station.clone(),
                     problem,
                     units: bad,
+                }),
+            });
+        }
+        // Runtime input coverage: the station's decomposition must actually
+        // CONSUME every input the station carries forward *that this run's plan
+        // produces*, or the run's distillation is silently dropped at this
+        // station (each unit reinventing its own way). Holds before Manufacture —
+        // the early, per-decomposition complement to the content-load template
+        // check (D4). `units` carries the dropped input paths the agent must wire
+        // into a unit.
+        let required = required_station_inputs(&factory, &state.plan, &station);
+        let dropped = dropped_station_inputs(&required, &su_all);
+        if !dropped.is_empty() {
+            return Ok(Position {
+                track: Track::Run,
+                action: Some(RunAction::UnitsInvalid {
+                    run: slug.to_string(),
+                    station: station.clone(),
+                    problem: "station_inputs_dropped".to_string(),
+                    units: dropped,
                 }),
             });
         }
@@ -2538,6 +2627,121 @@ mod tests {
     }
 
     #[test]
+    fn cursor_holds_station_inputs_dropped_until_a_unit_consumes_them() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+
+        // Drive frame to completion so the run reaches `specify`, which carries
+        // `frame.md` forward.
+        let inputs_for = |station: &str| {
+            crate::factory::resolve_factory("software")
+                .unwrap()
+                .station(station)
+                .map(|d| d.inputs.clone())
+                .unwrap_or_default()
+        };
+        let seed = |station: &str, inputs: Vec<String>| {
+            let unit = Unit {
+                slug: format!("{station}-u"),
+                frontmatter: darkrun_core::domain::UnitFrontmatter {
+                    status: Status::Completed,
+                    station: Some(station.to_string()),
+                    inputs,
+                    ..Default::default()
+                },
+                title: "u".into(),
+                body: String::new(),
+            };
+            store.write_unit("r", &unit).unwrap();
+        };
+
+        // frame has no inputs → a bare unit clears it.
+        seed("frame", vec![]);
+        for _ in 0..16 {
+            let t = run_tick(&store, "r").expect("tick");
+            match &t.action {
+                RunAction::UserGate { .. } | RunAction::Checkpoint { .. } => {
+                    checkpoint_decide(&store, "r", true, None).expect("decide");
+                }
+                RunAction::Spec { station, .. } if station == "specify" => break,
+                _ => {}
+            }
+        }
+
+        // At specify, decompose a unit that DROPS the carried `frame.md`.
+        seed("specify", vec![]);
+        // The cursor refuses to manufacture — it holds with station_inputs_dropped
+        // naming the dropped artifact.
+        let pos = derive_position(&store, "r").expect("derive");
+        match pos.action {
+            Some(RunAction::UnitsInvalid { ref problem, ref units, .. }) => {
+                assert_eq!(problem, "station_inputs_dropped");
+                assert_eq!(units, &vec!["frame.md".to_string()]);
+            }
+            other => panic!("expected station_inputs_dropped hold, got {other:?}"),
+        }
+
+        // Wire `frame.md` into the unit's inputs → the hold clears and the station
+        // can manufacture.
+        let mut u = store.read_unit("r", "specify-u").unwrap();
+        u.frontmatter.inputs = inputs_for("specify"); // [frame.md]
+        store.write_unit("r", &u).unwrap();
+        let pos = derive_position(&store, "r").expect("derive");
+        assert!(
+            !matches!(pos.action, Some(RunAction::UnitsInvalid { .. })),
+            "coverage satisfied → no longer held: {:?}",
+            pos.action
+        );
+    }
+
+    #[test]
+    fn dropped_station_inputs_flags_distillation_no_unit_consumes() {
+        let mk = |slug: &str, inputs: &[&str]| Unit {
+            slug: slug.into(),
+            frontmatter: darkrun_core::domain::UnitFrontmatter {
+                inputs: inputs.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            title: slug.into(),
+            body: String::new(),
+        };
+        let station_inputs = vec!["frame.md".to_string(), "spec.md".to_string()];
+
+        // No unit consumes spec.md → it's a dropped input.
+        let units = [mk("a", &["frame.md"]), mk("b", &[])];
+        let su: Vec<&Unit> = units.iter().collect();
+        assert_eq!(dropped_station_inputs(&station_inputs, &su), vec!["spec.md".to_string()]);
+
+        // Collective coverage: as long as SOME unit consumes each input (here a
+        // fuller path that matches by basename), nothing is dropped.
+        let units = [mk("a", &["frame.md"]), mk("b", &["specify/spec.md"])];
+        let su: Vec<&Unit> = units.iter().collect();
+        assert!(dropped_station_inputs(&station_inputs, &su).is_empty());
+    }
+
+    #[test]
+    fn required_station_inputs_only_covers_what_the_plan_produces() {
+        let f = crate::factory::resolve_factory("software").unwrap();
+        // Full plan: build is preceded by frame/specify/shape, so it must carry
+        // all three upstream artifacts.
+        let full = required_station_inputs(&f, &[], "build");
+        assert!(full.contains(&"frame.md".to_string()));
+        assert!(full.contains(&"spec.md".to_string()));
+        assert!(full.contains(&"design.md".to_string()));
+
+        // Right-sized `quick` plan = [build, prove]: build is FIRST, so nothing
+        // upstream is produced — none of its declared inputs are required (frame/
+        // specify/shape never ran to create them).
+        let quick = vec!["build".to_string(), "prove".to_string()];
+        assert!(required_station_inputs(&f, &quick, "build").is_empty());
+        // prove, second in the quick plan, must carry build's `code` (produced
+        // upstream in-plan) but not spec.md (specify was skipped).
+        let prove = required_station_inputs(&f, &quick, "prove");
+        assert!(prove.contains(&"code".to_string()));
+        assert!(!prove.contains(&"spec.md".to_string()));
+    }
+
+    #[test]
     fn missing_outputs_flags_a_declared_artifact_not_on_disk() {
         // A store rooted under a repo dir so output paths resolve to real files.
         let dir = tempdir().expect("tmp");
@@ -2613,11 +2817,20 @@ mod tests {
             match &t.action {
                 RunAction::Sealed { .. } => break,
                 RunAction::Spec { station, .. } => {
+                    // The unit consumes the station's declared inputs so the
+                    // runtime input-coverage gate is satisfied (the run's
+                    // distillation is carried forward, not dropped).
+                    let inputs = crate::factory::resolve_factory("software")
+                        .unwrap()
+                        .station(station)
+                        .map(|d| d.inputs.clone())
+                        .unwrap_or_default();
                     let unit = Unit {
                         slug: format!("{station}-u"),
                         frontmatter: darkrun_core::domain::UnitFrontmatter {
                             status: Status::Pending,
                             station: Some(station.clone()),
+                            inputs,
                             ..Default::default()
                         },
                         title: "u".into(),
@@ -2713,11 +2926,19 @@ mod tests {
             match &t.action {
                 RunAction::Sealed { .. } => break,
                 RunAction::Spec { station, .. } => {
+                    // Consume the station's declared inputs to satisfy the runtime
+                    // input-coverage gate.
+                    let inputs = crate::factory::resolve_factory("software")
+                        .unwrap()
+                        .station(station)
+                        .map(|d| d.inputs.clone())
+                        .unwrap_or_default();
                     let unit = Unit {
                         slug: format!("{station}-u"),
                         frontmatter: darkrun_core::domain::UnitFrontmatter {
                             status: Status::Pending,
                             station: Some(station.clone()),
+                            inputs,
                             ..Default::default()
                         },
                         title: "u".into(),

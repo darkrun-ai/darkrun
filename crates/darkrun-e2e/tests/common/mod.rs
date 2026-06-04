@@ -131,13 +131,27 @@ impl Harness {
     /// behaviour is covered directly in the `darkrun-mcp` suites; here it would
     /// just be noise between "set up the wave" and "watch it manufacture".
     pub fn decompose(&self, station: &str, units: &[(&str, &[&str])]) {
-        for (slug, deps) in units {
+        // Consume the station's declared inputs so the runtime input-coverage
+        // gate is satisfied (the run's distillation is carried forward, not
+        // silently dropped). Resolved from the run's actual factory.
+        let inputs = self
+            .store
+            .read_run(&self.slug)
+            .ok()
+            .and_then(|r| darkrun_mcp::resolve_factory(&r.frontmatter.factory))
+            .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+            .unwrap_or_default();
+        // Spread the station's required inputs across the wave: the FIRST unit
+        // carries them (collective coverage is satisfied as long as some unit in
+        // the station consumes each), leaving the rest as the test declared them.
+        for (idx, (slug, deps)) in units.iter().enumerate() {
             let unit = Unit {
                 slug: (*slug).to_string(),
                 frontmatter: UnitFrontmatter {
                     status: Status::Pending,
                     station: Some(station.to_string()),
                     depends_on: deps.iter().map(|d| d.to_string()).collect(),
+                    inputs: if idx == 0 { inputs.clone() } else { Vec::new() },
                     ..Default::default()
                 },
                 title: (*slug).to_string(),

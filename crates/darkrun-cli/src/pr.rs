@@ -198,11 +198,17 @@ mod tests {
     fn drive_to_external_checkpoint(store: &StateStore, slug: &str) {
         run_start(store, slug, "software", Some("Add login".into()), "continuous").unwrap();
         for station in ["frame", "specify", "shape", "build", "prove", "harden"] {
+            // Consume the station's declared inputs so the runtime input-coverage
+            // gate is satisfied (the run's distillation is carried forward).
+            let inputs = darkrun_mcp::resolve_factory("software")
+                .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+                .unwrap_or_default();
             let unit = Unit {
                 slug: format!("{station}-u"),
                 frontmatter: UnitFrontmatter {
                     status: Status::Completed,
                     station: Some(station.to_string()),
+                    inputs,
                     ..Default::default()
                 },
                 title: "u".into(),

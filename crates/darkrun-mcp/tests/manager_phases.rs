@@ -119,14 +119,19 @@ fn sign_run_reviews(store: &StateStore, run: &str) {
     }
 }
 
-/// Seed a unit at a station with a given status and deps.
+/// Seed a unit at a station with a given status and deps. The unit consumes the
+/// station's declared inputs so the runtime input-coverage gate is satisfied.
 fn seed_unit(store: &StateStore, run: &str, station: &str, slug: &str, status: Status, deps: &[&str]) {
+    let inputs = darkrun_mcp::resolve_factory("software")
+        .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+        .unwrap_or_default();
     let unit = Unit {
         slug: slug.into(),
         frontmatter: UnitFrontmatter {
             status,
             station: Some(station.into()),
             depends_on: deps.iter().map(|d| d.to_string()).collect(),
+            inputs,
             ..Default::default()
         },
         title: slug.into(),

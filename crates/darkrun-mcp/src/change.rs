@@ -260,13 +260,19 @@ mod tests {
         panic!("never reached {station} gate");
     }
 
-    /// Give a station one completed unit so Manufacture clears to Audit.
+    /// Give a station one completed unit so Manufacture clears to Audit. The unit
+    /// consumes the station's declared inputs so the runtime input-coverage gate
+    /// is satisfied (the run's distillation is carried forward).
     fn seed_one_unit(store: &StateStore, slug: &str, station: &str) {
+        let inputs = crate::factory::resolve_factory("software")
+            .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+            .unwrap_or_default();
         let unit = Unit {
             slug: format!("{station}-u1"),
             frontmatter: UnitFrontmatter {
                 status: Status::Completed,
                 station: Some(station.to_string()),
+                inputs,
                 ..Default::default()
             },
             title: "u1".into(),
