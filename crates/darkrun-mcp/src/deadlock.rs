@@ -104,7 +104,7 @@ fn progress_fingerprint(store: &StateStore, slug: &str) -> String {
     // Drift + feedback so a fix/drift loop that actually RESOLVES something (an
     // entry cleared, a status advanced) counts as progress and resets the guard;
     // only a loop that resolves nothing accumulates toward the halt.
-    let drift_n = crate::drift::list(store, slug).map(|v| v.len()).unwrap_or(0);
+    let drift_n = crate::drift::open_drift_count(store, slug);
     let mut fb: Vec<String> = crate::feedback::list(store, slug)
         .unwrap_or_default()
         .iter()

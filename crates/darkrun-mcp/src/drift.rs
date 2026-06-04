@@ -1,23 +1,36 @@
-//! Drift track (Track C) scaffold.
+//! Drift — the input-premise immune system.
 //!
-//! Drift is a witnessed artifact mutation — a locked artifact whose on-disk
-//! content no longer matches the hash the engine recorded. It preempts both
-//! feedback and run work because building on a silently-changed artifact
-//! produces inconsistent output.
+//! Drift is **about inputs, not outputs**. When a station locks,
+//! [`record_station_witnesses`] hashes every completed unit's declared **input**
+//! files — the *premises* the unit was built and signed against — into that
+//! unit's `input_witnesses`. Outputs are deliberately NOT witnessed: an output
+//! is the mutable product, downstream of the signature and allowed to evolve;
+//! witnessing it would make a later unit's edit register as drift on the earlier
+//! producer and spin a fix loop that never converges.
 //!
-//! The drift *sweep* — [`record_station_witnesses`] snapshots a station's
-//! locked artifacts (a content hash per output) when it completes, and
-//! [`sweep`] re-hashes every witness each tick: a hash that no longer matches
-//! (or a vanished file) deposits a drift entry, and a hash that matches again
-//! clears a stale one (so reverting an artifact self-heals). [`accept`]
-//! re-witnesses an intentional change. The manager's Track C reads the deposited
-//! entries via [`first`]; with none, the track is a no-op.
+//! Each tick [`sweep`] re-hashes every input premise. A premise that moved (or
+//! vanished) means the work resting on it may need to **re-orient** — so the
+//! sweep restamps the witness to the current content (it fires once), re-anchors
+//! any annotations on the artifact, and files an `origin = drift` **feedback**
+//! item against the affected unit's station. Drift is feedback: there is no
+//! separate drift hold. The agent then classifies the change as cosmetic (close,
+//! no-op) or material (invalidate the unit's signed slots → re-sign against the
+//! new premise). This is how an out-of-band change — a human editing a design
+//! file by hand, another agent moving an upstream artifact — gets taken into
+//! regard as the run iterates.
+//!
+//! **Baton exemption.** A premise that is also produced by the *same station*
+//! (a file a unit both consumes and produces — an in-place edit, or a shared
+//! baton several units append to) is exempt: its own in-loop writes must not
+//! re-fire drift. Only a premise produced *upstream* (a different station, or an
+//! external hand) is a real re-orientation signal.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use darkrun_core::domain::{Drift, DriftKind};
-use darkrun_core::{hash_file, StateStore, Witness};
+use darkrun_core::domain::{FeedbackOrigin, FeedbackSeverity, Unit};
+use darkrun_core::{hash_file, StateStore};
 
 use crate::error::Result;
 
@@ -31,8 +44,8 @@ fn repo_root(store: &StateStore) -> PathBuf {
         .unwrap_or_else(|| store.root().to_path_buf())
 }
 
-/// A filename-safe drift id derived from an artifact path (so re-sweeps of the
-/// same artifact overwrite rather than pile up).
+/// A filename-safe id derived from an artifact path — used for the fix-worktree
+/// branch a drift repair forks (B9) and for stable drift references.
 pub(crate) fn drift_id_for(path: &str) -> String {
     let mut id = String::from("drift-");
     for c in path.chars() {
@@ -41,19 +54,35 @@ pub(crate) fn drift_id_for(path: &str) -> String {
     id
 }
 
-/// Remove a drift entry if present (idempotent).
-fn clear(store: &StateStore, run: &str, id: &str) -> Result<()> {
-    let path = drift_dir(store, run).join(format!("{id}.md"));
-    if path.exists() {
-        fs::remove_file(&path).map_err(darkrun_core::CoreError::from)?;
-    }
-    Ok(())
+/// The artifact basename — the last path segment — so `specify/spec.md` and
+/// `spec.md` compare equal (premises and outputs are written in either form).
+fn artifact_basename(s: &str) -> String {
+    s.trim().rsplit('/').next().unwrap_or(s.trim()).to_string()
 }
 
-/// The cap on open drift entries before the sweep stops filing new ones — a
-/// circuit breaker so a cascade (a widely-consumed artifact moving, or a
-/// directory rename) can't bury the run under a flood of drift the operator
-/// can't act on. Overridable via `DARKRUN_DRIFT_CASCADE_CAP`.
+/// How a witnessed premise drifted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PremiseDrift {
+    /// The premise file's content changed.
+    Mutated,
+    /// The premise file was deleted.
+    Deleted,
+}
+
+impl PremiseDrift {
+    fn as_str(self) -> &'static str {
+        match self {
+            PremiseDrift::Mutated => "mutated",
+            PremiseDrift::Deleted => "deleted",
+        }
+    }
+}
+
+/// The cap on open drift feedback before the sweep stops filing new ones — a
+/// circuit breaker so a widely-consumed premise moving (or a directory rename)
+/// can't bury the run under a flood the operator can't act on. The witness is
+/// still restamped past the cap; only the feedback is suppressed. Overridable
+/// via `DARKRUN_DRIFT_CASCADE_CAP`.
 fn cascade_cap() -> usize {
     std::env::var("DARKRUN_DRIFT_CASCADE_CAP")
         .ok()
@@ -61,34 +90,15 @@ fn cascade_cap() -> usize {
         .unwrap_or(10)
 }
 
-/// Snapshot the premises of a just-completed station: hash every **output** of
-/// its completed units into the shared [`Witness`] store, AND every declared
-/// **input** into each unit's `input_witnesses` (the premise the unit was built
-/// on). Called when a station locks. A later sweep flags an output that mutated
-/// *or* an input premise that moved upstream.
+/// Snapshot the premises of a just-completed station: hash every declared
+/// **input** of its completed units into that unit's `input_witnesses` (the
+/// premise the unit was built on). Called when a station locks. A later
+/// [`sweep`] flags a premise that moved upstream.
+///
+/// Outputs are intentionally not witnessed (see the module docs).
 pub fn record_station_witnesses(store: &StateStore, run: &str, station: &str) -> Result<()> {
     let root = repo_root(store);
     let units = store.read_units(run)?;
-    let mut witnesses = store.read_witnesses(run)?;
-    for u in units.iter().filter(|u| {
-        u.station() == station && matches!(u.status(), darkrun_core::domain::Status::Completed)
-    }) {
-        for out in &u.frontmatter.outputs {
-            if let Some(hash) = hash_file(&root.join(out)) {
-                witnesses.retain(|w| w.path != *out);
-                witnesses.push(Witness {
-                    path: out.clone(),
-                    hash,
-                    station: station.to_string(),
-                    unit: Some(u.slug.clone()),
-                });
-            }
-        }
-    }
-    store.write_witnesses(run, &witnesses)?;
-
-    // Per-unit input premises: hash each declared input and stamp it onto the
-    // unit so a later upstream change to that input surfaces as Input drift.
     for u in units.iter().filter(|u| {
         u.station() == station && matches!(u.status(), darkrun_core::domain::Status::Completed)
     }) {
@@ -107,322 +117,284 @@ pub fn record_station_witnesses(store: &StateStore, run: &str, station: &str) ->
     Ok(())
 }
 
-/// Re-hash every witness; deposit a drift entry for any artifact whose content
-/// changed or vanished, and clear the entry for any that matches again. Pure
-/// over disk — same files, same result. Run at the top of each tick.
+/// The set of output basenames produced by each station's units — the
+/// baton-exempt set. A premise whose basename is produced by its *own* station
+/// is the station's own output evolving in-loop, not an upstream change.
+fn produced_basenames_by_station(units: &[Unit]) -> HashMap<String, HashSet<String>> {
+    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+    for u in units {
+        let set = out.entry(u.station().to_string()).or_default();
+        for o in &u.frontmatter.outputs {
+            set.insert(artifact_basename(o));
+        }
+    }
+    out
+}
+
+/// Re-hash every input premise; for any that moved or vanished, restamp the
+/// witness to current, re-anchor the artifact's annotations, and file one
+/// `origin = drift` feedback against the affected unit's station. Pure over disk
+/// — same files, same result. Run at the top of each tick.
 pub fn sweep(store: &StateStore, run: &str) -> Result<()> {
     let root = repo_root(store);
     let cap = cascade_cap();
-    // Count currently-open drift so the cascade breaker can stop filing once the
-    // run is already flooded (clears still run — a flood can still drain).
-    let mut open = list(store, run)?.len();
+    let units = store.read_units(run)?;
+    let produced = produced_basenames_by_station(&units);
+    let mut open_drift = open_drift_feedback_count(store, run)?;
 
-    // 1. Output witnesses (shared store).
-    for w in store.read_witnesses(run)? {
-        let id = drift_id_for(&w.path);
-        let drifted = match hash_file(&root.join(&w.path)) {
-            Some(current) => current != w.hash,
-            None => true, // a missing locked artifact is drift
-        };
-        if drifted {
-            if file_exists(store, run, &id) || open < cap {
-                let entry = Drift {
-                    path: w.path.clone(),
-                    station: w.station.clone(),
-                    run: run.to_string(),
-                    kind: DriftKind::Output,
-                    age: String::new(),
-                    unit: w.unit.clone(),
-                };
-                if !file_exists(store, run, &id) {
-                    open += 1;
-                }
-                record(store, run, &id, &entry)?;
-            }
-        } else {
-            clear(store, run, &id)?;
+    for unit in &units {
+        if unit.frontmatter.input_witnesses.is_empty() {
+            continue;
         }
-    }
+        let station = unit.station().to_string();
+        let exempt = produced.get(&station);
+        let mut updated = unit.clone();
+        let mut witnesses_changed = false;
+        let mut drifts: Vec<(String, PremiseDrift)> = Vec::new();
 
-    // 2. Input premises (per-unit `input_witnesses`). An upstream artifact a
-    //    completed unit was signed against has moved → the unit rests on a stale
-    //    premise. The drift id keys on (unit, input) so it's idempotent per
-    //    premise and never collides with the output-drift id for the same path.
-    for unit in store.read_units(run)? {
-        for (path, witnessed) in &unit.frontmatter.input_witnesses {
-            let id = format!("{}__in_{}", unit.slug, drift_id_for(path));
-            let drifted = match hash_file(&root.join(path)) {
-                Some(current) => current != *witnessed,
-                None => true,
-            };
-            if drifted {
-                if file_exists(store, run, &id) || open < cap {
-                    let entry = Drift {
-                        path: path.clone(),
-                        station: unit.station().to_string(),
-                        run: run.to_string(),
-                        kind: DriftKind::Input,
-                        age: String::new(),
-                        unit: Some(unit.slug.clone()),
-                    };
-                    if !file_exists(store, run, &id) {
-                        open += 1;
-                    }
-                    record(store, run, &id, &entry)?;
-                }
-            } else {
-                clear(store, run, &id)?;
+        for (path, witnessed) in unit.frontmatter.input_witnesses.clone() {
+            // Baton exemption: a premise the same station also produces is its
+            // own in-loop write, never a re-orientation signal.
+            if exempt
+                .map(|set| set.contains(&artifact_basename(&path)))
+                .unwrap_or(false)
+            {
+                continue;
             }
+            match hash_file(&root.join(&path)) {
+                Some(current) if current == witnessed => { /* steady — no drift */ }
+                Some(current) => {
+                    // Restamp to current so the same change fires exactly once;
+                    // the feedback now owns the unresolved re-orientation.
+                    updated.frontmatter.input_witnesses.insert(path.clone(), current);
+                    witnesses_changed = true;
+                    drifts.push((path, PremiseDrift::Mutated));
+                }
+                None => {
+                    // A vanished premise: drop the witness so it can't re-fire.
+                    updated.frontmatter.input_witnesses.remove(&path);
+                    witnesses_changed = true;
+                    drifts.push((path, PremiseDrift::Deleted));
+                }
+            }
+        }
+
+        if witnesses_changed {
+            store.write_unit(run, &updated)?;
+        }
+
+        for (path, kind) in drifts {
+            // Keep annotations valid across the change (text re-anchors;
+            // image/pdf regions re-crop from the new bytes).
+            if matches!(kind, PremiseDrift::Mutated) {
+                if let Ok(bytes) = fs::read(root.join(&path)) {
+                    let _ = crate::annotation::reanchor_artifact_version(store, &root, run, &path, &bytes);
+                }
+            }
+            // Dedup against an already-open drift feedback for this premise, then
+            // cascade-cap. Restamp has already run either way.
+            let marker = drift_marker(kind, &path);
+            if drift_feedback_is_open(store, run, &marker)? {
+                continue;
+            }
+            if open_drift >= cap {
+                continue;
+            }
+            let body = render_drift_body(kind, &path, &updated, &marker);
+            crate::feedback::create_with_origin(
+                store,
+                run,
+                &station,
+                &body,
+                Some(FeedbackSeverity::High),
+                FeedbackOrigin::Drift,
+                vec![],
+            )?;
+            open_drift += 1;
         }
     }
     Ok(())
 }
 
-/// Whether a drift entry with `id` is already on disk.
-fn file_exists(store: &StateStore, run: &str, id: &str) -> bool {
-    drift_dir(store, run).join(format!("{id}.md")).exists()
-}
-
-/// Accept an intentional change to a locked artifact: re-witness it to its
-/// current content hash, re-anchor every annotation pinned to it against the new
-/// version (text re-anchors; image/pdf regions re-crop), and clear the drift
-/// entry. Returns `false` if the path isn't witnessed or the file is unreadable.
-/// (The other resolution — reverting the artifact — needs no tool: the next
-/// [`sweep`] clears the drift on its own.)
+/// Accept an out-of-band premise change as the new truth, everywhere it is
+/// witnessed: re-stamp the premise on every unit that consumes it, re-anchor its
+/// annotations, and close any open drift feedback for it (a *cosmetic*
+/// resolution — the new premise is absorbed without re-orienting downstream
+/// work; for a *material* change the agent invalidates the unit's slots
+/// instead). Returns `false` if `path` isn't witnessed or is unreadable.
 pub fn accept(store: &StateStore, run: &str, path: &str) -> Result<bool> {
     let root = repo_root(store);
-    let full = root.join(path);
-    let Some(hash) = hash_file(&full) else {
-        return Ok(false);
-    };
-    // B9: capture the drift's effective station up front (its own, else the
-    // active station — mirroring how the cursor's ResolveDrift resolved it) so
-    // that once the drift resolves we can land its fix worktree back onto the
-    // station branch. Best-effort + idempotent downstream.
-    let fix_station = list(store, run)?
-        .into_iter()
-        .find(|d| d.path == path && !d.station.is_empty())
-        .map(|d| d.station)
-        .or_else(|| {
-            store
-                .read_state(run)
-                .ok()
-                .flatten()
-                .map(|s| s.active_station)
-        })
-        .filter(|s| !s.is_empty());
-    let mut witnesses = store.read_witnesses(run)?;
+    let current = hash_file(&root.join(path));
     let mut found = false;
-    for w in witnesses.iter_mut() {
-        if w.path == path {
-            w.hash = hash.clone();
-            found = true;
+    for u in store.read_units(run)? {
+        if !u.frontmatter.input_witnesses.contains_key(path) {
+            continue;
         }
-    }
-
-    // Re-witness the same path as an INPUT premise on any unit that consumed it,
-    // clearing that unit's input-drift entry too. An intentional upstream change
-    // is accepted everywhere it was a premise, not just where it was an output.
-    for mut unit in store.read_units(run)? {
-        if unit.frontmatter.input_witnesses.contains_key(path) {
-            unit.frontmatter.input_witnesses.insert(path.to_string(), hash.clone());
-            store.write_unit(run, &unit)?;
-            clear(store, run, &format!("{}__in_{}", unit.slug, drift_id_for(path)))?;
-            found = true;
+        let mut unit = u.clone();
+        match &current {
+            Some(hash) => {
+                unit.frontmatter.input_witnesses.insert(path.to_string(), hash.clone());
+            }
+            None => {
+                unit.frontmatter.input_witnesses.remove(path);
+            }
         }
+        store.write_unit(run, &unit)?;
+        found = true;
     }
-
     if found {
-        store.write_witnesses(run, &witnesses)?;
-        clear(store, run, &drift_id_for(path))?;
-        // Refresh the annotations on this artifact against the new version in
-        // one pass: text spans re-anchor, image/pdf region crops are re-cut from
-        // the new bytes, and a region that no longer frames the same content is
-        // flagged rather than silently mis-cropped.
-        if let Ok(bytes) = fs::read(&full) {
+        if let Ok(bytes) = fs::read(root.join(path)) {
             crate::annotation::reanchor_artifact_version(store, &root, run, path, &bytes)?;
         }
-        // The drift is resolved — land its fix worktree (if any) back onto the
-        // station branch and retire it. Idempotent: a drift resolved without a
-        // forked fix worktree (non-git run) no-ops.
-        if let Some(station) = &fix_station {
-            crate::lifecycle::land_fix(store, run, station, &drift_id_for(path));
-        }
+        close_open_drift_feedback_for(store, run, path, "premise change accepted")?;
     }
     Ok(found)
 }
 
-/// The `drift/` directory for a run.
-fn drift_dir(store: &StateStore, run: &str) -> std::path::PathBuf {
-    store.run_dir(run).join("drift")
-}
-
-/// Parse a drift kind, defaulting to `Output`.
-fn parse_kind(raw: &str) -> DriftKind {
-    match raw.trim().trim_matches('"').to_ascii_lowercase().as_str() {
-        "spec" => DriftKind::Spec,
-        "input" => DriftKind::Input,
-        "discovery_output" => DriftKind::DiscoveryOutput,
-        "discovery_mandate" => DriftKind::DiscoveryMandate,
-        _ => DriftKind::Output,
-    }
-}
-
-/// Parse one raw `drift/*.md` document into a [`Drift`].
-fn parse(run: &str, raw: &str) -> Drift {
-    let mut path = String::new();
-    let mut station = String::new();
-    let mut kind = DriftKind::Output;
-    let mut age = String::new();
-    let mut unit = None;
-    for line in raw.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("path:") {
-            path = rest.trim().trim_matches('"').to_string();
-        } else if let Some(rest) = line.strip_prefix("station:") {
-            station = rest.trim().trim_matches('"').to_string();
-        } else if let Some(rest) = line.strip_prefix("kind:") {
-            kind = parse_kind(rest);
-        } else if let Some(rest) = line.strip_prefix("age:") {
-            age = rest.trim().trim_matches('"').to_string();
-        } else if let Some(rest) = line.strip_prefix("unit:") {
-            let v = rest.trim().trim_matches('"').to_string();
-            if !v.is_empty() {
-                unit = Some(v);
+/// Re-witness every unit's input premises to their current content and close all
+/// open drift feedback — the operator's "rebaseline everything" reset, for a
+/// run whose witnesses are stale but already reconciled. Returns the number of
+/// premises re-witnessed.
+pub fn rebaseline_all(store: &StateStore, run: &str) -> Result<usize> {
+    let root = repo_root(store);
+    let mut count = 0;
+    for u in store.read_units(run)? {
+        if u.frontmatter.input_witnesses.is_empty() {
+            continue;
+        }
+        let mut unit = u.clone();
+        let paths: Vec<String> = u.frontmatter.input_witnesses.keys().cloned().collect();
+        for path in paths {
+            match hash_file(&root.join(&path)) {
+                Some(hash) => {
+                    unit.frontmatter.input_witnesses.insert(path.clone(), hash);
+                }
+                None => {
+                    unit.frontmatter.input_witnesses.remove(&path);
+                }
             }
+            count += 1;
+        }
+        store.write_unit(run, &unit)?;
+    }
+    // Close every open drift feedback — the reset reconciles them all.
+    for fb in crate::feedback::list(store, run)? {
+        if matches!(fb.origin, FeedbackOrigin::Drift) && !crate::feedback::is_terminal(fb.status) {
+            let _ = crate::feedback::close_with_reply(store, run, &fb.id, "rebaselined");
         }
     }
-    Drift {
-        path,
-        station,
-        run: run.to_string(),
-        kind,
-        age,
-        unit,
-    }
+    Ok(count)
 }
 
-/// Read every drift entry for a run (sorted by file stem). Empty when no
-/// sweep has deposited entries.
-pub fn list(store: &StateStore, run: &str) -> Result<Vec<Drift>> {
-    let dir = drift_dir(store, run);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut entries: Vec<(String, Drift)> = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(darkrun_core::CoreError::from)? {
-        let entry = entry.map_err(darkrun_core::CoreError::from)?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                let raw = fs::read_to_string(&path).map_err(darkrun_core::CoreError::from)?;
-                entries.push((stem.to_string(), parse(run, &raw)));
-            }
+/// The hidden marker embedded at the top of a drift feedback body so re-sweeps
+/// dedup against an already-open item for the same premise + kind. An HTML
+/// comment, so it doesn't render in the surfaced markdown.
+fn drift_marker(kind: PremiseDrift, path: &str) -> String {
+    format!("<!--drift:{}:{}-->", kind.as_str(), path)
+}
+
+/// Whether an open `origin = drift` feedback already carries `marker`.
+fn drift_feedback_is_open(store: &StateStore, run: &str, marker: &str) -> Result<bool> {
+    Ok(crate::feedback::list(store, run)?.into_iter().any(|fb| {
+        matches!(fb.origin, FeedbackOrigin::Drift)
+            && !crate::feedback::is_terminal(fb.status)
+            && fb.body.contains(marker)
+    }))
+}
+
+/// The number of open `origin = drift` feedback items — the cascade-cap counter.
+fn open_drift_feedback_count(store: &StateStore, run: &str) -> Result<usize> {
+    Ok(crate::feedback::list(store, run)?
+        .into_iter()
+        .filter(|fb| {
+            matches!(fb.origin, FeedbackOrigin::Drift) && !crate::feedback::is_terminal(fb.status)
+        })
+        .count())
+}
+
+/// The number of open drift feedback items (cascade counter), exposed for the
+/// deadlock guard's progress signature.
+pub fn open_drift_count(store: &StateStore, run: &str) -> usize {
+    open_drift_feedback_count(store, run).unwrap_or(0)
+}
+
+/// Close every open drift feedback that references `path`, with a reply.
+fn close_open_drift_feedback_for(
+    store: &StateStore,
+    run: &str,
+    path: &str,
+    reply: &str,
+) -> Result<()> {
+    let needle = format!(":{path}-->");
+    for fb in crate::feedback::list(store, run)? {
+        if matches!(fb.origin, FeedbackOrigin::Drift)
+            && !crate::feedback::is_terminal(fb.status)
+            && fb.body.contains(&needle)
+        {
+            let _ = crate::feedback::close_with_reply(store, run, &fb.id, reply);
         }
     }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(entries.into_iter().map(|(_, d)| d).collect())
+    Ok(())
 }
 
-/// The first (highest-priority) drift entry for a run, if any. The manager
-/// uses this to drive Track C.
-pub fn first(store: &StateStore, run: &str) -> Result<Option<Drift>> {
-    Ok(list(store, run)?.into_iter().next())
-}
-
-/// Record a drift entry under `drift/<id>.md`. Used by tests and by the
-/// (future) core sweep until it owns drift storage natively.
-pub fn record(store: &StateStore, run: &str, id: &str, entry: &Drift) -> Result<()> {
-    let dir = drift_dir(store, run);
-    fs::create_dir_all(&dir).map_err(|source| darkrun_core::CoreError::Io {
-        path: dir.clone(),
-        source,
-    })?;
-    let kind = match entry.kind {
-        DriftKind::Spec => "spec",
-        DriftKind::Output => "output",
-        DriftKind::Input => "input",
-        DriftKind::DiscoveryOutput => "discovery_output",
-        DriftKind::DiscoveryMandate => "discovery_mandate",
+/// The surfaced body of a drift feedback: the dedup marker, what moved, the
+/// signed slots it may have undercut, and how to classify it.
+fn render_drift_body(kind: PremiseDrift, path: &str, unit: &Unit, marker: &str) -> String {
+    let signed: Vec<&str> = unit
+        .frontmatter
+        .reviews
+        .iter()
+        .chain(unit.frontmatter.approvals.iter())
+        .filter(|(_, stamp)| stamp.is_some())
+        .map(|(role, _)| role.as_str())
+        .collect();
+    let slots = if signed.is_empty() {
+        "none signed yet".to_string()
+    } else {
+        signed.join(", ")
     };
-    let mut doc = String::from("---\n");
-    doc.push_str(&format!("path: {}\n", entry.path));
-    doc.push_str(&format!("station: {}\n", entry.station));
-    doc.push_str(&format!("kind: {kind}\n"));
-    if !entry.age.is_empty() {
-        doc.push_str(&format!("age: {}\n", entry.age));
-    }
-    if let Some(unit) = &entry.unit {
-        doc.push_str(&format!("unit: {unit}\n"));
-    }
-    doc.push_str("---\n");
-    let path = dir.join(format!("{id}.md"));
-    fs::write(&path, doc).map_err(|source| {
-        darkrun_core::CoreError::Io {
-            path: path.clone(),
-            source,
-        }
-        .into()
-    })
+    let what = match kind {
+        PremiseDrift::Mutated => format!("changed on disk: `{path}`"),
+        PremiseDrift::Deleted => format!("been deleted: `{path}`"),
+    };
+    format!(
+        "{marker}\n# Premise drift — `{path}`\n\n\
+         An input premise unit `{unit_slug}` was built and signed against has {what}. \
+         The change came from outside this unit's own work (an upstream station, or an \
+         out-of-band edit — a human or another agent). The work resting on this premise \
+         may need to re-orient.\n\n\
+         **Signed slots that rested on it:** {slots}.\n\n\
+         **Classify and act:**\n\
+         - **Cosmetic** — the change doesn't move this unit's result or how it's judged. \
+         Close this feedback; nothing re-opens.\n\
+         - **Material** — it changes what this unit must build, or the acceptance criteria \
+         it's judged against. Set the undercut roles with `darkrun_feedback_set_targets` \
+         (the signed slots above), then close: the gate re-fires and the work re-signs \
+         against the new premise — re-orienting around the change.\n",
+        unit_slug = unit.slug,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-
-    fn store() -> (tempfile::TempDir, StateStore) {
-        let dir = tempdir().expect("tmp");
-        let store = StateStore::new(dir.path());
-        (dir, store)
-    }
-
-    #[test]
-    fn empty_when_no_dir() {
-        let (_d, store) = store();
-        assert!(list(&store, "r").unwrap().is_empty());
-        assert!(first(&store, "r").unwrap().is_none());
-    }
-
-    #[test]
-    fn record_and_read_back() {
-        let (_d, store) = store();
-        let d = Drift {
-            path: "frame/frame.md".into(),
-            station: "frame".into(),
-            run: "r".into(),
-            kind: DriftKind::Spec,
-            age: "5m".into(),
-            unit: Some("u1".into()),
-        };
-        record(&store, "r", "d-01", &d).unwrap();
-        let read = list(&store, "r").unwrap();
-        assert_eq!(read.len(), 1);
-        assert_eq!(read[0].path, "frame/frame.md");
-        assert_eq!(read[0].kind, DriftKind::Spec);
-        assert_eq!(read[0].unit, Some("u1".to_string()));
-        assert_eq!(first(&store, "r").unwrap().unwrap().station, "frame");
-    }
-
     use darkrun_core::domain::{Status, Unit, UnitFrontmatter};
 
-    /// A store whose `.darkrun` root sits under `repo`, so the sweep's
-    /// `repo_root` resolves back to `repo` where the witnessed artifacts live.
-    /// (`StateStore::new` appends `.darkrun` itself.)
-    fn repo_store() -> (tempfile::TempDir, StateStore, std::path::PathBuf) {
-        let dir = tempdir().expect("tmp");
-        let repo = dir.path().to_path_buf();
-        let store = StateStore::new(&repo);
-        (dir, store, repo)
+    fn store() -> (tempfile::TempDir, StateStore, PathBuf) {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let root = dir.path().to_path_buf();
+        let store = StateStore::new(&root);
+        (dir, store, root)
     }
 
-    fn completed_unit_with_output(station: &str, slug: &str, output: &str) -> Unit {
+    fn unit(slug: &str, station: &str, inputs: &[&str], outputs: &[&str]) -> Unit {
         Unit {
             slug: slug.into(),
             frontmatter: UnitFrontmatter {
                 status: Status::Completed,
                 station: Some(station.into()),
-                outputs: vec![output.into()],
+                inputs: inputs.iter().map(|s| s.to_string()).collect(),
+                outputs: outputs.iter().map(|s| s.to_string()).collect(),
                 ..Default::default()
             },
             title: slug.into(),
@@ -430,117 +402,112 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sweep_detects_mutation_then_self_heals_on_revert() {
-        let (_d, store, repo) = repo_store();
-        store
-            .write_unit("r", &completed_unit_with_output("frame", "u1", "out.txt"))
-            .unwrap();
-        fs::write(repo.join("out.txt"), b"v1").unwrap();
-        record_station_witnesses(&store, "r", "frame").unwrap();
-        assert_eq!(store.read_witnesses("r").unwrap().len(), 1);
-
-        // Clean: no drift.
-        sweep(&store, "r").unwrap();
-        assert!(first(&store, "r").unwrap().is_none());
-
-        // Mutated: drift on that artifact.
-        fs::write(repo.join("out.txt"), b"v2").unwrap();
-        sweep(&store, "r").unwrap();
-        let d = first(&store, "r").unwrap().expect("drift");
-        assert_eq!(d.path, "out.txt");
-        assert_eq!(d.station, "frame");
-
-        // Reverted: the sweep clears the drift on its own.
-        fs::write(repo.join("out.txt"), b"v1").unwrap();
-        sweep(&store, "r").unwrap();
-        assert!(first(&store, "r").unwrap().is_none());
-
-        // Vanished locked artifact is itself drift.
-        fs::remove_file(repo.join("out.txt")).unwrap();
-        sweep(&store, "r").unwrap();
-        assert!(first(&store, "r").unwrap().is_some());
+    fn open_drift_bodies(store: &StateStore, run: &str) -> Vec<String> {
+        crate::feedback::list(store, run)
+            .unwrap()
+            .into_iter()
+            .filter(|f| matches!(f.origin, FeedbackOrigin::Drift) && !crate::feedback::is_terminal(f.status))
+            .map(|f| f.body)
+            .collect()
     }
 
     #[test]
-    fn sweep_detects_input_premise_drift_and_accept_rewitnesses_it() {
-        let (_d, store, repo) = repo_store();
-        // An upstream artifact this unit consumed as an input premise.
-        fs::write(repo.join("spec.md"), b"spec-v1").unwrap();
-        let mut unit = completed_unit_with_output("build", "u1", "impl.rs");
-        unit.frontmatter.inputs = vec!["spec.md".into()];
-        fs::write(repo.join("impl.rs"), b"code").unwrap();
-        store.write_unit("r", &unit).unwrap();
+    fn upstream_premise_change_files_one_drift_feedback_restamped_once() {
+        let (_d, store, root) = store();
+        // shape produces design.md; build consumes it as a premise.
+        std::fs::write(root.join("design.md"), b"v1").unwrap();
+        store.write_unit("r", &unit("u-build", "build", &["design.md"], &["code"])).unwrap();
         record_station_witnesses(&store, "r", "build").unwrap();
 
-        // The input premise is witnessed onto the unit.
-        let back = store.read_unit("r", "u1").unwrap();
-        assert_eq!(back.frontmatter.input_witnesses.get("spec.md").cloned(),
-                   Some(darkrun_core::hash_bytes(b"spec-v1")));
-
-        // Clean sweep: no drift.
+        // No change yet → no drift.
         sweep(&store, "r").unwrap();
-        assert!(first(&store, "r").unwrap().is_none());
+        assert_eq!(open_drift_bodies(&store, "r").len(), 0, "steady state files nothing");
 
-        // The upstream input moves → Input drift on this unit.
-        fs::write(repo.join("spec.md"), b"spec-v2").unwrap();
+        // A human edits design.md by hand → one drift feedback, restamped once.
+        std::fs::write(root.join("design.md"), b"v2-buttons-moved").unwrap();
         sweep(&store, "r").unwrap();
-        let d = first(&store, "r").unwrap().expect("input drift");
-        assert_eq!(d.kind, DriftKind::Input);
-        assert_eq!(d.path, "spec.md");
-        assert_eq!(d.unit, Some("u1".to_string()));
+        let bodies = open_drift_bodies(&store, "r");
+        assert_eq!(bodies.len(), 1, "exactly one drift feedback");
+        assert!(bodies[0].contains("design.md"));
+        assert!(matches!(
+            crate::feedback::list(&store, "r").unwrap()[0].origin,
+            FeedbackOrigin::Drift
+        ));
 
-        // Accept re-witnesses the premise; the drift clears.
+        // Re-sweeping does NOT pile on more (restamp fired once; dedup holds).
+        sweep(&store, "r").unwrap();
+        assert_eq!(open_drift_bodies(&store, "r").len(), 1, "fires once, not every tick");
+    }
+
+    #[test]
+    fn in_place_edit_is_baton_exempt_and_never_self_drifts() {
+        let (_d, store, root) = store();
+        // A unit that BOTH consumes and produces the same file (in-place refactor).
+        std::fs::write(root.join("code.rs"), b"v1").unwrap();
+        store.write_unit("r", &unit("u", "build", &["code.rs"], &["code.rs"])).unwrap();
+        record_station_witnesses(&store, "r", "build").unwrap();
+
+        // The unit's own work changes the file. It must NOT drift itself.
+        std::fs::write(root.join("code.rs"), b"v2-refactored").unwrap();
+        sweep(&store, "r").unwrap();
+        assert_eq!(open_drift_bodies(&store, "r").len(), 0, "input==output is baton-exempt");
+    }
+
+    #[test]
+    fn downstream_edit_to_a_produced_file_does_not_drift_the_producer() {
+        let (_d, store, root) = store();
+        // shape produces design.md (output only — no input witness on it).
+        std::fs::write(root.join("design.md"), b"v1").unwrap();
+        store.write_unit("r", &unit("u-shape", "shape", &[], &["design.md"])).unwrap();
+        record_station_witnesses(&store, "r", "shape").unwrap();
+
+        // Something downstream rewrites design.md. The producer must not drift —
+        // outputs are not witnessed.
+        std::fs::write(root.join("design.md"), b"v2").unwrap();
+        sweep(&store, "r").unwrap();
+        assert_eq!(open_drift_bodies(&store, "r").len(), 0, "outputs are not drift");
+    }
+
+    #[test]
+    fn deleted_premise_files_drift_then_accept_rebaselines() {
+        let (_d, store, root) = store();
+        std::fs::write(root.join("spec.md"), b"v1").unwrap();
+        store.write_unit("r", &unit("u", "build", &["spec.md"], &["code"])).unwrap();
+        record_station_witnesses(&store, "r", "build").unwrap();
+
+        std::fs::write(root.join("spec.md"), b"v2").unwrap();
+        sweep(&store, "r").unwrap();
+        assert_eq!(open_drift_bodies(&store, "r").len(), 1);
+
+        // Accept the change → the drift feedback closes and the witness rebaselines.
         assert!(accept(&store, "r", "spec.md").unwrap());
+        assert_eq!(open_drift_bodies(&store, "r").len(), 0, "accept closes the drift feedback");
+        // A further sweep stays quiet (witness == current).
         sweep(&store, "r").unwrap();
-        assert!(first(&store, "r").unwrap().is_none());
+        assert_eq!(open_drift_bodies(&store, "r").len(), 0);
     }
 
     #[test]
-    fn cascade_breaker_caps_open_drift() {
-        let (_d, store, repo) = repo_store();
-        std::env::set_var("DARKRUN_DRIFT_CASCADE_CAP", "3");
-        // Six witnessed outputs, all about to mutate.
-        for i in 0..6 {
-            let out = format!("o{i}.txt");
+    fn cascade_cap_bounds_open_drift_feedback() {
+        let (_d, store, root) = store();
+        std::env::set_var("DARKRUN_DRIFT_CASCADE_CAP", "2");
+        // Five distinct premises across five units, all drift at once.
+        for i in 0..5 {
+            let p = format!("in{i}.md");
+            std::fs::write(root.join(&p), b"v1").unwrap();
             store
-                .write_unit("r", &completed_unit_with_output("frame", &format!("u{i}"), &out))
+                .write_unit("r", &unit(&format!("u{i}"), "build", &[&p], &["code"]))
                 .unwrap();
-            fs::write(repo.join(&out), b"v1").unwrap();
         }
-        record_station_witnesses(&store, "r", "frame").unwrap();
-        for i in 0..6 {
-            fs::write(repo.join(format!("o{i}.txt")), b"v2").unwrap();
+        record_station_witnesses(&store, "r", "build").unwrap();
+        for i in 0..5 {
+            std::fs::write(root.join(format!("in{i}.md")), b"v2").unwrap();
         }
         sweep(&store, "r").unwrap();
-        // The breaker caps new filings at the configured cap.
-        assert_eq!(list(&store, "r").unwrap().len(), 3);
-        std::env::remove_var("DARKRUN_DRIFT_CASCADE_CAP");
-    }
-
-    #[test]
-    fn accept_rewitnesses_an_intentional_change() {
-        let (_d, store, repo) = repo_store();
-        store
-            .write_unit("r", &completed_unit_with_output("frame", "u1", "out.txt"))
-            .unwrap();
-        fs::write(repo.join("out.txt"), b"v1").unwrap();
-        record_station_witnesses(&store, "r", "frame").unwrap();
-
-        fs::write(repo.join("out.txt"), b"v2").unwrap();
-        sweep(&store, "r").unwrap();
-        assert!(first(&store, "r").unwrap().is_some());
-
-        // Accept the new content → drift clears, witness updates to v2.
-        assert!(accept(&store, "r", "out.txt").unwrap());
-        sweep(&store, "r").unwrap();
-        assert!(first(&store, "r").unwrap().is_none());
-        assert_eq!(
-            store.read_witnesses("r").unwrap()[0].hash,
-            darkrun_core::hash_bytes(b"v2")
+        assert!(
+            open_drift_bodies(&store, "r").len() <= 2,
+            "cascade cap suppresses the flood"
         );
-
-        // Accepting an unknown path is a no-op false.
-        assert!(!accept(&store, "r", "nope.txt").unwrap());
+        std::env::remove_var("DARKRUN_DRIFT_CASCADE_CAP");
     }
 }

@@ -7,11 +7,11 @@
 //! tree, so they exercise the same code path the MCP tools do.
 
 use darkrun_core::domain::{
-    CheckpointKind, Drift, DriftKind, FeedbackStatus, Status, StationPhase, Unit, UnitFrontmatter,
+    CheckpointKind, FeedbackStatus, Status, StationPhase, Unit, UnitFrontmatter,
 };
 use darkrun_core::StateStore;
 use darkrun_mcp::position::{checkpoint_decide, derive_position, run_start, run_tick, RunAction};
-use darkrun_mcp::{drift, feedback, Track};
+use darkrun_mcp::{feedback, Track};
 use tempfile::TempDir;
 
 fn store() -> (TempDir, StateStore) {
@@ -234,27 +234,12 @@ fn three_track_priority_drift_beats_feedback_beats_run() {
     let pos = derive_position(&store, "r").unwrap();
     assert_eq!(pos.track, Track::Run);
 
-    // Add open feedback → feedback preempts run.
+    // Add open feedback → feedback preempts run. (A drifted input premise also
+    // arrives here as origin=drift feedback — drift is feedback, not a track.)
     feedback::create(&store, "r", "frame", "broken", None).unwrap();
     let pos = derive_position(&store, "r").unwrap();
     assert_eq!(pos.track, Track::Feedback);
     assert!(matches!(pos.action, Some(RunAction::FixFeedback { .. })));
-
-    // Add a drift entry → drift preempts feedback (and run).
-    let d = Drift {
-        path: "frame/frame.md".into(),
-        station: "frame".into(),
-        run: "r".into(),
-        kind: DriftKind::Spec,
-        age: "1m".into(),
-        unit: None,
-    };
-    drift::record(&store, "r", "d-01", &d).unwrap();
-    let pos = derive_position(&store, "r").unwrap();
-    assert_eq!(pos.track, Track::Drift);
-    assert!(
-        matches!(&pos.action, Some(RunAction::ResolveDrift { path, .. }) if path == "frame/frame.md")
-    );
 }
 
 #[test]
@@ -313,27 +298,6 @@ fn checkpoint_approve_completes_and_advances() {
     let s = store.read_state("r").unwrap().unwrap();
     assert_eq!(s.stations["frame"].status, Status::Completed);
     assert_eq!(s.active_station, "specify");
-}
-
-#[test]
-fn drift_track_station_defaults_to_current_when_unspecified() {
-    let (_d, store) = store();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
-    // A drift entry with no station should attribute to the active station.
-    let d = Drift {
-        path: "x.md".into(),
-        station: String::new(),
-        run: "r".into(),
-        kind: DriftKind::Output,
-        age: String::new(),
-        unit: None,
-    };
-    drift::record(&store, "r", "d-01", &d).unwrap();
-    let pos = derive_position(&store, "r").unwrap();
-    assert_eq!(pos.track, Track::Drift);
-    assert!(
-        matches!(&pos.action, Some(RunAction::ResolveDrift { station, .. }) if station == "frame")
-    );
 }
 
 #[test]

@@ -1084,28 +1084,13 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
         });
     }
 
-    // ── Track C: drift ───────────────────────────────────────────────────
-    // Witnessed artifact drift preempts everything. The sweep that deposits
-    // drift entries is a future darkrun-core concern (see `deferred`); until
-    // it lands this reads any entries an external sweep left under
-    // `.darkrun/<run>/drift/`. With none, the track is a no-op.
-    if let Some(entry) = crate::drift::first(store, slug)? {
-        let drift_station = if entry.station.is_empty() {
-            station.clone()
-        } else {
-            entry.station.clone()
-        };
-        return Ok(Position {
-            track: Track::Drift,
-            action: Some(RunAction::ResolveDrift {
-                run: slug.to_string(),
-                station: drift_station,
-                path: entry.path,
-            }),
-        });
-    }
+    // Drift is no longer a separate track: an input-premise change is detected
+    // by `drift::sweep` (run at the top of each tick) and filed as an
+    // `origin = drift` **feedback** item, which the feedback track below resolves
+    // like any other finding. Outputs are never witnessed, so there is no global
+    // "reconcile this artifact" hold to preempt with.
 
-    // ── Track B: feedback ────────────────────────────────────────────────
+    // ── Track B: feedback (drift premise changes arrive here) ────────────
     if let Some(action) = walk_feedback(store, slug, &station)? {
         return Ok(Position {
             track: Track::Feedback,

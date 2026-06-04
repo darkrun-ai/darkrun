@@ -19,14 +19,14 @@
 //!   * `CheckpointOutcome` stamping on the persisted station checkpoint.
 
 use darkrun_core::domain::{
-    CheckpointKind, CheckpointOutcome, Drift, DriftKind, FeedbackSeverity, FeedbackStatus, Status,
+    CheckpointKind, CheckpointOutcome, FeedbackSeverity, FeedbackStatus, Status,
     StationPhase, Unit, UnitFrontmatter,
 };
 use darkrun_core::StateStore;
 use darkrun_mcp::position::{
     checkpoint_decide, derive_position, run_start, run_tick, Position, RunAction,
 };
-use darkrun_mcp::{drift, feedback, Track};
+use darkrun_mcp::{feedback, Track};
 use tempfile::TempDir;
 
 // ───────────────────────────── harness ──────────────────────────────────
@@ -186,60 +186,6 @@ fn open_feedback_preempts_run_track() {
 }
 
 #[test]
-fn drift_preempts_feedback() {
-    let (_d, store) = started();
-    feedback::create(&store, "r", "frame", "broken", None).unwrap();
-    record_drift(&store, "r", "d-01", "frame/frame.md", "frame");
-    let pos = derive_position(&store, "r").unwrap();
-    assert_eq!(pos_track(&pos), Track::Drift);
-}
-
-#[test]
-fn drift_preempts_run_with_no_feedback() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "d-01", "frame/frame.md", "frame");
-    let pos = derive_position(&store, "r").unwrap();
-    assert_eq!(pos_track(&pos), Track::Drift);
-    assert!(matches!(pos.action, Some(RunAction::ResolveDrift { .. })));
-}
-
-#[test]
-fn full_priority_drift_then_feedback_then_run() {
-    let (_d, store) = started();
-    // run only
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Run);
-    // + feedback
-    feedback::create(&store, "r", "frame", "x", None).unwrap();
-    assert_eq!(
-        pos_track(&derive_position(&store, "r").unwrap()),
-        Track::Feedback
-    );
-    // + drift
-    record_drift(&store, "r", "d-01", "frame/frame.md", "frame");
-    assert_eq!(
-        pos_track(&derive_position(&store, "r").unwrap()),
-        Track::Drift
-    );
-}
-
-#[test]
-fn removing_drift_falls_back_to_feedback() {
-    let (_d, store) = started();
-    feedback::create(&store, "r", "frame", "x", None).unwrap();
-    record_drift(&store, "r", "d-01", "frame/frame.md", "frame");
-    assert_eq!(
-        pos_track(&derive_position(&store, "r").unwrap()),
-        Track::Drift
-    );
-    // Remove the drift dir → feedback resurfaces.
-    std::fs::remove_dir_all(store.run_dir("r").join("drift")).unwrap();
-    assert_eq!(
-        pos_track(&derive_position(&store, "r").unwrap()),
-        Track::Feedback
-    );
-}
-
-#[test]
 fn resolving_feedback_falls_back_to_run() {
     let (_d, store) = started();
     let fb = feedback::create(&store, "r", "frame", "x", None).unwrap();
@@ -249,39 +195,6 @@ fn resolving_feedback_falls_back_to_run() {
     );
     feedback::set_status(&store, "r", &fb.id, FeedbackStatus::Addressed).unwrap();
     assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Run);
-}
-
-#[test]
-fn drift_and_feedback_both_clear_back_to_run() {
-    let (_d, store) = started();
-    let fb = feedback::create(&store, "r", "frame", "x", None).unwrap();
-    record_drift(&store, "r", "d-01", "frame/frame.md", "frame");
-    // drift first
-    assert_eq!(
-        pos_track(&derive_position(&store, "r").unwrap()),
-        Track::Drift
-    );
-    std::fs::remove_dir_all(store.run_dir("r").join("drift")).unwrap();
-    // then feedback
-    assert_eq!(
-        pos_track(&derive_position(&store, "r").unwrap()),
-        Track::Feedback
-    );
-    feedback::reject(&store, "r", &fb.id, "no").unwrap();
-    // then run
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Run);
-}
-
-fn record_drift(store: &StateStore, run: &str, id: &str, path: &str, station: &str) {
-    let d = Drift {
-        path: path.into(),
-        station: station.into(),
-        run: run.into(),
-        kind: DriftKind::Output,
-        age: "1m".into(),
-        unit: None,
-    };
-    drift::record(store, run, id, &d).unwrap();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -949,69 +862,6 @@ fn blocked_station_outcome_survives_reload() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
-fn drift_action_carries_path() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "d-01", "frame/out.md", "frame");
-    let pos = derive_position(&store, "r").unwrap();
-    match pos.action {
-        Some(RunAction::ResolveDrift { path, .. }) => assert_eq!(path, "frame/out.md"),
-        other => panic!("got {other:?}"),
-    }
-}
-
-#[test]
-fn drift_action_uses_entry_station_when_set() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "d-01", "x.md", "shape");
-    let pos = derive_position(&store, "r").unwrap();
-    match pos.action {
-        Some(RunAction::ResolveDrift { station, .. }) => assert_eq!(station, "shape"),
-        other => panic!("got {other:?}"),
-    }
-}
-
-#[test]
-fn drift_action_defaults_station_to_current_when_blank() {
-    let (_d, store) = started();
-    let d = Drift {
-        path: "x.md".into(),
-        station: String::new(),
-        run: "r".into(),
-        kind: DriftKind::Output,
-        age: String::new(),
-        unit: None,
-    };
-    drift::record(&store, "r", "d-01", &d).unwrap();
-    let pos = derive_position(&store, "r").unwrap();
-    match pos.action {
-        Some(RunAction::ResolveDrift { station, .. }) => assert_eq!(station, "frame"),
-        other => panic!("got {other:?}"),
-    }
-}
-
-#[test]
-fn first_drift_by_filename_is_dispatched() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "d-02", "b.md", "frame");
-    record_drift(&store, "r", "d-01", "a.md", "frame");
-    let pos = derive_position(&store, "r").unwrap();
-    match pos.action {
-        Some(RunAction::ResolveDrift { path, .. }) => assert_eq!(path, "a.md"),
-        other => panic!("got {other:?}"),
-    }
-}
-
-#[test]
-fn drift_does_not_advance_phase_on_tick() {
-    let (_d, store) = started();
-    let before = station_phase(&store, "r", "frame");
-    record_drift(&store, "r", "d-01", "x.md", "frame");
-    let t = run_tick(&store, "r").unwrap();
-    assert!(matches!(t.action, RunAction::ResolveDrift { .. }));
-    assert_eq!(station_phase(&store, "r", "frame"), before);
-}
-
-#[test]
 fn feedback_does_not_advance_phase_on_tick() {
     let (_d, store) = started();
     let before = station_phase(&store, "r", "frame");
@@ -1033,15 +883,6 @@ fn feedback_filed_while_held_preempts_checkpoint() {
     feedback::create(&store, "r", "frame", "more work", None).unwrap();
     let pos = derive_position(&store, "r").unwrap();
     assert_eq!(pos_track(&pos), Track::Feedback);
-}
-
-#[test]
-fn drift_filed_while_held_preempts_checkpoint() {
-    let (_d, store) = started();
-    walk_to_checkpoint(&store, "r", "frame");
-    record_drift(&store, "r", "d-01", "frame/frame.md", "frame");
-    let pos = derive_position(&store, "r").unwrap();
-    assert_eq!(pos_track(&pos), Track::Drift);
 }
 
 #[test]
@@ -1266,16 +1107,6 @@ fn runaction_fixfeedback_serializes_feedback_id() {
     let j = json_of(&pos.action.unwrap());
     assert_eq!(j["action"], serde_json::json!("fix_feedback"));
     assert_eq!(j["feedback_id"], serde_json::json!("fb-7"));
-}
-
-#[test]
-fn runaction_resolvedrift_serializes_path() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "d-01", "frame/x.md", "frame");
-    let pos = derive_position(&store, "r").unwrap();
-    let j = json_of(&pos.action.unwrap());
-    assert_eq!(j["action"], serde_json::json!("resolve_drift"));
-    assert_eq!(j["path"], serde_json::json!("frame/x.md"));
 }
 
 #[test]
@@ -1783,16 +1614,6 @@ fn sealed_takes_precedence_over_feedback() {
 }
 
 #[test]
-fn sealed_takes_precedence_over_drift() {
-    let (_d, store) = started();
-    run_to_sealed(&store, "r");
-    record_drift(&store, "r", "d-01", "harden/release.md", "harden");
-    let pos = derive_position(&store, "r").unwrap();
-    assert_eq!(pos_track(&pos), Track::Run);
-    assert!(matches!(pos.action, Some(RunAction::Sealed { .. })));
-}
-
-#[test]
 fn two_independent_runs_track_separately() {
     let (_d, store) = store();
     run_start(&store, "a", "software", None, "continuous").unwrap();
@@ -1809,16 +1630,6 @@ fn feedback_isolated_per_run() {
     run_start(&store, "b", "software", None, "continuous").unwrap();
     feedback::create(&store, "a", "frame", "x", None).unwrap();
     assert!(feedback::list(&store, "b").unwrap().is_empty());
-}
-
-#[test]
-fn drift_isolated_per_run() {
-    let (_d, store) = store();
-    run_start(&store, "a", "software", None, "continuous").unwrap();
-    run_start(&store, "b", "software", None, "continuous").unwrap();
-    record_drift(&store, "a", "d-01", "x.md", "frame");
-    assert_eq!(pos_track(&derive_position(&store, "a").unwrap()), Track::Drift);
-    assert_eq!(pos_track(&derive_position(&store, "b").unwrap()), Track::Run);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1873,104 +1684,6 @@ fn approve_after_block_clears_blocked_to_completed() {
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 19 — drift kind variations all surface Track C
 // ═══════════════════════════════════════════════════════════════════════
-
-fn record_drift_kind(store: &StateStore, run: &str, id: &str, kind: DriftKind) {
-    let d = Drift {
-        path: "frame/a.md".into(),
-        station: "frame".into(),
-        run: run.into(),
-        kind,
-        age: "1m".into(),
-        unit: None,
-    };
-    drift::record(store, run, id, &d).unwrap();
-}
-
-#[test]
-fn drift_kind_spec_surfaces() {
-    let (_d, store) = started();
-    record_drift_kind(&store, "r", "d-01", DriftKind::Spec);
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Drift);
-}
-
-#[test]
-fn drift_kind_output_surfaces() {
-    let (_d, store) = started();
-    record_drift_kind(&store, "r", "d-01", DriftKind::Output);
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Drift);
-}
-
-#[test]
-fn drift_kind_discovery_output_surfaces() {
-    let (_d, store) = started();
-    record_drift_kind(&store, "r", "d-01", DriftKind::DiscoveryOutput);
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Drift);
-}
-
-#[test]
-fn drift_kind_discovery_mandate_surfaces() {
-    let (_d, store) = started();
-    record_drift_kind(&store, "r", "d-01", DriftKind::DiscoveryMandate);
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Drift);
-}
-
-#[test]
-fn drift_kind_roundtrips_through_storage() {
-    for kind in [
-        DriftKind::Spec,
-        DriftKind::Output,
-        DriftKind::DiscoveryOutput,
-        DriftKind::DiscoveryMandate,
-    ] {
-        let (_d, store) = started();
-        record_drift_kind(&store, "r", "d-01", kind);
-        let read = drift::first(&store, "r").unwrap().unwrap();
-        assert_eq!(read.kind, kind, "{kind:?}");
-    }
-}
-
-#[test]
-fn drift_unit_field_roundtrips() {
-    let (_d, store) = started();
-    let d = Drift {
-        path: "x.md".into(),
-        station: "frame".into(),
-        run: "r".into(),
-        kind: DriftKind::Output,
-        age: "2h".into(),
-        unit: Some("widget".into()),
-    };
-    drift::record(&store, "r", "d-01", &d).unwrap();
-    let read = drift::first(&store, "r").unwrap().unwrap();
-    assert_eq!(read.unit, Some("widget".into()));
-    assert_eq!(read.age, "2h");
-}
-
-#[test]
-fn multiple_drift_entries_first_by_stem() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "z-99", "z.md", "frame");
-    record_drift(&store, "r", "a-01", "a.md", "frame");
-    record_drift(&store, "r", "m-50", "m.md", "frame");
-    let pos = derive_position(&store, "r").unwrap();
-    match pos.action {
-        Some(RunAction::ResolveDrift { path, .. }) => assert_eq!(path, "a.md"),
-        other => panic!("got {other:?}"),
-    }
-}
-
-#[test]
-fn drift_list_returns_all_sorted() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "d-03", "c.md", "frame");
-    record_drift(&store, "r", "d-01", "a.md", "frame");
-    record_drift(&store, "r", "d-02", "b.md", "frame");
-    let all = drift::list(&store, "r").unwrap();
-    assert_eq!(all.len(), 3);
-    assert_eq!(all[0].path, "a.md");
-    assert_eq!(all[1].path, "b.md");
-    assert_eq!(all[2].path, "c.md");
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 20 — Await kind hold semantics (simulated via state injection)
@@ -2201,17 +1914,6 @@ fn feedback_pause_preserves_manufacture_phase() {
 }
 
 #[test]
-fn drift_pause_preserves_checkpoint_phase() {
-    let (_d, store) = started();
-    walk_to_checkpoint(&store, "r", "frame");
-    record_drift(&store, "r", "d-01", "x.md", "frame");
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Drift);
-    std::fs::remove_dir_all(store.run_dir("r").join("drift")).unwrap();
-    let pos = derive_position(&store, "r").unwrap();
-    assert!(matches!(pos.action, Some(RunAction::Checkpoint { .. })));
-}
-
-#[test]
 fn feedback_during_manufacture_does_not_consume_wave() {
     // While feedback preempts, the manufacture wave is untouched — the same
     // units are still wave-ready once feedback clears.
@@ -2394,21 +2096,6 @@ fn repeated_ticks_while_feedback_open_stay_on_feedback() {
 }
 
 #[test]
-fn repeated_ticks_while_drift_present_stay_on_drift() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "d-01", "x.md", "frame");
-    // Stays on the drift track while the entry is present + being worked...
-    for _ in 0..4 {
-        let t = run_tick(&store, "r").unwrap();
-        assert_eq!(t.position.track, Track::Drift);
-        assert!(matches!(t.action, RunAction::ResolveDrift { .. }));
-    }
-    // ...but an unresolved no-progress drift loop is a wedge → escalate.
-    let t = run_tick(&store, "r").unwrap();
-    assert!(matches!(t.action, RunAction::Escalate { .. }));
-}
-
-#[test]
 fn feedback_does_not_advance_run_phase_over_many_ticks() {
     let (_d, store) = started();
     run_tick(&store, "r").unwrap(); // spec → review
@@ -2418,19 +2105,6 @@ fn feedback_does_not_advance_run_phase_over_many_ticks() {
         run_tick(&store, "r").unwrap();
     }
     assert_eq!(station_phase(&store, "r", "frame"), phase);
-}
-
-#[test]
-fn held_checkpoint_then_drift_then_clear_then_decide() {
-    // Full interplay: hold at checkpoint, drift preempts, clear drift, decide.
-    let (_d, store) = started();
-    walk_to_checkpoint(&store, "r", "frame");
-    record_drift(&store, "r", "d-01", "x.md", "frame");
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Drift);
-    std::fs::remove_dir_all(store.run_dir("r").join("drift")).unwrap();
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Run);
-    let decided = checkpoint_decide(&store, "r", true, None).expect("approve");
-    assert!(matches!(&decided.action, RunAction::Spec { station, .. } if station == "specify"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2454,13 +2128,6 @@ fn fresh_run_first_action_is_frame_spec() {
     let (_d, store) = started();
     let pos = derive_position(&store, "r").unwrap();
     assert!(matches!(&pos.action, Some(RunAction::Spec { station, .. }) if station == "frame"));
-}
-
-#[test]
-fn fresh_run_no_feedback_no_drift() {
-    let (_d, store) = started();
-    assert!(feedback::list(&store, "r").unwrap().is_empty());
-    assert!(drift::list(&store, "r").unwrap().is_empty());
 }
 
 #[test]
@@ -2522,36 +2189,6 @@ fn feedback_preempts_at_harden() {
         Some(RunAction::FixFeedback { station, .. }) => assert_eq!(station, "harden"),
         other => panic!("got {other:?}"),
     }
-}
-
-#[test]
-fn drift_default_station_tracks_active_station_progression() {
-    // A station-less drift attributes to whatever station is active now.
-    let (_d, store) = started();
-    advance_to_station(&store, "r", "shape");
-    let d = Drift {
-        path: "x.md".into(),
-        station: String::new(),
-        run: "r".into(),
-        kind: DriftKind::Output,
-        age: String::new(),
-        unit: None,
-    };
-    drift::record(&store, "r", "d-01", &d).unwrap();
-    let pos = derive_position(&store, "r").unwrap();
-    match pos.action {
-        Some(RunAction::ResolveDrift { station, .. }) => assert_eq!(station, "shape"),
-        other => panic!("got {other:?}"),
-    }
-}
-
-#[test]
-fn drift_beats_feedback_at_build() {
-    let (_d, store) = started();
-    advance_to_station(&store, "r", "build");
-    feedback::create(&store, "r", "build", "x", None).unwrap();
-    record_drift(&store, "r", "d-01", "build/x.md", "build");
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Drift);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2689,15 +2326,6 @@ fn fixfeedback_action_equality() {
     assert_eq!(a, b);
 }
 
-#[test]
-fn resolvedrift_action_equality() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "d-01", "x.md", "frame");
-    let a = derive_position(&store, "r").unwrap().action.unwrap();
-    let b = derive_position(&store, "r").unwrap().action.unwrap();
-    assert_eq!(a, b);
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 33 — additional checkpoint/track edge cases
 // ═══════════════════════════════════════════════════════════════════════
@@ -2751,15 +2379,6 @@ fn harden_reject_then_address_then_seal() {
     feedback::set_status(&store, "r", &fb.id, FeedbackStatus::Addressed).unwrap();
     let res = checkpoint_decide(&store, "r", true, None).expect("seal");
     assert!(matches!(finish_run_review(&store, "r", res.action), RunAction::Sealed { .. }));
-}
-
-#[test]
-fn drift_overrides_held_external_checkpoint() {
-    let (_d, store) = started();
-    advance_to_station(&store, "r", "harden");
-    walk_to_checkpoint(&store, "r", "harden");
-    record_drift(&store, "r", "d-01", "harden/x.md", "harden");
-    assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Drift);
 }
 
 #[test]
@@ -2832,16 +2451,6 @@ fn feedback_filed_by_reject_is_listable_and_open() {
     assert_eq!(all[0].id, "fb-checkpoint");
     assert_eq!(all[0].status, FeedbackStatus::Pending);
     assert!(all[0].body.contains("reason"));
-}
-
-#[test]
-fn drift_action_run_field_correct() {
-    let (_d, store) = started();
-    record_drift(&store, "r", "d-01", "x.md", "frame");
-    match derive_position(&store, "r").unwrap().action {
-        Some(RunAction::ResolveDrift { run, .. }) => assert_eq!(run, "r"),
-        other => panic!("got {other:?}"),
-    }
 }
 
 #[test]

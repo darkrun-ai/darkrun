@@ -124,16 +124,11 @@ pub fn reset_drift(
     reason: Option<&str>,
 ) -> Result<DebugResult> {
     let reason = require(confirm, reason, "reset_drift")?;
-    let mut count = 0;
-    for w in store.read_witnesses(slug)? {
-        if crate::drift::accept(store, slug, &w.path)? {
-            count += 1;
-        }
-    }
+    let count = crate::drift::rebaseline_all(store, slug)?;
     Ok(DebugResult {
         op: "reset_drift".to_string(),
         applied: true,
-        note: format!("re-witnessed {count} artifact(s) and cleared drift ({reason})"),
+        note: format!("re-witnessed {count} premise(s) and cleared drift ({reason})"),
         data: None,
     })
 }

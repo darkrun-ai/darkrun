@@ -306,56 +306,6 @@ fn feedback_cleared_mid_manufacture_resumes_wave() {
 // Drift station targeting and priority over run/feedback at each station.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn drift_targets_named_station() {
-    use darkrun_core::domain::{Drift, DriftKind};
-    let h = Harness::start("driftst");
-    advance_to(&h, "shape");
-    darkrun_mcp::drift::record(
-        &h.store,
-        "driftst",
-        "d-01",
-        &Drift {
-            path: "specify/spec.md".into(),
-            station: "specify".into(),
-            run: "driftst".into(),
-            kind: DriftKind::Spec,
-            age: "2h".into(),
-            unit: None,
-        },
-    )
-    .unwrap();
-    match h.position().action {
-        Some(RunAction::ResolveDrift { station, .. }) => assert_eq!(station, "specify"),
-        other => panic!("expected ResolveDrift on specify, got {other:?}"),
-    }
-}
-
-#[test]
-fn drift_empty_station_falls_back_to_active() {
-    use darkrun_core::domain::{Drift, DriftKind};
-    let h = Harness::start("driftfb");
-    advance_to(&h, "build");
-    darkrun_mcp::drift::record(
-        &h.store,
-        "driftfb",
-        "d-01",
-        &Drift {
-            path: "some/path.md".into(),
-            station: "".into(),
-            run: "driftfb".into(),
-            kind: DriftKind::Output,
-            age: "".into(),
-            unit: None,
-        },
-    )
-    .unwrap();
-    match h.position().action {
-        Some(RunAction::ResolveDrift { station, .. }) => assert_eq!(station, "build"),
-        other => panic!("expected ResolveDrift on build, got {other:?}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Cross-crate content: every station's reviewers/workers are well-formed.
 // ---------------------------------------------------------------------------

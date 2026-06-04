@@ -525,26 +525,6 @@ fn fix_feedback_action_renders_track_prompt() {
     assert!(prompt.contains("fb-7"), "feedback id missing from track prompt:\n{prompt}");
 }
 
-#[test]
-fn resolve_drift_action_renders_track_prompt() {
-    let (_d, store) = fresh("r");
-    // Drop a drift entry the manager will surface as ResolveDrift.
-    let drift_dir = store.run_dir("r").join("drift");
-    fs::create_dir_all(&drift_dir).unwrap();
-    fs::write(
-        drift_dir.join("frame.md"),
-        "---\nstation: frame\npath: frame.md\n---\nmutated\n",
-    )
-    .unwrap();
-    let t = run_tick(&store, "r").expect("tick");
-    match &t.action {
-        RunAction::ResolveDrift { path, .. } => assert!(path.contains("frame")),
-        // If drift parsing differs, at least ensure we still rendered *something*.
-        other => panic!("expected ResolveDrift, got {other:?}"),
-    }
-    let prompt = t.prompt.expect("drift prompt");
-    assert!(!prompt.trim().is_empty(), "drift prompt empty");
-}
 
 // ─────────── noop action renders the mid-wave hold prompt ───────────
 
