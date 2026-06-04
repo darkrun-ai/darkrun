@@ -139,8 +139,10 @@ fn list_factories_is_non_empty() {
 }
 
 #[test]
-fn list_factories_has_exactly_one_in_this_build() {
-    assert_eq!(list_factories().len(), 1);
+fn list_factories_contains_software_and_libdev() {
+    let names: Vec<String> = list_factories().iter().map(|f| f.name.clone()).collect();
+    assert!(names.iter().any(|n| n == "software"), "software factory shipped");
+    assert!(names.iter().any(|n| n == "libdev"), "libdev factory shipped");
 }
 
 #[test]
@@ -149,13 +151,20 @@ fn list_factories_contains_software() {
 }
 
 #[test]
-fn list_factories_first_is_software() {
-    assert_eq!(list_factories()[0].name, "software");
+fn list_factories_is_sorted() {
+    let names: Vec<String> = list_factories().iter().map(|f| f.name.clone()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "the catalog is sorted by slug");
 }
 
 #[test]
 fn list_factories_software_equals_resolve() {
-    assert_eq!(list_factories()[0], resolve_factory("software").unwrap());
+    let listed = list_factories()
+        .into_iter()
+        .find(|f| f.name == "software")
+        .expect("software listed");
+    assert_eq!(listed, resolve_factory("software").unwrap());
 }
 
 #[test]

@@ -1718,7 +1718,10 @@ fn run_list_mixes_archived_and_active() {
 fn factory_list_includes_software() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    assert_eq!(v[0]["name"], "software");
+    assert!(
+        v.as_array().unwrap().iter().any(|f| f["name"] == "software"),
+        "software factory listed"
+    );
 }
 
 #[test]
@@ -1844,8 +1847,14 @@ fn factory_detail_matches_list_entry() {
             }))
             .unwrap(),
     );
-    assert_eq!(list[0]["name"], detail["name"]);
-    assert_eq!(list[0]["stations"], detail["stations"]);
+    let entry = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "software")
+        .expect("software listed");
+    assert_eq!(entry["name"], detail["name"]);
+    assert_eq!(entry["stations"], detail["stations"]);
 }
 
 // ── Cross-tool / integration flows ─────────────────────────────────────────
@@ -3599,10 +3608,17 @@ fn factory_detail_empty_name_errors() {
 }
 
 #[test]
-fn factory_list_has_exactly_one_factory() {
+fn factory_list_lists_the_shipped_catalog() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
-    assert_eq!(v.as_array().unwrap().len(), 1);
+    let names: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"software"), "software shipped");
+    assert!(names.contains(&"libdev"), "libdev shipped");
 }
 
 // ── Batch 5: more error/validation edges ───────────────────────────────────
@@ -4828,13 +4844,19 @@ fn factory_list_each_station_matches_detail_workers() {
             }))
             .unwrap(),
     );
+    let entry = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "software")
+        .expect("software listed");
     for i in 0..6 {
         assert_eq!(
-            list[0]["stations"][i]["workers"],
+            entry["stations"][i]["workers"],
             detail["stations"][i]["workers"]
         );
         assert_eq!(
-            list[0]["stations"][i]["reviewers"],
+            entry["stations"][i]["reviewers"],
             detail["stations"][i]["reviewers"]
         );
     }

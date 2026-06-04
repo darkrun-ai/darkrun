@@ -2097,8 +2097,18 @@ mod tests {
         let server = DarkrunServer::new(dir.path());
         let res = server.darkrun_factory_list().unwrap();
         let v = res.structured_content.unwrap();
-        assert_eq!(v["items"][0]["name"], "software");
-        assert_eq!(v["items"][0]["stations"][0]["name"], "frame");
+        let items = v["items"].as_array().expect("items array");
+        let software = items
+            .iter()
+            .find(|i| i["name"] == "software")
+            .expect("software factory listed");
+        // Every factory — software included — opens on the fixed FSSBPH spine.
+        assert_eq!(software["stations"][0]["name"], "frame");
+        // libdev (inherits: software) appears as a distinct catalog entry.
+        assert!(
+            items.iter().any(|i| i["name"] == "libdev"),
+            "libdev factory listed"
+        );
     }
 
     #[test]

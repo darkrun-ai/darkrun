@@ -159,10 +159,10 @@ pub fn load_factory_at(repo_root: Option<&Path>, name: &str) -> Result<Factory> 
         chain,
     };
 
-    // The child's own FACTORY.md drives the manifest (run reviewers, reflections,
-    // model). Inherited stations/roles come through the resolver.
-    let (frontmatter, body): (FactoryFrontmatter, String) =
-        frontmatter::parse(&read_factory_md(repo_root, name)?)?;
+    // The child's own FACTORY.md drives the manifest, but each field falls
+    // through the inherits chain when the child leaves it empty — so a child
+    // factory can specialize one station and inherit the whole run-level roster.
+    let (frontmatter, body) = resolve_manifest(repo_root, &resolver.chain)?;
 
     // The six FSSBPH stations, always, in fixed order — resolved through the
     // chain so a parent can supply a station the child does not.
@@ -193,6 +193,49 @@ pub fn load_validated_at(repo_root: Option<&Path>, name: &str) -> Result<Factory
     let factory = load_factory_at(repo_root, name)?;
     crate::validate::validate(&factory)?;
     Ok(factory)
+}
+
+/// Assemble the factory manifest by walking the inherits `chain` (child first).
+/// The child's `name`, `inherits`, and `body` are authoritative; every other
+/// field falls through to the first ancestor that declares it — so an inheriting
+/// factory can leave the run-level roster, model, and category to its parent and
+/// only state what it changes. Returns the merged frontmatter and the child body.
+fn resolve_manifest(
+    repo_root: Option<&Path>,
+    chain: &[String],
+) -> Result<(FactoryFrontmatter, String)> {
+    let mut merged: Option<FactoryFrontmatter> = None;
+    let mut child_body = String::new();
+    for (i, slug) in chain.iter().enumerate() {
+        let (fm, body): (FactoryFrontmatter, String) =
+            frontmatter::parse(&read_factory_md(repo_root, slug)?)?;
+        if i == 0 {
+            child_body = body;
+            merged = Some(fm);
+            continue;
+        }
+        // Fill only the fields the child (and nearer ancestors) left empty.
+        let m = merged.as_mut().expect("child seeded merged");
+        if m.description.is_empty() {
+            m.description = fm.description;
+        }
+        if m.category.is_empty() {
+            m.category = fm.category;
+        }
+        if m.default_model.is_empty() {
+            m.default_model = fm.default_model;
+        }
+        if m.fix_workers.is_empty() {
+            m.fix_workers = fm.fix_workers;
+        }
+        if m.reviewers.is_empty() {
+            m.reviewers = fm.reviewers;
+        }
+        if m.reflections.is_empty() {
+            m.reflections = fm.reflections;
+        }
+    }
+    Ok((merged.expect("chain is never empty"), child_body))
 }
 
 fn load_station(resolver: &Resolver, station: &str) -> Result<Station> {
@@ -324,6 +367,41 @@ mod tests {
             f.station("build").unwrap().workers.iter().map(Role::name).collect::<Vec<_>>(),
             vec!["test_author", "builder", "self_reviewer", "reconciler"]
         );
+    }
+
+    #[test]
+    fn libdev_inherits_software_and_overrides_only_shape() {
+        // The shipped libdev factory is the real proof of inherits: a minimal
+        // FACTORY.md (inherits: software) plus one station override.
+        let f = load_validated("libdev").expect("libdev loads and validates");
+        assert_eq!(f.name(), "libdev");
+
+        // The six-station spine resolves through the parent.
+        let names: Vec<&str> = f.stations.iter().map(Station::name).collect();
+        assert_eq!(names, vec!["frame", "specify", "shape", "build", "prove", "harden"]);
+
+        // Shape is the override: the visual_designer beat is dropped.
+        let shape_workers: Vec<&str> =
+            f.station("shape").unwrap().workers.iter().map(Role::name).collect();
+        assert_eq!(shape_workers, vec!["designer", "spiker", "pressure_tester", "resolver"]);
+        assert!(!shape_workers.contains(&"visual_designer"));
+
+        // Every un-overridden station's roster comes from software unchanged.
+        let software = load_factory("software").unwrap();
+        fn build_workers(fac: &Factory) -> Vec<String> {
+            fac.station("build").unwrap().workers.iter().map(|r| r.name().to_string()).collect()
+        }
+        assert_eq!(build_workers(&f), build_workers(&software));
+
+        // The run-level manifest is inherited wholesale — libdev declares none.
+        let run_reviewers: Vec<&str> = f.run_reviewers.iter().map(Role::name).collect();
+        assert_eq!(
+            run_reviewers,
+            software.run_reviewers.iter().map(Role::name).collect::<Vec<_>>()
+        );
+        assert!(!f.reflections.is_empty(), "reflections inherited from software");
+        // The default model falls through the chain too.
+        assert_eq!(f.frontmatter.default_model, software.frontmatter.default_model);
     }
 
     #[test]
