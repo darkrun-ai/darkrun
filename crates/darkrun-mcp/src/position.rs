@@ -321,6 +321,11 @@ pub struct PromptContext {
     /// The open feedback id, for the fix track.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feedback_id: Option<String>,
+    /// The fix's isolation worktree path (B9), for the feedback/drift fix tracks
+    /// — the checkout the fix-worker should run the repair in, off the station
+    /// branch. Present only on a git-backed run where the worktree was forked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_worktree: Option<String>,
     /// The drifted artifact path, for the drift track.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -1531,23 +1536,25 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
                 })
                 .collect();
             // Surface each wave unit's isolation worktree (B9) so the worker runs
-            // that unit's beat in its own checkout. Only units that have actually
-            // forked a branch (a git-backed run) appear.
-            let repo_root = cascade_repo_root(store);
-            ctx.worktrees = wave_units
-                .iter()
-                .filter(|u| wave.contains(&u.slug))
-                .filter_map(|u| {
-                    let branch = u.frontmatter.branch.clone()?;
-                    let path =
-                        crate::lifecycle::unit_worktree_path(&repo_root, slug, mstation, &u.slug);
-                    Some(Worktree {
-                        unit: u.slug.clone(),
-                        branch,
-                        path: path.to_string_lossy().into_owned(),
+            // that unit's beat in its own checkout. Only on a git-backed run; the
+            // branch side-effect forks each worktree this same tick (AFTER this
+            // prompt renders), so we show the derived path the worker will land in
+            // — not one already on disk.
+            if git_backed_station(store, slug, mstation) {
+                let repo_root = cascade_repo_root(store);
+                ctx.worktrees = wave
+                    .iter()
+                    .map(|unit| {
+                        let path =
+                            crate::lifecycle::unit_worktree_path(&repo_root, slug, mstation, unit);
+                        Worktree {
+                            unit: unit.clone(),
+                            branch: crate::lifecycle::unit_branch(slug, mstation, unit),
+                            path: path.to_string_lossy().into_owned(),
+                        }
                     })
-                })
-                .collect();
+                    .collect();
+            }
         }
         RunAction::Spec { station: sstation, .. } => {
             // Collaboration backpressure flag: collaborative mode + the station's
@@ -1570,12 +1577,17 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         RunAction::RunReview { reviewers, .. } => {
             ctx.reviewers = reviewers.clone();
         }
-        RunAction::FixFeedback { feedback_id, .. }
-        | RunAction::FeedbackQuestion { feedback_id, .. } => {
+        RunAction::FixFeedback { feedback_id, station, .. } => {
+            ctx.feedback_id = Some(feedback_id.clone());
+            ctx.fix_worktree = fix_worktree_for(store, slug, station, feedback_id);
+        }
+        RunAction::FeedbackQuestion { feedback_id, .. } => {
             ctx.feedback_id = Some(feedback_id.clone());
         }
-        RunAction::ResolveDrift { path, .. } => {
+        RunAction::ResolveDrift { path, station, .. } => {
             ctx.path = Some(path.clone());
+            ctx.fix_worktree =
+                fix_worktree_for(store, slug, station, &crate::drift::drift_id_for(path));
         }
         RunAction::UnitsInvalid { problem, units, .. } => {
             ctx.problem = Some(problem.clone());
@@ -1911,6 +1923,12 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
     // after-persist discipline as the station side-effects.
     let mut entered_units: Vec<(String, String)> = Vec::new();
     let mut landed_units: Vec<(String, String)> = Vec::new();
+    // The fix `(station, fix_id)` to fork onto its own worktree this tick (B9):
+    // a drift/feedback repair is isolated off the station branch so its diff
+    // never tangles with in-flight units. Idempotent re-entry across the ticks
+    // the fix-worker spends resolving. The fix lands back on resolution (drift
+    // accept / feedback close), not here.
+    let mut entered_fix: Option<(String, String)> = None;
     // Whether an auto-checkpoint just COMPLETED a station (independent of
     // whether that station carried merge debt to land). Drives run completion.
     let mut auto_completed = false;
@@ -2040,9 +2058,19 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
             });
             state.active_station = station.clone();
         }
-        // Validation / repair / feedback / drift / seal / noop actions are all
-        // HOLDS — they don't advance the run phase machine on their own. The
-        // next tick re-derives once the agent has cleared the condition.
+        // A feedback/drift repair is a HOLD (it doesn't advance the phase
+        // machine), but it gets its own isolation worktree (B9) so the
+        // fix-worker's diff is forked off the station branch. Idempotent re-entry
+        // across the ticks the fix takes; it lands back on resolution.
+        RunAction::FixFeedback { station, feedback_id, .. } => {
+            entered_fix = Some((station.clone(), feedback_id.clone()));
+        }
+        RunAction::ResolveDrift { station, path, .. } => {
+            entered_fix = Some((station.clone(), crate::drift::drift_id_for(path)));
+        }
+        // Validation / question / seal / noop actions are all HOLDS — they don't
+        // advance the run phase machine on their own. The next tick re-derives
+        // once the agent has cleared the condition.
         _ => {}
     }
 
@@ -2065,6 +2093,7 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
         landed_station,
         entered_units,
         landed_units,
+        entered_fix,
         run_now_complete,
     })?;
     Ok(())
@@ -2081,6 +2110,9 @@ struct BranchSideEffects<'a> {
     entered_units: Vec<(String, String)>,
     /// `(station, unit)` pairs to land back onto the station branch (B9).
     landed_units: Vec<(String, String)>,
+    /// The `(station, fix_id)` to fork onto its own worktree (B9), if a fix
+    /// track is dispatching this tick. Idempotent across the fix's ticks.
+    entered_fix: Option<(String, String)>,
     run_now_complete: bool,
 }
 
@@ -2099,6 +2131,7 @@ fn run_branch_side_effects(fx: BranchSideEffects) -> Result<()> {
         landed_station,
         entered_units,
         landed_units,
+        entered_fix,
         run_now_complete,
     } = fx;
     if let Some(station) = &entered_station {
@@ -2106,6 +2139,12 @@ fn run_branch_side_effects(fx: BranchSideEffects) -> Result<()> {
     }
     for (station, unit) in &entered_units {
         enter_unit_and_record(store, slug, station, unit)?;
+    }
+    if let Some((station, fix_id)) = &entered_fix {
+        // Fork the fix onto its own worktree off the station branch. Idempotent;
+        // no branch is stamped on state (the fix's id + station fully derive it,
+        // and the fix lands on resolution via land_fix).
+        crate::lifecycle::enter_fix(store, slug, station, fix_id);
     }
     for (station, unit) in &landed_units {
         crate::lifecycle::land_unit(store, slug, station, unit);
@@ -2117,6 +2156,34 @@ fn run_branch_side_effects(fx: BranchSideEffects) -> Result<()> {
         crate::lifecycle::land_run(store, slug);
     }
     Ok(())
+}
+
+/// Whether this is a git-backed run whose `station` branch exists — the
+/// precondition for per-unit/per-fix worktree isolation (a child can only fork
+/// off a station branch that's there). Used to decide whether to surface a
+/// worktree path in a dispatch prompt. The branch side-effects that actually
+/// fork the worktree run AFTER the prompt renders, so the prompt shows the
+/// *derived* path it's about to create, not one already on disk.
+fn git_backed_station(store: &StateStore, slug: &str, station: &str) -> bool {
+    let repo_root = cascade_repo_root(store);
+    match Git::open(&repo_root) {
+        Ok(git) => git
+            .branch_exists(&crate::lifecycle::station_branch(slug, station))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// The fix worktree path to surface for `(station, fix_id)` on a git-backed run,
+/// else `None`. The path is the one the branch side-effect forks this same tick;
+/// the worker reads the prompt after the tick, when the worktree exists.
+fn fix_worktree_for(store: &StateStore, slug: &str, station: &str, fix_id: &str) -> Option<String> {
+    if !git_backed_station(store, slug, station) {
+        return None;
+    }
+    let repo_root = cascade_repo_root(store);
+    let path = crate::lifecycle::fix_worktree_path(&repo_root, slug, station, fix_id);
+    Some(path.to_string_lossy().into_owned())
 }
 
 /// Enter a unit's branch + worktree (forked off the station branch) and record
@@ -2404,6 +2471,7 @@ pub fn checkpoint_decide(
         landed_station,
         entered_units: Vec::new(),
         landed_units: Vec::new(),
+        entered_fix: None,
         run_now_complete,
     })?;
 
@@ -3614,6 +3682,50 @@ mod tests {
         assert!(show_path(&root, "darkrun/r/frame", "u1.txt"), "u1's work landed on the station");
         // …but NOT yet on run-main (the station hasn't completed).
         assert!(!show_path(&root, "darkrun/r/main", "u1.txt"), "station hasn't landed yet");
+    }
+
+    /// B9: an open feedback item forks the fix-worker onto its own worktree off
+    /// the station branch, the fix's commits stay isolated there, and closing the
+    /// feedback lands the fix back onto the station branch.
+    #[test]
+    fn feedback_fix_isolates_on_its_own_worktree_then_lands_on_close() {
+        let (_d, root, store) = git_store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+        assert!(branch_exists_at(&root, "darkrun/r/frame"));
+
+        // Open feedback at the active station preempts the run onto the fix track.
+        store
+            .write_feedback_raw("r", "fb-7", "---\nstatus: pending\nstation: frame\n---\nbusted\n")
+            .expect("fb");
+
+        let t = run_tick(&store, "r").expect("fix tick");
+        assert!(
+            matches!(&t.action, RunAction::FixFeedback { feedback_id, .. } if feedback_id == "fb-7"),
+            "got {:?}",
+            t.action
+        );
+        // The fix forked onto its own worktree off the station branch…
+        let wt = crate::lifecycle::fix_worktree_path(&root, "r", "frame", "fb-7");
+        assert!(wt.exists(), "the fix worktree exists on disk");
+        assert!(branch_exists_at(&root, "darkrun/r/fixes/frame/fb-7"));
+        // …and the prompt points the worker at it.
+        let prompt = t.prompt.expect("fix prompt");
+        assert!(prompt.contains("fixes/frame/fb-7"), "prompt names the fix worktree:\n{prompt}");
+
+        // The fix-worker repairs inside the isolated worktree and commits.
+        std::fs::write(wt.join("fix.txt"), "repaired\n").unwrap();
+        let git_wt = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&wt).args(args).status().unwrap().success()
+        };
+        assert!(git_wt(&["add", "-A"]));
+        assert!(git_wt(&["commit", "-q", "-m", "fix fb-7"]));
+        assert!(!show_path(&root, "darkrun/r/frame", "fix.txt"), "the fix is isolated pre-close");
+
+        // Closing the feedback lands the fix back onto the station branch.
+        crate::feedback::close_with_reply(&store, "r", "fb-7", "corrected").expect("close");
+        assert!(!branch_exists_at(&root, "darkrun/r/fixes/frame/fb-7"), "fix branch retired");
+        assert!(!wt.exists(), "fix worktree removed");
+        assert!(show_path(&root, "darkrun/r/frame", "fix.txt"), "the fix landed on the station");
     }
 
     fn branch_exists_at(root: &std::path::Path, branch: &str) -> bool {

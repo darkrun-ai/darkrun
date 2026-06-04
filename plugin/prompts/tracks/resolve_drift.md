@@ -10,6 +10,12 @@ A **locked** artifact changed out from under the line. Drift preempts everything
 
 `{{ path }}` was mutated after it was locked{% if station %} by station `{{ station }}`{% endif %}. The manager witnessed the change. Until it's reconciled, every downstream guarantee that depended on that artifact is suspect.
 
+{% if fix_worktree %}
+## This reconciliation has its own worktree — work in it
+
+The repair is isolated on its own branch + worktree, forked off the station branch: **`{{ fix_worktree }}`**. Reconcile the drift **inside that worktree** so its diff stays isolated from in-flight unit work; the manager lands it back onto the station branch when you accept the drift. Don't commit the reconciliation to the station branch yourself.
+{% endif %}
+
 ## What to do
 
 1. **Diff** the current `{{ path }}` against its locked state. Know exactly what changed.

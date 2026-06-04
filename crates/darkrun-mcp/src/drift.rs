@@ -33,7 +33,7 @@ fn repo_root(store: &StateStore) -> PathBuf {
 
 /// A filename-safe drift id derived from an artifact path (so re-sweeps of the
 /// same artifact overwrite rather than pile up).
-fn drift_id_for(path: &str) -> String {
+pub(crate) fn drift_id_for(path: &str) -> String {
     let mut id = String::from("drift-");
     for c in path.chars() {
         id.push(if c.is_ascii_alphanumeric() { c } else { '_' });
@@ -195,6 +195,22 @@ pub fn accept(store: &StateStore, run: &str, path: &str) -> Result<bool> {
     let Some(hash) = hash_file(&full) else {
         return Ok(false);
     };
+    // B9: capture the drift's effective station up front (its own, else the
+    // active station — mirroring how the cursor's ResolveDrift resolved it) so
+    // that once the drift resolves we can land its fix worktree back onto the
+    // station branch. Best-effort + idempotent downstream.
+    let fix_station = list(store, run)?
+        .into_iter()
+        .find(|d| d.path == path && !d.station.is_empty())
+        .map(|d| d.station)
+        .or_else(|| {
+            store
+                .read_state(run)
+                .ok()
+                .flatten()
+                .map(|s| s.active_station)
+        })
+        .filter(|s| !s.is_empty());
     let mut witnesses = store.read_witnesses(run)?;
     let mut found = false;
     for w in witnesses.iter_mut() {
@@ -225,6 +241,12 @@ pub fn accept(store: &StateStore, run: &str, path: &str) -> Result<bool> {
         // flagged rather than silently mis-cropped.
         if let Ok(bytes) = fs::read(&full) {
             crate::annotation::reanchor_artifact_version(store, &root, run, path, &bytes)?;
+        }
+        // The drift is resolved — land its fix worktree (if any) back onto the
+        // station branch and retire it. Idempotent: a drift resolved without a
+        // forked fix worktree (non-git run) no-ops.
+        if let Some(station) = &fix_station {
+            crate::lifecycle::land_fix(store, run, station, &drift_id_for(path));
         }
     }
     Ok(found)

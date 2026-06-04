@@ -350,6 +350,10 @@ pub fn close_with_reply(
         }
     }
     store.write_feedback_raw(run, id, &serialize(&fb))?;
+    // B9: the fix is resolved — land its isolation worktree (if any) back onto
+    // the station branch and retire it. Idempotent + best-effort: a feedback that
+    // never forked a fix worktree (non-git run, or resolved without code) no-ops.
+    crate::lifecycle::land_fix(store, run, &fb.station, id);
     Ok(fb)
 }
 
