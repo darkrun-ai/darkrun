@@ -31,7 +31,42 @@ pub fn validate(factory: &Factory) -> Result<()> {
 
     validate_run_level(&invalid, factory)?;
     validate_surfaces(&invalid, factory)?;
+    validate_input_coverage(&invalid, factory)?;
 
+    Ok(())
+}
+
+/// Cross-station input coverage — the run's distillation must not be *silently*
+/// lost. Walking the fixed flow, every upstream station's `locked_artifact` must
+/// appear in a later station's `inputs` (carried forward) **or** its
+/// `inputs_waived` (consciously dropped). An upstream artifact that is neither is
+/// a silent gap: the station would work from scratch, re-inventing what the run
+/// already distilled. (A station may also `inputs_waive` an artifact it never
+/// needs — that's the explicit opt-out.)
+fn validate_input_coverage(
+    invalid: &impl Fn(String) -> ContentError,
+    factory: &Factory,
+) -> Result<()> {
+    let mut upstream: Vec<String> = Vec::new();
+    for station in &factory.stations {
+        let fm = &station.frontmatter;
+        for art in &upstream {
+            let carried = fm.inputs.iter().any(|i| i == art);
+            let waived = fm.inputs_waived.iter().any(|w| w == art);
+            if !carried && !waived {
+                return Err(invalid(format!(
+                    "station `{}` silently drops upstream artifact `{art}` — \
+                     declare it in `inputs` (carry the distillation forward) or \
+                     `inputs_waived` (consciously not needed)",
+                    station.name()
+                )));
+            }
+        }
+        let art = fm.locked_artifact.trim();
+        if !art.is_empty() && !upstream.iter().any(|a| a == art) {
+            upstream.push(art.to_string());
+        }
+    }
     Ok(())
 }
 
@@ -218,6 +253,7 @@ mod tests {
                 checkpoint: CheckpointKind::Auto,
                 locked_artifact: "out.md".into(),
                 inputs: vec![],
+                inputs_waived: vec![],
             },
             body: "# s1".into(),
             explorers: vec![role("e1", RoleKind::Explorer)],

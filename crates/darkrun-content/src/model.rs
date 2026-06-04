@@ -89,6 +89,12 @@ pub struct StationFrontmatter {
     /// Artifacts (from upstream stations) this station consumes.
     #[serde(default)]
     pub inputs: Vec<String>,
+    /// Upstream locked artifacts this station **deliberately does not** carry
+    /// forward. Cross-station coverage requires every prior station's artifact
+    /// to be either an `input` or here — so the run's distillation is never
+    /// *silently* dropped, only consciously waived.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs_waived: Vec<String>,
 }
 
 /// The kind of role a definition file describes.

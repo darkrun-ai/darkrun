@@ -57,6 +57,7 @@ fn valid_station() -> Station {
             checkpoint: CheckpointKind::Auto,
             locked_artifact: "out.md".into(),
             inputs: vec![],
+            inputs_waived: vec![],
         },
         body: "# s1\n\nstation body".into(),
         explorers: vec![role("e1", RoleKind::Explorer)],
@@ -91,11 +92,51 @@ fn valid_factory() -> Factory {
 }
 
 /// A second valid station named `s2` whose role slugs do not collide with `s1`.
+/// Waives the baseline `out.md` artifact every station locks, so a chain of these
+/// satisfies cross-station input coverage (no silent drop) without each needing
+/// to consume the prior's output.
 fn valid_station_named(name: &str) -> Station {
     let mut s = valid_station();
     s.frontmatter.name = name.to_string();
+    s.frontmatter.inputs_waived = vec!["out.md".into()];
     s.body = format!("# {name}");
     s
+}
+
+#[test]
+fn cross_station_coverage_rejects_a_silent_drop_and_accepts_a_waiver() {
+    // s1 locks out.md; s2 neither consumes nor waives it → silent drop, rejected.
+    let mut f = valid_factory();
+    f.frontmatter.stations = vec!["s1".into(), "s2".into()];
+    let mut s2 = valid_station();
+    s2.frontmatter.name = "s2".into();
+    s2.frontmatter.inputs = vec![]; // does not carry out.md
+    s2.frontmatter.inputs_waived = vec![]; // and does not waive it
+    f.stations = vec![valid_station(), s2];
+    let msg = match darkrun_content::validate(&f) {
+        Err(ContentError::Invalid { message, .. }) => message,
+        other => panic!("expected Invalid, got {other:?}"),
+    };
+    assert!(msg.contains("silently drops upstream artifact `out.md`"), "{msg}");
+
+    // Waiving it explicitly is accepted (conscious drop, not silent).
+    f.stations[1].frontmatter.inputs_waived = vec!["out.md".into()];
+    assert!(darkrun_content::validate(&f).is_ok());
+
+    // Carrying it forward as an input is also accepted.
+    f.stations[1].frontmatter.inputs_waived = vec![];
+    f.stations[1].frontmatter.inputs = vec!["out.md".into()];
+    assert!(darkrun_content::validate(&f).is_ok());
+}
+
+#[test]
+fn software_prove_waives_frame_and_design_for_coverage() {
+    // The shipped software factory carries the distillation forward; prove
+    // consciously waives frame.md + design.md (it verifies against spec + code).
+    let f = load_validated("software").expect("software validates with coverage");
+    let prove = f.station("prove").unwrap();
+    assert!(prove.frontmatter.inputs_waived.contains(&"frame.md".to_string()));
+    assert!(prove.frontmatter.inputs_waived.contains(&"design.md".to_string()));
 }
 
 /// A two-station factory, both stations structurally valid.

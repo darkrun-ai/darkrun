@@ -65,6 +65,7 @@ fn valid_station() -> Station {
             checkpoint: CheckpointKind::Auto,
             locked_artifact: "out.md".into(),
             inputs: vec![],
+            inputs_waived: vec![],
         },
         body: "# s1\n\nstation body".into(),
         explorers: vec![role("e1", RoleKind::Explorer)],
