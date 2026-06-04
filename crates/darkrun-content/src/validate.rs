@@ -17,32 +17,15 @@ pub fn validate(factory: &Factory) -> Result<()> {
         message,
     };
 
-    if factory.frontmatter.stations.is_empty() {
-        return Err(invalid("factory declares no stations".into()));
+    // The station spine is the fixed `Position::FLOW`, resolved by the loader —
+    // not the factory's frontmatter (`stations` is vestigial). Validate each
+    // loaded station's internal coherence; their identity/order is the engine's
+    // invariant, not a per-factory declaration.
+    if factory.stations.is_empty() {
+        return Err(invalid("factory loaded no stations".into()));
     }
 
-    // Every declared station slug must have produced a loaded station whose
-    // frontmatter name agrees (loader preserves order, so zip by index).
-    if factory.stations.len() != factory.frontmatter.stations.len() {
-        return Err(invalid(format!(
-            "declared {} stations but loaded {}",
-            factory.frontmatter.stations.len(),
-            factory.stations.len()
-        )));
-    }
-
-    for (declared, station) in factory
-        .frontmatter
-        .stations
-        .iter()
-        .zip(factory.stations.iter())
-    {
-        if declared != station.name() {
-            return Err(invalid(format!(
-                "station slug `{declared}` resolved to `{}`",
-                station.name()
-            )));
-        }
+    for station in &factory.stations {
         validate_station(&slug, station)?;
     }
 
@@ -265,20 +248,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_declared_loaded_station_count_mismatch() {
+    fn frontmatter_stations_is_not_validated_against_loaded() {
+        // `frontmatter.stations` is vestigial — the spine is Position::FLOW.
+        // A mismatched declaration validates fine as long as the loaded stations
+        // are each coherent.
         let mut f = valid_factory();
-        // Declare two stations but only one is loaded.
-        f.frontmatter.stations.push("s2".into());
-        assert!(message(&f).contains("declared 2 stations but loaded 1"));
-    }
-
-    #[test]
-    fn rejects_station_order_mismatch() {
-        let mut f = valid_factory();
-        // The declared slug no longer matches the loaded station's name.
-        f.frontmatter.stations[0] = "other".into();
-        let msg = message(&f);
-        assert!(msg.contains("`other` resolved to `s1`"), "{msg}");
+        f.frontmatter.stations = vec!["anything".into(), "goes".into()];
+        assert!(validate(&f).is_ok());
     }
 
     #[test]

@@ -1618,10 +1618,12 @@ fn baseline_software_factory_validates() {
 }
 
 #[test]
-fn validation_rejects_a_station_count_mismatch() {
+fn validation_ignores_frontmatter_stations() {
+    // `frontmatter.stations` is vestigial (the spine is Position::FLOW). Adding a
+    // phantom declaration does not affect validation of the loaded stations.
     let mut f = load_factory("software").unwrap();
     f.frontmatter.stations.push("phantom".into());
-    assert!(validate(&f).is_err(), "declared more stations than loaded");
+    assert!(validate(&f).is_ok());
 }
 
 #[test]
@@ -1633,13 +1635,13 @@ fn validation_rejects_clearing_all_stations() {
 }
 
 #[test]
-fn validation_rejects_reordered_declaration() {
+fn validation_rejects_a_station_loaded_with_too_few_workers() {
+    // The loaded stations ARE validated: a station with fewer than three workers
+    // (Make→Challenge→Resolve) is rejected.
     let mut f = load_factory("software").unwrap();
-    f.frontmatter.stations.reverse();
-    assert!(
-        validate(&f).is_err(),
-        "declared order must match loaded order"
-    );
+    f.stations[0].frontmatter.workers.truncate(2);
+    f.stations[0].workers.truncate(2);
+    assert!(validate(&f).is_err(), "a station must keep its pass-loop workers");
 }
 
 #[test]

@@ -864,49 +864,21 @@ fn no_stations_error_carries_factory_slug() {
 }
 
 #[test]
-fn rejects_declared_more_than_loaded() {
+fn frontmatter_stations_is_ignored_by_validation() {
+    // The station spine is the fixed Position::FLOW (resolved by the loader);
+    // `frontmatter.stations` is vestigial and the validator does not check the
+    // loaded stations against it. A mismatched declaration validates fine so
+    // long as the loaded stations are each coherent.
     let mut f = valid_factory();
-    f.frontmatter.stations.push("s2".into());
-    assert!(message(&f).contains("declared 2 stations but loaded 1"));
+    f.frontmatter.stations = vec!["whatever".into(), "we".into(), "like".into()];
+    assert!(darkrun_content::validate(&f).is_ok());
 }
 
 #[test]
-fn rejects_loaded_more_than_declared() {
+fn no_stations_error_carries_factory_slug_too() {
+    // A genuinely empty factory still errors and carries its slug.
     let mut f = valid_factory();
-    f.stations.push(valid_station_named("s2"));
-    let msg = message(&f);
-    assert!(msg.contains("declared 1 stations but loaded 2"), "{msg}");
-}
-
-#[test]
-fn rejects_station_order_mismatch() {
-    let mut f = valid_factory();
-    f.frontmatter.stations[0] = "other".into();
-    let msg = message(&f);
-    assert!(msg.contains("`other` resolved to `s1`"), "{msg}");
-}
-
-#[test]
-fn rejects_swapped_station_order() {
-    let mut f = valid_two_station_factory();
-    // Declared order says s1 then s2, but loaded stations are swapped.
-    f.stations.swap(0, 1);
-    let msg = message(&f);
-    assert!(msg.contains("resolved to"), "{msg}");
-}
-
-#[test]
-fn station_count_mismatch_checked_before_order() {
-    // When counts differ the count error fires first (no zip).
-    let mut f = valid_factory();
-    f.frontmatter.stations = vec!["a".into(), "b".into()];
-    assert!(message(&f).contains("declared 2 stations but loaded 1"));
-}
-
-#[test]
-fn order_mismatch_error_carries_factory_slug() {
-    let mut f = valid_factory();
-    f.frontmatter.stations[0] = "renamed".into();
+    f.stations.clear();
     assert_eq!(invalid_factory_slug(&f), "demo");
 }
 
