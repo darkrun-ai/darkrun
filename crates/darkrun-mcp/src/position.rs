@@ -279,6 +279,11 @@ pub struct PromptContext {
     /// The worker beat to dispatch this manufacture tick.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
+    /// The model to dispatch the active worker on, resolved per-role: the
+    /// worker's own `model:` override, else the factory default. Absent → the
+    /// harness/agent default. Display + dispatch hint, not engine logic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// The prior worker's handoff note(s), threaded into this Manufacture
     /// dispatch so the next worker reads the story — what the last beat did or
     /// why it bounced — before it acts. Keyed by unit slug, newest note per unit.
@@ -1296,10 +1301,23 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
 
     // Overlay the action-specific fields (these win over station-derived ones).
     match action {
-        RunAction::Manufacture { worker, units: wave, .. } => {
+        RunAction::Manufacture { worker, units: wave, station: mstation, .. } => {
             ctx.worker = Some(worker.clone());
             // The action's wave-ready units are the ones the agent dispatches.
             ctx.units = wave.clone();
+            // Resolve the model for this beat: the worker's own override, else
+            // the factory default. (A per-unit override would win, but the wave
+            // can span units, so the role/factory resolution is the dispatch hint.)
+            if let Ok(run) = store.read_run(slug) {
+                if let Some(factory) = resolve_factory_for(store, &run.frontmatter.factory) {
+                    let by_role = factory
+                        .station(mstation)
+                        .and_then(|d| d.role_models.get(worker).cloned());
+                    ctx.model = by_role.or_else(|| {
+                        Some(factory.default_model.clone()).filter(|m| !m.is_empty())
+                    });
+                }
+            }
             // Thread each wave unit's most-recent handoff note into the dispatch
             // so the next worker reads what the last beat did, or why it bounced.
             ctx.handoffs = store

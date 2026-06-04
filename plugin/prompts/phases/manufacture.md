@@ -2,7 +2,7 @@
 
 # Manufacture — `{{ label }}`
 
-This is the build floor. You run the **Pass loop** — _Plan → Make → Challenge → Resolve_ — over the wave-ready Units. The current beat is **{{ worker }}**.
+This is the build floor. You run the **Pass loop** — _Plan → Make → Challenge → Resolve_ — over the wave-ready Units. The current beat is **{{ worker }}**{% if model %}, on model **{{ model }}**{% endif %}.
 
 {% include "_shared/contracts.md" %}
 

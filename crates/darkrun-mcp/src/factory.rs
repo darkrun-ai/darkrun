@@ -34,6 +34,10 @@ pub struct StationDef {
     pub workers: Vec<String>,
     /// The Reviewers that verify the station's output in the Review phase.
     pub reviewers: Vec<String>,
+    /// Per-role model overrides, keyed by role name (any explorer/worker/
+    /// reviewer that declared a `model:` in its definition). Resolved at
+    /// dispatch over the factory default; absent → use the factory default.
+    pub role_models: std::collections::BTreeMap<String, String>,
 }
 
 /// A resolved factory: an ordered list of stations.
@@ -47,6 +51,9 @@ pub struct FactoryDef {
     /// `FACTORY.md`. The Shape station classifies the run into one of these; the
     /// classification routes how Prove/Audit verify. Empty → no surface stage.
     pub surfaces: Vec<String>,
+    /// The factory's default model — the floor a role/station/unit override sits
+    /// above. Empty → the harness/agent default.
+    pub default_model: String,
 }
 
 impl FactoryDef {
@@ -104,6 +111,7 @@ impl FactoryDef {
             name: f.name().to_string(),
             stations,
             surfaces: f.frontmatter.surfaces.clone(),
+            default_model: f.frontmatter.default_model.clone(),
         }
     }
 }
@@ -111,6 +119,16 @@ impl FactoryDef {
 impl StationDef {
     /// Build a `StationDef` from a loaded on-disk [`darkrun_content::Station`].
     fn from_content(s: &darkrun_content::Station) -> StationDef {
+        // Collect every role's declared model override (explorers + workers +
+        // reviewers), keyed by role name, so dispatch can resolve per-role.
+        let mut role_models = std::collections::BTreeMap::new();
+        for role in s.explorers.iter().chain(&s.workers).chain(&s.reviewers) {
+            if let Some(model) = &role.frontmatter.model {
+                if !model.trim().is_empty() {
+                    role_models.insert(role.name().to_string(), model.clone());
+                }
+            }
+        }
         StationDef {
             name: s.name().to_string(),
             label: s.frontmatter.label.clone(),
@@ -120,6 +138,7 @@ impl StationDef {
             explorers: s.frontmatter.explorers.clone(),
             workers: s.frontmatter.workers.clone(),
             reviewers: s.frontmatter.reviewers.clone(),
+            role_models,
         }
     }
 }
@@ -194,6 +213,16 @@ mod tests {
         assert!(f.offers_surface("web-ui"), "tolerant spelling agrees");
         assert!(f.offers_surface("library"));
         assert!(!f.offers_surface("hologram"));
+    }
+
+    #[test]
+    fn factory_and_role_models_resolve_from_the_corpus() {
+        let f = resolve_factory("software").unwrap();
+        // The factory default model flows onto the def.
+        assert_eq!(f.default_model, "sonnet");
+        // A role that declares a `model:` is captured per-role for dispatch.
+        let shape = f.station("shape").unwrap();
+        assert_eq!(shape.role_models.get("spiker").map(String::as_str), Some("sonnet"));
     }
 
     #[test]
