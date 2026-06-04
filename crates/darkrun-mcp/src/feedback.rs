@@ -408,6 +408,27 @@ pub fn move_station(store: &StateStore, run: &str, id: &str, to_station: &str) -
     Ok(fb)
 }
 
+/// Set the review/approval roles a feedback `invalidates` on close — the
+/// materiality classification. A drift feedback files with none; the agent
+/// names the signed slots the change actually undercut, so closing it re-opens
+/// exactly those stamps and the work re-signs against the new premise (a
+/// *material* change re-orients; a *cosmetic* one is closed with none set).
+/// Settled items are immutable.
+pub fn set_targets(
+    store: &StateStore,
+    run: &str,
+    id: &str,
+    invalidates: Vec<String>,
+) -> Result<Feedback> {
+    let mut fb = get(store, run, id)?;
+    if is_terminal(fb.status) {
+        return Err(McpError::FeedbackSettled(id.to_string()));
+    }
+    fb.invalidates = invalidates;
+    store.write_feedback_raw(run, id, &serialize(&fb))?;
+    Ok(fb)
+}
+
 /// Set the severity ranking of a feedback item. Settled items are immutable.
 pub fn set_severity(
     store: &StateStore,

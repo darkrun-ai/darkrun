@@ -727,6 +727,19 @@ pub struct FeedbackMoveInput {
     pub to_station: String,
 }
 
+/// Input for `darkrun_feedback_set_targets`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct FeedbackSetTargetsInput {
+    /// The run slug.
+    pub slug: String,
+    /// The feedback id.
+    pub feedback_id: String,
+    /// The review/approval role slugs this finding invalidates on close — the
+    /// signed slots the change actually undercut. Empty marks it cosmetic.
+    pub invalidates: Vec<String>,
+}
+
 /// Input for `darkrun_run_list`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -1877,6 +1890,22 @@ impl DarkrunServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
         match feedback::move_station(&store, &input.slug, &input.feedback_id, &input.to_station) {
+            Ok(fb) => ok_json(&fb),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Set the roles a feedback invalidates on close — the materiality call.
+    #[tool(
+        name = "darkrun_feedback_set_targets",
+        description = "Set the review/approval roles a feedback invalidates on close. For a drift finding: name the signed slots the premise change actually undercut (material → those re-open and re-sign against the new premise on close), or set none (cosmetic → close is a no-op)."
+    )]
+    pub fn darkrun_feedback_set_targets(
+        &self,
+        Parameters(input): Parameters<FeedbackSetTargetsInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let store = self.store();
+        match feedback::set_targets(&store, &input.slug, &input.feedback_id, input.invalidates) {
             Ok(fb) => ok_json(&fb),
             Err(e) => Ok(err_text(e)),
         }

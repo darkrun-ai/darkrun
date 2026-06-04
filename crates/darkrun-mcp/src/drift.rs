@@ -488,6 +488,44 @@ mod tests {
     }
 
     #[test]
+    fn material_classification_reopens_the_units_signed_stamp() {
+        use darkrun_core::domain::Stamp;
+        let (_d, store, root) = store();
+        std::fs::write(root.join("design.md"), b"v1").unwrap();
+        // A build unit signed off (review `correctness`) resting on design.md.
+        let mut u = unit("u", "build", &["design.md"], &["code"]);
+        u.frontmatter
+            .reviews
+            .insert("correctness".into(), Some(Stamp { at: "t0".into() }));
+        store.write_unit("r", &u).unwrap();
+        record_station_witnesses(&store, "r", "build").unwrap();
+
+        // The design moves out-of-band → one drift feedback.
+        std::fs::write(root.join("design.md"), b"v2-buttons-moved").unwrap();
+        sweep(&store, "r").unwrap();
+        let fb = crate::feedback::list(&store, "r")
+            .unwrap()
+            .into_iter()
+            .find(|f| matches!(f.origin, FeedbackOrigin::Drift))
+            .expect("a drift feedback");
+        // Its body names the signed slot to consider.
+        assert!(fb.body.contains("correctness"));
+
+        // The agent classifies it MATERIAL: the moved design changes what this
+        // unit must build, so it invalidates the correctness review.
+        crate::feedback::set_targets(&store, "r", &fb.id, vec!["correctness".into()]).unwrap();
+        crate::feedback::close_with_reply(&store, "r", &fb.id, "re-orient to new layout").unwrap();
+
+        // The stamp is re-opened → the gate re-fires → the work re-signs against
+        // the new premise. That is the re-orientation.
+        let back = store.read_unit("r", "u").unwrap();
+        assert!(
+            !back.frontmatter.reviews.contains_key("correctness"),
+            "material drift re-opened the signed slot"
+        );
+    }
+
+    #[test]
     fn cascade_cap_bounds_open_drift_feedback() {
         let (_d, store, root) = store();
         std::env::set_var("DARKRUN_DRIFT_CASCADE_CAP", "2");
