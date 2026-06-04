@@ -1486,12 +1486,56 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
     // Advance the phase write-cache based on the derived action.
     advance_state(store, slug, &action)?;
 
+    // Append the resolved action to the run's append-only audit journal — the
+    // ordered trail the reflection pass and the operator read. Best-effort:
+    // a journal write never fails a tick.
+    append_action_log(store, slug, &position.track, &action);
+
     Ok(TickResult {
         run: slug.to_string(),
         position,
         action,
         prompt,
     })
+}
+
+/// The station an action targets, if any (run-level actions have none).
+fn station_of(action: &RunAction) -> Option<&str> {
+    match action {
+        RunAction::Spec { station, .. }
+        | RunAction::Review { station, .. }
+        | RunAction::Manufacture { station, .. }
+        | RunAction::Audit { station, .. }
+        | RunAction::Reflect { station, .. }
+        | RunAction::UserGate { station, .. }
+        | RunAction::Checkpoint { station, .. }
+        | RunAction::FixFeedback { station, .. }
+        | RunAction::FeedbackQuestion { station, .. }
+        | RunAction::ResolveDrift { station, .. }
+        | RunAction::UnitsInvalid { station, .. }
+        | RunAction::Escalate { station, .. }
+        | RunAction::SafeRepair { station, .. }
+        | RunAction::ReviseUnitSpecs { station, .. }
+        | RunAction::MergeConflict { station, .. }
+        | RunAction::ExternalReviewRequested { station, .. } => Some(station),
+        RunAction::PendingSeal { .. } | RunAction::Sealed { .. } | RunAction::Noop { .. } => None,
+    }
+}
+
+/// Append one resolved-action entry to `action-log.jsonl`. Best-effort.
+fn append_action_log(store: &StateStore, slug: &str, track: &Track, action: &RunAction) {
+    let track = match track {
+        Track::Drift => "drift",
+        Track::Feedback => "feedback",
+        Track::Run => "run",
+    };
+    let entry = serde_json::json!({
+        "at": Utc::now().to_rfc3339(),
+        "track": track,
+        "action": action_tag(action),
+        "station": station_of(action),
+    });
+    let _ = store.append_journal(slug, "action-log.jsonl", &entry.to_string());
 }
 
 /// Run the downstream sync (mechanic #5) for the active station before a tick
@@ -2156,6 +2200,20 @@ mod tests {
         let state = store.read_state("u").unwrap().unwrap();
         assert!(state.plan.is_empty());
         assert_eq!(state.active_station, "frame");
+    }
+
+    #[test]
+    fn each_tick_appends_to_the_action_log() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_tick(&store, "r").expect("t1"); // Spec
+        run_tick(&store, "r").expect("t2"); // Review
+        let log = store.read_journal("r", "action-log.jsonl");
+        assert_eq!(log.len(), 2, "one journal line per resolved tick");
+        assert!(log[0].contains("\"action\":\"spec\""), "{}", log[0]);
+        assert!(log[0].contains("\"track\":\"run\""), "{}", log[0]);
+        assert!(log[0].contains("\"station\":\"frame\""), "{}", log[0]);
+        assert!(log[1].contains("\"action\":\"review\""), "{}", log[1]);
     }
 
     #[test]

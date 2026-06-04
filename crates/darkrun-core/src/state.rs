@@ -198,6 +198,28 @@ impl StateStore {
         self.run_dir(slug).join("units")
     }
 
+    /// Append one line to a run-scoped append-only journal (e.g.
+    /// `action-log.jsonl`). Creates the run dir + file as needed. The trailing
+    /// newline is added. Used for the audit trail the reflection pass and the
+    /// operator read — every resolved action, in order, never rewritten.
+    pub fn append_journal(&self, slug: &str, file: &str, line: &str) -> Result<()> {
+        use std::io::Write;
+        let dir = self.run_dir(slug);
+        io(&dir, fs::create_dir_all(&dir))?;
+        let path = dir.join(file);
+        let mut f = io(&path, fs::OpenOptions::new().create(true).append(true).open(&path))?;
+        io(&path, writeln!(f, "{line}"))?;
+        Ok(())
+    }
+
+    /// Read a run-scoped journal's lines (empty when the file is absent).
+    pub fn read_journal(&self, slug: &str, file: &str) -> Vec<String> {
+        let path = self.run_dir(slug).join(file);
+        fs::read_to_string(&path)
+            .map(|s| s.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
     /// The `feedback/` directory for a run.
     pub fn feedback_dir(&self, slug: &str) -> PathBuf {
         self.run_dir(slug).join("feedback")
