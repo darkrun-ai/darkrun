@@ -23,7 +23,10 @@ yet.
 > outputs), exempts the same-station input==output **baton**, **restamps on
 > detect**, and routes a premise change as scoped **`origin=drift` feedback**
 > that re-orients the affected station — replacing the loop-prone output-witness
-> + global-hold model. B2 (restamp-on-detect) moved from "keep" to **done**.
+> + global-hold model. The materiality loop is closed (`darkrun_feedback_set_targets`
+> → invalidate → re-sign), and the retired drift track's dead code was fully
+> removed across every crate (no dormant types). B2 (restamp-on-detect) moved
+> from "keep" to **done**.
 
 Start of the work: 3 present · 15 partial · 26 missing → now: 27 built, the rest
 dispositioned with a reason.
