@@ -661,9 +661,10 @@ fn feedback_status_tokens_are_unique() {
 // DriftKind
 // ===========================================================================
 
-const ALL_DRIFT_KINDS: [(DriftKind, &str); 4] = [
+const ALL_DRIFT_KINDS: [(DriftKind, &str); 5] = [
     (DriftKind::Spec, "spec"),
     (DriftKind::Output, "output"),
+    (DriftKind::Input, "input"),
     (DriftKind::DiscoveryOutput, "discovery_output"),
     (DriftKind::DiscoveryMandate, "discovery_mandate"),
 ];
@@ -709,7 +710,7 @@ fn drift_kind_spec_token_shared_with_drift_kind_alone() {
 
 #[test]
 fn drift_kind_rejects_unknown() {
-    assert!(from_token::<DriftKind>("input").is_err());
+    assert!(from_token::<DriftKind>("premise").is_err());
     assert!(from_token::<DriftKind>("discovery").is_err());
 }
 
@@ -724,7 +725,7 @@ fn drift_kind_schema_tokens() {
         .collect();
     assert_eq!(
         tokens,
-        vec!["spec", "output", "discovery_output", "discovery_mandate"]
+        vec!["spec", "output", "input", "discovery_output", "discovery_mandate"]
     );
 }
 
@@ -3060,10 +3061,10 @@ fn feedback_status_has_exactly_eight_variants_in_schema() {
 }
 
 #[test]
-fn drift_kind_has_exactly_four_variants_in_schema() {
+fn drift_kind_has_exactly_five_variants_in_schema() {
     assert_eq!(
         schema_value!(DriftKind)["oneOf"].as_array().unwrap().len(),
-        4
+        5
     );
 }
 

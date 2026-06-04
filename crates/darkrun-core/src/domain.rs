@@ -778,6 +778,10 @@ pub enum DriftKind {
     Spec,
     /// A declared output changed.
     Output,
+    /// A witnessed **input premise** changed — an upstream artifact this unit
+    /// was built and signed against has since moved, so the work rests on a
+    /// stale premise and its station must reconsider.
+    Input,
     /// An explorer output changed.
     DiscoveryOutput,
     /// An explorer mandate changed.
