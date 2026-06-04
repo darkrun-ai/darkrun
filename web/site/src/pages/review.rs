@@ -67,6 +67,21 @@ pub fn Review() -> Element {
             status_label: "in review".to_string(),
         }
 
+        // The classified delivery surface, when set at Shape — it routes how
+        // Prove/Audit verify this run.
+        if let Some(surface) = payload.surface.as_ref() {
+            div { style: "margin-top:12px;display:flex;align-items:center;gap:8px;",
+                span {
+                    style: format!(
+                        "font-family:{};font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:{};",
+                        tokens::FONT_MONO, theme::TEXT_FAINT,
+                    ),
+                    "surface"
+                }
+                Badge { tone: Tone::Info, "{surface}" }
+            }
+        }
+
         div { style: "margin-top:24px;",
             h2 {
                 style: format!("font-family:{};font-size:18px;color:{};margin:0 0 10px;", tokens::FONT_SANS, theme::TEXT),
@@ -201,6 +216,8 @@ fn sample_payload() -> ReviewCurrentPayload {
     ReviewCurrentPayload {
         run: "rate-limit-public-api".to_string(),
         station: Some("build".to_string()),
+        station_label: None,
+        surface: Some("api".to_string()),
         phase: Some("audit".to_string()),
         units: vec![
             ReviewCurrentUnit {
@@ -228,6 +245,7 @@ fn sample_payload() -> ReviewCurrentPayload {
         stations: vec![
             ReviewCurrentStation {
                 name: "frame".to_string(),
+                label: None,
                 status: "locked".to_string(),
                 phase: None,
                 iteration: Some(1),
@@ -235,6 +253,7 @@ fn sample_payload() -> ReviewCurrentPayload {
             },
             ReviewCurrentStation {
                 name: "build".to_string(),
+                label: None,
                 status: "active".to_string(),
                 phase: Some("audit".to_string()),
                 iteration: Some(2),

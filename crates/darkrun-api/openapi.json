@@ -1096,12 +1096,26 @@
               "null"
             ]
           },
+          "station_label": {
+            "description": "The active station's domain label, when it differs from the position slug. Display-only; `None` → show the position name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "stations": {
             "description": "All stations on the run.",
             "items": {
               "$ref": "#/definitions/ReviewCurrentStation"
             },
             "type": "array"
+          },
+          "surface": {
+            "description": "The delivery surface the run was classified into at Shape (`web_ui`, `library`, …), or null until classified. Routes how Prove/Audit verify.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "units": {
             "description": "The units in the active station.",

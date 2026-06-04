@@ -1835,6 +1835,8 @@ fn review_current_payload_roundtrip() {
     let payload = ReviewCurrentPayload {
         run: "run".into(),
         station: Some("frame".into()),
+        station_label: Some("Intake".into()),
+        surface: Some("api".into()),
         phase: Some("manufacture".into()),
         units: vec![ReviewCurrentUnit {
             slug: "u1".into(),
@@ -1849,6 +1851,7 @@ fn review_current_payload_roundtrip() {
         },
         stations: vec![ReviewCurrentStation {
             name: "frame".into(),
+            label: Some("Intake".into()),
             status: "active".into(),
             phase: Some("manufacture".into()),
             iteration: Some(2),
@@ -1859,6 +1862,8 @@ fn review_current_payload_roundtrip() {
     assert_eq!(j["feedback_summary"]["pending"], 2);
     assert_eq!(j["units"][0]["slug"], "u1");
     assert_eq!(j["stations"][0]["iteration"], 2);
+    assert_eq!(j["stations"][0]["label"], "Intake");
+    assert_eq!(j["surface"], "api");
     roundtrips_stably(&payload);
 }
 
@@ -1867,6 +1872,8 @@ fn review_current_payload_null_station() {
     let payload = ReviewCurrentPayload {
         run: "run".into(),
         station: None,
+        station_label: None,
+        surface: None,
         phase: None,
         units: vec![],
         feedback_summary: FeedbackSummary::default(),
@@ -1875,6 +1882,9 @@ fn review_current_payload_null_station() {
     let j = serde_json::to_value(&payload).unwrap();
     // station is Option without skip — null appears.
     assert_eq!(j["station"], Value::Null);
+    // station_label and surface skip when None.
+    assert!(j.get("station_label").is_none());
+    assert!(j.get("surface").is_none());
     assert_eq!(j["feedback_summary"]["pending"], 0);
 }
 

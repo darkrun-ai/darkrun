@@ -23,8 +23,12 @@ pub struct FeedbackSummary {
 /// A station entry in the run-state summary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReviewCurrentStation {
-    /// The station name.
+    /// The station name (the fixed FSSBPH position slug, e.g. `frame`).
     pub name: String,
+    /// The domain-facing display label shown over the fixed position (legal →
+    /// `Intake`). `None` → the UI shows the position name. Display-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Lifecycle status (display).
     pub status: String,
     /// Current phase (display).
@@ -56,6 +60,14 @@ pub struct ReviewCurrentPayload {
     pub run: String,
     /// The active station, or null when between stations.
     pub station: Option<String>,
+    /// The active station's domain label, when it differs from the position
+    /// slug. Display-only; `None` → show the position name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub station_label: Option<String>,
+    /// The delivery surface the run was classified into at Shape (`web_ui`,
+    /// `library`, …), or null until classified. Routes how Prove/Audit verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
     /// The active phase (display).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
