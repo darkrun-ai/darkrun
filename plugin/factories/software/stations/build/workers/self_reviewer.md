@@ -1,6 +1,7 @@
 ---
 name: self_reviewer
 model: sonnet
+role: verify
 ---
 
 # SelfReviewer (Challenge)

@@ -337,6 +337,11 @@ pub struct PromptContext {
     /// the Review/Audit prompt frames each reviewer's dispute stance from this.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub interpretations: std::collections::BTreeMap<String, String>,
+    /// Per-worker pass-loop role (`plan`/`build`/`verify`), keyed by worker name
+    /// — the Manufacture prompt uses it to route a reject to the nearest build
+    /// worker (skipping verify/plan beats).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub worker_roles: std::collections::BTreeMap<String, String>,
     /// True when this Spec tick is in a collaborative mode and the operator has
     /// not yet been involved (no `elaborate_seal`). The Spec prompt uses it to
     /// require operator collaboration before the spec locks — the backpressure
@@ -1375,6 +1380,7 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
                 ctx.workers = def.workers.clone();
                 ctx.reviewers = def.reviewers.clone();
                 ctx.interpretations = def.role_interpretations.clone();
+                ctx.worker_roles = def.worker_roles.clone();
             }
         }
         // The station's on-record units, in slug order.

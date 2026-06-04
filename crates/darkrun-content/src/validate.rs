@@ -232,6 +232,7 @@ mod tests {
                 agent_type: None,
                 model: None,
                 interpretation: None,
+                role: None,
             },
             body: format!("# {name}\n\ninstructions"),
             kind,

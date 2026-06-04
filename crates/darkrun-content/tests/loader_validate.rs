@@ -30,6 +30,7 @@ fn role(name: &str, kind: RoleKind) -> Role {
             agent_type: None,
             model: None,
                 interpretation: None,
+                role: None,
         },
         body: format!("# {name}\n\nThis role carries enough prose to instruct an agent verbatim."),
         kind,

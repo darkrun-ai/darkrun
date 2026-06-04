@@ -42,6 +42,10 @@ pub struct StationDef {
     /// for reviewers that declared an `interpretation:`. Injected into the
     /// Review/Audit dispatch framing.
     pub role_interpretations: std::collections::BTreeMap<String, String>,
+    /// Per-worker pass-loop role (`plan` / `build` / `verify`), keyed by worker
+    /// name. Drives reject-bounce: a reject returns to the nearest preceding
+    /// `build` worker. Absent entries default to `build`.
+    pub worker_roles: std::collections::BTreeMap<String, String>,
 }
 
 /// A resolved factory: an ordered list of stations.
@@ -131,6 +135,7 @@ impl StationDef {
         // reviewers), keyed by role name, so dispatch can resolve per-role.
         let mut role_models = std::collections::BTreeMap::new();
         let mut role_interpretations = std::collections::BTreeMap::new();
+        let mut worker_roles = std::collections::BTreeMap::new();
         for role in s.explorers.iter().chain(&s.workers).chain(&s.reviewers) {
             if let Some(model) = &role.frontmatter.model {
                 if !model.trim().is_empty() {
@@ -140,6 +145,13 @@ impl StationDef {
             if let Some(interp) = &role.frontmatter.interpretation {
                 if !interp.trim().is_empty() {
                     role_interpretations.insert(role.name().to_string(), interp.clone());
+                }
+            }
+        }
+        for w in &s.workers {
+            if let Some(r) = &w.frontmatter.role {
+                if !r.trim().is_empty() {
+                    worker_roles.insert(w.name().to_string(), r.clone());
                 }
             }
         }
@@ -154,6 +166,7 @@ impl StationDef {
             reviewers: s.frontmatter.reviewers.clone(),
             role_models,
             role_interpretations,
+            worker_roles,
         }
     }
 }
@@ -241,6 +254,8 @@ mod tests {
         // A reviewer that declares an `interpretation:` is captured too.
         let build = f.station("build").unwrap();
         assert_eq!(build.role_interpretations.get("correctness").map(String::as_str), Some("strict"));
+        // A worker that declares a pass-loop `role:` is captured for reject-routing.
+        assert_eq!(build.worker_roles.get("self_reviewer").map(String::as_str), Some("verify"));
     }
 
     #[test]

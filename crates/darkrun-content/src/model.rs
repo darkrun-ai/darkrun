@@ -130,6 +130,12 @@ pub struct RoleFrontmatter {
     /// the reviewer's dispatch framing; absent → the default neutral posture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpretation: Option<String>,
+    /// Optional pass-loop role for a worker — `plan` (designs, doesn't fix),
+    /// `build` (produces and repairs), or `verify` (judges, doesn't fix). A
+    /// reject bounces to the nearest preceding `build` worker; `verify`/`plan`
+    /// beats are skipped on the way back. Absent → treated as a `build` worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// A fully-loaded role: its frontmatter, its raw markdown instructions, and the
