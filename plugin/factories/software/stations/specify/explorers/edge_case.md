@@ -1,6 +1,5 @@
 ---
 name: edge_case
-agent_type: explorer
 model: sonnet
 ---
 

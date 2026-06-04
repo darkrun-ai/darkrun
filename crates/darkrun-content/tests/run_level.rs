@@ -43,10 +43,11 @@ fn role(name: &str, kind: RoleKind) -> Role {
     Role {
         frontmatter: RoleFrontmatter {
             name: name.to_string(),
-            agent_type: kind,
+            agent_type: None,
             model: None,
         },
         body: format!("# {name}\n\nEnough prose to instruct an agent verbatim end to end."),
+        kind,
     }
 }
 
@@ -55,6 +56,8 @@ fn valid_station() -> Station {
         frontmatter: StationFrontmatter {
             name: "s1".into(),
             description: "a station".into(),
+            kills: "a-risk".into(),
+            label: None,
             explorers: vec!["e1".into()],
             workers: vec!["w1".into(), "w2".into(), "w3".into()],
             reviewers: vec!["r1".into()],
@@ -469,7 +472,7 @@ fn reflection_kind_rejects_titlecase() {
 fn role_frontmatter_parses_reflection_agent_type() {
     let yaml = "name: architecture\nagent_type: reflection";
     let fm: RoleFrontmatter = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(fm.agent_type, RoleKind::Reflection);
+    assert_eq!(fm.agent_type, Some(RoleKind::Reflection));
 }
 
 // ===========================================================================

@@ -1,6 +1,5 @@
 ---
 name: releaser
-agent_type: worker
 model: sonnet
 terminal: true
 ---

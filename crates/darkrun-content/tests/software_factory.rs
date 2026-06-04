@@ -1156,9 +1156,9 @@ fn role_name_matches_frontmatter_name() {
 #[test]
 fn role_kind_matches_frontmatter_agent_type() {
     for s in &factory().stations {
-        for r in s.explorers.iter().chain(&s.workers).chain(&s.reviewers) {
-            assert_eq!(r.kind(), r.frontmatter.agent_type);
-        }
+        for r in &s.explorers { assert_eq!(r.kind(), RoleKind::Explorer); }
+        for r in &s.workers { assert_eq!(r.kind(), RoleKind::Worker); }
+        for r in &s.reviewers { assert_eq!(r.kind(), RoleKind::Reviewer); }
     }
 }
 

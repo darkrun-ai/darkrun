@@ -92,25 +92,31 @@ pub enum RoleKind {
     Reflection,
 }
 
-/// Frontmatter of a role definition (`explorers|workers|reviewers/*.md`).
+/// Frontmatter of a role definition (`explorers|workers|reviewers|reflections/*.md`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleFrontmatter {
     /// Role slug (matches the station's reference list entry).
     pub name: String,
-    /// The kind of role.
-    pub agent_type: RoleKind,
+    /// DEPRECATED — the role kind is inferred from the role's *directory*
+    /// (`explorers/` → Explorer, `workers/` → Worker, …). Optional and ignored
+    /// if present; never written in new content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<RoleKind>,
     /// Optional model override; falls back to the factory default.
     #[serde(default)]
     pub model: Option<String>,
 }
 
-/// A fully-loaded role: its frontmatter plus its raw markdown instructions.
+/// A fully-loaded role: its frontmatter, its raw markdown instructions, and the
+/// kind inferred from the directory it was loaded from.
 #[derive(Debug, Clone)]
 pub struct Role {
     /// Parsed frontmatter.
     pub frontmatter: RoleFrontmatter,
     /// Raw markdown body — the role's instructions, handed to an agent verbatim.
     pub body: String,
+    /// The role kind, inferred from the typed directory (`explorers/` etc.).
+    pub kind: RoleKind,
 }
 
 impl Role {
@@ -119,9 +125,22 @@ impl Role {
         &self.frontmatter.name
     }
 
-    /// The role kind.
+    /// The role kind — inferred from its directory, not its frontmatter.
     pub fn kind(&self) -> RoleKind {
-        self.frontmatter.agent_type
+        self.kind
+    }
+}
+
+impl RoleKind {
+    /// The role kind for a typed role directory (`explorers` → `Explorer`, …).
+    pub fn from_dir(subdir: &str) -> Option<RoleKind> {
+        match subdir {
+            "explorers" => Some(RoleKind::Explorer),
+            "workers" => Some(RoleKind::Worker),
+            "reviewers" => Some(RoleKind::Reviewer),
+            "reflections" => Some(RoleKind::Reflection),
+            _ => None,
+        }
     }
 }
 

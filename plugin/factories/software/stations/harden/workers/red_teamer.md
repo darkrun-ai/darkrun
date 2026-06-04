@@ -1,6 +1,5 @@
 ---
 name: red_teamer
-agent_type: worker
 model: sonnet
 ---
 

@@ -1,6 +1,5 @@
 ---
 name: process
-agent_type: reflection
 model: sonnet
 ---
 

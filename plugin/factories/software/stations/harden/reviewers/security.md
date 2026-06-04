@@ -1,6 +1,5 @@
 ---
 name: security
-agent_type: reviewer
 model: sonnet
 ---
 

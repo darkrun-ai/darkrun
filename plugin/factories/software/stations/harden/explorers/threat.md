@@ -1,6 +1,5 @@
 ---
 name: threat
-agent_type: explorer
 model: sonnet
 ---
 

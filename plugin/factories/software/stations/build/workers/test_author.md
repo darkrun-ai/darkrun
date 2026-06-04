@@ -1,6 +1,5 @@
 ---
 name: test_author
-agent_type: worker
 model: sonnet
 ---
 

@@ -27,10 +27,11 @@ fn role(name: &str, kind: RoleKind) -> Role {
     Role {
         frontmatter: RoleFrontmatter {
             name: name.to_string(),
-            agent_type: kind,
+            agent_type: None,
             model: None,
         },
         body: format!("# {name}\n\nThis role carries enough prose to instruct an agent verbatim."),
+        kind,
     }
 }
 
@@ -47,6 +48,8 @@ fn valid_station() -> Station {
         frontmatter: StationFrontmatter {
             name: "s1".into(),
             description: "a station".into(),
+            kills: "a-risk".into(),
+            label: None,
             explorers: vec!["e1".into()],
             workers: vec!["w1".into(), "w2".into(), "w3".into()],
             reviewers: vec!["r1".into()],
@@ -571,9 +574,9 @@ fn every_reviewer_is_kinded_reviewer() {
 fn role_kind_accessor_matches_frontmatter_agent_type() {
     let f = load_factory("software").unwrap();
     for s in &f.stations {
-        for r in s.explorers.iter().chain(&s.workers).chain(&s.reviewers) {
-            assert_eq!(r.kind(), r.frontmatter.agent_type);
-        }
+        for r in &s.explorers { assert_eq!(r.kind(), RoleKind::Explorer); }
+        for r in &s.workers { assert_eq!(r.kind(), RoleKind::Worker); }
+        for r in &s.reviewers { assert_eq!(r.kind(), RoleKind::Reviewer); }
     }
 }
 
@@ -1358,7 +1361,7 @@ fn role_frontmatter_parses_minimal_yaml() {
     let yaml = "name: framer\nagent_type: worker";
     let fm: RoleFrontmatter = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(fm.name, "framer");
-    assert_eq!(fm.agent_type, RoleKind::Worker);
+    assert_eq!(fm.agent_type, Some(RoleKind::Worker));
     assert_eq!(fm.model, None, "model defaults to None when omitted");
 }
 
@@ -1376,9 +1379,12 @@ fn role_frontmatter_rejects_missing_name() {
 }
 
 #[test]
-fn role_frontmatter_rejects_missing_agent_type() {
+fn role_frontmatter_allows_missing_agent_type() {
+    // `agent_type` is deprecated — the kind is inferred from the role's
+    // directory — so a role file with only `name` parses fine.
     let yaml = "name: framer";
-    assert!(serde_yaml::from_str::<RoleFrontmatter>(yaml).is_err());
+    let fm = serde_yaml::from_str::<RoleFrontmatter>(yaml).expect("parses without agent_type");
+    assert_eq!(fm.agent_type, None);
 }
 
 #[test]
@@ -1493,7 +1499,9 @@ fn role_frontmatter_roundtrips_through_yaml() {
     let yaml = serde_yaml::to_string(&r.frontmatter).unwrap();
     let back: RoleFrontmatter = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(back.name, "framer");
-    assert_eq!(back.agent_type, RoleKind::Worker);
+    // `agent_type` is deprecated and not serialized; the kind lives on the Role.
+    assert_eq!(back.agent_type, None);
+    assert_eq!(r.kind(), RoleKind::Worker);
     assert_eq!(back.model.as_deref(), Some("opus"));
 }
 

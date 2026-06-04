@@ -1,6 +1,5 @@
 ---
 name: scenario
-agent_type: explorer
 model: sonnet
 ---
 

@@ -1,6 +1,5 @@
 ---
 name: readiness
-agent_type: reviewer
 model: sonnet
 ---
 

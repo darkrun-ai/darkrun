@@ -1,6 +1,5 @@
 ---
 name: pressure_tester
-agent_type: worker
 model: sonnet
 ---
 

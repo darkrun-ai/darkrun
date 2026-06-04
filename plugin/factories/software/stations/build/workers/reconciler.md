@@ -1,6 +1,5 @@
 ---
 name: reconciler
-agent_type: worker
 model: sonnet
 terminal: true
 ---

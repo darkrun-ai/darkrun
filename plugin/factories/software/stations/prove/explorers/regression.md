@@ -1,6 +1,5 @@
 ---
 name: regression
-agent_type: explorer
 model: sonnet
 ---
 

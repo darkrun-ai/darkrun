@@ -1,6 +1,5 @@
 ---
 name: distiller
-agent_type: worker
 model: sonnet
 terminal: true
 ---

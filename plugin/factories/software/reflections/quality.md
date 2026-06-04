@@ -1,6 +1,5 @@
 ---
 name: quality
-agent_type: reflection
 model: sonnet
 ---
 

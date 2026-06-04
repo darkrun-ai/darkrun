@@ -1,6 +1,5 @@
 ---
 name: value
-agent_type: explorer
 model: sonnet
 ---
 

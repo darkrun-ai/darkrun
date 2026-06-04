@@ -1,6 +1,5 @@
 ---
 name: security-auditor
-agent_type: reviewer
 model: opus
 ---
 

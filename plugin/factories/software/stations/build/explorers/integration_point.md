@@ -1,6 +1,5 @@
 ---
 name: integration_point
-agent_type: explorer
 model: sonnet
 ---
 

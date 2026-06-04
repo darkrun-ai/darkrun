@@ -1,6 +1,5 @@
 ---
 name: velocity
-agent_type: reflection
 model: sonnet
 ---
 

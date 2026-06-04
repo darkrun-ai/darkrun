@@ -1,6 +1,5 @@
 ---
 name: reversibility
-agent_type: reviewer
 model: sonnet
 ---
 

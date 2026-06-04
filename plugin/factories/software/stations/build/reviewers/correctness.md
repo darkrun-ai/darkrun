@@ -1,6 +1,5 @@
 ---
 name: correctness
-agent_type: reviewer
 model: sonnet
 ---
 

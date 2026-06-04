@@ -1,6 +1,5 @@
 ---
 name: completeness
-agent_type: reviewer
 model: sonnet
 ---
 

@@ -1,6 +1,5 @@
 ---
 name: value
-agent_type: reviewer
 model: sonnet
 ---
 

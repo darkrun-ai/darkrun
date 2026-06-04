@@ -1,6 +1,5 @@
 ---
 name: operability
-agent_type: explorer
 model: sonnet
 ---
 

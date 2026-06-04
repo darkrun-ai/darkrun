@@ -1,6 +1,5 @@
 ---
 name: surface
-agent_type: explorer
 model: sonnet
 ---
 

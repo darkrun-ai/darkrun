@@ -1,6 +1,5 @@
 ---
 name: contract
-agent_type: explorer
 model: sonnet
 ---
 

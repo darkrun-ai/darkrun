@@ -1,6 +1,5 @@
 ---
 name: fit
-agent_type: reviewer
 model: sonnet
 ---
 

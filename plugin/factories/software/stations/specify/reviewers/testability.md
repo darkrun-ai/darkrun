@@ -1,6 +1,5 @@
 ---
 name: testability
-agent_type: reviewer
 model: sonnet
 ---
 

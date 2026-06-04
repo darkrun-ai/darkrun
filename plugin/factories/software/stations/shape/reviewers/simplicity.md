@@ -1,6 +1,5 @@
 ---
 name: simplicity
-agent_type: reviewer
 model: sonnet
 ---
 

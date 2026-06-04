@@ -1,6 +1,5 @@
 ---
 name: architecture
-agent_type: reflection
 model: sonnet
 ---
 

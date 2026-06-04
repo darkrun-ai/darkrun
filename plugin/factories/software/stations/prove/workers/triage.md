@@ -1,6 +1,5 @@
 ---
 name: triage
-agent_type: worker
 model: sonnet
 terminal: true
 ---

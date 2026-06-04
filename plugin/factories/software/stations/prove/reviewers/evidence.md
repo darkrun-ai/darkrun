@@ -1,6 +1,5 @@
 ---
 name: evidence
-agent_type: reviewer
 model: sonnet
 ---
 

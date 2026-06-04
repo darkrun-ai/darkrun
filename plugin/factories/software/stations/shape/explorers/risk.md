@@ -1,6 +1,5 @@
 ---
 name: risk
-agent_type: explorer
 model: sonnet
 ---
 

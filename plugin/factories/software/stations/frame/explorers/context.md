@@ -1,6 +1,5 @@
 ---
 name: context
-agent_type: explorer
 model: sonnet
 ---
 

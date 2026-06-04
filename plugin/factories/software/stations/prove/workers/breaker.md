@@ -1,6 +1,5 @@
 ---
 name: breaker
-agent_type: worker
 model: sonnet
 ---
 

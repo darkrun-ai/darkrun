@@ -1,6 +1,5 @@
 ---
 name: self_reviewer
-agent_type: worker
 model: sonnet
 ---
 

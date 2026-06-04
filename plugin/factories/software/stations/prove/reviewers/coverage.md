@@ -1,6 +1,5 @@
 ---
 name: coverage
-agent_type: reviewer
 model: sonnet
 ---
 

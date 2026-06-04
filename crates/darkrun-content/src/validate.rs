@@ -192,10 +192,11 @@ mod tests {
         Role {
             frontmatter: RoleFrontmatter {
                 name: name.to_string(),
-                agent_type: kind,
+                agent_type: None,
                 model: None,
             },
             body: format!("# {name}\n\ninstructions"),
+            kind,
         }
     }
 
@@ -206,6 +207,8 @@ mod tests {
             frontmatter: StationFrontmatter {
                 name: "s1".into(),
                 description: String::new(),
+                kills: "a-risk".into(),
+                label: None,
                 explorers: vec!["e1".into()],
                 workers: vec!["w1".into(), "w2".into(), "w3".into()],
                 reviewers: vec!["r1".into()],

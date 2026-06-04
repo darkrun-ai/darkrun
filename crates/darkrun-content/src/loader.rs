@@ -104,14 +104,17 @@ fn load_station(factory: &str, station: &str) -> Result<Station> {
     })
 }
 
-/// Load each named role from a station subdirectory, preserving order.
+/// Load each named role from a station subdirectory, preserving order. The role
+/// kind is inferred from `subdir` (the directory IS the `agent_type`).
 fn load_roles(station_base: &str, subdir: &str, names: &[String]) -> Result<Vec<Role>> {
+    let kind = crate::model::RoleKind::from_dir(subdir)
+        .ok_or_else(|| ContentError::FileNotFound(format!("unknown role dir `{subdir}`")))?;
     let mut roles = Vec::with_capacity(names.len());
     for slug in names {
         let path = format!("{station_base}/{subdir}/{slug}.md");
         let (frontmatter, body): (RoleFrontmatter, String) =
             frontmatter::parse(&read_text(&path)?)?;
-        roles.push(Role { frontmatter, body });
+        roles.push(Role { frontmatter, body, kind });
     }
     Ok(roles)
 }
@@ -122,12 +125,14 @@ fn load_roles(station_base: &str, subdir: &str, names: &[String]) -> Result<Vec<
 /// These are the factory-scope analog of [`load_roles`]: whole-Run reviewers
 /// and reflection dimensions live beside the stations, not inside one.
 fn load_factory_roles(factory: &str, subdir: &str, names: &[String]) -> Result<Vec<Role>> {
+    let kind = crate::model::RoleKind::from_dir(subdir)
+        .ok_or_else(|| ContentError::FileNotFound(format!("unknown role dir `{subdir}`")))?;
     let mut roles = Vec::with_capacity(names.len());
     for slug in names {
         let path = format!("{factory}/{subdir}/{slug}.md");
         let (frontmatter, body): (RoleFrontmatter, String) =
             frontmatter::parse(&read_text(&path)?)?;
-        roles.push(Role { frontmatter, body });
+        roles.push(Role { frontmatter, body, kind });
     }
     Ok(roles)
 }

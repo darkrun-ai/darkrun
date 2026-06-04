@@ -1,6 +1,5 @@
 ---
 name: feasibility
-agent_type: reviewer
 model: sonnet
 ---
 

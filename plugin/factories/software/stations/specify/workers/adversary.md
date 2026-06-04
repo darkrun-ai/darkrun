@@ -1,6 +1,5 @@
 ---
 name: adversary
-agent_type: worker
 model: sonnet
 ---
 

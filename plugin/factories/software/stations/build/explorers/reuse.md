@@ -1,6 +1,5 @@
 ---
 name: reuse
-agent_type: explorer
 model: sonnet
 ---
 
