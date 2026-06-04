@@ -1,6 +1,6 @@
 {% include "_shared/announcement.md" %}
 
-# Manufacture — `{{ station }}`
+# Manufacture — `{{ label }}`
 
 This is the build floor. You run the **Pass loop** — _Plan → Make → Challenge → Resolve_ — over the wave-ready Units. The current beat is **{{ worker }}**.
 

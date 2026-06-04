@@ -1,6 +1,6 @@
 {% include "_shared/announcement.md" %}
 
-# Checkpoint — `{{ station }}`
+# Checkpoint — `{{ label }}`
 
 Station **{{ station }}** has passed spec, review, manufacture, audit, and reflect. The gate is now open. Its kind is **`{{ kind }}`** — that determines who decides whether the station locks.
 

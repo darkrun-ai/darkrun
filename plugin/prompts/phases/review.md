@@ -1,6 +1,6 @@
 {% include "_shared/announcement.md" %}
 
-# Review — `{{ station }}` spec
+# Review — `{{ label }}` spec
 
 Before a single Unit is manufactured, the spec gets reviewed. A bad spec that reaches manufacture is the most expensive failure in the line — kill it here, cheaply.
 

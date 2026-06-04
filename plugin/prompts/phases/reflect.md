@@ -1,6 +1,6 @@
 {% include "_shared/announcement.md" %}
 
-# Reflect — `{{ station }}`
+# Reflect — `{{ label }}`
 
 The output is audited and the checks are green. Before the checkpoint gate fires, run an autonomous retrospective. This is the moment to capture what this station taught the run — the learnings that feed the run-level reflections.
 

@@ -244,6 +244,11 @@ pub struct PromptContext {
     /// The active station name (absent for run-level actions like `sealed`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub station: Option<String>,
+    /// The station's domain-facing display name (legal → `Intake`). Defaults to
+    /// the station name when the factory declares no `label`. Shown by prompts
+    /// and UIs over the fixed position.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// The station phase tag, when the action sits on the phase machine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
@@ -1158,6 +1163,9 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         }
         if let Some(factory) = resolve_factory_for(store, &run.frontmatter.factory) {
             if let Some(def) = factory.station(station) {
+                // The display label defaults to the station name when the
+                // factory declares none.
+                ctx.label = Some(def.label.clone().unwrap_or_else(|| station.to_string()));
                 ctx.kills = Some(def.kills.clone());
                 ctx.locked_artifact = Some(def.artifact.clone());
                 ctx.kind = Some(def.checkpoint);

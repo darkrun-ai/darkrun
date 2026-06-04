@@ -1,6 +1,6 @@
 {% include "_shared/announcement.md" %}
 
-# Audit — `{{ station }}` output
+# Audit — `{{ label }}` output
 
 The Units are manufactured. Now audit the *output* against the *spec* **and run the quality checks**. Manufacture proves the thing was built; audit proves the *right* thing was built — and proves it with evidence, not just judgment. (Audit folds in what a separate tests phase used to do: reviewers give judgment, the checks give evidence. Both happen here.)
 

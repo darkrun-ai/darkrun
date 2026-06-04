@@ -1,6 +1,6 @@
 {% include "_shared/announcement.md" %}
 
-# User gate — `{{ station }}` spec
+# User gate — `{{ label }}` spec
 
 The review work for station **{{ station }}** is done: the spec is written, the adversarial reviewers have had their pass, and the review brief is recorded. Before a single Unit is manufactured, the **operator** reviews the station and clears it — this is the pre-execution gate, the cheapest place to catch a wrong direction.
 

@@ -1,6 +1,6 @@
 {% include "_shared/announcement.md" %}
 
-# Spec — `{{ station }}`
+# Spec — `{{ label }}`
 
 You are opening station **{{ station }}**. Its job is to eliminate a whole class of risk: **{{ kills }}**. Nothing downstream is allowed to proceed until that risk is named and bounded here.
 
