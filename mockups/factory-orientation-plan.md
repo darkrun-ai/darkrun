@@ -293,6 +293,37 @@ Reads via the `darkrun-api` WS contract (not the corpus directly).
   badges.
 - Full workspace `cargo test` green + `cargo clippy` clean.
 
+## Status (delivered)
+
+All nine phases are landed and green. Highlights and the few deliberate
+deviations from the original sketch:
+
+- **Phases 1–3 — done.** `Position::FLOW` is the code invariant; the
+  `software_factory()` fallback is deleted; the cascade loader (project override
+  + `inherits` chain) resolves the corpus; `agent_type` is the typed directory;
+  `kills`/`label` are frontmatter; the phase prompts open on `{{ label }}`.
+- **Phase 4 — surfaces as data (refined).** `FACTORY.md` declares a `surfaces:`
+  list; `darkrun_run_surface` rejects a classification the factory does not
+  offer. The core `Surface` vocabulary and its visual/bench/terminal **routing
+  stay in code** — that is the software measurement seam, which the plan itself
+  scopes as software ("the measurement tools stay software"). Full removal of the
+  enum + an open `ProofKind` registry was judged destabilizing for the value;
+  the *offered set* is now data, which is the behavior the plan specified for
+  `darkrun_run_surface`. The `attested`/open-proof seam is exercised by `legal`
+  declaring **no** surfaces and gating external (human attestation).
+- **Phase 5 — done.** `libdev inherits software`, overriding only Shape (drops
+  the visual-design beat) and narrowing surfaces; the loader walks the chain for
+  every manifest field, so a child factory is the delta, not a copy.
+- **Phase 6 — done.** The website is data-driven over `list_factories()`: all
+  three factories list, detail, and drill down; per-factory surface badges render.
+- **Phase 7 — done.** The review wire type carries the station `label` and the
+  classified `surface` (optional, back-compatible); `openapi.json` regenerated.
+- **Phase 8 — done.** `legal` is a full, independent domain corpus (its own
+  rosters, labels Intake→Execute, human-attested proof) proving the spine holds
+  cross-domain with zero engine changes. The `darkrun-factories`/`-scaffold`/
+  `-start` commands are data-driven over the engine tools and needed no change.
+- **Phase 9 — green.** Workspace tests pass, clippy clean, openapi parity holds.
+
 ## Phasing (dependency-ordered; no time estimates)
 
 - **Phase 1 — kill the fallback.** `FLOW` invariant; cascade loader in
