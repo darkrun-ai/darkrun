@@ -70,6 +70,64 @@ pub enum StationPhase {
     Checkpoint,
 }
 
+/// The six fixed stations of the FSSBPH flow, in cost-of-late-discovery order.
+///
+/// This is a **hardcoded, mandatory mechanic** — every factory walks these six,
+/// in this order, always. It is NOT overridable and has no on-disk definition:
+/// the spine is the methodology's invariant, so it lives in code (an invariant,
+/// not a fallback). A factory supplies only *orientation* for each position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Position {
+    /// Kills *wrong-thing* — establish problem/user/value/metric/non-goals.
+    Frame,
+    /// Kills *ambiguity* — make "done" testable and unambiguous.
+    Specify,
+    /// Kills *expensive structural reversal* — choose a sound, reversible approach.
+    Shape,
+    /// Kills *implementation defects* — produce the work.
+    Build,
+    /// Kills *escaped defects* — verify independently of the producer.
+    Prove,
+    /// Kills *works-in-dev-dies-in-prod* — operationalize for reality.
+    Harden,
+}
+
+impl Position {
+    /// The fixed flow — the six positions in order. The methodology's spine.
+    pub const FLOW: [Position; 6] = [
+        Position::Frame,
+        Position::Specify,
+        Position::Shape,
+        Position::Build,
+        Position::Prove,
+        Position::Harden,
+    ];
+
+    /// The on-disk directory name / slug for this position (`"frame"`, …). The
+    /// `stations/<dir>/` content for every factory is keyed by this.
+    pub fn dir(self) -> &'static str {
+        match self {
+            Position::Frame => "frame",
+            Position::Specify => "specify",
+            Position::Shape => "shape",
+            Position::Build => "build",
+            Position::Prove => "prove",
+            Position::Harden => "harden",
+        }
+    }
+
+    /// Parse a position slug, or `None` if it is not one of the six.
+    pub fn parse(slug: &str) -> Option<Position> {
+        Position::FLOW.into_iter().find(|p| p.dir() == slug)
+    }
+
+    /// This position's index in the flow (0 = Frame … 5 = Harden).
+    pub fn index(self) -> usize {
+        Position::FLOW.iter().position(|&p| p == self).unwrap_or(0)
+    }
+}
+
 /// The kind of gate a Checkpoint applies at the end of a Station.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

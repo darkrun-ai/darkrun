@@ -3216,3 +3216,31 @@ fn drift_kind_token_set_matches_const_table() {
         ALL_DRIFT_KINDS.iter().map(|(_, t)| t.to_string()).collect();
     assert_eq!(schema_tokens, table);
 }
+
+// ===========================================================================
+// Position — the fixed FSSBPH flow invariant
+// ===========================================================================
+
+#[test]
+fn flow_is_the_six_fssbph_positions_in_order() {
+    let dirs: Vec<&str> = Position::FLOW.iter().map(|p| p.dir()).collect();
+    assert_eq!(
+        dirs,
+        vec!["frame", "specify", "shape", "build", "prove", "harden"]
+    );
+}
+
+#[test]
+fn position_parse_round_trips_and_rejects_unknown() {
+    for p in Position::FLOW {
+        assert_eq!(Position::parse(p.dir()), Some(p));
+        assert_eq!(p.index(), Position::FLOW.iter().position(|&q| q == p).unwrap());
+    }
+    assert_eq!(Position::parse("operations"), None);
+}
+
+#[test]
+fn position_serializes_snake_case() {
+    assert_eq!(serde_json::to_string(&Position::Frame).unwrap(), "\"frame\"");
+    assert_eq!(serde_json::to_string(&Position::Harden).unwrap(), "\"harden\"");
+}
