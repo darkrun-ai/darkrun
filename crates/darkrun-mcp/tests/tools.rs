@@ -130,6 +130,8 @@ fn create_feedback(
             station: station.into(),
             body: body.into(),
             severity: None,
+                origin: None,
+                invalidates: None,
         }))
         .unwrap()
 }
@@ -933,6 +935,8 @@ fn feedback_create_with_severity() {
             station: "frame".into(),
             body: "x".into(),
             severity: Some("high".into()),
+                origin: None,
+                invalidates: None,
         }))
         .unwrap();
     assert_eq!(body(&res)["severity"], "high");
@@ -947,6 +951,8 @@ fn feedback_create_rejects_invalid_severity() {
             station: "frame".into(),
             body: "x".into(),
             severity: Some("catastrophic".into()),
+                origin: None,
+                invalidates: None,
         }))
         .unwrap();
     assert!(is_err(&res));
@@ -1033,6 +1039,7 @@ fn feedback_list_hides_settled_when_requested() {
             slug: "r".into(),
             feedback_id: id,
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     let v = body(
@@ -1058,6 +1065,7 @@ fn feedback_list_keeps_settled_when_included() {
             slug: "r".into(),
             feedback_id: id,
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     let v = body(
@@ -1083,6 +1091,7 @@ fn feedback_resolve_stamps_addressed() {
             slug: "r".into(),
             feedback_id: id,
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     assert_eq!(body(&res)["status"], "addressed");
@@ -1100,6 +1109,7 @@ fn feedback_resolve_accepts_answered() {
             slug: "r".into(),
             feedback_id: id,
             status: "answered".into(),
+                reply: None,
         }))
         .unwrap();
     assert_eq!(body(&res)["status"], "answered");
@@ -1117,6 +1127,7 @@ fn feedback_resolve_accepts_non_actionable() {
             slug: "r".into(),
             feedback_id: id,
             status: "non_actionable".into(),
+                reply: None,
         }))
         .unwrap();
     assert_eq!(body(&res)["status"], "non_actionable");
@@ -1134,6 +1145,7 @@ fn feedback_resolve_accepts_closed() {
             slug: "r".into(),
             feedback_id: id,
             status: "closed".into(),
+                reply: None,
         }))
         .unwrap();
     assert_eq!(body(&res)["status"], "closed");
@@ -1151,6 +1163,7 @@ fn feedback_resolve_rejects_non_terminal_status() {
             slug: "r".into(),
             feedback_id: id,
             status: "fixing".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_err(&res));
@@ -1169,6 +1182,7 @@ fn feedback_resolve_rejects_invalid_status() {
             slug: "r".into(),
             feedback_id: id,
             status: "garbage".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_err(&res));
@@ -1183,6 +1197,7 @@ fn feedback_resolve_errors_on_missing_id() {
             slug: "r".into(),
             feedback_id: "fb-99".into(),
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_err(&res));
@@ -1200,6 +1215,7 @@ fn feedback_resolve_twice_is_rejected_as_settled() {
             slug: "r".into(),
             feedback_id: id.clone(),
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     let again = server
@@ -1207,6 +1223,7 @@ fn feedback_resolve_twice_is_rejected_as_settled() {
             slug: "r".into(),
             feedback_id: id,
             status: "closed".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_err(&again));
@@ -1263,6 +1280,7 @@ fn feedback_reject_then_resolve_is_settled() {
             slug: "r".into(),
             feedback_id: id,
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_err(&res));
@@ -1310,6 +1328,7 @@ fn feedback_move_on_settled_is_rejected() {
             slug: "r".into(),
             feedback_id: id.clone(),
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     let res = server
@@ -1500,6 +1519,7 @@ fn checkpoint_decide_then_resolve_feedback_resumes_run() {
             slug: "r".into(),
             feedback_id: id,
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     // The run track resumes (no longer on the feedback track).
@@ -1942,6 +1962,7 @@ fn resolving_feedback_lets_run_resume() {
             slug: "r".into(),
             feedback_id: id,
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     // Now the run track is back.
@@ -2247,6 +2268,8 @@ fn feedback_severity_blocker_roundtrips() {
             station: "frame".into(),
             body: "x".into(),
             severity: Some("blocker".into()),
+                origin: None,
+                invalidates: None,
         }))
         .unwrap();
     assert_eq!(body(&res)["severity"], "blocker");
@@ -2261,6 +2284,8 @@ fn feedback_severity_medium_roundtrips() {
             station: "frame".into(),
             body: "x".into(),
             severity: Some("medium".into()),
+                origin: None,
+                invalidates: None,
         }))
         .unwrap();
     assert_eq!(body(&res)["severity"], "medium");
@@ -2275,6 +2300,8 @@ fn feedback_severity_low_roundtrips() {
             station: "frame".into(),
             body: "x".into(),
             severity: Some("low".into()),
+                origin: None,
+                invalidates: None,
         }))
         .unwrap();
     assert_eq!(body(&res)["severity"], "low");
@@ -2289,6 +2316,8 @@ fn feedback_severity_uppercase_accepted() {
             station: "frame".into(),
             body: "x".into(),
             severity: Some("HIGH".into()),
+                origin: None,
+                invalidates: None,
         }))
         .unwrap();
     assert!(is_ok(&res));
@@ -2568,6 +2597,7 @@ fn feedback_ids_continue_after_resolution() {
             slug: "r".into(),
             feedback_id: id1,
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     // Next id is still fb-02 — resolution doesn't free the slot.
@@ -2626,6 +2656,7 @@ fn checkpoint_decide_reject_routes_then_approve_after_resolve() {
             slug: "r".into(),
             feedback_id: id,
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     // Frame is still blocked but feedback cleared — now approve to advance.
@@ -2943,6 +2974,7 @@ fn resolving_first_feedback_surfaces_second() {
             slug: "r".into(),
             feedback_id: "fb-01".into(),
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     let v = body(&next(&server, "r"));
@@ -3337,6 +3369,7 @@ fn feedback_resolve_uppercase_terminal_status() {
             slug: "r".into(),
             feedback_id: id,
             status: "ADDRESSED".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_ok(&res));
@@ -3355,6 +3388,7 @@ fn feedback_resolve_nonactionable_alias() {
             slug: "r".into(),
             feedback_id: id,
             status: "nonactionable".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_ok(&res));
@@ -3736,6 +3770,7 @@ fn feedback_resolve_empty_status_defaults_to_addressed() {
             slug: "r".into(),
             feedback_id: id,
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     assert_eq!(body(&res)["status"], "addressed");
@@ -3931,6 +3966,8 @@ fn feedback_severity_survives_list() {
             station: "frame".into(),
             body: "x".into(),
             severity: Some("blocker".into()),
+                origin: None,
+                invalidates: None,
         }))
         .unwrap();
     let v = body(
@@ -3954,6 +3991,8 @@ fn feedback_severity_survives_status_change() {
                 station: "frame".into(),
                 body: "x".into(),
                 severity: Some("high".into()),
+                origin: None,
+                invalidates: None,
             }))
             .unwrap(),
     )["id"]
@@ -3966,6 +4005,7 @@ fn feedback_severity_survives_status_change() {
                 slug: "r".into(),
                 feedback_id: id,
                 status: "addressed".into(),
+                reply: None,
             }))
             .unwrap(),
     );
@@ -3985,6 +4025,7 @@ fn feedback_station_survives_status_change() {
                 slug: "r".into(),
                 feedback_id: id,
                 status: "closed".into(),
+                reply: None,
             }))
             .unwrap(),
     );
@@ -4145,6 +4186,7 @@ fn feedback_list_keeps_id_order_with_mixed_statuses() {
             slug: "r".into(),
             feedback_id: "fb-02".into(),
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     let v = body(
@@ -4175,6 +4217,7 @@ fn feedback_list_hide_settled_drops_only_terminal() {
             slug: "r".into(),
             feedback_id: "fb-02".into(),
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     let v = body(
@@ -4242,6 +4285,7 @@ fn checkpoint_reject_then_approve_advances_past_build() {
             slug: "r".into(),
             feedback_id: "fb-01".into(),
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     let v = approve(&server, "r");
@@ -4302,6 +4346,7 @@ fn feedback_resolve_fixing_is_not_terminal_rejected() {
             slug: "r".into(),
             feedback_id: id,
             status: "fixing".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_err(&res));
@@ -4319,6 +4364,7 @@ fn feedback_resolve_pending_is_not_terminal_rejected() {
             slug: "r".into(),
             feedback_id: id,
             status: "pending".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_err(&res));
@@ -4336,6 +4382,7 @@ fn feedback_resolve_escalated_is_not_terminal_rejected() {
             slug: "r".into(),
             feedback_id: id,
             status: "escalated".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_err(&res));
@@ -4354,6 +4401,7 @@ fn feedback_resolve_rejected_via_resolve_is_terminal() {
             slug: "r".into(),
             feedback_id: id,
             status: "rejected".into(),
+                reply: None,
         }))
         .unwrap();
     assert!(is_ok(&res));
@@ -4628,6 +4676,7 @@ fn run_show_position_track_returns_to_run_after_resolve() {
             slug: "r".into(),
             feedback_id: "fb-01".into(),
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     let v = body(
@@ -4734,6 +4783,8 @@ fn feedback_get_shape_via_list_has_all_fields() {
             station: "frame".into(),
             body: "x".into(),
             severity: Some("high".into()),
+                origin: None,
+                invalidates: None,
         }))
         .unwrap();
     let v = body(
@@ -4799,6 +4850,7 @@ fn checkpoint_reject_increments_feedback_ids() {
             slug: "r".into(),
             feedback_id: "fb-01".into(),
             status: "addressed".into(),
+                reply: None,
         }))
         .unwrap();
     server
@@ -5026,6 +5078,7 @@ fn feedback_list_default_include_settled_true_shows_resolved() {
             slug: "r".into(),
             feedback_id: id,
             status: "closed".into(),
+                reply: None,
         }))
         .unwrap();
     let v = body(
@@ -5345,6 +5398,7 @@ fn feedback_resolve_answered_then_settled_immutable() {
             slug: "r".into(),
             feedback_id: id.clone(),
             status: "answered".into(),
+                reply: None,
         }))
         .unwrap();
     let again = server

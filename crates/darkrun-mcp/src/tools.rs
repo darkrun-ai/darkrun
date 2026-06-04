@@ -358,6 +358,14 @@ pub struct FeedbackCreateInput {
     /// Optional severity: `blocker`/`high`/`medium`/`low`.
     #[serde(default)]
     pub severity: Option<String>,
+    /// Where the finding came from: `adversarial_review`/`run_review`/
+    /// `reflection`/`discovery`/`drift`/`operator`/`annotation`/`external`.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Review/approval role slugs this finding invalidates when it closes (the
+    /// stamps it undercut, re-opened on close so the gate re-fires).
+    #[serde(default)]
+    pub invalidates: Option<Vec<String>>,
 }
 
 /// The work-item selector shared by the annotation tools: which unit / output /
@@ -617,6 +625,12 @@ pub struct FeedbackResolveInput {
     /// The terminal status to apply: `addressed`/`answered`/`non_actionable`/`closed`.
     #[serde(default = "default_addressed")]
     pub status: String,
+    /// Optional closure reply — what was done to resolve the finding. Recorded
+    /// on the item and surfaced to the requester. When set with a `closed`
+    /// status, the finding's `invalidates` roles are re-opened on its station's
+    /// units so the gate re-fires.
+    #[serde(default)]
+    pub reply: Option<String>,
 }
 
 fn default_addressed() -> String {
@@ -1207,7 +1221,15 @@ impl DarkrunServer {
             },
             None => None,
         };
-        match feedback::create(&store, &input.slug, &input.station, &input.body, severity) {
+        let origin = input
+            .origin
+            .as_deref()
+            .map(feedback::parse_origin)
+            .unwrap_or(darkrun_core::domain::FeedbackOrigin::Unspecified);
+        let invalidates = input.invalidates.clone().unwrap_or_default();
+        match feedback::create_with_origin(
+            &store, &input.slug, &input.station, &input.body, severity, origin, invalidates,
+        ) {
             Ok(fb) => ok_json(&fb),
             Err(e) => Ok(err_text(e)),
         }
@@ -1621,7 +1643,15 @@ impl DarkrunServer {
             }
             None => return Ok(err_text(format!("invalid status: {}", input.status))),
         };
-        match feedback::set_status(&store, &input.slug, &input.feedback_id, status) {
+        // A `closed` resolution carrying a reply records the resolution AND
+        // re-opens the stamps the finding invalidated, so the gate re-fires.
+        let result = match (status, input.reply.as_deref()) {
+            (darkrun_core::domain::FeedbackStatus::Closed, Some(reply)) if !reply.trim().is_empty() => {
+                feedback::close_with_reply(&store, &input.slug, &input.feedback_id, reply)
+            }
+            _ => feedback::set_status(&store, &input.slug, &input.feedback_id, status),
+        };
+        match result {
             Ok(fb) => ok_json(&fb),
             Err(e) => Ok(err_text(e)),
         }
@@ -2278,6 +2308,8 @@ mod tests {
                 station: "frame".into(),
                 body: "widget overflows".into(),
                 severity: Some("high".into()),
+                origin: None,
+                invalidates: None,
             }))
             .unwrap();
         let v = created.structured_content.unwrap();
@@ -2300,6 +2332,7 @@ mod tests {
                 slug: "r".into(),
                 feedback_id: id,
                 status: "addressed".into(),
+                reply: None,
             }))
             .unwrap();
         let v = resolved.structured_content.unwrap();
@@ -2325,6 +2358,8 @@ mod tests {
                 station: "frame".into(),
                 body: "x".into(),
                 severity: None,
+                origin: None,
+                invalidates: None,
             }))
             .unwrap();
         let id = created.structured_content.unwrap()["id"]
@@ -2336,6 +2371,7 @@ mod tests {
                 slug: "r".into(),
                 feedback_id: id,
                 status: "fixing".into(),
+                reply: None,
             }))
             .unwrap();
         assert_eq!(res.is_error, Some(true));
@@ -2350,6 +2386,8 @@ mod tests {
                 station: "frame".into(),
                 body: "a".into(),
                 severity: None,
+                origin: None,
+                invalidates: None,
             }))
             .unwrap();
         let id_a = a.structured_content.unwrap()["id"]

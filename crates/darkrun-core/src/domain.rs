@@ -662,6 +662,45 @@ pub enum FeedbackStatus {
     Rejected,
 }
 
+/// Where a Feedback item came from — its source, which routes how it is handled
+/// and lets the operator and reflection tell an operator's revision from a drift
+/// alarm from an adversarial reviewer's finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackOrigin {
+    /// A station Reviewer's adversarial finding (the Review/Audit phase).
+    AdversarialReview,
+    /// A whole-Run reviewer's cross-station finding (run-level audit).
+    RunReview,
+    /// A reflection dimension's learning surfaced as actionable feedback.
+    Reflection,
+    /// An Explorer's discovery that needs an operator decision.
+    Discovery,
+    /// Witnessed artifact drift — an out-of-band change to a locked premise.
+    Drift,
+    /// The operator, via a checkpoint decision / request-changes.
+    Operator,
+    /// The operator, via an inline annotation on an artifact.
+    Annotation,
+    /// An external surface (a PR/MR review comment).
+    External,
+    /// Origin not recorded (legacy / unclassified).
+    #[default]
+    Unspecified,
+}
+
+/// A worker's reply when it closes a Feedback item — what it actually did, so
+/// the requester (operator or reviewer) reads the resolution, not just the
+/// status flip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ClosureReply {
+    /// What was done to resolve the finding.
+    pub text: String,
+    /// RFC3339 timestamp the reply was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+}
+
 /// A Feedback item routed back from a Checkpoint (`feedback/*.md`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Feedback {
@@ -676,12 +715,29 @@ pub struct Feedback {
     /// Finding severity (absent until classified).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<FeedbackSeverity>,
+    /// Where this finding came from — routes handling and tells the story.
+    #[serde(default, skip_serializing_if = "is_unspecified_origin")]
+    pub origin: FeedbackOrigin,
     /// Free-text finding body.
     #[serde(default)]
     pub body: String,
     /// RFC3339 creation timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+    /// The review/approval role slugs this feedback invalidates when it closes —
+    /// the stamps that must be re-signed because this finding undercut them.
+    /// Closing the feedback clears these on the target unit so the gate re-fires.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalidates: Vec<String>,
+    /// The closer's reply — what was done — recorded when the item terminally
+    /// closes. Surfaced to the requester so a close carries its resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure_reply: Option<ClosureReply>,
+}
+
+/// serde skip helper: omit `origin` when it carries no information.
+fn is_unspecified_origin(o: &FeedbackOrigin) -> bool {
+    matches!(o, FeedbackOrigin::Unspecified)
 }
 
 /// A registered project: the persisted record the desktop enumerates to list

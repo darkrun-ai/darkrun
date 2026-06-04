@@ -12,7 +12,9 @@
 //! agree on the same `status:` line.
 
 use chrono::Utc;
-use darkrun_core::domain::{Feedback, FeedbackSeverity, FeedbackStatus};
+use darkrun_core::domain::{
+    ClosureReply, Feedback, FeedbackOrigin, FeedbackSeverity, FeedbackStatus,
+};
 use darkrun_core::StateStore;
 
 use crate::error::{McpError, Result};
@@ -79,6 +81,46 @@ pub fn parse_severity(raw: &str) -> Option<FeedbackSeverity> {
     }
 }
 
+fn origin_str(origin: FeedbackOrigin) -> &'static str {
+    match origin {
+        FeedbackOrigin::AdversarialReview => "adversarial_review",
+        FeedbackOrigin::RunReview => "run_review",
+        FeedbackOrigin::Reflection => "reflection",
+        FeedbackOrigin::Discovery => "discovery",
+        FeedbackOrigin::Drift => "drift",
+        FeedbackOrigin::Operator => "operator",
+        FeedbackOrigin::Annotation => "annotation",
+        FeedbackOrigin::External => "external",
+        FeedbackOrigin::Unspecified => "unspecified",
+    }
+}
+
+/// Parse a feedback origin token; unknown tokens fall back to `Unspecified`.
+pub fn parse_origin(raw: &str) -> FeedbackOrigin {
+    match raw.trim().trim_matches('"').to_ascii_lowercase().replace('-', "_").as_str() {
+        "adversarial_review" | "review" => FeedbackOrigin::AdversarialReview,
+        "run_review" => FeedbackOrigin::RunReview,
+        "reflection" => FeedbackOrigin::Reflection,
+        "discovery" => FeedbackOrigin::Discovery,
+        "drift" => FeedbackOrigin::Drift,
+        "operator" => FeedbackOrigin::Operator,
+        "annotation" => FeedbackOrigin::Annotation,
+        "external" => FeedbackOrigin::External,
+        _ => FeedbackOrigin::Unspecified,
+    }
+}
+
+/// Parse a `[a, b, c]` inline list of role slugs from a frontmatter value.
+fn parse_inline_list(raw: &str) -> Vec<String> {
+    raw.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Serialize a feedback item to its on-disk `feedback/*.md` shape.
 fn serialize(fb: &Feedback) -> String {
     let mut out = String::from("---\n");
@@ -87,8 +129,23 @@ fn serialize(fb: &Feedback) -> String {
     if let Some(sev) = fb.severity {
         out.push_str(&format!("severity: {}\n", severity_str(sev)));
     }
+    if !matches!(fb.origin, FeedbackOrigin::Unspecified) {
+        out.push_str(&format!("origin: {}\n", origin_str(fb.origin)));
+    }
+    if !fb.invalidates.is_empty() {
+        out.push_str(&format!("invalidates: [{}]\n", fb.invalidates.join(", ")));
+    }
     if let Some(created) = &fb.created_at {
         out.push_str(&format!("created_at: {created}\n"));
+    }
+    if let Some(reply) = &fb.closure_reply {
+        // Hand-rolled YAML: keep the reply single-line (newlines collapse to
+        // spaces) and quoted so it survives the fence round-trip.
+        let text = reply.text.replace('\n', " ").replace('"', "'");
+        out.push_str(&format!("closure_reply: \"{text}\"\n"));
+        if let Some(at) = &reply.at {
+            out.push_str(&format!("closure_reply_at: {at}\n"));
+        }
     }
     out.push_str("---\n");
     out.push_str(&fb.body);
@@ -106,7 +163,11 @@ fn parse(run: &str, id: &str, raw: &str) -> Feedback {
     let mut status = FeedbackStatus::Pending;
     let mut station = String::new();
     let mut severity = None;
+    let mut origin = FeedbackOrigin::Unspecified;
+    let mut invalidates = Vec::new();
     let mut created_at = None;
+    let mut closure_text: Option<String> = None;
+    let mut closure_at: Option<String> = None;
 
     // Split frontmatter (between the first two `---` fences) from the body.
     let (front, body) = split_frontmatter(raw);
@@ -120,6 +181,20 @@ fn parse(run: &str, id: &str, raw: &str) -> Feedback {
             station = rest.trim().trim_matches('"').to_string();
         } else if let Some(rest) = line.strip_prefix("severity:") {
             severity = parse_severity(rest);
+        } else if let Some(rest) = line.strip_prefix("origin:") {
+            origin = parse_origin(rest);
+        } else if let Some(rest) = line.strip_prefix("invalidates:") {
+            invalidates = parse_inline_list(rest);
+        } else if let Some(rest) = line.strip_prefix("closure_reply_at:") {
+            let v = rest.trim().trim_matches('"').to_string();
+            if !v.is_empty() {
+                closure_at = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("closure_reply:") {
+            let v = rest.trim().trim_matches('"').to_string();
+            if !v.is_empty() {
+                closure_text = Some(v);
+            }
         } else if let Some(rest) = line.strip_prefix("created_at:") {
             let v = rest.trim().trim_matches('"').to_string();
             if !v.is_empty() {
@@ -134,8 +209,11 @@ fn parse(run: &str, id: &str, raw: &str) -> Feedback {
         station,
         status,
         severity,
+        origin,
         body: body.trim_start_matches('\n').to_string(),
         created_at,
+        invalidates,
+        closure_reply: closure_text.map(|text| ClosureReply { text, at: closure_at }),
     }
 }
 
@@ -193,6 +271,21 @@ pub fn create(
     body: &str,
     severity: Option<FeedbackSeverity>,
 ) -> Result<Feedback> {
+    create_with_origin(store, run, station, body, severity, FeedbackOrigin::Unspecified, vec![])
+}
+
+/// Create a feedback item, recording its `origin` (where the finding came from)
+/// and the review/approval roles it `invalidates` on close.
+#[allow(clippy::too_many_arguments)]
+pub fn create_with_origin(
+    store: &StateStore,
+    run: &str,
+    station: &str,
+    body: &str,
+    severity: Option<FeedbackSeverity>,
+    origin: FeedbackOrigin,
+    invalidates: Vec<String>,
+) -> Result<Feedback> {
     if body.trim().is_empty() {
         return Err(McpError::InvalidInput("feedback body must not be empty".into()));
     }
@@ -203,10 +296,60 @@ pub fn create(
         station: station.to_string(),
         status: FeedbackStatus::Pending,
         severity,
+        origin,
         body: body.to_string(),
         created_at: Some(Utc::now().to_rfc3339()),
+        invalidates,
+        closure_reply: None,
     };
     store.write_feedback_raw(run, &id, &serialize(&fb))?;
+    Ok(fb)
+}
+
+/// Close a feedback item with a resolution reply, and **invalidate** the stamps
+/// the finding undercut: every role named in `invalidates` is cleared from each
+/// of the target station's units so the gate re-fires and re-signs against the
+/// fixed work. This is the loop's self-correction — a closed finding doesn't
+/// just flip a status, it re-opens exactly the reviews/approvals it invalidated.
+pub fn close_with_reply(
+    store: &StateStore,
+    run: &str,
+    id: &str,
+    reply: &str,
+) -> Result<Feedback> {
+    let mut fb = get(store, run, id)?;
+    if is_terminal(fb.status) {
+        return Err(McpError::FeedbackSettled(id.to_string()));
+    }
+    fb.status = FeedbackStatus::Closed;
+    if !reply.trim().is_empty() {
+        fb.closure_reply = Some(ClosureReply {
+            text: reply.trim().to_string(),
+            at: Some(Utc::now().to_rfc3339()),
+        });
+    }
+    // Clear the invalidated stamps on the target station's units.
+    if !fb.invalidates.is_empty() {
+        let units = store.read_units(run).unwrap_or_default();
+        for mut unit in units {
+            if unit.station() != fb.station {
+                continue;
+            }
+            let mut changed = false;
+            for role in &fb.invalidates {
+                if unit.frontmatter.reviews.remove(role).is_some() {
+                    changed = true;
+                }
+                if unit.frontmatter.approvals.remove(role).is_some() {
+                    changed = true;
+                }
+            }
+            if changed {
+                store.write_unit(run, &unit)?;
+            }
+        }
+    }
+    store.write_feedback_raw(run, id, &serialize(&fb))?;
     Ok(fb)
 }
 
@@ -296,6 +439,47 @@ mod tests {
         assert_eq!(a.id, "fb-01");
         assert_eq!(b.id, "fb-02");
         assert_eq!(a.status, FeedbackStatus::Pending);
+    }
+
+    #[test]
+    fn origin_and_invalidates_roundtrip_through_disk() {
+        let (_d, store) = store();
+        let fb = create_with_origin(
+            &store, "r", "build", "the diff regresses the limiter", Some(FeedbackSeverity::High),
+            FeedbackOrigin::AdversarialReview, vec!["correctness".into(), "user".into()],
+        )
+        .unwrap();
+        let back = get(&store, "r", &fb.id).unwrap();
+        assert_eq!(back.origin, FeedbackOrigin::AdversarialReview);
+        assert_eq!(back.invalidates, vec!["correctness".to_string(), "user".to_string()]);
+    }
+
+    #[test]
+    fn close_with_reply_records_resolution_and_invalidates_stamps() {
+        use darkrun_core::domain::Stamp;
+        let (_d, store) = store();
+        // A build unit signed by two roles.
+        let mut unit = crate::units::create(&store, "r", "u1", "build", None, vec![]).unwrap();
+        let stamp = || Some(Stamp { at: "2026-06-04T00:00:00Z".into() });
+        unit.frontmatter.approvals.insert("correctness".into(), stamp());
+        unit.frontmatter.approvals.insert("user".into(), stamp());
+        store.write_unit("r", &unit).unwrap();
+
+        let fb = create_with_origin(
+            &store, "r", "build", "regression", Some(FeedbackSeverity::Blocker),
+            FeedbackOrigin::AdversarialReview, vec!["correctness".into()],
+        )
+        .unwrap();
+        let closed = close_with_reply(&store, "r", &fb.id, "rewrote the burst path; added a regression test").unwrap();
+        assert_eq!(closed.status, FeedbackStatus::Closed);
+        assert_eq!(
+            closed.closure_reply.as_ref().map(|r| r.text.as_str()),
+            Some("rewrote the burst path; added a regression test")
+        );
+        // The invalidated role is re-opened; the untouched one survives.
+        let back = store.read_unit("r", "u1").unwrap();
+        assert!(back.frontmatter.approvals.get("correctness").is_none());
+        assert!(matches!(back.frontmatter.approvals.get("user"), Some(Some(_))));
     }
 
     #[test]
