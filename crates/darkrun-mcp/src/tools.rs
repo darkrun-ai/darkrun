@@ -345,6 +345,24 @@ pub struct UnitIterateInput {
     pub next_worker: Option<String>,
 }
 
+/// Input for `darkrun_quality_gate_record` — record one gate's result on a unit.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct GateRecordInput {
+    /// The run slug.
+    pub slug: String,
+    /// The unit slug.
+    pub unit: String,
+    /// The gate name (matches a declared `quality_gates` entry, e.g. `tests`).
+    pub gate: String,
+    /// The outcome: `pass` / `fail` / `env_blocked`. A repeatedly `env_blocked`
+    /// gate is auto-deferred to CI so it can't wedge the run.
+    pub status: String,
+    /// Optional detail — failure output tail, or the blocked dependency.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 /// Input for `darkrun_feedback_create`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -1196,6 +1214,36 @@ impl DarkrunServer {
             result,
             input.note.clone(),
             input.next_worker.clone(),
+        ) {
+            Ok(unit) => ok_json(&unit),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Record a quality-gate result on a unit — the objective check the unit's
+    /// work must pass before it can leave Manufacture.
+    #[tool(
+        name = "darkrun_quality_gate_record",
+        description = "Record a unit's quality-gate result: gate name + status (pass|fail|env_blocked). You run the command (you have a shell); this records and enforces it. A unit can't pass Audit until every declared gate is pass (or deferred-to-CI). A repeatedly env_blocked gate auto-defers to CI so it can't wedge the run."
+    )]
+    pub fn darkrun_quality_gate_record(
+        &self,
+        Parameters(input): Parameters<GateRecordInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        use darkrun_core::domain::GateStatus;
+        let status = match input.status.trim().to_ascii_lowercase().as_str() {
+            "pass" | "passed" => GateStatus::Pass,
+            "fail" | "failed" => GateStatus::Fail,
+            "env_blocked" | "env-blocked" | "blocked" => GateStatus::EnvBlocked,
+            other => {
+                return Ok(err_text(format!(
+                    "invalid gate status `{other}` (want pass|fail|env_blocked)"
+                )))
+            }
+        };
+        let store = self.store();
+        match units::record_gate_result(
+            &store, &input.slug, &input.unit, &input.gate, status, input.detail.clone(),
         ) {
             Ok(unit) => ok_json(&unit),
             Err(e) => Ok(err_text(e)),

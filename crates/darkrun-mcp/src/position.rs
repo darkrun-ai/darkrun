@@ -991,12 +991,27 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
                         // artifact it promised isn't on disk. Hold at the station
                         // until it exists (idempotent: re-derives each tick).
                         let missing = missing_outputs(store, &owned);
+                        // Quality-gate gate: a unit whose declared gates aren't all
+                        // satisfied (pass / deferred-to-CI) can't reach Audit.
+                        let gated: Vec<String> = owned
+                            .iter()
+                            .filter(|u| matches!(u.status(), Status::Completed))
+                            .filter(|u| !u.gates_satisfied())
+                            .map(|u| u.slug.clone())
+                            .collect();
                         if !missing.is_empty() {
                             RunAction::UnitsInvalid {
                                 run: slug.to_string(),
                                 station: station.clone(),
                                 problem: "missing_output".to_string(),
                                 units: missing,
+                            }
+                        } else if !gated.is_empty() {
+                            RunAction::UnitsInvalid {
+                                run: slug.to_string(),
+                                station: station.clone(),
+                                problem: "gates_unmet".to_string(),
+                                units: gated,
                             }
                         } else {
                             RunAction::Audit {

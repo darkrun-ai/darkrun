@@ -11,10 +11,16 @@
 //! once a unit starts executing.
 
 use chrono::Utc;
-use darkrun_core::domain::{IterationResult, Status, Unit, UnitFrontmatter, UnitIteration};
+use darkrun_core::domain::{
+    GateResult, GateStatus, IterationResult, Status, Unit, UnitFrontmatter, UnitIteration,
+};
 use darkrun_core::StateStore;
 
 use crate::error::{McpError, Result};
+
+/// After this many env-blocked recordings, a gate is auto-deferred to CI rather
+/// than wedging the run — CI is authoritative on the change request.
+const GATE_DEFER_AFTER: u32 = 2;
 
 /// Create a new pending unit on a station, returning the persisted record.
 pub fn create(
@@ -166,6 +172,51 @@ pub fn record_iteration(
     Ok(unit)
 }
 
+/// Record a quality-gate result on a unit — upsert by gate name, accumulating
+/// the attempt count. A `pass` satisfies the gate; a `fail` holds Audit; an
+/// `env_blocked` that has now been seen `GATE_DEFER_AFTER` times is auto-promoted
+/// to `deferred_to_ci` so an unrunnable gate can't wedge the run (CI is the
+/// authority). Returns the updated unit.
+pub fn record_gate_result(
+    store: &StateStore,
+    run: &str,
+    slug: &str,
+    gate: &str,
+    status: GateStatus,
+    detail: Option<String>,
+) -> Result<Unit> {
+    if gate.trim().is_empty() {
+        return Err(McpError::InvalidInput("gate name must not be empty".into()));
+    }
+    let mut unit = get(store, run, slug)?;
+    let now = Utc::now().to_rfc3339();
+    let prior_attempts = unit
+        .frontmatter
+        .gate_results
+        .iter()
+        .find(|r| r.name == gate)
+        .map(|r| r.attempts)
+        .unwrap_or(0);
+    let attempts = prior_attempts + 1;
+    // Auto-defer a repeatedly env-blocked gate to CI rather than wedge.
+    let effective = if matches!(status, GateStatus::EnvBlocked) && attempts >= GATE_DEFER_AFTER {
+        GateStatus::DeferredToCi
+    } else {
+        status
+    };
+    let result = GateResult {
+        name: gate.to_string(),
+        status: effective,
+        at: Some(now),
+        attempts,
+        detail,
+    };
+    unit.frontmatter.gate_results.retain(|r| r.name != gate);
+    unit.frontmatter.gate_results.push(result);
+    store.write_unit(run, &unit)?;
+    Ok(unit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +350,45 @@ mod tests {
         assert_eq!(u2.pass(), 2);
         assert_eq!(u2.active_worker(), "make");
         assert_eq!(u2.last_note(), Some("burst overflows the bucket — bounce to make"));
+    }
+
+    #[test]
+    fn quality_gate_record_satisfies_on_pass_and_defers_blocked_to_ci() {
+        use darkrun_core::domain::QualityGate;
+        let (_d, store) = store1();
+        let mut u = create(&store, "r", "u1", "build", None, vec![]).unwrap();
+        u.frontmatter.quality_gates = vec![
+            QualityGate { name: "tests".into(), command: "cargo test".into() },
+            QualityGate { name: "lint".into(), command: "cargo clippy".into() },
+        ];
+        store.write_unit("r", &u).unwrap();
+
+        // Unsatisfied until both gates land.
+        assert!(!store.read_unit("r", "u1").unwrap().gates_satisfied());
+        record_gate_result(&store, "r", "u1", "tests", GateStatus::Pass, None).unwrap();
+        assert!(!store.read_unit("r", "u1").unwrap().gates_satisfied());
+
+        // lint is env-blocked: first block holds; second auto-defers to CI.
+        record_gate_result(&store, "r", "u1", "lint", GateStatus::EnvBlocked, Some("no toolchain".into())).unwrap();
+        assert!(!store.read_unit("r", "u1").unwrap().gates_satisfied());
+        let after = record_gate_result(&store, "r", "u1", "lint", GateStatus::EnvBlocked, None).unwrap();
+        // Both now satisfied (tests=pass, lint=deferred_to_ci).
+        assert!(after.gates_satisfied());
+        let lint = after.frontmatter.gate_results.iter().find(|r| r.name == "lint").unwrap();
+        assert_eq!(lint.status, GateStatus::DeferredToCi);
+        assert_eq!(lint.attempts, 2);
+    }
+
+    #[test]
+    fn quality_gate_fail_holds_the_unit() {
+        use darkrun_core::domain::QualityGate;
+        let (_d, store) = store1();
+        let mut u = create(&store, "r", "u1", "build", None, vec![]).unwrap();
+        u.frontmatter.quality_gates = vec![QualityGate { name: "tests".into(), command: "t".into() }];
+        store.write_unit("r", &u).unwrap();
+        let after = record_gate_result(&store, "r", "u1", "tests", GateStatus::Fail, None).unwrap();
+        assert!(!after.gates_satisfied());
+        assert_eq!(after.unsatisfied_gates(), vec!["tests"]);
     }
 
     #[test]

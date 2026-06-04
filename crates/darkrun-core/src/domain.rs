@@ -404,6 +404,55 @@ pub struct Stamp {
     pub at: String,
 }
 
+/// A declared quality gate on a Unit — an objective check the unit's work must
+/// pass before it can leave Manufacture. The *command* is project-specific
+/// (`cargo test`, `npm run lint`) and supplied at decomposition by the agent who
+/// knows the project; the engine doesn't run it (the agent does, it has a shell)
+/// — the engine **records and enforces** the result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct QualityGate {
+    /// Short name (e.g. `tests`, `lint`, `types`).
+    pub name: String,
+    /// The command that runs the check.
+    #[serde(default)]
+    pub command: String,
+}
+
+/// The outcome of running a quality gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GateStatus {
+    /// The check ran and passed.
+    Pass,
+    /// The check ran and failed — blocks Audit until fixed.
+    Fail,
+    /// The check could not run (a dependency was unavailable — DB down, tool
+    /// absent). Not a failure of the work; doesn't stamp a pass, but after
+    /// repeated env-blocks the gate may be deferred to CI rather than wedge.
+    EnvBlocked,
+    /// The check is delegated to CI (authoritative on the change request) after
+    /// it could not converge locally. Satisfies the gate so the run can advance.
+    DeferredToCi,
+}
+
+/// A recorded quality-gate result on a Unit — what happened when the gate ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GateResult {
+    /// The gate name this result is for.
+    pub name: String,
+    /// The outcome.
+    pub status: GateStatus,
+    /// RFC3339 timestamp the result was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// How many times this gate has been recorded (drives defer-to-CI).
+    #[serde(default)]
+    pub attempts: u32,
+    /// Optional detail (failure output tail, the blocked dependency).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// Frontmatter for a Unit document (`.darkrun/<run>/stations/<station>/units/<slug>.md`).
 ///
 /// Carries the unit's passes, its worker assignment, its station, and — the
@@ -467,6 +516,14 @@ pub struct UnitFrontmatter {
     /// was signed over; a changed witness re-opens that slot. Engine-managed.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub input_witnesses: std::collections::BTreeMap<String, String>,
+    /// Objective quality gates this unit must pass before leaving Manufacture —
+    /// declared by the agent at decomposition (the commands are project-specific).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quality_gates: Vec<QualityGate>,
+    /// Recorded gate results, keyed by gate name. A declared gate is *satisfied*
+    /// when its result is `Pass` or `DeferredToCi`. Engine-recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_results: Vec<GateResult>,
 }
 
 /// A parsed Unit document: frontmatter + markdown body.
@@ -520,6 +577,34 @@ impl Unit {
             .iter()
             .rev()
             .find_map(|it| it.note.as_deref())
+    }
+
+    /// Whether every declared quality gate is **satisfied** — each has a recorded
+    /// result of `Pass` or `DeferredToCi`. A unit with no declared gates is
+    /// trivially satisfied. The Audit gate holds until this is true.
+    pub fn gates_satisfied(&self) -> bool {
+        self.frontmatter.quality_gates.iter().all(|g| {
+            self.frontmatter.gate_results.iter().any(|r| {
+                r.name == g.name
+                    && matches!(r.status, GateStatus::Pass | GateStatus::DeferredToCi)
+            })
+        })
+    }
+
+    /// The names of declared gates that are not yet satisfied (failing, blocked,
+    /// or never recorded) — what the agent still owes before Audit.
+    pub fn unsatisfied_gates(&self) -> Vec<&str> {
+        self.frontmatter
+            .quality_gates
+            .iter()
+            .filter(|g| {
+                !self.frontmatter.gate_results.iter().any(|r| {
+                    r.name == g.name
+                        && matches!(r.status, GateStatus::Pass | GateStatus::DeferredToCi)
+                })
+            })
+            .map(|g| g.name.as_str())
+            .collect()
     }
 }
 
