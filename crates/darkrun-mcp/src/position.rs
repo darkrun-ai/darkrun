@@ -330,6 +330,12 @@ pub struct PromptContext {
     /// the Review/Audit prompt frames each reviewer's dispute stance from this.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub interpretations: std::collections::BTreeMap<String, String>,
+    /// True when this Spec tick is in a collaborative mode and the operator has
+    /// not yet been involved (no `elaborate_seal`). The Spec prompt uses it to
+    /// require operator collaboration before the spec locks — the backpressure
+    /// that stops the agent authoring solo and skipping the human.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub needs_collaboration: bool,
     /// The wave-ready / on-record unit slugs for this action.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub units: Vec<String>,
@@ -659,6 +665,33 @@ pub fn resolve_discrete(mode: &str) -> DiscreteMode {
         "discrete_hybrid" => DiscreteMode::Hybrid,
         _ => DiscreteMode::Off,
     }
+}
+
+/// Mark a station's Spec as elaborated-with-the-operator, clearing the
+/// collaboration hold so the Spec phase can advance to Review. Idempotent.
+pub fn elaborate_seal(store: &StateStore, slug: &str, station: &str) -> Result<()> {
+    let mut state = store
+        .read_state(slug)?
+        .ok_or_else(|| McpError::Core(darkrun_core::CoreError::RunNotFound(slug.to_string())))?;
+    match state.stations.get_mut(station) {
+        Some(st) => st.elaborated = true,
+        None => {
+            return Err(McpError::InvalidInput(format!(
+                "station `{station}` is not active; cannot seal elaboration"
+            )))
+        }
+    }
+    store.write_state(slug, &state)?;
+    Ok(())
+}
+
+/// Whether a run mode wants the operator in the loop during elaboration. The
+/// autonomous modes — `autopilot` (runs unattended) and `quick` (a fast
+/// right-sized pass) — skip the Spec collaboration gate; everything else
+/// (continuous / discrete / discrete-hybrid) holds for it.
+pub fn collaborative_mode(mode: &str) -> bool {
+    let m = mode.trim().to_ascii_lowercase();
+    !(m.contains("auto") || m == "quick")
 }
 
 /// Resolve a station's EFFECTIVE Checkpoint kind for a run — the single place
@@ -1361,6 +1394,21 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
                 })
                 .collect();
         }
+        RunAction::Spec { station: sstation, .. } => {
+            // Collaboration backpressure flag: collaborative mode + the station's
+            // Spec not yet elaborated with the operator.
+            if let Ok(run) = store.read_run(slug) {
+                if collaborative_mode(&run.frontmatter.mode) {
+                    let elaborated = store
+                        .read_state(slug)
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.stations.get(sstation).map(|st| st.elaborated))
+                        .unwrap_or(false);
+                    ctx.needs_collaboration = !elaborated;
+                }
+            }
+        }
         RunAction::Checkpoint { kind, .. } => {
             ctx.kind = Some(*kind);
         }
@@ -1709,6 +1757,13 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
                 entered_station = Some(station.clone());
             }
             st.status = Status::InProgress;
+            // Collaboration backpressure (C1) currently runs at the PROMPT level:
+            // in collaborative modes the Spec prompt requires the operator be
+            // involved + `darkrun_elaborate_seal` (see `needs_collaboration`). A
+            // HARD engine hold here — `if collaborative && !st.elaborated { stay
+            // in Spec }` — is the faithful predecessor backpressure, but it
+            // reshapes the linear phase machine; left gated on an operator
+            // decision (it changes continuous-mode semantics + the test suite).
             st.phase = StationPhase::Review;
             if st.started_at.is_none() {
                 st.started_at = Some(now.clone());
@@ -1858,6 +1913,7 @@ fn ensure_station<'a>(
                 station: station.to_string(),
                 status: Status::Pending,
                 phase: StationPhase::Spec,
+                elaborated: false,
                 checkpoint: Some(Checkpoint {
                     kind: def.checkpoint,
                     entered_at: None,

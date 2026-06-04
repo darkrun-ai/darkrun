@@ -99,6 +99,7 @@ fn at_phase(store: &StateStore, run: &str, target: &str, phase: StationPhase) {
                 station: station.to_string(),
                 status: Status::Completed,
                 phase: StationPhase::Checkpoint,
+            elaborated: false,
                 checkpoint: Some(darkrun_core::domain::Checkpoint {
                     kind: def.checkpoint,
                     entered_at: None,
@@ -118,6 +119,7 @@ fn at_phase(store: &StateStore, run: &str, target: &str, phase: StationPhase) {
             station: target.to_string(),
             status: Status::InProgress,
             phase,
+            elaborated: false,
             checkpoint: Some(darkrun_core::domain::Checkpoint {
                 kind: def.checkpoint,
                 entered_at: None,
@@ -480,6 +482,7 @@ fn sealed_action_renders_run_completion_prompt() {
                 station: s.name.clone(),
                 status: Status::Completed,
                 phase: StationPhase::Checkpoint,
+            elaborated: false,
                 checkpoint: None,
                 branch: None,
                 pr_ref: None,

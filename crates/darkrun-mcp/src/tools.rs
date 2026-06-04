@@ -345,6 +345,17 @@ pub struct UnitIterateInput {
     pub next_worker: Option<String>,
 }
 
+/// Input for `darkrun_elaborate_seal` — record that the operator was involved
+/// in shaping a station's spec, clearing the collaboration hold.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ElaborateSealInput {
+    /// The run slug.
+    pub slug: String,
+    /// The station whose spec was elaborated with the operator.
+    pub station: String,
+}
+
 /// Input for `darkrun_review_stamp` — a single reviewer's per-role sign-off.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -1260,6 +1271,23 @@ impl DarkrunServer {
             &store, &input.slug, &input.unit, &input.gate, status, input.detail.clone(),
         ) {
             Ok(unit) => ok_json(&unit),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Record that the operator was involved in shaping this station's spec —
+    /// clears the collaborative-mode Spec hold so the run advances to Review.
+    #[tool(
+        name = "darkrun_elaborate_seal",
+        description = "Mark a station's spec as elaborated WITH the operator. In collaborative modes the Spec phase holds until you call this — so you involve the operator (darkrun_question / darkrun_direction) in shaping the spec instead of authoring it solo and only surfacing it at the gate. Autonomous modes (autopilot/quick) don't need it."
+    )]
+    pub fn darkrun_elaborate_seal(
+        &self,
+        Parameters(input): Parameters<ElaborateSealInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let store = self.store();
+        match crate::position::elaborate_seal(&store, &input.slug, &input.station) {
+            Ok(()) => ok_json(&serde_json::json!({ "ok": true, "station": input.station })),
             Err(e) => Ok(err_text(e)),
         }
     }

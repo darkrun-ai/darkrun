@@ -586,6 +586,7 @@ mod tests {
                 station: "frame".into(),
                 status: Status::Completed,
                 phase: StationPhase::Checkpoint,
+            elaborated: false,
                 checkpoint: Some(Checkpoint {
                     kind: CheckpointKind::Ask,
                     entered_at: Some("2026-05-31T00:00:00Z".into()),
@@ -603,6 +604,7 @@ mod tests {
                 station: "specify".into(),
                 status: Status::InProgress,
                 phase: StationPhase::Manufacture,
+            elaborated: false,
                 checkpoint: None,
                 branch: None,
                 pr_ref: None,

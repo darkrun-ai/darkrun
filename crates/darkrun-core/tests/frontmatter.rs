@@ -1066,6 +1066,7 @@ fn roundtrip_station_through_envelope() {
         station: "frame".into(),
         status: Status::Active,
         phase: StationPhase::Manufacture,
+            elaborated: false,
         checkpoint: Some(Checkpoint {
             kind: CheckpointKind::Ask,
             entered_at: Some("2026-05-30T00:00:00Z".into()),
@@ -1101,6 +1102,7 @@ fn roundtrip_station_each_phase() {
             station: "s".into(),
             status: Status::Pending,
             phase,
+            elaborated: false,
             checkpoint: None,
             branch: None,
             pr_ref: None,
@@ -1126,6 +1128,7 @@ fn roundtrip_checkpoint_each_kind() {
             station: "s".into(),
             status: Status::Pending,
             phase: StationPhase::Checkpoint,
+            elaborated: false,
             checkpoint: Some(Checkpoint {
                 kind,
                 entered_at: None,
@@ -1155,6 +1158,7 @@ fn roundtrip_checkpoint_each_outcome() {
             station: "s".into(),
             status: Status::Pending,
             phase: StationPhase::Checkpoint,
+            elaborated: false,
             checkpoint: Some(Checkpoint {
                 kind: CheckpointKind::Auto,
                 entered_at: None,
@@ -1182,6 +1186,7 @@ fn roundtrip_station_skips_none_checkpoint() {
         station: "s".into(),
         status: Status::Pending,
         phase: StationPhase::Spec,
+            elaborated: false,
         checkpoint: None,
         branch: None,
         pr_ref: None,
@@ -1199,6 +1204,7 @@ fn roundtrip_station_idempotent() {
         station: "build".into(),
         status: Status::Completed,
         phase: StationPhase::Reflect,
+            elaborated: false,
         checkpoint: Some(Checkpoint {
             kind: CheckpointKind::External,
             entered_at: Some("2026-05-30T00:00:00Z".into()),
@@ -2052,6 +2058,7 @@ fn serialize_station_emits_snake_case_phase() {
         station: "s".into(),
         status: Status::Pending,
         phase: StationPhase::Manufacture,
+            elaborated: false,
         checkpoint: None,
         branch: None,
         pr_ref: None,

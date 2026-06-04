@@ -373,6 +373,7 @@ fn state_json_roundtrip() {
             station: "frame".into(),
             status: Status::Active,
             phase: StationPhase::Manufacture,
+            elaborated: false,
             checkpoint: None,
             branch: None,
             pr_ref: None,

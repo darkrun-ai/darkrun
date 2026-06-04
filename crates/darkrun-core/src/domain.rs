@@ -687,6 +687,12 @@ pub struct Station {
     pub status: Status,
     /// Current phase within the station.
     pub phase: StationPhase,
+    /// Whether the station's Spec has been **elaborated with the operator** — set
+    /// by `darkrun_elaborate_seal` once the agent has involved the operator in
+    /// shaping the spec. In collaborative modes the Spec phase holds until this
+    /// is true (collaboration backpressure); autonomous modes skip it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub elaborated: bool,
     /// The checkpoint gating this station.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<Checkpoint>,

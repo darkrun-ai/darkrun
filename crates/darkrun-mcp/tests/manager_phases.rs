@@ -201,6 +201,7 @@ fn advance_to_station(store: &StateStore, run: &str, target: &str) {
             station: target.to_string(),
             status: Status::Pending,
             phase: StationPhase::Spec,
+            elaborated: false,
             checkpoint: Some(darkrun_core::domain::Checkpoint {
                 kind: def.checkpoint,
                 entered_at: None,
@@ -769,6 +770,7 @@ fn sealed_action_carries_run_slug() {
                 station: s.name.clone(),
                 status: Status::Completed,
                 phase: StationPhase::Checkpoint,
+            elaborated: false,
                 checkpoint: None,
                 branch: None,
                 pr_ref: None,

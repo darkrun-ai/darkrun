@@ -1993,6 +1993,7 @@ fn sample_station() -> Station {
         station: "build".into(),
         status: Status::Active,
         phase: StationPhase::Manufacture,
+            elaborated: false,
         checkpoint: None,
         branch: None,
         pr_ref: None,
@@ -2062,6 +2063,7 @@ fn station_full_roundtrips() {
         station: "frame".into(),
         status: Status::Completed,
         phase: StationPhase::Checkpoint,
+            elaborated: false,
         checkpoint: Some(Checkpoint {
             kind: CheckpointKind::Auto,
             entered_at: Some("t1".into()),
@@ -2133,6 +2135,7 @@ fn station_yaml_roundtrips() {
         station: "audit".into(),
         status: Status::Blocked,
         phase: StationPhase::Audit,
+            elaborated: false,
         checkpoint: None,
         branch: None,
         pr_ref: None,
@@ -2497,6 +2500,7 @@ fn double_roundtrip_is_idempotent_for_station() {
         station: "build".into(),
         status: Status::Active,
         phase: StationPhase::Reflect,
+            elaborated: false,
         checkpoint: Some(Checkpoint {
             kind: CheckpointKind::External,
             entered_at: Some("t".into()),
@@ -2890,6 +2894,7 @@ fn station_with_each_checkpoint_kind_roundtrips() {
             station: "s".into(),
             status: Status::Active,
             phase: StationPhase::Checkpoint,
+            elaborated: false,
             checkpoint: Some(Checkpoint {
                 kind,
                 entered_at: None,
