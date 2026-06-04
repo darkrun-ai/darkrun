@@ -40,9 +40,10 @@ all of G. A few are deliberate design differences rather than gaps — see notes
   `darkrun_quality_gate_record` stamps results; Audit holds on `gates_unmet`;
   env-block auto-defers to CI. A "passed Audit" is now backed by recorded gates.
 - ✅ **E2 — reviewer interpretation (lens/strict). DONE.**
-- **Remaining content batch — E4 `run_quality_gates`, E5 structured inputs,
-  E6 `applies_to`, plus E3 (reject-routing to a build worker) and E7 (compound
-  gates) — the last two need a small cursor change.** Low-to-moderate risk.
+- **Remaining content batch — E5 structured inputs, E6 `applies_to`, plus E3
+  (reject-routing to a build worker) and E7 (compound gates) — the last two need a
+  small cursor change.** Low-to-moderate risk. (E4 `run_quality_gates` is now
+  redundant: D1's Audit gate already forces gate recording.)
 - **C4/C5 — run-level review + mode shaping.** The roles are already declared;
   wire a run-level review gate into the walk. Moderate.
 

@@ -290,8 +290,8 @@
           <td class="rec"><span class="k k-do">do · 2nd</span>Content batch — adds reject-routing to the nearest build worker.</td></tr>
       <tr><td class="gap"><span class="code">run_quality_gates</span></td>
           <td class="pred">auto-test-and-reject</td>
-          <td class="dr"><span class="pill missing">missing</span></td>
-          <td class="rec"><span class="k k-do">do · 2nd</span>Content batch — pairs naturally with D1.</td></tr>
+          <td class="dr"><span class="pill missing">n/a</span></td>
+          <td class="rec"><span class="k k-skip">skip</span>Largely subsumed by D1 — the Audit gate already forces every declared gate to be recorded before the station advances. A per-worker "run gates now" flag is marginal; build only if a worker needs to gate mid-loop rather than at Audit.</td></tr>
       <tr><td class="gap">Structured inputs</td>
           <td class="pred"><span class="code">[{stage, output}]</span> + include</td>
           <td class="dr"><span class="pill partial">flat names</span></td>
@@ -371,9 +371,9 @@
 <div class="matter">
   <h3>the recommendation, honestly</h3>
   <p><b>Update:</b> D1 (quality-gate execution) and E2 (reviewer interpretation) are now <span class="k k-done">done</span>.
-  What's left worth building: the rest of the content-model batch — E4 (run_quality_gates), E5 (structured inputs),
-  E6 (applies_to), and the two that need a small cursor change, E3 (reject-routing to a build worker) and E7 (compound
-  gates) — then the run-level review wiring (C4/C5). After that the ledger is, in my honest read, <em>done enough</em>.</p>
+  What's left worth building: E5 (structured inputs), E6 (applies_to), and the two that need a small cursor change —
+  E3 (reject-routing to a build worker) and E7 (compound gates) — then the run-level review wiring (C4/C5). E4 is now
+  redundant (D1's Audit gate already forces gate recording). After those, the ledger is, in my honest read, <em>done enough</em>.</p>
   <p><b>What I'd argue against building</b> (the <span class="k k-skip">skip</span> rows): C1 multi-signal elaborate,
   B5 verifier nonce, B7 dispatch leases, B9 fix-chain worktrees, D4 coverage ack, F2 human_write, F4 review_stamp,
   F5 presence grace, G3 clarifications, G5 persisted sessions. Each solves a problem darkrun either doesn't have or
