@@ -33,6 +33,8 @@ Some reviewers carry a declared **posture** — honour it when you frame their p
 - Are the Units genuinely independent, or will they collide during manufacture?
 - Is anything load-bearing left unstated?
 
+**Dispatch the reviewers in parallel** — one subagent each, fanned out concurrently, not one-after-another. They share no state and each owns a different lens, so they run independently. When a reviewer is satisfied it records its own sign-off with **`darkrun_review_stamp`** (`kind: review`, its `role`) — that stamps only its role and returns without advancing the run, so parallel reviewers never contend on the tick. A reviewer that finds a real problem files it with `darkrun_feedback_create` (origin `adversarial_review`) **instead of** stamping. You call `darkrun_tick` once, after every reviewer has returned.
+
 **A reviewer reviews — it does not redesign.** Each reviewer MUST NOT propose new requirements outside the spec's stated intent, MUST NOT substitute its own approach or relitigate a settled tradeoff, and MUST NOT block on stylistic preference. It finds where the spec fails *its own* goal and files exactly that — nothing more.
 
 {% if units %}

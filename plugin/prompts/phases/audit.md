@@ -14,12 +14,14 @@ Audit walks two beats, in order:
 
 ### 1. spec — verify against the locked spec
 
-Dispatch each reviewer{% if reviewers %} ({% for r in reviewers %}`{{ r }}`{% if not loop.last %}, {% endif %}{% endfor %}){% endif %} over the manufactured output. For each:
+Dispatch the reviewers{% if reviewers %} ({% for r in reviewers %}`{{ r }}`{% if not loop.last %}, {% endif %}{% endfor %}){% endif %} **in parallel** — one subagent each, concurrently — over the manufactured output. Each asks:
 
 - Does the output meet every Unit's **completion criteria** — not approximately, exactly?
 - Did manufacture drift from the locked spec? Any silent scope creep?
 - Does the combined output actually eliminate **{{ kills }}**?
 - Is anything fragile, unhandled, or quietly broken?
+
+When a reviewer clears, it records its own approval with **`darkrun_review_stamp`** (`kind: approval`, its `role`) — stamping only its role without advancing the run, so the parallel pass never contends on the tick. A reviewer that finds a real problem files it with `darkrun_feedback_create` **instead of** stamping. You `darkrun_tick` once, after every reviewer returns.
 
 **A reviewer verifies — it does not rebuild.** Each reviewer MUST NOT propose new requirements beyond the Unit's completion criteria, MUST NOT redesign the output or reopen the locked spec, and MUST NOT flag stylistic preference. It checks the output against the criteria and files what genuinely fails — nothing more.
 

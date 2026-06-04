@@ -345,6 +345,20 @@ pub struct UnitIterateInput {
     pub next_worker: Option<String>,
 }
 
+/// Input for `darkrun_review_stamp` — a single reviewer's per-role sign-off.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ReviewStampInput {
+    /// The run slug.
+    pub slug: String,
+    /// The station whose units this reviewer signs.
+    pub station: String,
+    /// The reviewer role being stamped (e.g. `correctness`, `spec`).
+    pub role: String,
+    /// `review` (pre-execute spec sign-off) or `approval` (post-execute output).
+    pub kind: String,
+}
+
 /// Input for `darkrun_quality_gate_record` — record one gate's result on a unit.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -1246,6 +1260,45 @@ impl DarkrunServer {
             &store, &input.slug, &input.unit, &input.gate, status, input.detail.clone(),
         ) {
             Ok(unit) => ok_json(&unit),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Stamp one reviewer's per-role sign-off across a station's units, WITHOUT
+    /// walking the cursor — so parallel reviewers each close their own role
+    /// concurrently and the parent ticks once.
+    #[tool(
+        name = "darkrun_review_stamp",
+        description = "Record ONE reviewer role's sign-off (review|approval) across a station's units without advancing the run — the parallel-safe close for a fanned-out reviewer subagent. A station with an open finding is skipped (file the finding instead of stamping). The parent calls darkrun_tick once after all reviewers return."
+    )]
+    pub fn darkrun_review_stamp(
+        &self,
+        Parameters(input): Parameters<ReviewStampInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let kind = match input.kind.trim().to_ascii_lowercase().as_str() {
+            "review" => units::StampKind::Review,
+            "approval" => units::StampKind::Approval,
+            other => return Ok(err_text(format!("invalid kind `{other}` (want review|approval)"))),
+        };
+        let store = self.store();
+        // Stations carrying an open (non-terminal) finding are not signed off.
+        let open_stations: Vec<String> = match feedback::list(&store, &input.slug) {
+            Ok(items) => items
+                .into_iter()
+                .filter(|f| !feedback::is_terminal(f.status))
+                .map(|f| f.station)
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        match units::stamp_role(
+            &store, &input.slug, &input.station, &input.role, kind, &open_stations,
+        ) {
+            Ok(outcome) => ok_json(&serde_json::json!({
+                "role": input.role,
+                "kind": input.kind,
+                "stamped": outcome.stamped,
+                "skipped": outcome.skipped,
+            })),
             Err(e) => Ok(err_text(e)),
         }
     }

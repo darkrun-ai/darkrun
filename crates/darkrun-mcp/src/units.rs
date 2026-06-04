@@ -12,11 +12,20 @@
 
 use chrono::Utc;
 use darkrun_core::domain::{
-    GateResult, GateStatus, IterationResult, Status, Unit, UnitFrontmatter, UnitIteration,
+    GateResult, GateStatus, IterationResult, Stamp, Status, Unit, UnitFrontmatter, UnitIteration,
 };
 use darkrun_core::StateStore;
 
 use crate::error::{McpError, Result};
+
+/// Which stamp map a per-role sign-off writes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampKind {
+    /// PRE-execute spec review (`reviews` map).
+    Review,
+    /// POST-execute output approval (`approvals` map).
+    Approval,
+}
 
 /// After this many env-blocked recordings, a gate is auto-deferred to CI rather
 /// than wedging the run — CI is authoritative on the change request.
@@ -217,6 +226,57 @@ pub fn record_gate_result(
     Ok(unit)
 }
 
+/// The outcome of stamping a review/approval role across a station's units.
+#[derive(Debug, Clone, Default)]
+pub struct StampOutcome {
+    /// Unit slugs stamped this call.
+    pub stamped: Vec<String>,
+    /// Unit slugs skipped because the reviewer left an open finding on them —
+    /// an open finding for this role means the work isn't signed off yet.
+    pub skipped: Vec<String>,
+}
+
+/// Stamp one review/approval `role` across the given station's units — the
+/// **parallel-safe** per-role sign-off. This writes only the one role's stamp
+/// and returns; it does **not** walk the cursor, so N reviewer subagents can
+/// each stamp their own role concurrently without contending on the tick or
+/// tripping the deadlock guard. The parent ticks once after the wave closes.
+///
+/// A unit with an open feedback finding targeting this `station` is **skipped**
+/// (its work isn't signed) — the reviewer should file the finding, not stamp.
+pub fn stamp_role(
+    store: &StateStore,
+    run: &str,
+    station: &str,
+    role: &str,
+    kind: StampKind,
+    open_feedback_stations: &[String],
+) -> Result<StampOutcome> {
+    if role.trim().is_empty() {
+        return Err(McpError::InvalidInput("review role must not be empty".into()));
+    }
+    let station_has_open_finding = open_feedback_stations.iter().any(|s| s == station);
+    let now = Utc::now().to_rfc3339();
+    let mut outcome = StampOutcome::default();
+    for mut unit in store.read_units(run)? {
+        if unit.station() != station {
+            continue;
+        }
+        if station_has_open_finding {
+            outcome.skipped.push(unit.slug.clone());
+            continue;
+        }
+        let map = match kind {
+            StampKind::Review => &mut unit.frontmatter.reviews,
+            StampKind::Approval => &mut unit.frontmatter.approvals,
+        };
+        map.insert(role.to_string(), Some(Stamp { at: now.clone() }));
+        store.write_unit(run, &unit)?;
+        outcome.stamped.push(unit.slug.clone());
+    }
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +449,32 @@ mod tests {
         let after = record_gate_result(&store, "r", "u1", "tests", GateStatus::Fail, None).unwrap();
         assert!(!after.gates_satisfied());
         assert_eq!(after.unsatisfied_gates(), vec!["tests"]);
+    }
+
+    #[test]
+    fn stamp_role_signs_station_units_and_skips_open_findings() {
+        let (_d, store) = store1();
+        create(&store, "r", "u1", "build", None, vec![]).unwrap();
+        create(&store, "r", "u2", "build", None, vec![]).unwrap();
+        create(&store, "r", "other", "frame", None, vec![]).unwrap();
+
+        // No open findings → both build units get the correctness review stamp;
+        // the frame unit is untouched.
+        let out = stamp_role(&store, "r", "build", "correctness", StampKind::Review, &[]).unwrap();
+        assert_eq!(out.stamped.len(), 2);
+        assert!(out.skipped.is_empty());
+        let u1 = store.read_unit("r", "u1").unwrap();
+        assert!(matches!(u1.frontmatter.reviews.get("correctness"), Some(Some(_))));
+        assert!(store.read_unit("r", "other").unwrap().frontmatter.reviews.is_empty());
+
+        // An open finding on the station → its units are skipped, not stamped.
+        let out2 = stamp_role(
+            &store, "r", "build", "maintainability", StampKind::Approval,
+            &["build".to_string()],
+        )
+        .unwrap();
+        assert!(out2.stamped.is_empty());
+        assert_eq!(out2.skipped.len(), 2);
     }
 
     #[test]
