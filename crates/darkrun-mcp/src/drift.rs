@@ -580,4 +580,45 @@ mod tests {
         );
         std::env::remove_var("DARKRUN_DRIFT_CASCADE_CAP");
     }
+
+    #[test]
+    fn rebaseline_all_rewitnesses_and_closes_open_drift() {
+        let (_d, store, root) = store();
+        std::fs::write(root.join("design.md"), b"v1").unwrap();
+        store.write_unit("r", &unit("u-build", "build", &["design.md"], &["code"])).unwrap();
+        record_station_witnesses(&store, "r", "build").unwrap();
+        // Drift it.
+        std::fs::write(root.join("design.md"), b"v2").unwrap();
+        sweep(&store, "r").unwrap();
+        assert_eq!(open_drift_bodies(&store, "r").len(), 1);
+
+        // rebaseline_all re-witnesses every premise and closes the drift.
+        let n = rebaseline_all(&store, "r").unwrap();
+        assert!(n >= 1, "re-witnessed at least one premise");
+        assert_eq!(open_drift_bodies(&store, "r").len(), 0, "drift closed by rebaseline");
+        // Steady again: the witness now matches the current content.
+        sweep(&store, "r").unwrap();
+        assert_eq!(open_drift_bodies(&store, "r").len(), 0);
+    }
+
+    #[test]
+    fn a_deleted_premise_files_a_deleted_drift_and_drops_the_witness() {
+        let (_d, store, root) = store();
+        std::fs::write(root.join("design.md"), b"v1").unwrap();
+        store.write_unit("r", &unit("u-build", "build", &["design.md"], &["code"])).unwrap();
+        record_station_witnesses(&store, "r", "build").unwrap();
+        // Delete the premise → one drift, witness dropped so it can't re-fire.
+        std::fs::remove_file(root.join("design.md")).unwrap();
+        sweep(&store, "r").unwrap();
+        assert_eq!(open_drift_bodies(&store, "r").len(), 1);
+        assert!(open_drift_bodies(&store, "r")[0].contains("design.md"));
+        sweep(&store, "r").unwrap();
+        assert_eq!(open_drift_bodies(&store, "r").len(), 1, "deleted-premise drift fires once");
+    }
+
+    #[test]
+    fn premise_drift_labels() {
+        assert_eq!(PremiseDrift::Mutated.as_str(), "mutated");
+        assert_eq!(PremiseDrift::Deleted.as_str(), "deleted");
+    }
 }
