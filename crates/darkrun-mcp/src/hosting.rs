@@ -34,6 +34,26 @@ pub struct OpenRequest {
     pub body: String,
 }
 
+/// A human's review note pulled back off an opened change request — a PR/MR
+/// comment or a review verdict. C6 turns each of these into darkrun feedback the
+/// fix track addresses, so a reviewer's "please change X" on the PR re-enters the
+/// run as work rather than dying on the remote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComment {
+    /// A provider-stable id for this note (GitHub node id / GitLab note id),
+    /// prefixed by kind (`c<id>` issue comment, `r<id>` review). Drives dedup:
+    /// the feedback minted from it carries a deterministic id derived from this,
+    /// so re-polling the same PR never double-files.
+    pub id: String,
+    /// The note author's handle (for the feedback body's provenance line).
+    pub author: String,
+    /// The note's markdown text.
+    pub body: String,
+    /// Whether this note is a **change request** (a GitHub `CHANGES_REQUESTED`
+    /// review) — filed as a blocker, versus a plain comment filed as medium.
+    pub change_request: bool,
+}
+
 /// The merge state of an opened change request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeState {
@@ -78,6 +98,15 @@ pub trait Hosting {
     /// (no-op) so a client that can't comment simply skips the upload.
     fn comment(&self, _pr_ref: &str, _body: &str) -> bool {
         false
+    }
+
+    /// Pull the human review notes off `pr_ref` — PR/MR comments and review
+    /// verdicts (C6). The discrete poll files each NEW one as `external`-origin
+    /// feedback the fix track addresses, so a reviewer's change-request on the
+    /// remote re-enters the run as work. Defaults to empty (best-effort) so a
+    /// client that can't fetch simply surfaces no remote feedback.
+    fn review_comments(&self, _pr_ref: &str) -> Vec<ReviewComment> {
+        Vec::new()
     }
 }
 
@@ -245,6 +274,165 @@ impl Hosting for CliHosting {
             Provider::None => false,
         }
     }
+
+    fn review_comments(&self, pr_ref: &str) -> Vec<ReviewComment> {
+        match self.provider {
+            Provider::GitHub => {
+                // `gh pr view <ref> --json comments,reviews` → issue comments +
+                // review verdicts (with `state`). Both carry a stable node `id`.
+                match self.run("gh", &["pr", "view", pr_ref, "--json", "comments,reviews"]) {
+                    Some(json) => parse_github_review_comments(&json),
+                    None => Vec::new(),
+                }
+            }
+            Provider::GitLab => {
+                // `glab mr view <ref> -F json` carries the MR's notes when the
+                // provider includes them; parse defensively (best-effort).
+                match self.run("glab", &["mr", "view", pr_ref, "-F", "json"]) {
+                    Some(json) => parse_gitlab_notes(&json),
+                    None => Vec::new(),
+                }
+            }
+            Provider::None => Vec::new(),
+        }
+    }
+}
+
+/// Render a JSON value's `id` field as a stable string (GitHub uses string node
+/// ids, GitLab uses integer note ids — accept either).
+fn json_id(v: &serde_json::Value) -> Option<String> {
+    match v.get("id")? {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Parse `gh pr view --json comments,reviews` into review notes (C6).
+///
+/// Issue `comments[]` become plain comments (`c<id>`); `reviews[]` become notes
+/// keyed `r<id>`, with `CHANGES_REQUESTED` flagged as a change request and
+/// `APPROVED`/`DISMISSED`/`PENDING` reviews with an empty body skipped (no
+/// actionable content — an approval isn't work).
+fn parse_github_review_comments(json: &str) -> Vec<ReviewComment> {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    if let Some(comments) = root.get("comments").and_then(|v| v.as_array()) {
+        for c in comments {
+            let (Some(id), Some(body)) = (json_id(c), c.get("body").and_then(|b| b.as_str()))
+            else {
+                continue;
+            };
+            if body.trim().is_empty() {
+                continue;
+            }
+            out.push(ReviewComment {
+                id: format!("c{id}"),
+                author: github_author(c),
+                body: body.to_string(),
+                change_request: false,
+            });
+        }
+    }
+
+    if let Some(reviews) = root.get("reviews").and_then(|v| v.as_array()) {
+        for r in reviews {
+            let Some(id) = json_id(r) else { continue };
+            let state = r
+                .get("state")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            let body = r.get("body").and_then(|b| b.as_str()).unwrap_or("");
+            let is_change = state == "CHANGES_REQUESTED";
+            // An approval / dismissal / empty comment carries no work — skip it.
+            // A change request with no body still files (the verdict IS the ask).
+            if body.trim().is_empty() && !is_change {
+                continue;
+            }
+            let text = if body.trim().is_empty() {
+                "Reviewer requested changes (no inline summary).".to_string()
+            } else {
+                body.to_string()
+            };
+            out.push(ReviewComment {
+                id: format!("r{id}"),
+                author: github_author(r),
+                body: text,
+                change_request: is_change,
+            });
+        }
+    }
+
+    out
+}
+
+/// Pull `author.login` from a GitHub comment/review object (default `unknown`).
+fn github_author(v: &serde_json::Value) -> String {
+    v.get("author")
+        .and_then(|a| a.get("login"))
+        .and_then(|l| l.as_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Parse GitLab MR notes out of `glab mr view -F json` (best-effort).
+///
+/// glab capitalizes struct fields (`Notes`); accept either case. System notes
+/// (state changes, label edits) carry `system: true` and are skipped — only a
+/// human's discussion becomes feedback. GitLab has no per-note "changes
+/// requested" verdict, so every human note files as a plain comment.
+fn parse_gitlab_notes(json: &str) -> Vec<ReviewComment> {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let notes = root
+        .get("Notes")
+        .or_else(|| root.get("notes"))
+        .and_then(|v| v.as_array());
+    let Some(notes) = notes else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for n in notes {
+        // Skip system notes (automated activity, not a human comment).
+        let system = n
+            .get("system")
+            .or_else(|| n.get("System"))
+            .and_then(|s| s.as_bool())
+            .unwrap_or(false);
+        if system {
+            continue;
+        }
+        let (Some(id), Some(body)) = (
+            json_id(n),
+            n.get("body")
+                .or_else(|| n.get("Body"))
+                .and_then(|b| b.as_str()),
+        ) else {
+            continue;
+        };
+        if body.trim().is_empty() {
+            continue;
+        }
+        let author = n
+            .get("author")
+            .or_else(|| n.get("Author"))
+            .and_then(|a| a.get("username").or_else(|| a.get("Username")))
+            .and_then(|u| u.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        out.push(ReviewComment {
+            id: format!("c{id}"),
+            author,
+            body: body.to_string(),
+            change_request: false,
+        });
+    }
+    out
 }
 
 /// Extract a top-level boolean `field` from a flat JSON object body. `None` when
@@ -435,6 +623,66 @@ mod tests {
         assert_eq!(parse_gitlab_state(r#"{"state":"merged"}"#), MergeState::Merged);
         assert_eq!(parse_gitlab_state(r#"{"state":"opened"}"#), MergeState::Open);
         assert_eq!(parse_gitlab_state(r#"{"state":"closed"}"#), MergeState::Closed);
+    }
+
+    #[test]
+    fn github_review_comments_split_change_requests_from_comments() {
+        let json = r#"{
+            "comments": [
+                {"id": "IC_1", "author": {"login": "bob"}, "body": "nit: rename this"},
+                {"id": "IC_2", "author": {"login": "x"}, "body": "   "}
+            ],
+            "reviews": [
+                {"id": "PRR_9", "author": {"login": "alice"}, "body": "needs a metric", "state": "CHANGES_REQUESTED"},
+                {"id": "PRR_8", "author": {"login": "carol"}, "body": "", "state": "APPROVED"},
+                {"id": "PRR_7", "author": {"login": "dave"}, "body": "", "state": "CHANGES_REQUESTED"}
+            ]
+        }"#;
+        let got = parse_github_review_comments(json);
+        // The empty issue comment and the empty APPROVED review are dropped; the
+        // two change requests + the one real comment survive.
+        assert_eq!(got.len(), 3, "got {got:?}");
+        let cr = got.iter().find(|c| c.id == "rPRR_9").unwrap();
+        assert!(cr.change_request);
+        assert_eq!(cr.author, "alice");
+        assert_eq!(cr.body, "needs a metric");
+        // An empty-body change request still files, with a synthetic ask.
+        let empty_cr = got.iter().find(|c| c.id == "rPRR_7").unwrap();
+        assert!(empty_cr.change_request);
+        assert!(empty_cr.body.contains("requested changes"));
+        // The issue comment is keyed `c<id>` and not a change request.
+        let comment = got.iter().find(|c| c.id == "cIC_1").unwrap();
+        assert!(!comment.change_request);
+        // The APPROVED review with no body contributes nothing.
+        assert!(got.iter().all(|c| c.id != "rPRR_8"));
+    }
+
+    #[test]
+    fn github_review_comments_empty_on_garbage() {
+        assert!(parse_github_review_comments("not json").is_empty());
+        assert!(parse_github_review_comments("{}").is_empty());
+    }
+
+    #[test]
+    fn gitlab_notes_skip_system_and_capitalize_either_case() {
+        let json = r#"{
+            "Notes": [
+                {"id": 11, "system": true, "body": "changed the description", "author": {"username": "gitbot"}},
+                {"id": 12, "system": false, "body": "please add a test", "author": {"username": "erin"}},
+                {"id": 13, "system": false, "body": "  ", "author": {"username": "x"}}
+            ]
+        }"#;
+        let got = parse_gitlab_notes(json);
+        assert_eq!(got.len(), 1, "only the one human, non-empty note survives: {got:?}");
+        assert_eq!(got[0].id, "c12");
+        assert_eq!(got[0].author, "erin");
+        assert!(!got[0].change_request, "gitlab notes file as plain comments");
+    }
+
+    #[test]
+    fn gitlab_notes_empty_when_absent() {
+        assert!(parse_gitlab_notes(r#"{"state":"opened"}"#).is_empty());
+        assert!(parse_gitlab_notes("garbage").is_empty());
     }
 
     #[test]

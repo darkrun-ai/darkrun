@@ -306,6 +306,66 @@ pub fn create_with_origin(
     Ok(fb)
 }
 
+/// Mint feedback from a remote review note (C6), with a **deterministic** id
+/// derived from the provider note id (`fb-ext-<sanitized>`) so re-polling the
+/// same PR never double-files. Returns `Ok(None)` when a feedback with that id
+/// already exists (already ingested) or the body is empty.
+///
+/// A change request files as a `Blocker` (it gates the merge); a plain comment
+/// as `Medium`. Origin is `External`, with no `invalidates` — the human IS the
+/// external reviewer, so there's no internal stamp to re-sign; the fix track just
+/// addresses the note and closes it.
+pub fn create_external(
+    store: &StateStore,
+    run: &str,
+    station: &str,
+    external_id: &str,
+    author: &str,
+    body: &str,
+    change_request: bool,
+) -> Result<Option<Feedback>> {
+    if body.trim().is_empty() {
+        return Ok(None);
+    }
+    let id = external_feedback_id(external_id);
+    // Dedup: this note already became feedback on an earlier poll → no-op.
+    if store.read_feedback_raw(run)?.contains_key(&id) {
+        return Ok(None);
+    }
+    let severity = if change_request {
+        FeedbackSeverity::Blocker
+    } else {
+        FeedbackSeverity::Medium
+    };
+    let verb = if change_request { "requested changes" } else { "commented" };
+    let full_body = format!("**@{author}** {verb} on the change request:\n\n{}", body.trim());
+    let fb = Feedback {
+        id: id.clone(),
+        run: run.to_string(),
+        station: station.to_string(),
+        status: FeedbackStatus::Pending,
+        severity: Some(severity),
+        origin: FeedbackOrigin::External,
+        body: full_body,
+        created_at: Some(Utc::now().to_rfc3339()),
+        invalidates: vec![],
+        closure_reply: None,
+    };
+    store.write_feedback_raw(run, &id, &serialize(&fb))?;
+    Ok(Some(fb))
+}
+
+/// The deterministic feedback id for a remote review note: `fb-ext-<sanitized>`,
+/// where the provider id is reduced to a filesystem-safe `[A-Za-z0-9_-]` slug so
+/// it can be the `feedback/<id>.md` filename and the dedup key in one.
+fn external_feedback_id(external_id: &str) -> String {
+    let safe: String = external_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+        .collect();
+    format!("fb-ext-{safe}")
+}
+
 /// Close a feedback item with a resolution reply, and **invalidate** the stamps
 /// the finding undercut: every role named in `invalidates` is cleared from each
 /// of the target station's units so the gate re-fires and re-signs against the
@@ -464,6 +524,33 @@ mod tests {
         assert_eq!(a.id, "fb-01");
         assert_eq!(b.id, "fb-02");
         assert_eq!(a.status, FeedbackStatus::Pending);
+    }
+
+    #[test]
+    fn create_external_is_deterministic_and_deduped() {
+        let (_d, store) = store();
+        // First ingest of a change-request note files a blocker, external-origin,
+        // with an id derived from the provider note id.
+        let first = create_external(&store, "r", "frame", "r100", "alice", "fix the metric", true)
+            .unwrap()
+            .expect("first ingest files feedback");
+        assert_eq!(first.id, "fb-ext-r100");
+        assert_eq!(first.origin, FeedbackOrigin::External);
+        assert_eq!(first.severity, Some(FeedbackSeverity::Blocker));
+        assert!(first.body.contains("@alice") && first.body.contains("requested changes"));
+
+        // Re-ingesting the SAME note is a no-op (dedup by deterministic id).
+        let again = create_external(&store, "r", "frame", "r100", "alice", "fix the metric", true).unwrap();
+        assert!(again.is_none(), "the same note must not double-file");
+        assert_eq!(list(&store, "r").unwrap().len(), 1);
+
+        // A plain comment files as medium; an empty body is ignored.
+        let note = create_external(&store, "r", "frame", "c200", "bob", "nit", false)
+            .unwrap()
+            .expect("comment files");
+        assert_eq!(note.severity, Some(FeedbackSeverity::Medium));
+        assert!(create_external(&store, "r", "frame", "c300", "bob", "   ", false).unwrap().is_none());
+        assert_eq!(list(&store, "r").unwrap().len(), 2);
     }
 
     #[test]

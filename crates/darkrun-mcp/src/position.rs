@@ -1909,6 +1909,37 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
         // PR exists: poll it. A merge resolves the gate and advances the cursor;
         // a draft→ready transition is recorded along the way (G4).
         Some(pr_ref) => {
+            // C6: pull any human review notes off the PR and file each NEW one as
+            // `external`-origin feedback the fix track addresses — a reviewer's
+            // "please change X" on the remote re-enters the run as work. Deduped
+            // by a deterministic id, so re-polling never double-files. Best-effort:
+            // a fetch failure surfaces no feedback rather than crashing the tick.
+            for c in hosting.review_comments(&pr_ref) {
+                let _ = crate::feedback::create_external(
+                    store, slug, &station, &c.id, &c.author, &c.body, c.change_request,
+                );
+            }
+            // C6 (close the loop): once a PR has received review activity, keep
+            // origin's PR head current with any fix commits that landed on the
+            // station branch (a closed external feedback lands its fix locally via
+            // `land_fix`). Guarded so a PR that never drew a comment is never
+            // re-pushed; best-effort + NFF-recovering, a no-op when already current.
+            let has_review_activity = crate::feedback::list(store, slug)
+                .unwrap_or_default()
+                .iter()
+                .any(|f| {
+                    f.station == station
+                        && matches!(f.origin, darkrun_core::domain::FeedbackOrigin::External)
+                });
+            if has_review_activity {
+                let repo_root = cascade_repo_root(store);
+                if let Ok(git) = Git::open(&repo_root) {
+                    let head = crate::lifecycle::station_branch(slug, &station);
+                    let wt = crate::lifecycle::station_worktree_path(&repo_root, slug, &station);
+                    let from = if wt.exists() { wt } else { repo_root.clone() };
+                    let _ = crate::hosting::push_head_with_nff_recovery(&git, &from, &head);
+                }
+            }
             let now = Utc::now().to_rfc3339();
             if matches!(hosting.merge_state(&pr_ref), crate::hosting::MergeState::Merged) {
                 if let Some(st) = state.stations.get_mut(&station) {
@@ -3767,6 +3798,8 @@ mod tests {
         opened: RefCell<Vec<OpenRequest>>,
         /// Every `comment` (pr_ref, body), in call order (D5 proof upload).
         comments: RefCell<Vec<(String, String)>>,
+        /// Human review notes the PR returns on each poll (C6 ingest source).
+        notes: Vec<crate::hosting::ReviewComment>,
     }
 
     impl MockHosting {
@@ -3778,6 +3811,7 @@ mod tests {
                 draft: None,
                 opened: RefCell::new(Vec::new()),
                 comments: RefCell::new(Vec::new()),
+                notes: Vec::new(),
             }
         }
         fn unavailable() -> Self {
@@ -3788,12 +3822,20 @@ mod tests {
                 draft: None,
                 opened: RefCell::new(Vec::new()),
                 comments: RefCell::new(Vec::new()),
+                notes: Vec::new(),
             }
         }
         /// An open PR that reports it has been marked ready for review.
         fn ready() -> Self {
             Self {
                 draft: Some(false),
+                ..Self::new(MergeState::Open)
+            }
+        }
+        /// An open PR that hands back `notes` on each `review_comments` poll (C6).
+        fn with_notes(notes: Vec<crate::hosting::ReviewComment>) -> Self {
+            Self {
+                notes,
                 ..Self::new(MergeState::Open)
             }
         }
@@ -3816,6 +3858,9 @@ mod tests {
         fn comment(&self, pr_ref: &str, body: &str) -> bool {
             self.comments.borrow_mut().push((pr_ref.to_string(), body.to_string()));
             true
+        }
+        fn review_comments(&self, _pr_ref: &str) -> Vec<crate::hosting::ReviewComment> {
+            self.notes.clone()
         }
     }
 
@@ -3976,6 +4021,67 @@ mod tests {
         assert!(st.pr_ready_at.is_some(), "ready transition is timestamped");
         assert!(st.pr_merged_at.is_none(), "not merged yet");
         assert_eq!(st.status, Status::InProgress, "gate still holds");
+    }
+
+    /// C6: a human's review notes on the open PR re-enter the run as feedback the
+    /// fix track addresses — a `CHANGES_REQUESTED` review files a blocker, a plain
+    /// comment a medium, both `external`-origin; the open feedback then preempts
+    /// the held external gate (Track B over the run track). Re-polling the same
+    /// notes is deduped (deterministic ids), so nothing double-files.
+    #[test]
+    fn discrete_pulls_pr_review_notes_into_feedback() {
+        use crate::hosting::ReviewComment;
+        use darkrun_core::domain::{FeedbackOrigin, FeedbackSeverity};
+        let (_d, store) = store();
+        run_start(&store, "d", "software", None, "discrete").expect("start");
+
+        // Reach the gate + open the draft PR (no notes yet).
+        drive_discrete_frame_to_gate(&store, &MockHosting::new(MergeState::Open));
+        assert!(crate::feedback::list(&store, "d").unwrap().is_empty(), "no feedback before review");
+
+        // The reviewer requests changes and leaves a plain comment on the PR.
+        let host = MockHosting::with_notes(vec![
+            ReviewComment {
+                id: "r100".into(),
+                author: "alice".into(),
+                body: "Tighten the success metric — it's not measurable.".into(),
+                change_request: true,
+            },
+            ReviewComment {
+                id: "c200".into(),
+                author: "bob".into(),
+                body: "nit: typo in the non-goals list".into(),
+                change_request: false,
+            },
+        ]);
+        let after = run_tick_with_hosting(&store, "d", &host).expect("tick");
+
+        // Both notes became external-origin feedback on the frame station, with
+        // deterministic ids derived from the provider note ids.
+        let fbs = crate::feedback::list(&store, "d").unwrap();
+        assert_eq!(fbs.len(), 2, "both review notes filed as feedback, got {fbs:?}");
+        let cr = fbs.iter().find(|f| f.id == "fb-ext-r100").expect("change-request feedback");
+        assert_eq!(cr.origin, FeedbackOrigin::External);
+        assert_eq!(cr.severity, Some(FeedbackSeverity::Blocker), "a change request is a blocker");
+        assert_eq!(cr.station, "frame");
+        assert!(cr.body.contains("@alice") && cr.body.contains("Tighten the success metric"));
+        let note = fbs.iter().find(|f| f.id == "fb-ext-c200").expect("comment feedback");
+        assert_eq!(note.severity, Some(FeedbackSeverity::Medium), "a plain comment is medium");
+
+        // The open feedback preempts the held external gate (Track B over run).
+        assert!(
+            matches!(&after.action, RunAction::FixFeedback { station, .. } if station == "frame"),
+            "open review feedback should preempt the gate as a fix, got {:?}",
+            after.action
+        );
+
+        // Re-polling the SAME notes double-files nothing (deterministic-id dedup).
+        run_tick_with_hosting(&store, "d", &host).expect("re-poll tick");
+        assert_eq!(
+            crate::feedback::list(&store, "d").unwrap().len(),
+            2,
+            "re-polling the same notes is deduped"
+        );
     }
 
     /// D5: when the discrete gate opens a station's draft PR and the station has
