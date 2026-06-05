@@ -83,11 +83,18 @@ pub struct RunState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub run_reviews: BTreeMap<String, Option<crate::domain::Stamp>>,
     /// The engine version this run was created with — stamped immutably at run
-    /// start, never overwritten. On reading a run whose state predates the stamp
-    /// (legacy), the loader fills it with [`LEGACY_VERSION`] so the field always
-    /// answers "what shape was this run born in", which on-read migrators key on.
+    /// start, never overwritten. Pure **provenance** — which plugin/engine build
+    /// authored the run — distinct from the on-disk shape, which
+    /// [`schema_version`](RunState::schema_version) tracks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_with_version: Option<String>,
+    /// The on-disk STATE-SHAPE version this run was written in — versioned
+    /// **separately from the plugin** so the state format can evolve at its own
+    /// cadence. On-read shape migrators key on this, not the plugin version. A
+    /// run with no recorded value predates the stamp and is treated as
+    /// [`SCHEMA_VERSION_LEGACY`] (the pre-versioning baseline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
 }
 
 /// The version stamped onto a run whose on-disk state predates the
@@ -96,16 +103,36 @@ pub struct RunState {
 /// semver (a versioned run).
 pub const LEGACY_VERSION: &str = "legacy";
 
+/// The current on-disk state-shape version. Bumped (and a matching migrator
+/// added to [`migrate_state`]) whenever the persisted `RunState`/`state.json`
+/// shape changes in a way old runs must be carried across. Versioned
+/// independently of the plugin/engine semver.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// The shape version assigned to a run whose state predates schema versioning —
+/// the pre-1 baseline. Migrators run for any run at a version below
+/// [`SCHEMA_VERSION`].
+pub const SCHEMA_VERSION_LEGACY: u32 = 0;
+
 /// Migrate a freshly-deserialized [`RunState`] forward on read. Idempotent and
-/// pure (no I/O): each migrator keys on the run's `created_with_version` so a
-/// future on-disk shape change can be applied only to the runs that predate it.
+/// pure (no I/O): shape migrators key on the run's
+/// [`schema_version`](RunState::schema_version) so a future state-shape change
+/// is applied only to the runs that predate it.
 ///
-/// Today the only migration is the version stamp itself: a run with no recorded
-/// version is tagged [`LEGACY_VERSION`].
+/// Today: a run with no recorded plugin provenance is tagged
+/// [`LEGACY_VERSION`], and a run with no recorded schema version is treated as
+/// the pre-versioning [`SCHEMA_VERSION_LEGACY`] baseline. No shape migrators are
+/// needed yet (v0 and v1 are structurally compatible via serde defaults); the
+/// hook is in place for the first real shape change.
 fn migrate_state(state: &mut RunState) {
     if state.created_with_version.is_none() {
         state.created_with_version = Some(LEGACY_VERSION.to_string());
     }
+    let from = state.schema_version.unwrap_or(SCHEMA_VERSION_LEGACY);
+    // Future shape migrators run here, gated on `from < N`, in ascending order.
+    // (None yet — v0→v1 is a no-op beyond the stamp.)
+    let _ = from;
+    state.schema_version = Some(SCHEMA_VERSION);
 }
 
 /// The derived position of one station in a run's ordered plan — the strip
@@ -567,19 +594,41 @@ mod tests {
 
         let back = store.read_state("r").unwrap().unwrap();
         assert_eq!(back.created_with_version.as_deref(), Some(LEGACY_VERSION));
+        // Legacy state had no schema version → migrated up to the current shape.
+        assert_eq!(back.schema_version, Some(SCHEMA_VERSION));
     }
 
     #[test]
-    fn a_versioned_run_keeps_its_stamp_on_read() {
+    fn a_versioned_run_keeps_its_plugin_provenance_on_read() {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path());
         let state = RunState {
             created_with_version: Some("9.9.9".into()),
+            schema_version: Some(SCHEMA_VERSION),
             ..Default::default()
         };
         store.write_state("r", &state).unwrap();
         let back = store.read_state("r").unwrap().unwrap();
+        // Plugin provenance is preserved verbatim; schema version is independent.
         assert_eq!(back.created_with_version.as_deref(), Some("9.9.9"));
+        assert_eq!(back.schema_version, Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn schema_version_is_independent_of_the_plugin_version() {
+        // A run can carry an old plugin provenance but be migrated to the
+        // current on-disk schema — the two version axes are separate.
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        let state = RunState {
+            created_with_version: Some("0.0.1".into()),
+            schema_version: None, // pre-schema-versioning
+            ..Default::default()
+        };
+        store.write_state("r", &state).unwrap();
+        let back = store.read_state("r").unwrap().unwrap();
+        assert_eq!(back.created_with_version.as_deref(), Some("0.0.1"));
+        assert_eq!(back.schema_version, Some(SCHEMA_VERSION));
     }
 
     #[test]

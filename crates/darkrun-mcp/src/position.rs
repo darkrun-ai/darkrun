@@ -2409,9 +2409,11 @@ pub fn run_start(
         discrete: matches!(discrete_mode, DiscreteMode::Full | DiscreteMode::Hybrid),
         discrete_hybrid: matches!(discrete_mode, DiscreteMode::Hybrid),
         base_branch: Some(base),
-        // Stamp the engine version this run is born in — immutable; on-read
-        // shape-migrators key on it (G1).
+        // Stamp the plugin provenance (which build authored the run) and the
+        // on-disk schema version (what shape-migrators key on) — versioned
+        // independently (G1).
         created_with_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        schema_version: Some(darkrun_core::SCHEMA_VERSION),
         ..Default::default()
     };
     ensure_station(&mut state, &factory, &first_name)?;
