@@ -545,6 +545,28 @@ mod tests {
         assert!(matches!(err, McpError::FeedbackSettled(_)));
     }
 
+    /// Predecessor BUG-6: a non-code finding (a question, an out-of-scope
+    /// observation, a doc/process change) reached a builder fix-hat that could
+    /// only edit files or `reject` — so it looped to the bolt cap, never closing.
+    /// darkrun gives every finding a terminal NON-CODE route: `Answered` (a
+    /// question resolved by reply) and `NonActionable` (valid but no code fix),
+    /// both terminal, settable directly without a build loop.
+    #[test]
+    fn non_code_findings_have_terminal_routes() {
+        let (_d, store) = store();
+        // A question, answered with a reply — terminal, no code delta.
+        let q = create(&store, "r", "frame", "is this in scope?", None).unwrap();
+        let answered = set_status(&store, "r", &q.id, FeedbackStatus::Answered).unwrap();
+        assert!(is_terminal(answered.status));
+
+        // An out-of-scope observation — valid, but no actionable fix. Terminal.
+        let obs = create(&store, "r", "frame", "noted for later, not this run", None).unwrap();
+        let na = set_status(&store, "r", &obs.id, FeedbackStatus::NonActionable).unwrap();
+        assert!(is_terminal(na.status));
+        // Neither can loop: a terminal item refuses further transitions.
+        assert!(set_status(&store, "r", &obs.id, FeedbackStatus::Fixing).is_err());
+    }
+
     #[test]
     fn reject_is_terminal_and_appends_reason() {
         let (_d, store) = store();

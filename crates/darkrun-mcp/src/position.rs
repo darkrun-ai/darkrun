@@ -341,6 +341,12 @@ pub struct PromptContext {
     /// The run-level seal gate (`external` / `await`), for `PendingSeal`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seal: Option<String>,
+    /// Where the run's stable branch stands vs the default branch at seal
+    /// (`ahead`/`merged`/…), surfaced so the operator knows whether origin still
+    /// needs a push — the local-first land is a real commit but not pushed
+    /// (guards against the predecessor's "completed but origin stale" trap).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_status: Option<String>,
     /// A free-form message (mid-wave noop).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -864,6 +870,18 @@ pub fn run_review_stamp(store: &StateStore, slug: &str, role: &str) -> Result<()
     );
     store.write_state(slug, &state)?;
     Ok(())
+}
+
+/// The run-main-vs-default branch status as a snake_case token for the prompt
+/// (`ahead`/`merged`/`diverged`/…), or `None` outside a git repo / when not
+/// forked — surfaced at seal so the operator knows whether origin needs a push.
+fn branch_status_token(store: &StateStore, slug: &str) -> Option<String> {
+    match crate::lifecycle::run_main_status(store, slug) {
+        crate::lifecycle::RunMainStatus::NotForked => None,
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string)),
+    }
 }
 
 /// Whether a reviewer with surface scope `applies_to` fires on a run classified
@@ -1754,6 +1772,12 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         }
         RunAction::PendingSeal { kind, .. } => {
             ctx.seal = Some(kind.as_str().to_string());
+            ctx.branch_status = branch_status_token(store, slug);
+        }
+        RunAction::Sealed { .. } => {
+            // Surface where run-main stands vs the default branch so the operator
+            // knows if origin still needs a push (BUG-4 trap).
+            ctx.branch_status = branch_status_token(store, slug);
         }
         RunAction::Noop { message, .. } => {
             ctx.message = Some(message.clone());
@@ -4112,6 +4136,31 @@ mod tests {
             station_has_merge_debt(&store, "r", "build"),
             "a station with new commits has merge debt"
         );
+    }
+
+    /// BUG-4 guard: a locally-landed run is `ahead` of the default branch (the
+    /// work is a real commit, not pushed) — `branch_status_token` surfaces it so
+    /// the seal prompt can warn the operator that origin still needs a push.
+    #[test]
+    fn branch_status_token_reports_ahead_after_local_land() {
+        let (_d, root, store) = git_store();
+        crate::lifecycle::ensure_run_main(&store, "r");
+        crate::lifecycle::enter_station(&store, "r", "build");
+        let wt = crate::lifecycle::station_worktree_path(&root, "r", "build");
+        std::fs::write(wt.join("shipped.txt"), "ship\n").unwrap();
+        let git_wt = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&wt).args(args).status().unwrap().success()
+        };
+        assert!(git_wt(&["add", "-A"]));
+        assert!(git_wt(&["commit", "-q", "-m", "work"]));
+        crate::lifecycle::land_station(&store, "r", "build");
+
+        // run-main now carries verified work the default branch doesn't → ahead.
+        assert_eq!(branch_status_token(&store, "r").as_deref(), Some("ahead"));
+        // A non-git run surfaces nothing (no false "push needed").
+        let plain_dir = tempdir().expect("tmp");
+        let plain = StateStore::new(plain_dir.path());
+        assert_eq!(branch_status_token(&plain, "r"), None);
     }
 
     /// #3: a land that leaves agent-content conflicts surfaces as a
