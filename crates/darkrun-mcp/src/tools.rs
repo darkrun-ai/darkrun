@@ -28,7 +28,7 @@ use darkrun_http::SessionRegistry;
 use crate::factory::{list_factories, resolve_factory};
 use crate::position::{checkpoint_decide, run_start, run_tick};
 use crate::sessions::{self, ArchetypeSpec, PickerOptionSpec, QuestionOptionSpec};
-use crate::{feedback, proof, reflection, runs, units};
+use crate::{feedback, human_write, proof, reflection, runs, units};
 
 /// The darkrun MCP server: a manager bound to a repo root, holding the shared
 /// in-memory [`SessionRegistry`] that the in-process HTTP/WS server also serves
@@ -906,6 +906,17 @@ pub struct RunSurfaceInput {
     /// `data`. Omit to read the current surface without changing it.
     #[serde(default)]
     pub surface: Option<String>,
+}
+
+/// Input for `darkrun_human_write` — an operator-delegated project-file write.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct HumanWriteInput {
+    /// The project-relative path to write (no absolute paths, no `..`, not under
+    /// `.darkrun/`).
+    pub path: String,
+    /// The file content to write.
+    pub content: String,
 }
 
 /// Input for `darkrun_external_ref` — set or read a run's cross-system handles.
@@ -1998,6 +2009,24 @@ impl DarkrunServer {
         };
         match result {
             Ok(res) => ok_json(&res),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Write a project file on the operator's behalf ("save this for me").
+    #[tool(
+        name = "darkrun_human_write",
+        description = "Write a project file on the operator's behalf (a guarded 'save this for me'). Path must be project-relative, not under .darkrun/, no symlink escape. If the file is a premise some unit was built on, the next tick's drift sweep catches it automatically — no separate step."
+    )]
+    pub fn darkrun_human_write(
+        &self,
+        Parameters(input): Parameters<HumanWriteInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        match human_write::human_write(self.repo_root.as_ref(), &input.path, &input.content) {
+            Ok(path) => ok_json(&serde_json::json!({
+                "ok": true,
+                "path": path.to_string_lossy(),
+            })),
             Err(e) => Ok(err_text(e)),
         }
     }
