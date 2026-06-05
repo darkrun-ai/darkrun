@@ -1456,4 +1456,55 @@ mod tests {
         assert!(body.contains("station note"));
         assert!(body.contains("src/payment.rs"));
     }
+
+    #[test]
+    fn describe_anchor_covers_every_variant() {
+        use darkrun_api::annotation::{Anchor, DomAnchor, NormRect, PixelMark};
+        let rect = NormRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+        let mark = PixelMark {
+            shape: ImageShape::Rect,
+            point: None,
+            rect: Some(rect.clone()),
+            arrow_from: None,
+            arrow_to: None,
+            path: vec![],
+            render_w: 800,
+            render_h: 600,
+        };
+        let trange = |s: u32, e: u32| TextRange { start_line: s, start_col: 0, end_line: e, end_col: 0 };
+        let text = |s, e| Anchor::Text { range: trange(s, e), quote: "q".into(), prefix: String::new(), suffix: String::new() };
+
+        assert_eq!(describe_anchor(&text(5, 5)), "line 5");
+        assert_eq!(describe_anchor(&text(5, 8)), "lines 5–8");
+        assert_eq!(describe_anchor(&Anchor::Image { mark: mark.clone() }), "image region");
+        let html = Anchor::Html {
+            pixel: mark.clone(),
+            dom: DomAnchor { selector: ".btn".into(), src: None, outer_html: None },
+        };
+        assert_eq!(describe_anchor(&html), ".btn");
+        assert_eq!(describe_anchor(&Anchor::Pdf { page: 3, rect: rect.clone() }), "pdf page 3");
+        assert_eq!(
+            describe_anchor(&Anchor::Svg { element_id: Some("#icon".into()), xpath: None, bbox: rect.clone() }),
+            "#icon"
+        );
+        assert_eq!(
+            describe_anchor(&Anchor::Svg { element_id: None, xpath: Some("/svg/g".into()), bbox: rect.clone() }),
+            "/svg/g"
+        );
+        assert_eq!(
+            describe_anchor(&Anchor::Svg { element_id: None, xpath: None, bbox: rect.clone() }),
+            "svg element"
+        );
+        assert!(describe_anchor(&Anchor::Video { t_start: 12.0, t_end: 15.0, rect: None }).contains("video @ 12"));
+    }
+
+    #[test]
+    fn render_rework_emits_a_request_changes_header() {
+        // With no open annotations the body is just the header — exercises the
+        // bundle + render path's frame. (Per-item rendering is covered by the
+        // full submit→list→render flow tests above.)
+        let body = render_rework_feedback("build", &[]);
+        assert_eq!(body, "# Request changes — build\n\n");
+        assert!(station_rework_bundle(&[]).is_empty());
+    }
 }
