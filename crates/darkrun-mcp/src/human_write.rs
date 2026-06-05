@@ -181,4 +181,20 @@ mod tests {
             .collect();
         assert_eq!(drift_fb.len(), 1, "the human write triggered drift automatically");
     }
+
+    #[test]
+    fn rejects_empty_path() {
+        let d = root();
+        assert!(human_write(d.path(), "   ", "x").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_write_through_a_target_symlink() {
+        let d = root();
+        // A symlink AT the target path itself must not be clobbered through.
+        let link = d.path().join("link.txt");
+        std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();
+        assert!(human_write(d.path(), "link.txt", "x").is_err());
+    }
 }
