@@ -129,6 +129,60 @@ pub fn resolve_base_branch(store: &StateStore) -> String {
     "main".to_string()
 }
 
+/// Where a run's stable base branch (`darkrun/<slug>/main`) stands relative to
+/// the repo's default branch (G4b). The run accumulates verified stations onto
+/// run-main; this is whether that work has reached the default branch yet, and
+/// whether the default branch has moved on underneath it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunMainStatus {
+    /// run-main hasn't been forked yet (no run work branched), or the repo isn't
+    /// git-backed.
+    NotForked,
+    /// run-main and the default branch are at the same commit — nothing to land.
+    UpToDate,
+    /// run-main has verified work the default branch doesn't have yet (the normal
+    /// in-progress state, awaiting the run-completion land).
+    Ahead,
+    /// run-main is fully contained in the default branch and the default branch
+    /// has advanced past it — the run's work has landed.
+    Merged,
+    /// run-main and the default branch each have commits the other lacks — they
+    /// diverged; a downstream sync is needed before landing.
+    Diverged,
+}
+
+/// Compute [`RunMainStatus`] for a run — where its `darkrun/<slug>/main` stands
+/// against the default branch. Best-effort: returns `NotForked` outside a git
+/// repo or when run-main doesn't exist. The base is the run's snapshotted
+/// `base_branch` (falling back to the resolved default).
+pub fn run_main_status(store: &StateStore, slug: &str) -> RunMainStatus {
+    let Some((git, _root)) = open_git(store) else {
+        return RunMainStatus::NotForked;
+    };
+    let run_main = run_main_branch(slug);
+    if !git.branch_exists(&run_main).unwrap_or(false) {
+        return RunMainStatus::NotForked;
+    }
+    let base = store
+        .read_state(slug)
+        .ok()
+        .flatten()
+        .and_then(|s| s.base_branch)
+        .unwrap_or_else(|| resolve_base_branch(store));
+    if !git.branch_exists(&base).unwrap_or(false) {
+        return RunMainStatus::NotForked;
+    }
+    let base_in_main = git.is_ancestor(&base, &run_main).unwrap_or(false);
+    let main_in_base = git.is_ancestor(&run_main, &base).unwrap_or(false);
+    match (base_in_main, main_in_base) {
+        (true, true) => RunMainStatus::UpToDate,
+        (true, false) => RunMainStatus::Ahead,
+        (false, true) => RunMainStatus::Merged,
+        (false, false) => RunMainStatus::Diverged,
+    }
+}
+
 /// Which downstream-sync step (mechanic #5) surfaced a conflict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncConflictStep {
@@ -1098,6 +1152,32 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "shipped.txt should be on base (main)");
+    }
+
+    /// G4b: run_main_status tracks where run-main stands vs the default branch
+    /// across its lifecycle — not_forked → up_to_date → ahead → merged.
+    #[test]
+    fn run_main_status_tracks_run_main_vs_default() {
+        let (_d, root, store) = init_repo();
+        // Not forked yet.
+        assert_eq!(run_main_status(&store, "r"), RunMainStatus::NotForked);
+
+        // Forked at the base tip → up to date (same commit).
+        ensure_run_main(&store, "r");
+        assert_eq!(run_main_status(&store, "r"), RunMainStatus::UpToDate);
+
+        // Do verified station work and land it onto run-main → run-main is ahead
+        // of the default branch.
+        enter_station(&store, "r", "build");
+        let wt = station_worktree_path(&root, "r", "build");
+        commit_in(&wt, "feature.txt", "built\n", "build work");
+        land_station(&store, "r", "build");
+        assert_eq!(run_main_status(&store, "r"), RunMainStatus::Ahead);
+
+        // Land run-main onto the default branch → merged (base now contains it
+        // and has advanced past the original fork point).
+        land_run(&store, "r");
+        assert_eq!(run_main_status(&store, "r"), RunMainStatus::Merged);
     }
 
     /// #4: a land with no merge debt (identical trees) is a clean no-op — no new

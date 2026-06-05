@@ -1141,6 +1141,9 @@ impl DarkrunServer {
             "run": run,
             "state": state,
             "position": position,
+            // G4b: where the run's stable branch stands vs the default branch
+            // (not_forked / up_to_date / ahead / merged / diverged).
+            "run_main_status": crate::lifecycle::run_main_status(&store, &slug),
             "showing": {
                 "surface": "desktop",
                 "session_id": slug,

@@ -90,8 +90,8 @@ pub use factory::{
 };
 pub use lifecycle::{
     enter_fix, enter_station, enter_unit, ensure_run_main, fix_branch, land_fix, land_run,
-    land_station, land_unit, resolve_base_branch, run_main_branch, station_branch, unit_branch,
-    LifecycleOutcome,
+    land_station, land_unit, resolve_base_branch, run_main_branch, run_main_status, station_branch,
+    unit_branch, LifecycleOutcome, RunMainStatus,
 };
 pub use position::{
     checkpoint_decide, derive_position, render_prompt, run_start, run_tick, Position, PromptContext,
