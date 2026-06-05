@@ -722,4 +722,45 @@ mod tests {
             .is_none());
         assert_eq!(client.merge_state("1"), MergeState::Unknown);
     }
+
+    /// Build a `CliHosting` whose provider is forced via a settings file, in a
+    /// throwaway non-git directory so every CLI call fails fast (no repo / no
+    /// auth) and returns its best-effort fallback — exercising the GitHub and
+    /// GitLab dispatch arms without a real `gh`/`glab` round-trip.
+    fn forced(provider: &str) -> (tempfile::TempDir, CliHosting) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".darkrun")).unwrap();
+        std::fs::write(
+            dir.path().join(".darkrun").join("settings.yml"),
+            format!("hosting: {provider}\n"),
+        )
+        .unwrap();
+        let client = CliHosting::resolve(dir.path());
+        (dir, client)
+    }
+
+    /// Every provider dispatch arm runs and degrades gracefully to its fallback
+    /// when the CLI can't act (non-repo dir): `open_draft` -> None, `merge_state`
+    /// -> Unknown, `is_draft` -> None, `comment` -> false, `review_comments` ->
+    /// empty. Covers the GitHub + GitLab arms regardless of whether the binaries
+    /// are installed on the host.
+    #[test]
+    fn provider_arms_degrade_to_fallback_without_a_live_cli() {
+        let req = OpenRequest {
+            head: "darkrun/x/frame".into(),
+            base: "darkrun/x/main".into(),
+            title: "t".into(),
+            body: "b".into(),
+        };
+        for provider in ["github", "gitlab"] {
+            let (_d, client) = forced(provider);
+            // `available()` probes the CLI binary; either answer is fine, the arm runs.
+            let _ = client.available();
+            assert!(client.open_draft(&req).is_none(), "{provider} open_draft");
+            assert_eq!(client.merge_state("1"), MergeState::Unknown, "{provider} merge_state");
+            assert_eq!(client.is_draft("1"), None, "{provider} is_draft");
+            assert!(!client.comment("1", "hi"), "{provider} comment");
+            assert!(client.review_comments("1").is_empty(), "{provider} review_comments");
+        }
+    }
 }
