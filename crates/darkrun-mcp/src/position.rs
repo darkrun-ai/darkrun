@@ -33,8 +33,8 @@
 
 use chrono::Utc;
 use darkrun_core::domain::{
-    Checkpoint, CheckpointKind, CheckpointOutcome, IterationResult, Run, RunFrontmatter, SealKind,
-    Station, StationPhase, Status, Unit,
+    Checkpoint, CheckpointKind, CheckpointOutcome, IterationResult, PrStatus, Run, RunFrontmatter,
+    SealKind, Station, StationPhase, Status, Unit,
 };
 use darkrun_core::{RunState, StateStore};
 use darkrun_git::{Git, GitBackend};
@@ -1779,15 +1779,22 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
             if let Some(pr_ref) = hosting.open_draft(&req) {
                 if let Some(st) = state.stations.get_mut(&station) {
                     st.pr_ref = Some(pr_ref);
+                    // G4: a freshly-opened PR starts in the draft stage.
+                    st.pr_status = Some(PrStatus::Draft);
                     store.write_state(slug, &state)?;
                 }
             }
             Ok(())
         }
-        // PR exists: poll it. A merge resolves the gate and advances the cursor.
+        // PR exists: poll it. A merge resolves the gate and advances the cursor;
+        // a draft→ready transition is recorded along the way (G4).
         Some(pr_ref) => {
+            let now = Utc::now().to_rfc3339();
             if matches!(hosting.merge_state(&pr_ref), crate::hosting::MergeState::Merged) {
-                let now = Utc::now().to_rfc3339();
+                if let Some(st) = state.stations.get_mut(&station) {
+                    st.pr_status = Some(PrStatus::Merged);
+                    st.pr_merged_at.get_or_insert_with(|| now.clone());
+                }
                 complete_station(&mut state, &factory, &station, &now)?;
                 store.write_state(slug, &state)?;
                 // The human's PR merge already landed the station onto run-main,
@@ -1796,6 +1803,16 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
                 crate::drift::record_station_witnesses(store, slug, &station)?;
                 if current_station(&factory, &state).is_none() {
                     crate::lifecycle::land_run(store, slug);
+                }
+            } else if hosting.is_draft(&pr_ref) == Some(false) {
+                // Marked ready for review (no longer draft), not yet merged —
+                // record the transition once.
+                if let Some(st) = state.stations.get_mut(&station) {
+                    if matches!(st.pr_status, Some(PrStatus::Draft) | None) {
+                        st.pr_status = Some(PrStatus::Ready);
+                        st.pr_ready_at.get_or_insert(now);
+                        store.write_state(slug, &state)?;
+                    }
                 }
             }
             Ok(())
@@ -2283,6 +2300,9 @@ fn ensure_station<'a>(
                 chosen_checkpoint: None,
                 branch: None,
                 pr_ref: None,
+                pr_status: None,
+                pr_ready_at: None,
+                pr_merged_at: None,
                 started_at: None,
                 completed_at: None,
             },
@@ -3475,6 +3495,8 @@ mod tests {
         pr_ref: Option<String>,
         /// What `merge_state` returns for the recorded ref.
         state: MergeState,
+        /// What `is_draft` returns for the recorded ref (G4 draft→ready).
+        draft: Option<bool>,
         /// Every `open_draft` request, in call order (for assertions).
         opened: RefCell<Vec<OpenRequest>>,
     }
@@ -3485,6 +3507,7 @@ mod tests {
                 available: true,
                 pr_ref: Some("42".into()),
                 state,
+                draft: None,
                 opened: RefCell::new(Vec::new()),
             }
         }
@@ -3493,7 +3516,15 @@ mod tests {
                 available: false,
                 pr_ref: None,
                 state: MergeState::Unknown,
+                draft: None,
                 opened: RefCell::new(Vec::new()),
+            }
+        }
+        /// An open PR that reports it has been marked ready for review.
+        fn ready() -> Self {
+            Self {
+                draft: Some(false),
+                ..Self::new(MergeState::Open)
             }
         }
     }
@@ -3508,6 +3539,9 @@ mod tests {
         }
         fn merge_state(&self, _pr_ref: &str) -> MergeState {
             self.state
+        }
+        fn is_draft(&self, _pr_ref: &str) -> Option<bool> {
+            self.draft
         }
     }
 
@@ -3636,8 +3670,54 @@ mod tests {
         // Recorded on the station for the merge poll.
         let state = store.read_state("d").unwrap().unwrap();
         assert_eq!(state.stations["frame"].pr_ref.as_deref(), Some("42"));
+        // G4: a freshly-opened PR is in the draft stage.
+        assert_eq!(state.stations["frame"].pr_status, Some(PrStatus::Draft));
         // Still in-progress (the gate holds until merge).
         assert_eq!(state.stations["frame"].status, Status::InProgress);
+    }
+
+    /// G4: polling a PR that has been marked ready for review (no longer draft)
+    /// records the draft→ready transition with a `pr_ready_at` stamp, without
+    /// advancing the gate (it still holds until merge).
+    #[test]
+    fn discrete_pr_marked_ready_records_the_transition() {
+        let (_d, store) = store();
+        run_start(&store, "d", "software", None, "discrete").expect("start");
+
+        // Reach the gate + open the draft PR.
+        let open_host = MockHosting::new(MergeState::Open);
+        drive_discrete_frame_to_gate(&store, &open_host);
+        assert_eq!(store.read_state("d").unwrap().unwrap().stations["frame"].pr_status, Some(PrStatus::Draft));
+
+        // The author marks it ready for review. The next tick records ready.
+        let ready_host = MockHosting::ready();
+        let still_holding = run_tick_with_hosting(&store, "d", &ready_host).expect("tick");
+        assert!(
+            matches!(&still_holding.action, RunAction::ExternalReviewRequested { station, .. } if station == "frame"),
+            "ready (not merged) still holds the gate, got {:?}",
+            still_holding.action
+        );
+        let st = &store.read_state("d").unwrap().unwrap().stations["frame"];
+        assert_eq!(st.pr_status, Some(PrStatus::Ready));
+        assert!(st.pr_ready_at.is_some(), "ready transition is timestamped");
+        assert!(st.pr_merged_at.is_none(), "not merged yet");
+        assert_eq!(st.status, Status::InProgress, "gate still holds");
+    }
+
+    /// G4: a merge records the `merged` status + `pr_merged_at` on the way to
+    /// resolving the gate.
+    #[test]
+    fn discrete_merge_records_merged_status_and_timestamp() {
+        let (_d, store) = store();
+        run_start(&store, "d", "software", None, "discrete").expect("start");
+        let open_host = MockHosting::new(MergeState::Open);
+        drive_discrete_frame_to_gate(&store, &open_host);
+
+        let merged_host = MockHosting::new(MergeState::Merged);
+        run_tick_with_hosting(&store, "d", &merged_host).expect("tick");
+        let st = &store.read_state("d").unwrap().unwrap().stations["frame"];
+        assert_eq!(st.pr_status, Some(PrStatus::Merged));
+        assert!(st.pr_merged_at.is_some(), "merge is timestamped");
     }
 
     /// Full discrete: once the PR is MERGED the manager advances — the station

@@ -775,12 +775,40 @@ pub struct Station {
     /// when no hosting client could open one (best-effort await fallback).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_ref: Option<String>,
+    /// The lifecycle status of the station's draft PR/MR — `draft` on open,
+    /// `ready` once it's marked ready for review, `merged`/`closed` once
+    /// resolved. Lets the engine (and the operator) see *where* the change
+    /// request stands, not just that one exists. `None` until a PR is opened or
+    /// on legacy state (G4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_status: Option<PrStatus>,
+    /// RFC3339 timestamp the PR transitioned out of draft (became ready for
+    /// review). `None` until that happens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_ready_at: Option<String>,
+    /// RFC3339 timestamp the PR merged. `None` until merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_merged_at: Option<String>,
     /// RFC3339 start timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     /// RFC3339 completion timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+}
+
+/// The lifecycle stage of a station's draft change request (G4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PrStatus {
+    /// Opened as a draft — not yet marked ready for review.
+    Draft,
+    /// Marked ready for review (no longer a draft), not yet merged.
+    Ready,
+    /// Merged — the gate resolves and the station advances.
+    Merged,
+    /// Closed without merging.
+    Closed,
 }
 
 /// Severity of a Feedback finding.

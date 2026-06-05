@@ -534,6 +534,9 @@ mod tests {
             chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
+            pr_status: None,
+            pr_ready_at: None,
+            pr_merged_at: None,
             started_at: None,
             completed_at: None,
         }

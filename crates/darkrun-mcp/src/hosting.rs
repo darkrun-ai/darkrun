@@ -62,6 +62,15 @@ pub trait Hosting {
 
     /// Poll the merge state of a previously-opened change request `pr_ref`.
     fn merge_state(&self, pr_ref: &str) -> MergeState;
+
+    /// Whether `pr_ref` is still a DRAFT (not yet marked ready for review).
+    /// `Some(true)`/`Some(false)` when known, `None` when unknown or the
+    /// provider doesn't report it. Drives the draft→ready transition in the
+    /// PR lifecycle (G4); defaults to `None` so a client that can't tell simply
+    /// leaves the status at `draft` until it merges.
+    fn is_draft(&self, _pr_ref: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// The CLI-backed hosting client: shells `gh` / `glab` against a repo root.
@@ -200,6 +209,31 @@ impl Hosting for CliHosting {
             Provider::None => MergeState::Unknown,
         }
     }
+
+    fn is_draft(&self, pr_ref: &str) -> Option<bool> {
+        match self.provider {
+            Provider::GitHub => {
+                // `gh pr view <ref> --json isDraft` → {"isDraft": true|false}.
+                let raw = self.run("gh", &["pr", "view", pr_ref, "--json", "isDraft"])?;
+                parse_bool_field(&raw, "isDraft")
+            }
+            Provider::GitLab => {
+                // GitLab MRs carry a `draft` boolean in their JSON view.
+                let raw = self.run("glab", &["mr", "view", pr_ref, "-F", "json"])?;
+                parse_bool_field(&raw, "draft")
+            }
+            Provider::None => None,
+        }
+    }
+}
+
+/// Extract a top-level boolean `field` from a flat JSON object body. `None` when
+/// the body doesn't parse or the field is absent/non-boolean.
+fn parse_bool_field(json: &str, field: &str) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .get(field)?
+        .as_bool()
 }
 
 /// Resolve the hosting provider for `repo_root` from `.darkrun/settings.yml`'s

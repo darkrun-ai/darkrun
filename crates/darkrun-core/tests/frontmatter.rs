@@ -1076,6 +1076,9 @@ fn roundtrip_station_through_envelope() {
         chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
+        pr_status: None,
+        pr_ready_at: None,
+        pr_merged_at: None,
         started_at: Some("2026-05-30T00:00:00Z".into()),
         completed_at: None,
     };
@@ -1109,6 +1112,9 @@ fn roundtrip_station_each_phase() {
             chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
+            pr_status: None,
+            pr_ready_at: None,
+            pr_merged_at: None,
             started_at: None,
             completed_at: None,
         };
@@ -1140,6 +1146,9 @@ fn roundtrip_checkpoint_each_kind() {
             chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
+            pr_status: None,
+            pr_ready_at: None,
+            pr_merged_at: None,
             started_at: None,
             completed_at: None,
         };
@@ -1171,6 +1180,9 @@ fn roundtrip_checkpoint_each_outcome() {
             chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
+            pr_status: None,
+            pr_ready_at: None,
+            pr_merged_at: None,
             started_at: None,
             completed_at: None,
         };
@@ -1196,6 +1208,9 @@ fn roundtrip_station_skips_none_checkpoint() {
         chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
+        pr_status: None,
+        pr_ready_at: None,
+        pr_merged_at: None,
         started_at: None,
         completed_at: None,
     };
@@ -1219,6 +1234,9 @@ fn roundtrip_station_idempotent() {
         chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
+        pr_status: None,
+        pr_ready_at: None,
+        pr_merged_at: None,
         started_at: Some("2026-05-30T00:00:00Z".into()),
         completed_at: Some("2026-05-30T02:00:00Z".into()),
     };
@@ -1967,6 +1985,9 @@ fn serialize_station_emits_snake_case_phase() {
         chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
+        pr_status: None,
+        pr_ready_at: None,
+        pr_merged_at: None,
         started_at: None,
         completed_at: None,
     };

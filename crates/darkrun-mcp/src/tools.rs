@@ -2249,9 +2249,48 @@ impl DarkrunServer {
 /// back to a text decision (elicitation or inline) per the adapted instructions.
 const VISUAL_TOOL_NAMES: &[&str] = &["darkrun_direction", "darkrun_direction_result"];
 
+/// The tools that DRIVE a run — the cursor loop, gate decisions, unit + feedback
+/// work, proof/quality recording. When a harness's tool budget forces a cut,
+/// these survive: dropping any of them would break the agent's ability to run a
+/// Run at all. Everything else (admin, meta, scaffolding, lifecycle extras) is
+/// shed first. Kept conservatively under every harness budget.
+const ESSENTIAL_TOOL_NAMES: &[&str] = &[
+    "darkrun_run_start",
+    "darkrun_tick",
+    "darkrun_run_show",
+    "darkrun_run_list",
+    "darkrun_checkpoint_decide",
+    "darkrun_checkpoint_choose",
+    "darkrun_unit_create",
+    "darkrun_unit_update",
+    "darkrun_unit_get",
+    "darkrun_unit_list",
+    "darkrun_unit_iterate",
+    "darkrun_feedback_create",
+    "darkrun_feedback_list",
+    "darkrun_feedback_resolve",
+    "darkrun_feedback_set_targets",
+    "darkrun_quality_gate_record",
+    "darkrun_review_stamp",
+    "darkrun_run_review_stamp",
+    "darkrun_drift_accept",
+    "darkrun_run_surface",
+    "darkrun_proof_attach",
+    "darkrun_proof_get",
+    "darkrun_elaborate_seal",
+    "darkrun_gate_review",
+    "darkrun_question",
+    "darkrun_question_result",
+];
+
 /// Adapt the full tool list to a harness: drop browser/visual tools when the
 /// harness has no desktop UI, then enforce its tool budget. Pure over the
 /// inputs so it's unit-testable without an MCP request context.
+///
+/// The budget cut is **priority-aware**: essential run-driving tools
+/// ([`ESSENTIAL_TOOL_NAMES`]) are kept and the budget is filled with the
+/// remaining tools in registration order, so a growing tool surface can never
+/// silently shed `darkrun_tick` (or any loop driver) on a constrained harness.
 fn adapt_tool_list(
     caps: &darkrun_harness::Capabilities,
     mut tools: Vec<rmcp::model::Tool>,
@@ -2260,7 +2299,18 @@ fn adapt_tool_list(
         tools.retain(|t| !VISUAL_TOOL_NAMES.contains(&t.name.as_ref()));
     }
     if let Some(max) = caps.max_tools {
-        tools.truncate(max);
+        if tools.len() > max {
+            let is_essential =
+                |t: &rmcp::model::Tool| ESSENTIAL_TOOL_NAMES.contains(&t.name.as_ref());
+            // Essential tools first (in registration order), then fill with the
+            // rest, then clamp. If even the essential set exceeds an
+            // (artificially tiny) budget, the clamp still wins — but the loop
+            // drivers lead the list, so the first kept are the ones that matter.
+            let (mut kept, rest): (Vec<_>, Vec<_>) = tools.into_iter().partition(is_essential);
+            kept.extend(rest);
+            kept.truncate(max);
+            tools = kept;
+        }
     }
     tools
 }
@@ -2389,8 +2439,18 @@ mod tests {
         let adapted = adapt_tool_list(&caps, all.clone());
         assert!(!adapted.iter().any(|t| t.name == "darkrun_direction"));
         assert!(!adapted.iter().any(|t| t.name == "darkrun_direction_result"));
-        // Non-visual tools survive.
-        assert!(adapted.iter().any(|t| t.name == "darkrun_tick"));
+        // EVERY essential run-driving tool survives the budget cut — the loop
+        // can never be silently broken by a growing tool surface.
+        for name in ESSENTIAL_TOOL_NAMES {
+            // Visual tools aren't on a non-browser harness; skip those.
+            if VISUAL_TOOL_NAMES.contains(name) {
+                continue;
+            }
+            assert!(
+                adapted.iter().any(|t| &t.name == name),
+                "essential tool {name} was dropped by the budget cut"
+            );
+        }
         // Visual tools are dropped; the remainder is then clamped to Cursor's
         // tool budget (the truncation path is covered by its own test).
         let after_visual = all.len() - VISUAL_TOOL_NAMES.len();
