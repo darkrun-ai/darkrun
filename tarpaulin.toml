@@ -1,0 +1,34 @@
+# darkrun engine line-coverage config (cargo-tarpaulin).
+#
+# Run:  cargo tarpaulin --config engine
+#
+# Scope: the engine crates (core + mcp + git), driven by their own unit/
+# integration tests PLUS the cross-crate `darkrun-e2e` suite (so the full-run
+# lifecycle, restart-recovery, VCS-checkpoint, and HTTP-session e2e flows count
+# toward coverage of the engine source they exercise).
+#
+# Excluded files are EXERCISED ONLY BY RUNNING THE BINARY, not by unit tests —
+# they perform irreducible runtime I/O that can't run in a test process:
+#   - server.rs   : the blocking MCP stdio host + the axum socket bind/serve loop
+#   - desktop.rs  : spawns the external desktop GUI app (LaunchServices `open`,
+#                   on-demand cargo build of the desktop binary)
+# Both are composition/launch glue, conventionally outside a unit-coverage target
+# (like a `main.rs`). Everything else is held to the coverage bar.
+
+[engine]
+packages = [
+    "darkrun-core",
+    "darkrun-mcp",
+    "darkrun-git",
+    "darkrun-e2e",
+]
+engine = "llvm"
+timeout = "900s"
+exclude-files = [
+    "target/*",
+    "crates/darkrun-mcp/src/server.rs",
+    "crates/darkrun-mcp/src/desktop.rs",
+]
+# fail-under is enabled once the in-scope surface reaches 100% (the /goal target),
+# so coverage can't regress below the achieved bar.
+# fail-under = 100
