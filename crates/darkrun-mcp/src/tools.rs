@@ -1113,8 +1113,11 @@ impl DarkrunServer {
         // The desktop is the only interactive surface darkrun drives. The
         // structured state is returned too, for the agent.
         let _ = crate::sessions::create_show(&self.sessions, &store, &slug);
-        let desktop = if self.sessions.live_connections() > 0 {
-            // A desktop is already connected; its home poller navigates to the run.
+        // F5: treat a recently-dropped app as still present (grace window) so a
+        // backgrounded tab or a network blip doesn't respawn the desktop.
+        let desktop = if self.sessions.presence().is_present() {
+            // A desktop is connected (or within the grace window); its home
+            // poller navigates to the run.
             serde_json::json!({ "status": "connected" })
         } else if let Some(addr) = self.announced_addr {
             match crate::desktop::spawn(self.repo_root.as_ref(), addr.port(), Some(&slug)) {

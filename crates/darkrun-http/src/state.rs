@@ -9,8 +9,9 @@
 //! live-update WebSocket cheap.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use darkrun_api::{Proof, SessionPayload};
 use darkrun_core::StateStore;
@@ -24,6 +25,50 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 pub const DEFAULT_MAX_WS_SESSIONS: usize = 128;
 /// Capacity of each session's broadcast channel (buffered server frames).
 const WS_CHANNEL_CAPACITY: usize = 64;
+/// How long after the desktop app's last connection drops it is still treated as
+/// merely *lost* (a backgrounded tab, a network blip) rather than *closed* — the
+/// presence grace window. Within it, the engine should not relaunch the app.
+pub const PRESENCE_GRACE_MS: u64 = 15_000;
+
+/// The desktop app's connection presence, with a grace window so a momentary
+/// disconnect doesn't read as "closed" (F5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// At least one client is connected right now.
+    Live,
+    /// Was connected, dropped within the last [`PRESENCE_GRACE_MS`] — likely a
+    /// blip or a backgrounded tab; may reattach. Don't relaunch yet.
+    Lost,
+    /// Was connected and has been gone past the grace window — the app is closed.
+    Closed,
+    /// No client has ever connected this process — the app hasn't opened yet.
+    NeverAttached,
+}
+
+impl Presence {
+    /// Whether the engine should consider the app present (live or in grace) —
+    /// the relaunch decision uses this so a brief drop doesn't respawn the app.
+    pub fn is_present(self) -> bool {
+        matches!(self, Presence::Live | Presence::Lost)
+    }
+}
+
+/// Process-wide desktop-presence tracker: records connection transitions with
+/// timestamps so [`SessionRegistry::presence`] can apply the grace window.
+#[derive(Default)]
+struct PresenceTracker {
+    ever_connected: AtomicBool,
+    /// Epoch-ms when the connection count last fell to zero. `0` = never lost.
+    last_lost_ms: AtomicU64,
+}
+
+/// Current epoch milliseconds.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 /// Global request-body ceiling (1 MiB). Oversize bodies are rejected `413`
 /// before a handler runs, bounding memory per request.
 pub const DEFAULT_BODY_MAX_BYTES: usize = 1_048_576;
@@ -68,6 +113,7 @@ struct SessionEntry {
 pub struct SessionRegistry {
     inner: Arc<Mutex<HashMap<String, SessionEntry>>>,
     ws_session_count: Arc<AtomicU64>,
+    presence: Arc<PresenceTracker>,
 }
 
 impl SessionRegistry {
@@ -131,6 +177,31 @@ impl SessionRegistry {
         self.ws_session_count.load(Ordering::Acquire)
     }
 
+    /// The desktop app's connection presence, with a grace window so a momentary
+    /// disconnect doesn't read as "closed" (F5). The relaunch decision should use
+    /// `presence().is_present()` rather than `live_connections() > 0`, so a
+    /// backgrounded tab or a network blip doesn't respawn the app.
+    pub fn presence(&self) -> Presence {
+        self.presence_at(now_ms())
+    }
+
+    /// [`presence`](Self::presence) evaluated at an explicit `now` (epoch ms) —
+    /// the clock seam so the grace window is testable without sleeping.
+    fn presence_at(&self, now: u64) -> Presence {
+        if self.ws_session_count.load(Ordering::Acquire) > 0 {
+            return Presence::Live;
+        }
+        if !self.presence.ever_connected.load(Ordering::Acquire) {
+            return Presence::NeverAttached;
+        }
+        let lost = self.presence.last_lost_ms.load(Ordering::Acquire);
+        if lost != 0 && now.saturating_sub(lost) < PRESENCE_GRACE_MS {
+            Presence::Lost
+        } else {
+            Presence::Closed
+        }
+    }
+
     /// Remove a session and drop its broadcast channel (closing subscribers).
     pub fn remove(&self, id: &str) -> Option<SessionPayload> {
         let mut guard = self.inner.lock().expect("session registry poisoned");
@@ -157,8 +228,12 @@ impl SessionRegistry {
                 .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                // The app is (re)attached — mark it ever-connected so a later
+                // drop is a *loss*, not "never opened" (F5).
+                self.presence.ever_connected.store(true, Ordering::Release);
                 return Some(WsSlot {
                     counter: Arc::clone(&self.ws_session_count),
+                    presence: Arc::clone(&self.presence),
                 });
             }
         }
@@ -168,11 +243,16 @@ impl SessionRegistry {
 /// RAII guard for a reserved WebSocket session slot. Releases on drop.
 pub struct WsSlot {
     counter: Arc<AtomicU64>,
+    presence: Arc<PresenceTracker>,
 }
 
 impl Drop for WsSlot {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
+        // `fetch_sub` returns the PRIOR value; if it was 1 the count just fell to
+        // zero — stamp the loss time so the grace window starts (F5).
+        if self.counter.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.presence.last_lost_ms.store(now_ms(), Ordering::Release);
+        }
     }
 }
 
@@ -236,5 +316,54 @@ impl AppState {
             store: Arc::new(store),
             limits,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presence_starts_never_attached() {
+        let reg = SessionRegistry::new();
+        assert_eq!(reg.presence(), Presence::NeverAttached);
+        assert!(!reg.presence().is_present());
+    }
+
+    #[test]
+    fn presence_is_live_while_a_slot_is_held() {
+        let reg = SessionRegistry::new();
+        let slot = reg.try_acquire_ws_slot(8).expect("slot");
+        assert_eq!(reg.presence(), Presence::Live);
+        assert!(reg.presence().is_present());
+        drop(slot);
+    }
+
+    #[test]
+    fn presence_is_lost_within_grace_then_closed_after() {
+        let reg = SessionRegistry::new();
+        // Connect then drop → the loss time is stamped (~now).
+        let slot = reg.try_acquire_ws_slot(8).expect("slot");
+        drop(slot);
+        let lost_at = reg.presence.last_lost_ms.load(Ordering::Acquire);
+        assert!(lost_at > 0, "drop stamps the loss time");
+
+        // Just after the drop: still LOST (within grace) and counts as present.
+        let just_after = lost_at + 1;
+        assert_eq!(reg.presence_at(just_after), Presence::Lost);
+        assert!(reg.presence_at(just_after).is_present());
+
+        // Past the grace window: CLOSED — the app is gone.
+        let past_grace = lost_at + PRESENCE_GRACE_MS + 1;
+        assert_eq!(reg.presence_at(past_grace), Presence::Closed);
+        assert!(!reg.presence_at(past_grace).is_present());
+    }
+
+    #[test]
+    fn reattaching_returns_to_live() {
+        let reg = SessionRegistry::new();
+        drop(reg.try_acquire_ws_slot(8).expect("slot")); // connect then lose
+        let _slot = reg.try_acquire_ws_slot(8).expect("slot"); // reattach
+        assert_eq!(reg.presence(), Presence::Live);
     }
 }

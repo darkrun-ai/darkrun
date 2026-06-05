@@ -35,8 +35,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 pub use ratelimit::RateLimiter;
 pub use state::{
-    AppState, Limits, ProofRegistry, SessionRegistry, DEFAULT_BODY_MAX_BYTES,
-    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_WS_SESSIONS, DEFAULT_RATE_LIMIT_PER_MIN,
+    AppState, Limits, Presence, ProofRegistry, SessionRegistry, DEFAULT_BODY_MAX_BYTES,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_WS_SESSIONS, DEFAULT_RATE_LIMIT_PER_MIN, PRESENCE_GRACE_MS,
 };
 
 /// The composite router state: the domain [`AppState`] plus the rate-limiter.
