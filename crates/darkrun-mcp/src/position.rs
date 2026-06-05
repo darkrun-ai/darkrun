@@ -1777,6 +1777,13 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
                 ),
             };
             if let Some(pr_ref) = hosting.open_draft(&req) {
+                // D5: attach the station's objective proof to the change request
+                // as a durable, linkable asset — posted once, here, since the PR
+                // opens exactly once (the next tick polls instead). Best-effort:
+                // a failed comment never blocks the gate.
+                if let Some(body) = crate::proof::station_proof_markdown(store, slug, &station) {
+                    hosting.comment(&pr_ref, &body);
+                }
                 if let Some(st) = state.stations.get_mut(&station) {
                     st.pr_ref = Some(pr_ref);
                     // G4: a freshly-opened PR starts in the draft stage.
@@ -3499,6 +3506,8 @@ mod tests {
         draft: Option<bool>,
         /// Every `open_draft` request, in call order (for assertions).
         opened: RefCell<Vec<OpenRequest>>,
+        /// Every `comment` (pr_ref, body), in call order (D5 proof upload).
+        comments: RefCell<Vec<(String, String)>>,
     }
 
     impl MockHosting {
@@ -3509,6 +3518,7 @@ mod tests {
                 state,
                 draft: None,
                 opened: RefCell::new(Vec::new()),
+                comments: RefCell::new(Vec::new()),
             }
         }
         fn unavailable() -> Self {
@@ -3518,6 +3528,7 @@ mod tests {
                 state: MergeState::Unknown,
                 draft: None,
                 opened: RefCell::new(Vec::new()),
+                comments: RefCell::new(Vec::new()),
             }
         }
         /// An open PR that reports it has been marked ready for review.
@@ -3542,6 +3553,10 @@ mod tests {
         }
         fn is_draft(&self, _pr_ref: &str) -> Option<bool> {
             self.draft
+        }
+        fn comment(&self, pr_ref: &str, body: &str) -> bool {
+            self.comments.borrow_mut().push((pr_ref.to_string(), body.to_string()));
+            true
         }
     }
 
@@ -3702,6 +3717,46 @@ mod tests {
         assert!(st.pr_ready_at.is_some(), "ready transition is timestamped");
         assert!(st.pr_merged_at.is_none(), "not merged yet");
         assert_eq!(st.status, Status::InProgress, "gate still holds");
+    }
+
+    /// D5: when the discrete gate opens a station's draft PR and the station has
+    /// an attached proof, that proof is posted to the PR as a durable comment —
+    /// exactly once (the PR opens once).
+    #[test]
+    fn discrete_open_uploads_the_station_proof_to_the_pr() {
+        use darkrun_api::proof::{BenchProof, Proof, Surface as ApiSurface};
+        let (_d, store) = store();
+        run_start(&store, "d", "software", None, "discrete").expect("start");
+        // Classify the run + attach a matching proof for the frame station.
+        crate::proof::set_surface(&store, "d", "data").unwrap();
+        crate::proof::attach_proof(
+            &store,
+            "d",
+            Proof::bench(ApiSurface::Data, BenchProof { p50: Some(1.5), ..Default::default() }),
+            Some("frame".into()),
+        )
+        .unwrap();
+
+        let hosting = MockHosting::new(MergeState::Open);
+        drive_discrete_frame_to_gate(&store, &hosting);
+
+        // The proof was posted to the opened PR ref exactly once.
+        let comments = hosting.comments.borrow();
+        assert_eq!(comments.len(), 1, "proof posted exactly once");
+        assert_eq!(comments[0].0, "42", "posted to the opened PR ref");
+        assert!(comments[0].1.contains("darkrun proof"), "comment carries the proof");
+        assert!(comments[0].1.contains("p50"), "comment carries the measured numbers");
+    }
+
+    /// D5: a station with NO attached proof opens its PR without a spurious
+    /// comment.
+    #[test]
+    fn discrete_open_without_proof_posts_no_comment() {
+        let (_d, store) = store();
+        run_start(&store, "d", "software", None, "discrete").expect("start");
+        let hosting = MockHosting::new(MergeState::Open);
+        drive_discrete_frame_to_gate(&store, &hosting);
+        assert!(hosting.comments.borrow().is_empty(), "no proof → no comment");
     }
 
     /// G4: a merge records the `merged` status + `pr_merged_at` on the way to

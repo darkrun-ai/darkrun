@@ -262,6 +262,24 @@ pub fn get_proof(
     })
 }
 
+/// Render a station's attached proof as a markdown comment body — the durable,
+/// linkable asset posted onto the station's change request (D5). `None` when no
+/// proof is attached for the station (nothing to upload). The proof's measured
+/// numbers are emitted as a fenced JSON block under a header naming the run +
+/// station + surface, so a reviewer reads the objective evidence right on the PR.
+pub fn station_proof_markdown(store: &StateStore, slug: &str, station: &str) -> Option<String> {
+    let ps = read_store(store, slug).ok()?;
+    let proof = ps.stations.get(station).or(ps.run.as_ref())?;
+    let json = serde_json::to_string_pretty(proof).ok()?;
+    Some(format!(
+        "## darkrun proof — `{station}` ({surface})\n\n\
+         Objective verification recorded by the darkrun **{station}** station for run `{slug}`. \
+         This is the measured evidence the Prove/Audit gate passed against.\n\n\
+         ```json\n{json}\n```\n",
+        surface = proof.surface.as_str(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

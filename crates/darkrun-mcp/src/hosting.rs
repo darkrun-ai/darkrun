@@ -71,6 +71,14 @@ pub trait Hosting {
     fn is_draft(&self, _pr_ref: &str) -> Option<bool> {
         None
     }
+
+    /// Post a markdown `body` as a comment on `pr_ref`, returning `true` on a
+    /// confirmed post. Used to attach the station's objective proof to the
+    /// change request as a durable, linkable asset (D5). Defaults to `false`
+    /// (no-op) so a client that can't comment simply skips the upload.
+    fn comment(&self, _pr_ref: &str, _body: &str) -> bool {
+        false
+    }
 }
 
 /// The CLI-backed hosting client: shells `gh` / `glab` against a repo root.
@@ -223,6 +231,18 @@ impl Hosting for CliHosting {
                 parse_bool_field(&raw, "draft")
             }
             Provider::None => None,
+        }
+    }
+
+    fn comment(&self, pr_ref: &str, body: &str) -> bool {
+        match self.provider {
+            Provider::GitHub => self
+                .run("gh", &["pr", "comment", pr_ref, "--body", body])
+                .is_some(),
+            Provider::GitLab => self
+                .run("glab", &["mr", "note", pr_ref, "--message", body])
+                .is_some(),
+            Provider::None => false,
         }
     }
 }
