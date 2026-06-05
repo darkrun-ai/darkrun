@@ -607,4 +607,53 @@ mod tests {
         assert_eq!(projects[0].slug, live[0].slug);
         assert_eq!(record.slug, live[0].slug);
     }
+
+    #[test]
+    fn list_live_engines_in_skips_junk_and_handles_missing() {
+        // An absent root lists empty (NotFound), not an error.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(list_live_engines_in(&tmp.path().join("never")).unwrap().is_empty());
+
+        // A non-dir entry at the top level is skipped; a slug dir with only
+        // non-descriptor / malformed files yields nothing live.
+        fs::write(tmp.path().join("loose-file"), b"x").unwrap();
+        let slug = tmp.path().join("darkrun-deadbeef");
+        fs::create_dir_all(&slug).unwrap();
+        fs::write(slug.join("notes.txt"), b"not a descriptor").unwrap();
+        fs::write(slug.join("engine-stale.json.stale"), b"{}").unwrap();
+        fs::write(slug.join("engine-bad.json"), b"not json").unwrap(); // parse-skip
+        assert!(list_live_engines_in(tmp.path()).unwrap().is_empty());
+
+        assert!(!is_live_descriptor_name(Path::new("engine-x.json.stale")));
+        assert!(is_live_descriptor_name(Path::new("/a/engine-x.json")));
+    }
+
+    #[test]
+    fn home_rooted_wrappers_resolve_under_an_overridden_home() {
+        // Override HOME so the home-based wrappers (new / default_root /
+        // register_project / list_projects / list_live_engines) operate under a
+        // throwaway tree instead of the real ~/.darkrun.
+        let _g = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let root = default_root().expect("home resolves");
+        assert!(root.ends_with(".darkrun"));
+
+        let reg = EngineRegistry::new("/Users/dev/widget").expect("registry under home");
+        reg.announce(sample_addr(), "claude").unwrap();
+        assert!(!list_live_engines().unwrap().is_empty());
+
+        let rec = register_project(Path::new("/Users/dev/widget"), Some("Widget".into())).unwrap();
+        assert_eq!(rec.name.as_deref(), Some("Widget"));
+        assert!(list_projects().unwrap().iter().any(|p| p.slug == rec.slug));
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
