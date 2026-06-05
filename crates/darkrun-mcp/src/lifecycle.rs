@@ -1325,4 +1325,83 @@ mod tests {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if s.is_empty() || s == "HEAD" { None } else { Some(s) }
     }
+
+    /// Run `git -C <dir> <args>`, asserting success.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success();
+        assert!(ok, "git {args:?} in {dir:?}");
+    }
+
+    /// Commit a divergent edit to `file` on `branch` via a throwaway worktree
+    /// (so a branch checked out nowhere can still gain a commit).
+    fn commit_on_branch(root: &Path, branch: &str, file: &str, body: &str, msg: &str) {
+        let wt = root.parent().unwrap().join(format!("dr-edit-{}", msg.replace(' ', "-")));
+        git_in(root, &["worktree", "add", "--force", &wt.to_string_lossy(), branch]);
+        std::fs::write(wt.join(file), body).unwrap();
+        git_in(&wt, &["add", "-A"]);
+        git_in(&wt, &["commit", "-qm", msg]);
+        git_in(root, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
+    }
+
+    #[test]
+    fn land_station_with_a_genuine_conflict_leaves_it_in_tree() {
+        let (_d, root, store) = init_repo();
+        // A shared file in the base both sides will diverge on.
+        std::fs::write(root.join("shared.txt"), "base\n").unwrap();
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-qm", "add shared"]);
+
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+        let wt = station_worktree_path(&root, "r", "build");
+
+        // Build edits shared.txt one way…
+        std::fs::write(wt.join("shared.txt"), "build version\n").unwrap();
+        git_in(&wt, &["add", "-A"]);
+        git_in(&wt, &["commit", "-qm", "build edit"]);
+        // …and run-main edits it the other way.
+        commit_on_branch(&root, "darkrun/r/main", "shared.txt", "main version\n", "main edit");
+
+        // Landing build -> run-main surfaces a genuine agent-content conflict,
+        // left IN-TREE (not torn down) for resolution.
+        let land = land_station(&store, "r", "build");
+        assert!(
+            land.has_conflicts() || land.conflict_branch.is_some(),
+            "expected a conflict outcome, got {land:?}"
+        );
+    }
+
+    #[test]
+    fn sync_branch_downstream_freshens_run_main_and_station_from_base() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+
+        // The base branch (`main`) advances with a new, non-conflicting file
+        // after the run forked — sync pulls it down base -> run-main -> station.
+        commit_on_branch(&root, "main", "base-new.txt", "fresh\n", "base advance");
+
+        let out = sync_branch_downstream(&store, "r", "build");
+        // Either it performed a downstream merge or cleanly no-op'd — never errors;
+        // the new base file is now reachable from the station branch.
+        assert!(out.conflict_step.is_none(), "non-conflicting sync: {out:?}");
+        let reachable = Command::new("git")
+            .arg("-C").arg(&root)
+            .args(["cat-file", "-e", "darkrun/r/build:base-new.txt"])
+            .status().unwrap().success();
+        assert!(reachable, "base advance should reach the station branch after sync");
+    }
+
+    #[test]
+    fn with_worktree_on_branch_runs_a_closure_against_the_branch_tree() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        let (git, root2) = open_git(&store).unwrap();
+        let saw = with_worktree_on_branch(&git, &root2, &run_main_branch("r"), "r", |wt| {
+            // README from the base commit is present in run-main's tree.
+            wt.join("README.md").exists()
+        })
+        .expect("closure runs on a fresh worktree");
+        assert!(saw, "the run-main worktree carries the base README");
+    }
 }
