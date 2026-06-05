@@ -1936,6 +1936,7 @@ fn sample_station() -> Station {
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: None,
         completed_at: None,
     }
@@ -2014,6 +2015,7 @@ fn station_full_roundtrips() {
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: Some("t0".into()),
         completed_at: Some("t2".into()),
     };
@@ -2086,6 +2088,7 @@ fn station_yaml_roundtrips() {
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: Some("t".into()),
         completed_at: None,
     };
@@ -2323,6 +2326,7 @@ fn double_roundtrip_is_idempotent_for_station() {
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: Some("t0".into()),
         completed_at: None,
     };
@@ -2690,6 +2694,7 @@ fn station_with_each_checkpoint_kind_roundtrips() {
             pr_status: None,
             pr_ready_at: None,
             pr_merged_at: None,
+            verifier_nonce: None,
             started_at: None,
             completed_at: None,
         };

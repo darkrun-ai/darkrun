@@ -1079,6 +1079,7 @@ fn roundtrip_station_through_envelope() {
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: Some("2026-05-30T00:00:00Z".into()),
         completed_at: None,
     };
@@ -1115,6 +1116,7 @@ fn roundtrip_station_each_phase() {
             pr_status: None,
             pr_ready_at: None,
             pr_merged_at: None,
+            verifier_nonce: None,
             started_at: None,
             completed_at: None,
         };
@@ -1149,6 +1151,7 @@ fn roundtrip_checkpoint_each_kind() {
             pr_status: None,
             pr_ready_at: None,
             pr_merged_at: None,
+            verifier_nonce: None,
             started_at: None,
             completed_at: None,
         };
@@ -1183,6 +1186,7 @@ fn roundtrip_checkpoint_each_outcome() {
             pr_status: None,
             pr_ready_at: None,
             pr_merged_at: None,
+            verifier_nonce: None,
             started_at: None,
             completed_at: None,
         };
@@ -1211,6 +1215,7 @@ fn roundtrip_station_skips_none_checkpoint() {
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: None,
         completed_at: None,
     };
@@ -1237,6 +1242,7 @@ fn roundtrip_station_idempotent() {
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: Some("2026-05-30T00:00:00Z".into()),
         completed_at: Some("2026-05-30T02:00:00Z".into()),
     };
@@ -1988,6 +1994,7 @@ fn serialize_station_emits_snake_case_phase() {
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: None,
         completed_at: None,
     };

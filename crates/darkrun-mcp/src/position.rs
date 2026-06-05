@@ -310,6 +310,11 @@ pub struct PromptContext {
     /// until it lands onto the station branch. Empty outside a git-backed run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub worktrees: Vec<Worktree>,
+    /// The station's one-time verifier nonce (B5) — the dispatch token the agent
+    /// must pass to `darkrun_quality_gate_record`. Surfaced in the Manufacture
+    /// prompt; absent outside Manufacture or on a station with no nonce.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verifier_nonce: Option<String>,
     /// The open feedback id, for the fix track.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feedback_id: Option<String>,
@@ -1562,6 +1567,13 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
             ctx.worker = Some(worker.clone());
             // The action's wave-ready units are the ones the agent dispatches.
             ctx.units = wave.clone();
+            // B5: hand the agent the station's verifier nonce so it can record
+            // quality-gate results — the engine refuses a result without it.
+            ctx.verifier_nonce = store
+                .read_state(slug)
+                .ok()
+                .flatten()
+                .and_then(|s| s.stations.get(mstation).and_then(|st| st.verifier_nonce.clone()));
             // Resolve the model for this beat: the worker's own override, else
             // the factory default. (A per-unit override would win, but the wave
             // can span units, so the role/factory resolution is the dispatch hint.)
@@ -2048,6 +2060,9 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
                 .unwrap_or(CheckpointKind::Auto);
             let st = ensure_station(&mut state, &factory, station)?;
             st.phase = if matches!(kind, CheckpointKind::Auto) {
+                // Entering Manufacture without a gate hold → mint the verifier
+                // nonce now so the first Manufacture prompt carries it (B5).
+                mint_verifier_nonce(st, slug, station, &now);
                 StationPhase::Manufacture
             } else {
                 StationPhase::UserGate
@@ -2067,6 +2082,9 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
             // One wave per tick — stay in Manufacture until every unit locks.
             let st = ensure_station(&mut state, &factory, station)?;
             st.phase = StationPhase::Manufacture;
+            // B5 backstop: ensure the verifier nonce exists (the entry
+            // transitions mint it, but a re-entry via rework lands here directly).
+            mint_verifier_nonce(st, slug, station, &now);
             state.active_station = station.clone();
             // B9: fork each wave-ready unit onto its own worktree off the station
             // branch, so its Pass-loop diff is isolated. Idempotent downstream —
@@ -2310,6 +2328,7 @@ fn ensure_station<'a>(
                 pr_status: None,
                 pr_ready_at: None,
                 pr_merged_at: None,
+                verifier_nonce: None,
                 started_at: None,
                 completed_at: None,
             },
@@ -2332,6 +2351,9 @@ fn complete_station(
         let st = ensure_station(state, factory, station)?;
         st.status = Status::Completed;
         st.completed_at = Some(now.to_string());
+        // B5: the station's verification is done — retire its one-time nonce so a
+        // late/forged gate record can't reuse it (a fresh re-entry remints one).
+        st.verifier_nonce = None;
         if let Some(cp) = st.checkpoint.as_mut() {
             cp.outcome = Some(CheckpointOutcome::Advanced);
         }
@@ -2345,6 +2367,18 @@ fn complete_station(
         state.active_station = next_name;
     }
     Ok(())
+}
+
+/// Mint the station's one-time verifier nonce if it doesn't have one yet (B5).
+/// Called at the transition INTO Manufacture so the nonce is present before the
+/// first Manufacture prompt renders. The token is a content hash over the run,
+/// station, and dispatch time — unique per dispatch and not guessable from the
+/// run state, so a quality-gate result can't be recorded without it.
+fn mint_verifier_nonce(st: &mut Station, slug: &str, station: &str, now: &str) {
+    if st.verifier_nonce.is_none() {
+        let seed = format!("{slug}\u{1}{station}\u{1}{now}");
+        st.verifier_nonce = Some(darkrun_core::hash_bytes(seed.as_bytes()));
+    }
 }
 
 /// Start a fresh run: write `run.md`, right-size the station plan from `mode`,
@@ -2479,6 +2513,8 @@ pub fn checkpoint_decide(
         let st = ensure_station(&mut state, &factory, &station)?;
         if approved {
             st.phase = StationPhase::Manufacture;
+            // B5: releasing the wave dispatches verification — mint the nonce.
+            mint_verifier_nonce(st, slug, &station, &now);
         } else if let Some(body) = feedback {
             // Hold at the gate (phase stays UserGate); the pending feedback doc
             // preempts via Track B next tick, then the gate re-opens for a
@@ -3132,6 +3168,16 @@ mod tests {
             matches!(t3b.action, RunAction::Manufacture { ref units, .. } if units == &vec!["u1".to_string()]),
             "expected Manufacture, got {:?}",
             t3b.action
+        );
+        // B5: the verifier nonce was minted on the station and surfaced in the
+        // Manufacture prompt, so the agent can record quality gates.
+        let nonce = store.read_state("r").unwrap().unwrap().stations["frame"]
+            .verifier_nonce
+            .clone();
+        assert!(nonce.is_some(), "verifier nonce minted on Manufacture dispatch");
+        assert!(
+            t3b.prompt.as_deref().unwrap().contains(nonce.as_deref().unwrap()),
+            "manufacture prompt carries the verifier nonce"
         );
 
         // Complete the unit; next tick audits (folds tests in), then reflects,

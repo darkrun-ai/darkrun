@@ -789,6 +789,13 @@ pub struct Station {
     /// RFC3339 timestamp the PR merged. `None` until merged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_merged_at: Option<String>,
+    /// The one-time verifier nonce minted when the engine dispatches this
+    /// station's verification (Manufacture entry). `darkrun_quality_gate_record`
+    /// refuses a result without the matching nonce, so an agent can't certify a
+    /// quality gate it was never dispatched to run (B5). Cleared when the station
+    /// completes and reminted on a fresh re-entry (rework).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_nonce: Option<String>,
     /// RFC3339 start timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,

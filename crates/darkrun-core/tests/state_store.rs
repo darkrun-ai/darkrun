@@ -74,6 +74,7 @@ fn station(name: &str, status: Status, phase: StationPhase) -> Station {
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: None,
         completed_at: None,
     }

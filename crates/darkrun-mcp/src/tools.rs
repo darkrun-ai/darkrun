@@ -409,6 +409,11 @@ pub struct GateRecordInput {
     /// Optional detail — failure output tail, or the blocked dependency.
     #[serde(default)]
     pub detail: Option<String>,
+    /// The station's verifier nonce, handed to you in the Manufacture dispatch
+    /// (B5). Required when the station carries one; the engine refuses a result
+    /// without it, so a gate can't be certified outside a real dispatch.
+    #[serde(default)]
+    pub nonce: Option<String>,
 }
 
 /// Input for `darkrun_feedback_create`.
@@ -1320,7 +1325,13 @@ impl DarkrunServer {
         };
         let store = self.store();
         match units::record_gate_result(
-            &store, &input.slug, &input.unit, &input.gate, status, input.detail.clone(),
+            &store,
+            &input.slug,
+            &input.unit,
+            &input.gate,
+            status,
+            input.detail.clone(),
+            input.nonce.as_deref(),
         ) {
             Ok(unit) => ok_json(&unit),
             Err(e) => Ok(err_text(e)),

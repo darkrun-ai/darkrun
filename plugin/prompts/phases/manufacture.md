@@ -49,6 +49,10 @@ The Pass loop is adversarial on purpose: a single confident pass is exactly wher
 **Reject routing.** Workers carry a pass-loop role: {% for w in workers %}{% if worker_roles[w] %}`{{ w }}` = {{ worker_roles[w] }}{% if not loop.last %}, {% endif %}{% endif %}{% endfor %}. A `build` worker produces and repairs; a `verify` worker only judges; a `plan` worker only designs. When a beat **rejects**, bounce back to the **nearest preceding `build` worker** (pass it as `next_worker` to `darkrun_unit_iterate`) — skip `verify`/`plan` beats on the way back, since they can't fix. An `advance` rolls forward to the next worker in order.
 {% endif %}
 
+{% if verifier_nonce %}
+**Quality-gate verifier nonce.** This dispatch carries a one-time verifier token: **`{{ verifier_nonce }}`**. When you record a quality gate with `darkrun_quality_gate_record`, pass it as `nonce`. The engine refuses a gate result without the matching token — so a gate is only ever recorded as part of a real verification dispatch, never self-certified. Run the gate's command for real, then record the actual outcome with this nonce.
+{% endif %}
+
 Run **only the `{{ worker }}` beat** this tick. When the beat finishes, **record it** with `darkrun_unit_iterate` — pass the `worker`, the `result` (`advance` or `reject`), and a `note`: on advance, what you did and what the next worker needs to know; on reject, why you bounced it (a reject without a reason is refused). That note becomes the next beat's handoff above. Then call `darkrun_tick`; the manager advances the loop or releases the next wave. A Unit is locked only after Resolve and its completion criteria pass.
 
 A Unit gets a **bounded pass budget** — the manager escalates a Unit that can't converge within it to the operator rather than grinding forever. Don't paper over a stuck Unit to dodge the escalation; a Unit that needs more passes than the budget allows is a signal the spec, the scope, or the approach is wrong, and that's the operator's call to make.

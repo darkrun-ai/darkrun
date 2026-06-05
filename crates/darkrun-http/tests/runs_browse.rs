@@ -96,6 +96,7 @@ fn station(name: &str, status: Status, phase: StationPhase, started_at: Option<&
         pr_status: None,
         pr_ready_at: None,
         pr_merged_at: None,
+        verifier_nonce: None,
         started_at: started_at.map(str::to_string),
         completed_at: None,
     }

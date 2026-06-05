@@ -193,11 +193,33 @@ pub fn record_gate_result(
     gate: &str,
     status: GateStatus,
     detail: Option<String>,
+    nonce: Option<&str>,
 ) -> Result<Unit> {
     if gate.trim().is_empty() {
         return Err(McpError::InvalidInput("gate name must not be empty".into()));
     }
     let mut unit = get(store, run, slug)?;
+    // B5: a gate result is only trustworthy if it came from a real verification
+    // dispatch. The unit's station carries a one-time `verifier_nonce` minted
+    // when the engine dispatched Manufacture; the caller must echo it. A station
+    // with no nonce (legacy/non-gated path) imposes no check.
+    let station = unit.station().to_string();
+    if let Some(expected) = store
+        .read_state(run)
+        .ok()
+        .flatten()
+        .and_then(|s| s.stations.get(&station).and_then(|st| st.verifier_nonce.clone()))
+    {
+        match nonce {
+            Some(n) if n == expected => {}
+            _ => {
+                return Err(McpError::InvalidInput(format!(
+                    "quality-gate result for '{gate}' rejected: missing or wrong verifier nonce — \
+                     record gates only from the engine's Manufacture dispatch (which carries the nonce)"
+                )));
+            }
+        }
+    }
     let now = Utc::now().to_rfc3339();
     let prior_attempts = unit
         .frontmatter
@@ -425,13 +447,13 @@ mod tests {
 
         // Unsatisfied until both gates land.
         assert!(!store.read_unit("r", "u1").unwrap().gates_satisfied());
-        record_gate_result(&store, "r", "u1", "tests", GateStatus::Pass, None).unwrap();
+        record_gate_result(&store, "r", "u1", "tests", GateStatus::Pass, None, None).unwrap();
         assert!(!store.read_unit("r", "u1").unwrap().gates_satisfied());
 
         // lint is env-blocked: first block holds; second auto-defers to CI.
-        record_gate_result(&store, "r", "u1", "lint", GateStatus::EnvBlocked, Some("no toolchain".into())).unwrap();
+        record_gate_result(&store, "r", "u1", "lint", GateStatus::EnvBlocked, Some("no toolchain".into()), None).unwrap();
         assert!(!store.read_unit("r", "u1").unwrap().gates_satisfied());
-        let after = record_gate_result(&store, "r", "u1", "lint", GateStatus::EnvBlocked, None).unwrap();
+        let after = record_gate_result(&store, "r", "u1", "lint", GateStatus::EnvBlocked, None, None).unwrap();
         // Both now satisfied (tests=pass, lint=deferred_to_ci).
         assert!(after.gates_satisfied());
         let lint = after.frontmatter.gate_results.iter().find(|r| r.name == "lint").unwrap();
@@ -446,9 +468,50 @@ mod tests {
         let mut u = create(&store, "r", "u1", "build", None, vec![]).unwrap();
         u.frontmatter.quality_gates = vec![QualityGate { name: "tests".into(), command: "t".into() }];
         store.write_unit("r", &u).unwrap();
-        let after = record_gate_result(&store, "r", "u1", "tests", GateStatus::Fail, None).unwrap();
+        let after = record_gate_result(&store, "r", "u1", "tests", GateStatus::Fail, None, None).unwrap();
         assert!(!after.gates_satisfied());
         assert_eq!(after.unsatisfied_gates(), vec!["tests"]);
+    }
+
+    #[test]
+    fn verifier_nonce_is_required_when_the_station_carries_one() {
+        use darkrun_core::domain::Station;
+        let (_d, store) = store1();
+        create(&store, "r", "u1", "build", None, vec![]).unwrap();
+        // The station carries a minted nonce (as it would after Manufacture
+        // dispatch). Recording a gate now requires that exact token.
+        let mut state = darkrun_core::RunState::default();
+        let st = Station {
+            station: "build".into(),
+            status: Status::InProgress,
+            phase: darkrun_core::domain::StationPhase::Manufacture,
+            elaborated: false,
+            checkpoint: None,
+            chosen_checkpoint: None,
+            branch: None,
+            pr_ref: None,
+            pr_status: None,
+            pr_ready_at: None,
+            pr_merged_at: None,
+            verifier_nonce: Some("the-token".into()),
+            started_at: None,
+            completed_at: None,
+        };
+        state.stations.insert("build".into(), st);
+        store.write_state("r", &state).unwrap();
+
+        // No nonce → rejected.
+        let err = record_gate_result(&store, "r", "u1", "tests", GateStatus::Pass, None, None)
+            .unwrap_err();
+        assert!(format!("{err}").contains("verifier nonce"), "{err}");
+        // Wrong nonce → rejected.
+        assert!(record_gate_result(&store, "r", "u1", "tests", GateStatus::Pass, None, Some("wrong"))
+            .is_err());
+        // Correct nonce → accepted.
+        let ok = record_gate_result(
+            &store, "r", "u1", "tests", GateStatus::Pass, None, Some("the-token"),
+        );
+        assert!(ok.is_ok(), "correct nonce records the gate: {ok:?}");
     }
 
     #[test]

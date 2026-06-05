@@ -381,6 +381,7 @@ fn state_json_roundtrip() {
             pr_status: None,
             pr_ready_at: None,
             pr_merged_at: None,
+            verifier_nonce: None,
             started_at: Some("2026-05-30T00:00:00Z".into()),
             completed_at: None,
         },
