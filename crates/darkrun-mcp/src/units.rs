@@ -135,6 +135,108 @@ pub fn update(store: &StateStore, run: &str, slug: &str, upd: UnitUpdate) -> Res
     Ok(unit)
 }
 
+/// What a unit reset cleared (or, on a dry run, would clear).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnitResetPlan {
+    /// The run slug.
+    pub run: String,
+    /// The unit slug that was/would be reset.
+    pub unit: String,
+    /// The unit's station.
+    pub station: String,
+    /// The unit's status before the reset (what it's being rescued from).
+    pub from_status: String,
+    /// Pass iterations cleared.
+    pub passes_cleared: u32,
+    /// Review + approval stamps cleared.
+    pub stamps_cleared: usize,
+    /// Gate results cleared.
+    pub gates_cleared: usize,
+    /// Whether the reset was actually applied (vs a dry run).
+    pub confirmed: bool,
+    /// Human-readable summary / next step.
+    pub note: String,
+}
+
+/// Reset a single unit back to a fresh `Pending` state — the per-unit recovery
+/// for a wedged or bolt-capped unit.
+///
+/// A unit's body (its spec) is locked while it executes, so a unit that has run
+/// off the rails can't simply be edited and retried. This clears the unit's
+/// engine-managed execution state — Pass history (so `pass()` drops to 0),
+/// review/approval stamps, input witnesses, gate results, the `revise` flag, and
+/// the start/complete timestamps — and flips it to `Pending`, which re-opens the
+/// body + structural fields for editing and re-dispatches it from Pass 1.
+///
+/// **Preserves the unit's identity and spec**: slug, station, dependencies,
+/// inputs, outputs, declared `quality_gates`, worker assignment, title, and body.
+/// Only the execution *attempt* is wiped, never the unit's definition.
+///
+/// Dry run by default (reports what it would clear); only mutates when `confirm`
+/// is set — mirroring [`crate::reset::reset`]. Idempotent on an already-pending
+/// unit (nothing to clear). Resetting a unit other units depend on is the
+/// operator's call (the dry-run note flags it); like a station reset, it's an
+/// explicit recovery action.
+pub fn reset(store: &StateStore, run: &str, slug: &str, confirm: bool) -> Result<UnitResetPlan> {
+    let mut unit = get(store, run, slug)?;
+    let station = unit.station().to_string();
+    let from_status = format!("{:?}", unit.frontmatter.status).to_lowercase();
+    let passes = unit.pass();
+    let stamps = unit.frontmatter.reviews.len() + unit.frontmatter.approvals.len();
+    let gates = unit.frontmatter.gate_results.len();
+    // Flag dependents so the operator sees the blast radius before confirming.
+    let dependents: Vec<String> = store
+        .read_units(run)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|u| u.slug != slug && u.frontmatter.depends_on.iter().any(|d| d == slug))
+        .map(|u| u.slug)
+        .collect();
+
+    if confirm {
+        unit.frontmatter.status = Status::Pending;
+        unit.frontmatter.revise = false;
+        unit.frontmatter.started_at = None;
+        unit.frontmatter.completed_at = None;
+        unit.frontmatter.iterations.clear();
+        unit.frontmatter.reviews.clear();
+        unit.frontmatter.approvals.clear();
+        unit.frontmatter.input_witnesses.clear();
+        unit.frontmatter.gate_results.clear();
+        store.write_unit(run, &unit)?;
+    }
+
+    let dep_note = if dependents.is_empty() {
+        String::new()
+    } else {
+        format!(" Note: {} unit(s) depend on it ({}) — they may need re-running.", dependents.len(), dependents.join(", "))
+    };
+    let note = if confirm {
+        format!(
+            "Reset unit `{slug}` (was {from_status}) to pending — cleared {passes} pass(es), \
+             {stamps} stamp(s), {gates} gate result(s). Its body is editable again; the next \
+             tick re-dispatches it from Pass 1.{dep_note}"
+        )
+    } else {
+        format!(
+            "Dry run: would reset unit `{slug}` (currently {from_status}) to pending — clearing \
+             {passes} pass(es), {stamps} stamp(s), {gates} gate result(s). Re-call with \
+             confirm:true to apply.{dep_note}"
+        )
+    };
+    Ok(UnitResetPlan {
+        run: run.to_string(),
+        unit: slug.to_string(),
+        station,
+        from_status,
+        passes_cleared: passes,
+        stamps_cleared: stamps,
+        gates_cleared: gates,
+        confirmed: confirm,
+        note,
+    })
+}
+
 /// Record one Pass beat on a unit — append-only. A worker reports whether it
 /// `advance`d or `reject`ed, plus a **note**: its handoff to the next worker on
 /// advance, or its reason on reject. The note is what the next dispatch reads,
@@ -325,6 +427,81 @@ mod tests {
         create(&store, "r", "u1", "frame", None, vec![]).unwrap();
         let err = create(&store, "r", "u1", "frame", None, vec![]).unwrap_err();
         assert!(matches!(err, McpError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn reset_clears_execution_state_but_keeps_the_spec() {
+        let (_d, store) = store1();
+        // A unit that ran several passes, picked up stamps + a gate result, and
+        // wedged InProgress — its body (the spec) is now locked.
+        let mut u = create(&store, "r", "u1", "build", Some("Burst limiter".into()), vec!["u0".into()]).unwrap();
+        u.body = "# Burst limiter\nThe durable spec the operator wants to keep.\n".into();
+        u.frontmatter.status = Status::InProgress;
+        u.frontmatter.started_at = Some("2026-06-05T00:00:00Z".into());
+        u.frontmatter.inputs = vec!["frame/frame.md".into()];
+        u.frontmatter.outputs = vec!["src/limiter.rs".into()];
+        for n in 0..5 {
+            u.frontmatter.iterations.push(UnitIteration {
+                worker: format!("w{n}"),
+                started_at: None,
+                completed_at: None,
+                result: Some(IterationResult::Advance),
+                note: None,
+            });
+        }
+        u.frontmatter.reviews.insert("correctness".into(), Some(Stamp { at: "2026-06-05T00:00:00Z".into() }));
+        u.frontmatter.approvals.insert("user".into(), Some(Stamp { at: "2026-06-05T00:00:00Z".into() }));
+        u.frontmatter.input_witnesses.insert("frame/frame.md".into(), "deadbeef".into());
+        u.frontmatter.gate_results.push(GateResult {
+            name: "tests".into(),
+            status: GateStatus::Fail,
+            at: None,
+            attempts: 3,
+            detail: None,
+        });
+        store.write_unit("r", &u).unwrap();
+        assert_eq!(store.read_unit("r", "u1").unwrap().pass(), 5);
+
+        // Dry run reports the blast radius and changes nothing.
+        let dry = reset(&store, "r", "u1", false).unwrap();
+        assert!(!dry.confirmed);
+        assert_eq!(dry.passes_cleared, 5);
+        assert_eq!(dry.stamps_cleared, 2);
+        assert_eq!(dry.gates_cleared, 1);
+        assert_eq!(dry.from_status, "inprogress");
+        assert_eq!(store.read_unit("r", "u1").unwrap().pass(), 5, "dry run mutates nothing");
+
+        // Confirmed reset: back to a fresh pending, execution state wiped.
+        let done = reset(&store, "r", "u1", true).unwrap();
+        assert!(done.confirmed);
+        let after = store.read_unit("r", "u1").unwrap();
+        assert_eq!(after.frontmatter.status, Status::Pending, "editable again");
+        assert_eq!(after.pass(), 0, "pass budget reset");
+        assert!(after.frontmatter.reviews.is_empty() && after.frontmatter.approvals.is_empty());
+        assert!(after.frontmatter.input_witnesses.is_empty());
+        assert!(after.frontmatter.gate_results.is_empty());
+        assert!(after.frontmatter.started_at.is_none() && after.frontmatter.completed_at.is_none());
+        // The spec + identity survive untouched.
+        assert!(after.body.contains("The durable spec the operator wants to keep"));
+        assert_eq!(after.title, "Burst limiter");
+        assert_eq!(after.frontmatter.depends_on, vec!["u0".to_string()]);
+        assert_eq!(after.frontmatter.inputs, vec!["frame/frame.md".to_string()]);
+        assert_eq!(after.frontmatter.outputs, vec!["src/limiter.rs".to_string()]);
+    }
+
+    #[test]
+    fn reset_is_now_pending_so_structural_edits_reopen() {
+        let (_d, store) = store1();
+        let mut u = create(&store, "r", "u1", "build", None, vec![]).unwrap();
+        u.frontmatter.status = Status::InProgress;
+        store.write_unit("r", &u).unwrap();
+        // Structural edit is refused while InProgress…
+        let blocked = update(&store, "r", "u1", UnitUpdate { depends_on: Some(vec!["x".into()]), ..Default::default() });
+        assert!(blocked.is_err(), "InProgress structural edit must be refused");
+        // …and permitted again after a reset.
+        reset(&store, "r", "u1", true).unwrap();
+        let ok = update(&store, "r", "u1", UnitUpdate { depends_on: Some(vec!["x".into()]), ..Default::default() }).unwrap();
+        assert_eq!(ok.frontmatter.depends_on, vec!["x".to_string()]);
     }
 
     #[test]

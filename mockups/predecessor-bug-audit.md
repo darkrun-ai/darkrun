@@ -142,11 +142,19 @@ scope per-unit — darkrun's per-unit worktree isolation already neutralizes the
 T15's terminal route is the exception, not the norm) — but none is an *engine*
 parity gap.
 
-**One honest ergonomics gap (not a defect):** darkrun has no *single-unit*
-pass-counter reset — recovery from a wedged unit is `darkrun_run_reset` (station
-scope) + `unit_update`, heavier than resetting one unit's budget. Nothing loops
-(the cap escalates cleanly); it's a convenience, not a shared bug. Logged for a
-possible `darkrun_unit_reset` follow-up.
+**The one ergonomics gap is now closed.** The 1:1 pass noted darkrun had no
+*single-unit* reset — recovery from a wedged unit meant `darkrun_run_reset`
+(station scope, wipes siblings) + `unit_update`. That's now built:
+**`darkrun_unit_reset`** returns one wedged/bolt-capped unit to a fresh `Pending`
+state — clearing its Pass history (so `pass()` drops to 0), review/approval
+stamps, input witnesses, gate results, and start/complete stamps — which re-opens
+its otherwise-locked body for editing and re-dispatches it from Pass 1. It
+preserves the unit's identity and spec (deps, inputs, outputs, declared gates,
+body), is dry-run-by-default, and flags dependents before confirming. The
+`MAX_PASSES` escalation message now *names* this recovery — directly fixing the
+predecessor's failure mode where the escalation promised a reset no tool
+delivered (and a permission classifier blocked the one it named). `units.rs`
+`reset` + the `darkrun_unit_reset` tool, 2 tests.
 
 **Bottom line on "all predecessor bugs verified?": yes, now 1:1.** BUG-3 remains
 the only genuine shared *engine* defect in the entire corpus (fixed); every other

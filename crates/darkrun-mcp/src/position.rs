@@ -1266,8 +1266,11 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
                 run: slug.to_string(),
                 station: station.clone(),
                 reason: format!(
-                    "unit `{}` has run {} passes (budget {MAX_PASSES}) — escalating",
-                    u.slug, u.pass()
+                    "unit `{}` has run {} passes (budget {MAX_PASSES}) — escalating. Recover by \
+                     editing the unit's spec and retrying: call `darkrun_unit_reset` (slug `{}`) \
+                     to return it to pending (its body unlocks and the Pass budget resets), fix \
+                     the spec, then tick to re-dispatch from Pass 1.",
+                    u.slug, u.pass(), u.slug
                 ),
             }),
         });

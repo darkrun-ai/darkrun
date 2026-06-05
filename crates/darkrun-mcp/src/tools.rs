@@ -641,6 +641,19 @@ pub struct RunResetInput {
     pub confirm: bool,
 }
 
+/// Input for `darkrun_unit_reset` — return a wedged unit to a fresh pending state.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UnitResetInput {
+    /// The run slug.
+    pub slug: String,
+    /// The unit slug to reset.
+    pub unit: String,
+    /// Must be true to actually reset; otherwise a dry run reporting what it would clear.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
 /// Input for `darkrun_debug` — admin recovery ops on a wedged run.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -1806,6 +1819,25 @@ impl DarkrunServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
         match crate::reset::reset(&store, &input.slug, input.station.as_deref(), input.confirm) {
+            Ok(plan) => ok_json(&plan),
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
+    /// Reset a single wedged/bolt-capped unit back to a fresh pending state so its
+    /// (otherwise locked) body becomes editable and it re-runs from Pass 1. Clears
+    /// the unit's pass history, stamps, and gate results; preserves its spec. Dry
+    /// run unless confirmed.
+    #[tool(
+        name = "darkrun_unit_reset",
+        description = "Reset one wedged/bolt-capped unit to pending so its body is editable again and it re-runs from Pass 1 (clears passes/stamps/gates, keeps the spec). Dry run unless confirm:true."
+    )]
+    pub fn darkrun_unit_reset(
+        &self,
+        Parameters(input): Parameters<UnitResetInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let store = self.store();
+        match crate::units::reset(&store, &input.slug, &input.unit, input.confirm) {
             Ok(plan) => ok_json(&plan),
             Err(e) => Ok(err_text(e)),
         }
