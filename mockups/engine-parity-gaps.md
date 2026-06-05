@@ -111,20 +111,45 @@ The earlier 28, plus this session's deferred-batch + review-driven close:
   **F4 per-role review stamp** (`darkrun_review_stamp` records one role without a
   cursor walk, so reviewers/explorers fan out in parallel and the parent ticks once).
 
+> **Re-audited at C6-level rigor (2026-06-05).** After C6 turned out to be a real
+> capability hiding under a "keep/redundant" label, the remaining 5 not-built items
+> were re-checked the same way — *what failure mode, at what level, at what time, and
+> does the claimed substitute actually exist in source?* Verdict: **all 5 are
+> genuinely not-build for darkrun's model** (substitutes verified in code: run-start
+> right-sizing exists for C2; phase re-derives from unit markers for B6; the Audit
+> gate blocks advance until every declared gate is satisfied for E4). But two
+> rationales were *wrong or imprecise* and are corrected below.
+
 ### Deliberate design — not a gap (2: keep)
 
-- **B6** the hook suite + `drift-witness.log` over an FSM checksum sidecar.
+- **B6** FSM checksum sidecar. *Corrected rationale:* the old "the hook suite covers
+  hookless tamper" was self-contradictory — hooks don't fire in a hookless harness.
+  The real coverage is that `derive_position` re-derives the working invariants from
+  on-disk artifacts every tick (phase from unit completion markers, feedback from
+  `feedback/*.md`, drift from content-hashes), so a tampered *derived* field in
+  `state.json` self-heals next tick, and the drift sweep catches out-of-band edits to
+  locked artifacts. The non-derived authoritative state (plan/mode/`pr_ref`) is
+  out-of-contract to hand-edit; a checksum is a server-era multi-writer concern, not a
+  fit for local-first single-writer.
 - **C2** the fixed six FSSBPH stations (the whole orientation refactor rests on the
-  invariant spine; right-sizing collapses at run start).
+  invariant spine; right-sizing collapses at run start — `derive_plan`/`run_plan`,
+  verified present).
 
 ### Redundant in darkrun's model (3: skip)
 
-- **E4** `run_quality_gates` — subsumed by D1's Audit gate, which already forces every
-  declared gate to be recorded.
-- **G3** clarifications — already captured in the run doc / annotations (review
-  confirmed: "fine with whatever mechanism as long as it's captured in elaboration").
-- **G5** persisted session metadata — sessions are in-memory by design; the on-disk run
-  state is the durable truth (review confirmed skip).
+- **E4** `run_quality_gates` — subsumed by D1's Audit gate, which blocks station advance
+  until every declared gate is satisfied (`!u.gates_satisfied()` in `derive_position`);
+  the mid-loop adversarial check is the Challenge beat. Build only if a worker must
+  *record* a gate mid-beat rather than at Audit.
+- **G3** clarifications. *Corrected rationale:* `darkrun_question_result` reads an
+  **in-memory** session — durability comes from the agent folding the answer into the
+  elaboration artifact (the same filesystem-is-truth contract as everything else). The
+  honest boundary: an unfolded answer is *re-solicited* after a restart, never silently
+  defaulted — worst case re-ask, not loss. A dedicated store only matters if answers had
+  to survive a mid-elaboration crash unfolded.
+- **G5** persisted session metadata — sessions are in-memory by design; a restart
+  re-derives the needed hold from durable run state (the agent re-raises on re-pickup).
+  Persist only if restart-survival of an in-flight session becomes a hard requirement.
 
 *(Nothing is deferred — the formerly-deferred B5/C5/D5/F2/F5/G1/G2/G4 are now built,
 and the formerly-skipped B7 and E6 were verified/built per the spreadsheet review.)*
