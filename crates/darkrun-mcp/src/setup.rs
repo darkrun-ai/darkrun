@@ -139,5 +139,25 @@ mod tests {
         assert_eq!(hosting_from_remote("git@github.com:a/b.git"), "github");
         assert_eq!(hosting_from_remote("https://gitlab.com/a/b.git"), "gitlab");
         assert_eq!(hosting_from_remote(""), "none");
+        assert_eq!(hosting_from_remote("git@bitbucket.org:a/b.git"), "bitbucket");
+        assert_eq!(hosting_from_remote("https://example.com/a/b.git"), "other");
+    }
+
+    #[test]
+    fn detects_jj_vcs_and_gitlab_ci() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".jj")).unwrap();
+        std::fs::write(dir.path().join(".gitlab-ci.yml"), "").unwrap();
+        let s = setup(dir.path(), false).unwrap();
+        assert_eq!(s.vcs, "jj");
+        assert_eq!(s.ci, "gitlab-ci");
+    }
+
+    #[test]
+    fn detects_circleci() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".circleci")).unwrap();
+        let s = setup(dir.path(), false).unwrap();
+        assert_eq!(s.ci, "circleci");
     }
 }
