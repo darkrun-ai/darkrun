@@ -514,4 +514,13 @@ mod tests {
         let err = get_surface(&store, "ghost").unwrap_err();
         assert!(matches!(err, McpError::Core(_)));
     }
+
+    #[test]
+    fn get_proof_errors_when_none_attached() {
+        let (_d, store) = store();
+        started(&store, "r");
+        // No proof attached → both the station-scoped and run-level reads error.
+        assert!(get_proof(&store, "r", Some("prove".into())).is_err());
+        assert!(get_proof(&store, "r", None).is_err());
+    }
 }

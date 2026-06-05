@@ -132,4 +132,14 @@ mod tests {
         let (_d, store) = store();
         assert!(list(&store, "r").unwrap().is_empty());
     }
+
+    #[test]
+    fn parse_falls_back_for_a_doc_without_frontmatter() {
+        // A reflection doc with no `---` fence parses to a body-only record.
+        let r = parse("refl-99".into(), "  a bare note, no frontmatter  ");
+        assert_eq!(r.id, "refl-99");
+        assert_eq!(r.station, "");
+        assert_eq!(r.created_at, "");
+        assert_eq!(r.body, "a bare note, no frontmatter");
+    }
 }
