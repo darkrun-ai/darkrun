@@ -2973,3 +2973,331 @@ mod tests {
         assert_eq!(bad.is_error, Some(true));
     }
 }
+
+/// Handler-coverage smoke: construct the tool server and CALL every MCP handler
+/// at least once (most on both the Ok and an Err path), so the thin
+/// `Parameters -> service-call -> ok_json/err_text` wrappers are all exercised.
+/// This guards the tool surface against an advertised-but-unexercised handler and
+/// pins the request/response plumbing of each tool.
+#[cfg(test)]
+mod handler_smoke {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Pull a freshly-minted visual-session id out of a create result.
+    fn session_id(res: &CallToolResult) -> String {
+        res.structured_content
+            .as_ref()
+            .and_then(|v| v.get("session_id"))
+            .and_then(|s| s.as_str())
+            .expect("create result carries a session_id")
+            .to_string()
+    }
+
+    #[test]
+    fn every_handler_executes_both_paths() {
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+
+        // ── argument-free / stateless readers ──────────────────────────────
+        s.darkrun_factory_list().unwrap();
+        s.darkrun_version_info(Parameters(NoInput {})).unwrap();
+        s.darkrun_changelog(Parameters(ChangelogInput { version: None })).unwrap();
+        s.darkrun_changelog(Parameters(ChangelogInput { version: Some("0.1.0".into()) })).unwrap();
+        s.darkrun_factory_detail(Parameters(FactoryRef { factory: "software".into() })).unwrap();
+        s.darkrun_factory_detail(Parameters(FactoryRef { factory: "nope".into() })).unwrap();
+        s.darkrun_backlog(Parameters(BacklogInput::default())).unwrap();
+        s.darkrun_setup(Parameters(SetupInput { apply: false })).unwrap();
+        s.darkrun_gate_review(Parameters(GateReviewInput { slug: None })).unwrap();
+        s.darkrun_report(Parameters(ReportInput {
+            message: "smoke report".into(),
+            contact_email: None,
+            name: None,
+        }))
+        .unwrap();
+        s.darkrun_run_list(Parameters(RunListInput { include_archived: true })).unwrap();
+
+        // ── error arms on an absent run ────────────────────────────────────
+        let rr = |slug: &str| RunRef { slug: slug.into() };
+        assert_eq!(
+            s.darkrun_tick(Parameters(rr("ghost"))).unwrap().is_error,
+            Some(true)
+        );
+        s.darkrun_run_show(Parameters(RunShowRef { slug: Some("ghost".into()) })).unwrap();
+        s.darkrun_unit_list(Parameters(rr("ghost"))).unwrap();
+
+        // ── start a real run + drive a little state ────────────────────────
+        s.darkrun_run_start(Parameters(RunStartInput {
+            slug: "r".into(),
+            factory: "software".into(),
+            title: Some("Smoke".into()),
+            mode: "continuous".into(),
+        }))
+        .unwrap();
+        s.darkrun_tick(Parameters(rr("r"))).unwrap();
+        s.darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
+        s.darkrun_run_surface(Parameters(RunSurfaceInput {
+            slug: "r".into(),
+            surface: Some("data".into()),
+        }))
+        .unwrap();
+        s.darkrun_run_surface(Parameters(RunSurfaceInput { slug: "r".into(), surface: None })).unwrap();
+        s.darkrun_external_ref(Parameters(ExternalRefInput {
+            slug: "r".into(),
+            key: Some("ticket".into()),
+            value: Some("JIRA-1".into()),
+        }))
+        .unwrap();
+        s.darkrun_external_ref(Parameters(ExternalRefInput { slug: "r".into(), key: None, value: None })).unwrap();
+        s.darkrun_proof_attach(Parameters(ProofAttachInput {
+            slug: "r".into(),
+            proof: serde_json::json!({ "surface": "data", "bench": { "p50": 1.5 } }),
+            station: Some("frame".into()),
+        }))
+        .unwrap();
+        s.darkrun_proof_get(Parameters(ProofGetInput { slug: "r".into(), station: None })).unwrap();
+
+        // ── units ──────────────────────────────────────────────────────────
+        s.darkrun_unit_create(Parameters(UnitCreateInput {
+            slug: "r".into(),
+            unit: "u1".into(),
+            station: "frame".into(),
+            title: Some("Unit one".into()),
+            depends_on: vec![],
+        }))
+        .unwrap();
+        s.darkrun_unit_get(Parameters(UnitRef { slug: "r".into(), unit: "u1".into() })).unwrap();
+        s.darkrun_unit_list(Parameters(rr("r"))).unwrap();
+        s.darkrun_unit_update(Parameters(UnitUpdateInput {
+            slug: "r".into(),
+            unit: "u1".into(),
+            status: Some("in_progress".into()),
+            depends_on: None,
+            worker: Some("make".into()),
+            inputs: None,
+            outputs: Some(vec!["src/x.rs".into()]),
+        }))
+        .unwrap();
+        s.darkrun_unit_iterate(Parameters(UnitIterateInput {
+            slug: "r".into(),
+            unit: "u1".into(),
+            worker: "make".into(),
+            result: "advance".into(),
+            note: Some("did the thing".into()),
+            next_worker: Some("challenge".into()),
+        }))
+        .unwrap();
+        s.darkrun_quality_gate_record(Parameters(GateRecordInput {
+            slug: "r".into(),
+            unit: "u1".into(),
+            gate: "tests".into(),
+            status: "pass".into(),
+            detail: None,
+            nonce: None,
+        }))
+        .unwrap();
+        s.darkrun_unit_reset(Parameters(UnitResetInput { slug: "r".into(), unit: "u1".into(), confirm: true })).unwrap();
+
+        // ── stamps + elaboration + gate choice ─────────────────────────────
+        s.darkrun_review_stamp(Parameters(ReviewStampInput {
+            slug: "r".into(),
+            station: "frame".into(),
+            role: "spec".into(),
+            kind: "review".into(),
+        }))
+        .unwrap();
+        s.darkrun_run_review_stamp(Parameters(RunReviewStampInput {
+            slug: "r".into(),
+            role: "integration-auditor".into(),
+        }))
+        .unwrap();
+        s.darkrun_elaborate_seal(Parameters(ElaborateSealInput { slug: "r".into(), station: "frame".into() })).unwrap();
+        s.darkrun_checkpoint_choose(Parameters(CheckpointChooseInput {
+            slug: "r".into(),
+            station: "frame".into(),
+            kind: "ask".into(),
+        }))
+        .unwrap();
+
+        // ── feedback lifecycle ─────────────────────────────────────────────
+        let fb = s
+            .darkrun_feedback_create(Parameters(FeedbackCreateInput {
+                slug: "r".into(),
+                station: "frame".into(),
+                body: "a finding".into(),
+                severity: Some("high".into()),
+                origin: Some("operator".into()),
+                invalidates: Some(vec!["spec".into()]),
+            }))
+            .unwrap();
+        let fb_id = fb.structured_content.unwrap()["id"].as_str().unwrap().to_string();
+        s.darkrun_feedback_list(Parameters(FeedbackListInput { slug: "r".into(), include_settled: true })).unwrap();
+        s.darkrun_feedback_set_targets(Parameters(FeedbackSetTargetsInput {
+            slug: "r".into(),
+            feedback_id: fb_id.clone(),
+            invalidates: vec!["spec".into()],
+        }))
+        .unwrap();
+        s.darkrun_feedback_move(Parameters(FeedbackMoveInput {
+            slug: "r".into(),
+            feedback_id: fb_id.clone(),
+            to_station: "specify".into(),
+        }))
+        .unwrap();
+        s.darkrun_feedback_resolve(Parameters(FeedbackResolveInput {
+            slug: "r".into(),
+            feedback_id: fb_id.clone(),
+            status: "addressed".into(),
+            reply: Some("fixed it".into()),
+        }))
+        .unwrap();
+        // A second finding we reject.
+        let fb2 = s
+            .darkrun_feedback_create(Parameters(FeedbackCreateInput {
+                slug: "r".into(),
+                station: "frame".into(),
+                body: "stale finding".into(),
+                severity: None,
+                origin: None,
+                invalidates: None,
+            }))
+            .unwrap();
+        let fb2_id = fb2.structured_content.unwrap()["id"].as_str().unwrap().to_string();
+        s.darkrun_feedback_reject(Parameters(FeedbackRejectInput {
+            slug: "r".into(),
+            feedback_id: fb2_id,
+            reason: "no longer applies".into(),
+        }))
+        .unwrap();
+
+        // ── reflections + drift + checkpoint decide ────────────────────────
+        s.darkrun_reflection_record(Parameters(ReflectionRecordInput {
+            slug: "r".into(),
+            body: "learned something".into(),
+            station: Some("frame".into()),
+        }))
+        .unwrap();
+        s.darkrun_reflection_list(Parameters(ReflectionListInput { slug: "r".into() })).unwrap();
+        s.darkrun_drift_accept(Parameters(DriftAcceptInput { slug: "r".into(), path: "frame/frame.md".into() })).unwrap();
+        s.darkrun_checkpoint_decide(Parameters(CheckpointDecideInput {
+            slug: "r".into(),
+            approved: false,
+            feedback: Some("hold".into()),
+        }))
+        .unwrap();
+
+        // ── annotations ────────────────────────────────────────────────────
+        let work_item = WorkItemInput { kind: "station".into(), id: String::new(), station: "frame".into() };
+        s.darkrun_annotation_submit(Parameters(AnnotationSubmitInput {
+            slug: "r".into(),
+            author: Some("human".into()),
+            work_item: work_item.clone(),
+            artifact: None,
+            anchor: None,
+            expression: None,
+            comment: "station note".into(),
+            ask: serde_json::json!({ "kind": "question", "severity": "should" }),
+            suggestion: None,
+        }))
+        .unwrap();
+        s.darkrun_annotation_list(Parameters(AnnotationListInput {
+            slug: "r".into(),
+            work_item: work_item.clone(),
+            open_only: false,
+        }))
+        .unwrap();
+        s.darkrun_annotation_payload(Parameters(AnnotationListInput {
+            slug: "r".into(),
+            work_item,
+            open_only: true,
+        }))
+        .unwrap();
+
+        // ── visual sessions: create then read back ─────────────────────────
+        let q = s
+            .darkrun_question(Parameters(QuestionInput {
+                slug: "r".into(),
+                title: None,
+                prompt: "Pick one".into(),
+                context: None,
+                options: vec![QuestionOptionInput {
+                    id: "a".into(),
+                    label: "A".into(),
+                    image_url: None,
+                    description: None,
+                }],
+                multi_select: false,
+                image_urls: vec![],
+            }))
+            .unwrap();
+        s.darkrun_question_result(Parameters(SessionResultInput { slug: "r".into(), session_id: session_id(&q) })).unwrap();
+        let d = s
+            .darkrun_direction(Parameters(DirectionInput {
+                slug: "r".into(),
+                title: None,
+                prompt: "Choose a direction".into(),
+                context: None,
+                archetypes: vec![ArchetypeInput {
+                    id: "x".into(),
+                    label: "X".into(),
+                    image_url: "http://img/x.png".into(),
+                    description: "the x".into(),
+                }],
+            }))
+            .unwrap();
+        s.darkrun_direction_result(Parameters(SessionResultInput { slug: "r".into(), session_id: session_id(&d) })).unwrap();
+        let p = s
+            .darkrun_picker(Parameters(PickerInput {
+                slug: "r".into(),
+                kind: "confirm".into(),
+                title: "Confirm".into(),
+                prompt: "Yes?".into(),
+                options: vec![PickerOptionInput {
+                    id: "yes".into(),
+                    label: "Yes".into(),
+                    description: None,
+                    secondary: None,
+                }],
+            }))
+            .unwrap();
+        s.darkrun_picker_result(Parameters(SessionResultInput { slug: "r".into(), session_id: session_id(&p) })).unwrap();
+
+        // ── admin / recovery / scaffolding ─────────────────────────────────
+        s.darkrun_debug(Parameters(DebugInput {
+            slug: "r".into(),
+            op: "preview_cursor".into(),
+            station: None,
+            field: None,
+            value: None,
+            feedback_id: None,
+            reason: None,
+            confirm: false,
+        }))
+        .unwrap();
+        s.darkrun_human_write(Parameters(HumanWriteInput {
+            path: "notes/smoke.txt".into(),
+            content: "hello".into(),
+        }))
+        .unwrap();
+        s.darkrun_scaffold(Parameters(ScaffoldInput {
+            kind: "factory".into(),
+            name: "smoke-factory".into(),
+            factory: None,
+            station: None,
+        }))
+        .unwrap();
+        s.darkrun_run_archive(Parameters(RunArchiveInput { slug: "r".into(), archived: true })).unwrap();
+        s.darkrun_run_reset(Parameters(RunResetInput {
+            slug: "r".into(),
+            station: None,
+            confirm: false,
+        }))
+        .unwrap();
+        s.darkrun_zap(Parameters(ZapInput {
+            task: "print hello".into(),
+            factory: None,
+            station: None,
+        }))
+        .unwrap();
+    }
+}
