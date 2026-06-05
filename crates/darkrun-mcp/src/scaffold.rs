@@ -151,4 +151,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(scaffold(dir.path(), "gizmo", "x", None, None).is_err());
     }
+
+    #[test]
+    fn scaffolds_a_station_with_its_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(scaffold(dir.path(), "station", "shape", None, None).is_err());
+        let s = scaffold(dir.path(), "station", "shape", Some("software"), None).unwrap();
+        assert!(s.written[0].ends_with("shape/STATION.md"));
+        for sub in ["workers", "reviewers", "explorers"] {
+            assert!(dir.path().join(format!(".darkrun/factories/software/stations/shape/{sub}")).is_dir());
+        }
+        let body = std::fs::read_to_string(dir.path().join(&s.written[0])).unwrap();
+        assert!(body.contains("kills:"));
+    }
+
+    #[test]
+    fn scaffolds_a_reviewer() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(scaffold(dir.path(), "reviewer", "fit", Some("software"), None).is_err());
+        let s = scaffold(dir.path(), "reviewer", "fit", Some("software"), Some("shape")).unwrap();
+        assert!(s.written[0].ends_with("shape/reviewers/fit.md"));
+        let body = std::fs::read_to_string(dir.path().join(&s.written[0])).unwrap();
+        assert!(body.contains("Lens"));
+    }
 }

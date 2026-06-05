@@ -186,4 +186,47 @@ mod tests {
         assert!(doc.contains("contact_email: a@b.c"));
         assert!(doc.contains("it broke"));
     }
+
+    #[test]
+    fn report_records_the_reporter_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = report(dir.path(), "msg", None, Some("Ada")).unwrap();
+        let doc = std::fs::read_to_string(&r.saved_to).unwrap();
+        assert!(doc.contains("name: Ada"));
+    }
+
+    #[test]
+    fn changelog_without_a_file_explains_absence() {
+        // From a temp cwd with no CHANGELOG.md, the reader reports the absence.
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::current_dir().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        std::env::remove_var("CLAUDE_PLUGIN_ROOT");
+        let out = changelog(None);
+        std::env::set_current_dir(prev).unwrap();
+        assert!(out.contains("No changelog"));
+    }
+
+    #[test]
+    fn plugin_version_resolves_from_the_plugin_root_and_flags_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude-plugin")).unwrap();
+        std::fs::write(
+            dir.path().join(".claude-plugin").join("plugin.json"),
+            r#"{"version":"99.99.99"}"#,
+        )
+        .unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_PLUGIN_ROOT", dir.path());
+        let v = version_info();
+        let pv = plugin_version();
+        std::env::remove_var("CLAUDE_PLUGIN_ROOT");
+        assert_eq!(pv.as_deref(), Some("99.99.99"));
+        assert_eq!(v.plugin_version, "99.99.99");
+        assert!(v.mismatch, "a differing plugin version flags a mismatch");
+    }
+
+    /// Serializes the tests that mutate process-global env / cwd.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

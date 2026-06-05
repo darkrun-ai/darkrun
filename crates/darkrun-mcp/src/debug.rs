@@ -200,4 +200,34 @@ mod tests {
         assert_eq!(store.read_run("r").unwrap().frontmatter.mode, "quick");
         assert!(set_run_field(&store, "r", "nope", "x", true, Some("y")).is_err());
     }
+
+    #[test]
+    fn set_run_field_active_station() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+        let r = set_run_field(&store, "r", "active_station", "shape", true, Some("jump")).unwrap();
+        assert!(r.applied);
+        assert_eq!(store.read_run("r").unwrap().frontmatter.active_station, "shape");
+    }
+
+    #[test]
+    fn reset_drift_rebaselines_and_clears() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+        let r = reset_drift(&store, "r", true, Some("stale witnesses")).unwrap();
+        assert!(r.applied);
+        assert!(r.note.contains("re-witnessed"));
+    }
+
+    #[test]
+    fn mutate_feedback_sets_status_and_rejects_bad_status() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+        let fb = crate::feedback::create(&store, "r", "frame", "a finding", None).unwrap();
+        let r = mutate_feedback(&store, "r", &fb.id, "closed", true, Some("force-close")).unwrap();
+        assert!(r.applied);
+        assert!(r.data.is_some());
+        // An invalid status token is rejected.
+        assert!(mutate_feedback(&store, "r", &fb.id, "bogus", true, Some("x")).is_err());
+    }
 }
