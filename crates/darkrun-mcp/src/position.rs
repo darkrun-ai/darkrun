@@ -3052,6 +3052,53 @@ mod tests {
     }
 
     #[test]
+    fn build_prompt_context_threads_wave_handoffs_and_the_factory_model() {
+        use darkrun_core::domain::{IterationResult, Unit, UnitIteration, UnitFrontmatter};
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+
+        // Three wave units, each carrying a most-recent handoff note with a
+        // different terminal result (advance / reject / in-flight).
+        let with_iter = |slug: &str, result: Option<IterationResult>| {
+            let unit = Unit {
+                slug: slug.into(),
+                frontmatter: UnitFrontmatter {
+                    station: Some("frame".into()),
+                    iterations: vec![UnitIteration {
+                        worker: "maker".into(),
+                        result,
+                        note: Some(format!("note for {slug}")),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                title: slug.into(),
+                body: String::new(),
+            };
+            store.write_unit("r", &unit).unwrap();
+        };
+        with_iter("u-adv", Some(IterationResult::Advance));
+        with_iter("u-rej", Some(IterationResult::Reject));
+        with_iter("u-fly", None);
+
+        let action = RunAction::Manufacture {
+            run: "r".into(),
+            station: "frame".into(),
+            // A worker with no role-model override → the factory default resolves.
+            worker: "ghostworker".into(),
+            units: vec!["u-adv".into(), "u-rej".into(), "u-fly".into()],
+        };
+        let ctx = build_prompt_context(&store, "r", &action).expect("context");
+
+        assert_eq!(ctx.model.as_deref(), Some("sonnet"), "falls back to the factory default model");
+        let result_of = |slug: &str| ctx.handoffs.iter().find(|h| h.unit == slug).map(|h| h.result.as_str());
+        assert_eq!(result_of("u-adv"), Some("advance"));
+        assert_eq!(result_of("u-rej"), Some("reject"));
+        assert_eq!(result_of("u-fly"), Some("in_flight"));
+        assert!(ctx.handoffs.iter().all(|h| h.note.starts_with("note for")));
+    }
+
+    #[test]
     fn a_run_with_an_unmet_seal_gate_holds_at_pending_seal() {
         use darkrun_core::domain::{SealKind, Status};
         let (_d, store) = store();
