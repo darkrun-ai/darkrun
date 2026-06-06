@@ -3052,6 +3052,108 @@ mod tests {
     }
 
     #[test]
+    fn a_unit_past_its_pass_budget_escalates() {
+        use darkrun_core::domain::{IterationResult, Unit, UnitIteration, UnitFrontmatter};
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+        // A frame unit that has burned more than MAX_PASSES iterations without
+        // converging. `pass()` counts iterations, so seed MAX_PASSES + 1 beats.
+        let iterations = (0..=MAX_PASSES)
+            .map(|_| UnitIteration {
+                worker: "make".into(),
+                result: Some(IterationResult::Advance),
+                ..Default::default()
+            })
+            .collect();
+        let runaway = Unit {
+            slug: "frame-u".into(),
+            frontmatter: UnitFrontmatter {
+                station: Some("frame".into()),
+                iterations,
+                ..Default::default()
+            },
+            title: "u".into(),
+            body: String::new(),
+        };
+        store.write_unit("r", &runaway).unwrap();
+
+        match derive_position(&store, "r").expect("derive").action {
+            Some(RunAction::Escalate { reason, station, .. }) => {
+                assert_eq!(station, "frame");
+                assert!(reason.contains("frame-u"), "names the runaway unit: {reason}");
+                assert!(reason.contains("budget"), "explains the budget overrun: {reason}");
+            }
+            other => panic!("expected Escalate for a runaway pass loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manufacture_holds_on_a_missing_declared_output_then_an_unmet_gate() {
+        use darkrun_core::domain::{
+            GateResult, GateStatus, QualityGate, Status, Unit, UnitFrontmatter,
+        };
+        let dir = tempdir().expect("tmp");
+        let repo = dir.path().to_path_buf();
+        let store = StateStore::new(&repo);
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+
+        // Force the recorded phase to Manufacture: a completed unit with no
+        // derivation signals leaves the pure phase undetermined, so the cursor
+        // falls back to the recorded phase.
+        let mut state = store.read_state("r").unwrap().unwrap();
+        state.stations.get_mut("frame").unwrap().phase = StationPhase::Manufacture;
+        store.write_state("r", &state).unwrap();
+
+        // A completed unit promising an output that was never written → the
+        // output-existence gate holds the station before Audit.
+        let promised = Unit {
+            slug: "frame-u".into(),
+            frontmatter: UnitFrontmatter {
+                status: Status::Completed,
+                station: Some("frame".into()),
+                outputs: vec!["frame/never.md".into()],
+                ..Default::default()
+            },
+            title: "u".into(),
+            body: String::new(),
+        };
+        store.write_unit("r", &promised).unwrap();
+        match derive_position(&store, "r").expect("derive").action {
+            Some(RunAction::UnitsInvalid { ref problem, ref units, .. }) => {
+                assert_eq!(problem, "missing_output");
+                assert_eq!(units, &vec!["frame-u".to_string()]);
+            }
+            other => panic!("expected missing_output hold, got {other:?}"),
+        }
+
+        // Produce the output, but declare a quality gate with no passing result →
+        // now the gates-unmet gate holds instead.
+        std::fs::create_dir_all(repo.join("frame")).unwrap();
+        std::fs::write(repo.join("frame/never.md"), b"done").unwrap();
+        let mut gated = promised.clone();
+        gated.frontmatter.quality_gates = vec![QualityGate {
+            name: "tests".into(),
+            command: "cargo test".into(),
+        }];
+        // A recorded FAIL does not satisfy the gate.
+        gated.frontmatter.gate_results = vec![GateResult {
+            name: "tests".into(),
+            status: GateStatus::Fail,
+            at: None,
+            attempts: 1,
+            detail: None,
+        }];
+        store.write_unit("r", &gated).unwrap();
+        match derive_position(&store, "r").expect("derive").action {
+            Some(RunAction::UnitsInvalid { ref problem, ref units, .. }) => {
+                assert_eq!(problem, "gates_unmet");
+                assert_eq!(units, &vec!["frame-u".to_string()]);
+            }
+            other => panic!("expected gates_unmet hold, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn run_start_seeds_state_at_first_station() {
         let (_d, store) = store();
         let run = run_start(&store, "my-run", "software", Some("Ship it".into()), "continuous")
