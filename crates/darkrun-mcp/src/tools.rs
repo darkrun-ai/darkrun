@@ -3451,6 +3451,40 @@ mod handler_smoke {
     }
 
     #[test]
+    fn list_handlers_surface_an_unreadable_collection_dir() {
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+        let store = s.store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+
+        // Plant a regular FILE where each collection directory belongs — reading
+        // it as a directory fails, so the list handlers must surface a tool error
+        // rather than panic.
+        std::fs::write(store.feedback_dir("r"), "not a dir").unwrap();
+        std::fs::write(store.reflections_dir("r"), "not a dir").unwrap();
+        std::fs::write(store.annotations_dir("r"), "not a dir").unwrap();
+
+        assert_eq!(
+            s.darkrun_feedback_list(Parameters(FeedbackListInput { slug: "r".into(), include_settled: true }))
+                .unwrap().is_error,
+            Some(true)
+        );
+        assert_eq!(
+            s.darkrun_reflection_list(Parameters(ReflectionListInput { slug: "r".into() }))
+                .unwrap().is_error,
+            Some(true)
+        );
+        assert_eq!(
+            s.darkrun_annotation_list(Parameters(AnnotationListInput {
+                slug: "r".into(),
+                work_item: WorkItemInput { kind: "station".into(), id: String::new(), station: "frame".into() },
+                open_only: false,
+            })).unwrap().is_error,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn handler_edge_arms_success_and_error_paths() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
