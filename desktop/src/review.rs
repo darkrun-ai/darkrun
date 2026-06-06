@@ -2133,3 +2133,75 @@ mod tests {
         assert_eq!(anchor.artifact_type(), darkrun_api::ArtifactType::Image);
     }
 }
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use crate::wire::ConnConfig;
+    use darkrun_api::session::{
+        DirectionSessionPayload, PickerSessionPayload, QuestionSessionPayload, ReviewSessionPayload,
+    };
+
+    fn render(app: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn review_app_loading_state_renders() {
+        fn App() -> Element {
+            rsx! { ReviewApp { cfg: ConnConfig::from_env() } }
+        }
+        let _ = render(App);
+    }
+
+    #[test]
+    fn review_body_renders_with_a_payload() {
+        fn App() -> Element {
+            let decision = use_signal(|| Decision::Idle);
+            review_body(
+                ConnConfig::from_env(),
+                ReviewSessionPayload { session_id: "s".into(), ..Default::default() },
+                decision,
+            )
+        }
+        let _ = render(App);
+    }
+
+    #[test]
+    fn question_direction_picker_sessions_render() {
+        fn AppQ() -> Element {
+            question_session(
+                ConnConfig::from_env(),
+                QuestionSessionPayload { session_id: "s".into(), prompt: "Pick".into(), ..Default::default() },
+            )
+        }
+        let _ = render(AppQ);
+
+        fn AppD() -> Element {
+            direction_session(
+                ConnConfig::from_env(),
+                DirectionSessionPayload { session_id: "s".into(), prompt: "Choose".into(), ..Default::default() },
+            )
+        }
+        let _ = render(AppD);
+
+        fn AppP() -> Element {
+            picker_session(
+                ConnConfig::from_env(),
+                PickerSessionPayload {
+                    session_id: "s".into(),
+                    status: Default::default(),
+                    run_slug: None,
+                    kind: darkrun_api::session::PickerKind::Confirm,
+                    title: "Confirm".into(),
+                    prompt: "Yes?".into(),
+                    options: vec![],
+                    selection: None,
+                },
+            )
+        }
+        let _ = render(AppP);
+    }
+}
