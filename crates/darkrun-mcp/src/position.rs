@@ -4742,6 +4742,42 @@ mod tests {
     /// `MergeConflict` action and the merge is left in-tree (MERGE_HEAD set, not
     /// aborted); the next derive keeps re-deriving it until the merge clears.
     #[test]
+    fn derive_preempts_everything_with_an_in_tree_merge_conflict() {
+        let (_d, root, store) = git_store();
+        // A real run document so derive_position can resolve run/factory/state.
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+        // run_start entered frame, forking its branch + worktree.
+        let git_root = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success()
+        };
+        // Advance run-main with a conflicting line via a temp worktree.
+        let rmwt = root.join(".darkrun/rm");
+        assert!(git_root(&["worktree", "add", "-q", rmwt.to_str().unwrap(), "darkrun/r/main"]));
+        std::fs::write(rmwt.join("conflict.txt"), "RUN-MAIN SIDE\n").unwrap();
+        let git_rm = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&rmwt).args(a).status().unwrap().success();
+        assert!(git_rm(&["add", "-A"]));
+        assert!(git_rm(&["commit", "-q", "-m", "run-main line"]));
+        assert!(git_root(&["worktree", "remove", "--force", rmwt.to_str().unwrap()]));
+        // The active station (frame) edits the same file differently → conflict.
+        let wt = crate::lifecycle::station_worktree_path(&root, "r", "frame");
+        std::fs::write(wt.join("conflict.txt"), "STATION SIDE\n").unwrap();
+        let git_wt = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&wt).args(a).status().unwrap().success();
+        assert!(git_wt(&["add", "-A"]));
+        assert!(git_wt(&["commit", "-q", "-m", "station line"]));
+        // Land leaves the conflict in-tree.
+        let out = crate::lifecycle::land_station(&store, "r", "frame");
+        assert!(!out.performed && out.has_conflicts(), "conflict left in tree: {out:?}");
+
+        // derive_position preempts every track with the in-tree merge conflict.
+        let pos = derive_position(&store, "r").expect("derive");
+        assert!(
+            matches!(pos.action, Some(RunAction::MergeConflict { .. })),
+            "the mid-merge conflict preempts, got {:?}",
+            pos.action
+        );
+    }
+
+    #[test]
     fn conflicting_land_surfaces_merge_conflict_left_in_tree() {
         let (_d, root, store) = git_store();
         crate::lifecycle::ensure_run_main(&store, "r");
