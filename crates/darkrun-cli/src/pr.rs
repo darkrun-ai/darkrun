@@ -36,6 +36,7 @@ pub struct GitCliFacts {
 
 impl GitCliFacts {
     /// Facts for `repo_root`, reading the named remote (typically `origin`).
+    #[cfg(not(tarpaulin_include))] // the git-CLI facts source — only the network PR path builds it
     pub fn new(repo_root: impl Into<std::path::PathBuf>, remote: impl Into<String>) -> Self {
         Self {
             repo_root: repo_root.into(),
@@ -43,6 +44,7 @@ impl GitCliFacts {
         }
     }
 
+    #[cfg(not(tarpaulin_include))] // shells out to git — irreducible process I/O
     fn git(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
         let out = std::process::Command::new("git")
             .arg("-C")
@@ -62,10 +64,12 @@ impl GitCliFacts {
 }
 
 impl RepoFacts for GitCliFacts {
+    #[cfg(not(tarpaulin_include))] // git remote read — irreducible process I/O
     fn remote_url(&self) -> Result<String, Box<dyn std::error::Error>> {
         self.git(&["remote", "get-url", &self.remote])
     }
 
+    #[cfg(not(tarpaulin_include))] // git branch read — irreducible process I/O
     fn current_branch(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
         let branch = self.git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
         if branch.is_empty() || branch == "HEAD" {

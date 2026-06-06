@@ -194,6 +194,7 @@ impl ReqwestTransport {
 }
 
 impl HttpTransport for ReqwestTransport {
+    #[cfg(not(tarpaulin_include))] // real blocking HTTP — irreducible network I/O
     fn execute(&self, request: HttpRequest) -> darkrun_vcs::Result<HttpResponse> {
         let method = match request.method {
             darkrun_vcs::Method::Get => reqwest::Method::GET,
@@ -219,6 +220,7 @@ impl HttpTransport for ReqwestTransport {
 
 /// Open `url` in the operator's default browser, best-effort. A failure is not
 /// fatal — the URL is always printed so the operator can open it by hand.
+#[cfg(not(tarpaulin_include))] // spawns the OS browser opener — irreducible process I/O
 fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let prog = ("open", vec![url]);
