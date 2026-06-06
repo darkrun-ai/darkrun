@@ -3482,6 +3482,31 @@ mod handler_smoke {
             })).unwrap().is_error,
             Some(true)
         );
+
+        // annotation_payload reads the same unreadable annotations dir → error.
+        assert_eq!(
+            s.darkrun_annotation_payload(Parameters(AnnotationListInput {
+                slug: "r".into(),
+                work_item: WorkItemInput { kind: "station".into(), id: String::new(), station: "frame".into() },
+                open_only: true,
+            })).unwrap().is_error,
+            Some(true)
+        );
+
+        // reflection_record writes into the unreadable reflections dir → error.
+        assert_eq!(
+            s.darkrun_reflection_record(Parameters(ReflectionRecordInput {
+                slug: "r".into(), body: "retro".into(), station: Some("frame".into()),
+            })).unwrap().is_error,
+            Some(true)
+        );
+
+        // review_stamp tolerates an unreadable feedback dir (its open-finding scan
+        // falls back to empty) and still stamps without erroring.
+        let stamped = s.darkrun_review_stamp(Parameters(ReviewStampInput {
+            slug: "r".into(), station: "frame".into(), role: "value".into(), kind: "review".into(),
+        })).unwrap();
+        assert!(stamped.is_error != Some(true), "feedback-scan fault degrades to a clean stamp");
     }
 
     #[test]
@@ -3597,6 +3622,15 @@ mod handler_smoke {
             s.darkrun_unit_get(Parameters(UnitRef { slug: "r".into(), unit: "broken".into() }))
                 .unwrap()
                 .is_error,
+            Some(true)
+        );
+
+        // review_stamp reads units to stamp a role → the corrupt unit makes it
+        // error rather than stamp over malformed state.
+        assert_eq!(
+            s.darkrun_review_stamp(Parameters(ReviewStampInput {
+                slug: "r".into(), station: "frame".into(), role: "value".into(), kind: "review".into(),
+            })).unwrap().is_error,
             Some(true)
         );
 
