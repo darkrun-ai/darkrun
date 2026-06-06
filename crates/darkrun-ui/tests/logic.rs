@@ -1707,3 +1707,91 @@ fn pending_glyph_color_is_faint_not_phase_hue() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pure-logic arms behind the interactive surfaces: selection seeding, visual-
+// mark anchor/note projection, artifact glyphs, latency formatting, and the
+// themed-var phase lookup. These are the non-render branches the components
+// call; exercised directly through the public API.
+// ---------------------------------------------------------------------------
+#[test]
+fn selection_seeding_and_getters() {
+    use darkrun_ui::selection::{SelectMode, SelectionModel};
+    // Single-select seeding keeps only the last id.
+    let single = SelectionModel::from_selected(
+        SelectMode::Single,
+        ["a".to_string(), "b".to_string()],
+    );
+    assert_eq!(single.mode(), SelectMode::Single);
+    assert_eq!(single.selected(), &["b".to_string()]);
+    // Multi-select accumulates uniquely (the dup is dropped).
+    let multi = SelectionModel::from_selected(
+        SelectMode::Multi,
+        ["a".to_string(), "a".to_string(), "c".to_string()],
+    );
+    assert_eq!(multi.mode(), SelectMode::Multi);
+    assert_eq!(multi.selected(), &["a".to_string(), "c".to_string()]);
+}
+
+#[test]
+fn visual_mark_anchor_point_and_note_for_every_shape() {
+    use darkrun_ui::selection::{NormBox, PinPoint, VisualMark};
+    let pin = VisualMark::Pin { point: PinPoint::new(0.2, 0.3, "p") };
+    assert_eq!(pin.anchor_point().x, 0.2);
+    assert_eq!(pin.note(), "p");
+
+    let rect = VisualMark::Rect { rect: NormBox::new(0.1, 0.4, 0.2, 0.2, "r") };
+    let ap = rect.anchor_point();
+    assert_eq!((ap.x, ap.y), (0.1, 0.4));
+    assert_eq!(rect.note(), "r");
+
+    let hi = VisualMark::Highlight { rect: NormBox::new(0.5, 0.6, 0.1, 0.1, "h") };
+    assert_eq!(hi.anchor_point().x, 0.5);
+    assert_eq!(hi.note(), "h");
+
+    let arrow = VisualMark::Arrow {
+        from: PinPoint::new(0.0, 0.0, "tail"),
+        to: PinPoint::new(0.7, 0.8, "head"),
+    };
+    assert_eq!(arrow.anchor_point().x, 0.7); // the head is the anchor
+    assert_eq!(arrow.note(), "head");
+
+    let path = VisualMark::Path {
+        points: vec![PinPoint::new(0.1, 0.1, "first"), PinPoint::new(0.9, 0.9, "last")],
+    };
+    assert_eq!(path.anchor_point().x, 0.1); // first point anchors
+    assert_eq!(path.note(), "last"); // last point's note threads the comment
+
+    // Degenerate empty path: anchor falls back to origin, note to empty.
+    let empty = VisualMark::Path { points: vec![] };
+    assert_eq!(empty.anchor_point().x, 0.0);
+    assert_eq!(empty.note(), "");
+}
+
+#[test]
+fn artifact_glyph_for_every_kind() {
+    use darkrun_ui::view::ArtifactKind::*;
+    assert_eq!(File.glyph(), '▢');
+    assert_eq!(Image.glyph(), '▣');
+    assert_eq!(Screenshot.glyph(), '◧');
+    assert_eq!(Markdown.glyph(), '¶');
+    assert_eq!(Json.glyph(), '{');
+}
+
+#[test]
+fn latency_formatting_handles_non_finite() {
+    use darkrun_ui::view::format_latency_ms;
+    assert_eq!(format_latency_ms(f64::NAN), "—");
+    assert_eq!(format_latency_ms(f64::INFINITY), "—");
+    assert!(format_latency_ms(640.0).ends_with("ms"));
+    assert!(format_latency_ms(1200.0).ends_with("s"));
+}
+
+#[test]
+fn themed_var_phase_lookup_covers_all_and_unknown() {
+    use darkrun_ui::tokens::var;
+    for name in ["spec", "REVIEW", "Manufacture", "audit", "reflect", "checkpoint"] {
+        assert!(var::phase(name).is_some(), "{name} resolves to a themed var");
+    }
+    assert!(var::phase("nope").is_none());
+}
