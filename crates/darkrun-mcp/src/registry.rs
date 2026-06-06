@@ -70,6 +70,7 @@ impl EngineRegistry {
     /// deriving the slug and capturing the current pid.
     ///
     /// Fails only when the home directory can't be resolved.
+    #[cfg(not(tarpaulin_include))] // resolves the real home dir; logic via with_root
     pub fn new(repo_root: impl AsRef<Path>) -> io::Result<Self> {
         let root = default_root().ok_or_else(|| {
             io::Error::new(
@@ -149,6 +150,7 @@ pub fn default_root() -> Option<PathBuf> {
 }
 
 /// Env-var fallback mirroring the resolution used elsewhere in darkrun.
+#[cfg(not(tarpaulin_include))] // env-var home fallback; only on dirs::home_dir() failure
 fn home_dir_env() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -227,6 +229,7 @@ fn stale_path(live: &Path) -> PathBuf {
 /// `.stale` sibling) AND its pid is still running. Stale-but-running is ignored
 /// (already flagged); live-but-dead is ignored (engine vanished without a clean
 /// shutdown). Returns an empty list when the tree doesn't exist.
+#[cfg(not(tarpaulin_include))] // resolves the real home dir; logic via list_live_engines_in
 pub fn list_live_engines() -> io::Result<Vec<EngineDescriptor>> {
     match default_root() {
         Some(root) => list_live_engines_in(&root),
@@ -320,6 +323,7 @@ const PROJECT_RECORD_FILE: &str = "project.json";
 ///
 /// `name` is an optional display label; `added_at` is stamped now. Returns the
 /// record that was written. Fails when the home directory can't be resolved.
+#[cfg(not(tarpaulin_include))] // resolves the real home dir; logic via register_project_in
 pub fn register_project(repo_root: &Path, name: Option<String>) -> io::Result<ProjectRecord> {
     let root = default_root().ok_or_else(|| {
         io::Error::new(
@@ -388,6 +392,7 @@ pub fn read_project_record_in(root: &Path, slug: &str) -> io::Result<Option<Proj
 /// engines). Idle projects (a `project.json` with no running engine) appear
 /// here; the desktop overlays live status by matching on slug. Returns an empty
 /// list when the tree doesn't exist.
+#[cfg(not(tarpaulin_include))] // resolves the real home dir; logic via list_projects_in
 pub fn list_projects() -> io::Result<Vec<ProjectRecord>> {
     match default_root() {
         Some(root) => list_projects_in(&root),
@@ -656,4 +661,45 @@ mod tests {
     }
 
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn slug_for_falls_back_when_basename_is_all_special() {
+        // An all-non-alphanumeric basename sanitizes to dashes → the "repo" fallback.
+        let slug = slug_for(Path::new("/x/@@@"));
+        assert!(slug.starts_with("repo-"), "got {slug}");
+    }
+
+    #[test]
+    fn is_live_descriptor_name_rejects_nameless_and_stale_paths() {
+        assert!(is_live_descriptor_name(Path::new("/d/engine-7.json")));
+        assert!(!is_live_descriptor_name(Path::new("/d/engine-7.json.stale")));
+        // A path with no final component → the no-filename guard.
+        assert!(!is_live_descriptor_name(Path::new("..")));
+    }
+
+    #[test]
+    fn list_live_engines_in_surfaces_a_non_notfound_read_error() {
+        // Pointing at a FILE (not a dir) makes read_dir fail with a non-NotFound
+        // error, exercising the error-propagation arm.
+        let f = tempfile::NamedTempFile::new().unwrap();
+        assert!(list_live_engines_in(f.path()).is_err());
+    }
+
+    #[test]
+    fn list_projects_in_surfaces_a_non_notfound_read_error() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        assert!(list_projects_in(f.path()).is_err());
+    }
+
+    #[test]
+    fn read_project_record_errors_when_the_record_is_a_directory() {
+        // A `project.json` that is itself a directory makes fs::read fail with a
+        // non-NotFound error → the hard-error arm (vs. Ok(None) for absent).
+        let dir = tempfile::tempdir().unwrap();
+        let slug = "s";
+        std::fs::create_dir_all(dir.path().join(slug).join(PROJECT_RECORD_FILE)).unwrap();
+        assert!(read_project_record_in(dir.path(), slug).is_err());
+        // And Ok(None) when truly absent.
+        assert!(read_project_record_in(dir.path(), "ghost").unwrap().is_none());
+    }
 }
