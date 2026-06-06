@@ -1006,6 +1006,53 @@ mod tests {
     }
 
     #[test]
+    fn reanchor_repins_a_pdf_region_with_no_decodable_image() {
+        let (_d, store, root) = store();
+        // A pdf-anchored annotation with an in-bounds region.
+        let mut a = submit(&store, &root, "run", image_args(&root)).unwrap().annotation;
+        if let Some(art) = a.artifact.as_mut() {
+            art.path = "doc.pdf".into();
+            art.artifact_type = ArtifactType::Pdf;
+        }
+        a.anchor = Some(Anchor::Pdf { page: 1, rect: NormRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 } });
+        store.write_annotation("run", &a).unwrap();
+
+        // New bytes that don't decode as an image → the pdf region only re-pins.
+        let outcomes = reanchor_artifact_version(&store, &root, "run", "doc.pdf", b"%PDF-1.4 not-an-image").unwrap();
+        assert_eq!(outcomes, vec![(a.id.clone(), VersionReAnchor::Repinned)]);
+    }
+
+    #[test]
+    fn annotation_helpers_cover_id_collision_dims_and_crop_skips() {
+        let (_d, store, root) = store();
+        let base = submit(&store, &root, "run", image_args(&root)).unwrap().annotation;
+
+        // mint_id: a colliding `_000` id forces the disambiguation loop to bump.
+        let ts = "2026-01-01T00:00:00Z";
+        let mut clash = base.clone();
+        clash.id = "anno_20260101000000_000".into();
+        assert_eq!(mint_id(&[clash], ts), "anno_20260101000000_001");
+
+        // marked_render_dims: an image mark records its render size; a pdf anchor
+        // carries none (so it can't be scene-compared).
+        assert!(marked_render_dims(&base).is_some(), "image mark has render dims");
+        let mut pdf = base.clone();
+        pdf.anchor = Some(Anchor::Pdf { page: 1, rect: NormRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 } });
+        assert!(marked_render_dims(&pdf).is_none(), "a pdf anchor has no render dims");
+
+        // write_crop: a bare note (no artifact) and an undecodable artifact both
+        // skip the crop without erroring.
+        let rect = NormRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
+        let mut note = base.clone();
+        note.artifact = None;
+        assert!(write_crop(&store, &root, "run", &note, rect).unwrap().is_none());
+        let mut nonimage = base.clone();
+        if let Some(a) = nonimage.artifact.as_mut() { a.path = "notes.txt".into(); }
+        std::fs::write(root.join("notes.txt"), b"not an image").unwrap();
+        assert!(write_crop(&store, &root, "run", &nonimage, rect).unwrap().is_none());
+    }
+
+    #[test]
     fn submit_rejects_mismatched_anchor_artifact() {
         let (_d, store, root) = store();
         let mut args = text_args(AskSeverity::Must);
