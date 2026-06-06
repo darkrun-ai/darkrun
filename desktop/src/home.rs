@@ -1618,3 +1618,44 @@ fn HarnessTab(label: String, active: bool, on_pick: EventHandler<MouseEvent>) ->
         }
     }
 }
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use crate::wire::ConnConfig;
+
+    fn render(app: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn home_app_renders() {
+        fn App() -> Element {
+            rsx! {
+                HomeApp { cfg: ConnConfig::from_env(), project_path: None, initial_session: None }
+            }
+        }
+        let _ = render(App);
+    }
+
+    #[test]
+    fn home_chrome_components_render() {
+        fn App() -> Element {
+            let drawer = use_signal(|| true);
+            let selection = use_signal(|| Selection::None);
+            let mine = use_signal(|| false);
+            let search = use_signal(String::new);
+            rsx! {
+                Toolbar { drawer_open: drawer, selection }
+                MineAllFilter { mine_only: mine }
+                SidebarSearch { search }
+                SidebarEmpty { mine_only: mine, has_projects: false }
+                ThemeControl {}
+            }
+        }
+        let html = render(App);
+        assert!(!html.is_empty());
+    }
+}
