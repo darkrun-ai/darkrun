@@ -852,6 +852,17 @@ async fn limit_defaults_are_sane() {
     const { assert!(DEFAULT_MAX_CONNECTIONS > 0) };
 }
 
+#[tokio::test]
+async fn bind_listener_assigns_an_ephemeral_port() {
+    // Port 0 → the kernel picks a free loopback port the embedder can read back
+    // before serving (the discovery-descriptor seam).
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = darkrun_http::bind_listener(addr).await.expect("binds");
+    let bound = listener.local_addr().unwrap();
+    assert!(bound.port() != 0, "an ephemeral port was assigned");
+    assert!(bound.ip().is_loopback());
+}
+
 // ── End-to-end bound server ───────────────────────────────────────────────
 
 #[tokio::test]

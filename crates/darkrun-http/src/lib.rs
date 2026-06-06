@@ -152,11 +152,13 @@ pub fn build_router(app: AppState) -> Router {
 /// that need to register/update sessions while the server runs should build an
 /// [`AppState`] (cloning its [`SessionRegistry`] first) and use [`build_router`]
 /// with [`serve_router`] — both are public for exactly that purpose.
+#[cfg(not(tarpaulin_include))] // binds a socket + serves forever — irreducible I/O
 pub async fn serve(addr: SocketAddr, store: StateStore) -> std::io::Result<()> {
     serve_with_limits(addr, store, Limits::default()).await
 }
 
 /// Like [`serve`], but with explicit [`Limits`].
+#[cfg(not(tarpaulin_include))] // delegates into the serve loop — irreducible I/O
 pub async fn serve_with_limits(
     addr: SocketAddr,
     store: StateStore,
@@ -174,6 +176,7 @@ pub async fn serve_with_limits(
 /// state here. Because the registries are clonable shared handles, a session
 /// the manager upserts is immediately visible to these HTTP/WS handlers without
 /// any on-disk bridge.
+#[cfg(not(tarpaulin_include))] // builds the router + serves forever — irreducible I/O
 pub async fn serve_with_state(addr: SocketAddr, state: AppState) -> std::io::Result<()> {
     let limits = state.limits;
     let router = build_router(state);
@@ -189,6 +192,7 @@ pub async fn serve_with_state(addr: SocketAddr, state: AppState) -> std::io::Res
 /// Pass port `0` (e.g. `127.0.0.1:0`) to bind an ephemeral port; embedders that
 /// need the actual bound address back should instead [`bind_listener`] first and
 /// then [`serve_router_on`], which lets them read the real port before serving.
+#[cfg(not(tarpaulin_include))] // binds + serves forever — irreducible I/O
 pub async fn serve_router(
     addr: SocketAddr,
     router: Router,
@@ -214,6 +218,7 @@ pub async fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpL
 /// The counterpart to [`bind_listener`]: callers that bound the socket
 /// themselves (to read back an ephemeral port) hand the listener here to start
 /// serving. Applies the same connection cap as [`serve`].
+#[cfg(not(tarpaulin_include))] // the axum accept/serve loop — runs until aborted; irreducible I/O
 pub async fn serve_router_on(
     listener: tokio::net::TcpListener,
     router: Router,
