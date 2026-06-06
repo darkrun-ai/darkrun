@@ -227,6 +227,38 @@ mod tests {
         assert!(v.mismatch, "a differing plugin version flags a mismatch");
     }
 
+    #[test]
+    fn section_for_breaks_at_the_next_release_heading() {
+        // Extracting a NON-last section exercises the break when the scan reaches
+        // the following `## ` heading.
+        let text = "# Changelog\n\n## 0.2.0\n\n- new\n\n## 0.1.0\n\n- first\n";
+        let s = section_for(text, "0.2.0").expect("section");
+        assert!(s.contains("- new"));
+        assert!(!s.contains("- first"), "the next release is not absorbed");
+    }
+
+    #[test]
+    fn changelog_reads_the_plugin_root_and_slices_a_version() {
+        // Drive read_changelog's plugin-root branch (no cwd mutation, so this is
+        // robust under parallel tests) + changelog's version dispatch.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## 0.2.0\n\n- two\n\n## 0.1.0\n\n- one\n",
+        )
+        .unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_PLUGIN_ROOT", dir.path());
+        let sliced = changelog(Some("0.1.0"));
+        let whole = changelog(None);
+        let missing = changelog(Some("9.9.9"));
+        std::env::remove_var("CLAUDE_PLUGIN_ROOT");
+        assert!(sliced.contains("- one") && !sliced.contains("- two"));
+        assert!(whole.contains("## 0.2.0") && whole.contains("## 0.1.0"));
+        // An unknown version falls back to the whole text with a note.
+        assert!(missing.contains("No changelog entry for `9.9.9`") && missing.contains("- one"));
+    }
+
     /// Serializes the tests that mutate process-global env / cwd.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
