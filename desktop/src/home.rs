@@ -1720,3 +1720,51 @@ mod data_render_tests {
         assert!(html.contains("Storefront") || html.contains("store") || !html.is_empty());
     }
 }
+
+#[cfg(test)]
+mod main_pane_render_tests {
+    use super::*;
+    use crate::wire::ConnConfig;
+
+    fn render(app: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    fn proj() -> Project {
+        Project { name: "store".into(), path: "/tmp/store".into(), port: Some(58616), harness: Some("claude-code".into()) }
+    }
+
+    #[test]
+    fn main_pane_renders_every_selection_state() {
+        // None — the projects / welcome surface.
+        fn None_() -> Element {
+            let sel = use_signal(|| Selection::None);
+            let refresh = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], refresh } }
+        }
+        let _ = render(None_);
+        // NoEngine — the per-harness start command.
+        fn NoEngine() -> Element {
+            let sel = use_signal(|| Selection::NoEngine { name: "store".into(), path: "/tmp/store".into() });
+            let refresh = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], refresh } }
+        }
+        let _ = render(NoEngine);
+        // Settings — the theme/settings page.
+        fn Settings() -> Element {
+            let sel = use_signal(|| Selection::Settings);
+            let refresh = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![], refresh } }
+        }
+        let _ = render(Settings);
+        // Run — embeds the live Review for a selected run.
+        fn Run() -> Element {
+            let sel = use_signal(|| Selection::Run { port: 58616, slug: "r".into(), project: "store".into() });
+            let refresh = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], refresh } }
+        }
+        let _ = render(Run);
+    }
+}
