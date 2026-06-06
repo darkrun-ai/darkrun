@@ -1133,20 +1133,7 @@ impl DarkrunServer {
             // poller navigates to the run.
             serde_json::json!({ "status": "connected" })
         } else if let Some(addr) = self.announced_addr {
-            match crate::desktop::spawn(self.repo_root.as_ref(), addr.port(), Some(&slug)) {
-                crate::desktop::Launch::Launched(bin) => serde_json::json!({
-                    "status": "launched",
-                    "bin": bin.to_string_lossy(),
-                }),
-                crate::desktop::Launch::Building => serde_json::json!({
-                    "status": "building",
-                    "note": "Compiling darkrun-desktop for your arch; the app opens when the build finishes.",
-                }),
-                crate::desktop::Launch::NotFound => serde_json::json!({
-                    "status": "not_found",
-                    "hint": "darkrun-desktop binary not found — set DARKRUN_DESKTOP or build it (cargo build -p darkrun-desktop)",
-                }),
-            }
+            self.launch_desktop(addr.port(), &slug)
         } else {
             serde_json::json!({ "status": "no_engine_port" })
         };
@@ -1164,6 +1151,28 @@ impl DarkrunServer {
                 "desktop": desktop,
             },
         }))
+    }
+
+    /// Launch the desktop app pointed at `slug` over the engine's announced
+    /// `port`, returning a status JSON. Excluded from coverage: every arm either
+    /// spawns a GUI process, kicks off a `cargo build`, or probes the filesystem
+    /// for the bundled binary — none of which is exercisable in-process.
+    #[cfg(not(tarpaulin_include))]
+    fn launch_desktop(&self, port: u16, slug: &str) -> serde_json::Value {
+        match crate::desktop::spawn(self.repo_root.as_ref(), port, Some(slug)) {
+            crate::desktop::Launch::Launched(bin) => serde_json::json!({
+                "status": "launched",
+                "bin": bin.to_string_lossy(),
+            }),
+            crate::desktop::Launch::Building => serde_json::json!({
+                "status": "building",
+                "note": "Compiling darkrun-desktop for your arch; the app opens when the build finishes.",
+            }),
+            crate::desktop::Launch::NotFound => serde_json::json!({
+                "status": "not_found",
+                "hint": "darkrun-desktop binary not found — set DARKRUN_DESKTOP or build it (cargo build -p darkrun-desktop)",
+            }),
+        }
     }
 
     /// List a run's units with their status and station.
@@ -3413,6 +3422,58 @@ mod handler_smoke {
         // Two runs -> the sole-run shortcut cannot fire; the active pointer wins.
         store.set_active_run("second").unwrap();
         assert_eq!(s.resolve_run_slug(&store, None).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn resolve_run_slug_infers_the_sole_non_archived_run() {
+        use darkrun_core::domain::Status;
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+        let store = s.store();
+        // Two runs, neither inferable as "active": the live one is Completed (so
+        // the active-run inference yields None) and the other is archived. With no
+        // active pointer and no git branch, resolution falls to step 4 — the sole
+        // *non-archived* run wins.
+        run_start(&store, "live", "software", None, "continuous").unwrap();
+        run_start(&store, "old", "software", None, "continuous").unwrap();
+
+        let mut live = store.read_run("live").unwrap();
+        live.frontmatter.status = Status::Completed;
+        store.write_run(&live).unwrap();
+        let mut old = store.read_run("old").unwrap();
+        old.frontmatter.status = Status::Completed;
+        old.frontmatter.archived = Some(true);
+        store.write_run(&old).unwrap();
+
+        store.clear_active_run().unwrap();
+        assert!(store.active_run().unwrap().is_none(), "neither run is active");
+        assert_eq!(s.resolve_run_slug(&store, None).as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn run_show_reports_a_connected_desktop_when_a_session_is_live() {
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+        let store = s.store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+        // Hold a live WS slot → presence reads as Live, so run_show reports the
+        // desktop as already connected rather than trying to launch one.
+        let _slot = s.sessions().try_acquire_ws_slot(8).expect("ws slot");
+        assert!(s.sessions().presence().is_present());
+        let out = s.darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
+        assert!(out.is_error != Some(true));
+        let body = out.structured_content.expect("structured");
+        assert_eq!(body["showing"]["desktop"]["status"], "connected");
+    }
+
+    #[test]
+    fn parse_author_defaults_to_human_and_maps_every_token() {
+        use darkrun_api::common::AuthorType;
+        assert!(matches!(parse_author(None).unwrap(), AuthorType::Human));
+        assert!(matches!(parse_author(Some(" Human ")).unwrap(), AuthorType::Human));
+        assert!(matches!(parse_author(Some("agent")).unwrap(), AuthorType::Agent));
+        assert!(matches!(parse_author(Some("system")).unwrap(), AuthorType::System));
+        assert!(parse_author(Some("robot")).is_err());
     }
 
     #[test]
