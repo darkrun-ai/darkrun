@@ -161,6 +161,66 @@ fn renders_proof_panel_for_each_kind() {
 }
 
 #[test]
+fn renders_proof_panel_alternate_blocks_and_verdicts() {
+    // A web proof carrying every non-Good vital verdict + a failing audit.
+    fn web_mixed() -> ProofView {
+        ProofView {
+            surface: "web_ui".into(),
+            kind: ProofMetricKind::Web,
+            vitals: vec![
+                VitalMetric { key: "lcp".into(), value: 3.0, display: "3.0 s".into(), verdict: VitalVerdict::NeedsImprovement },
+                VitalMetric { key: "cls".into(), value: 0.4, display: "0.40".into(), verdict: VitalVerdict::Poor },
+                VitalMetric { key: "inp".into(), value: 0.0, display: "—".into(), verdict: VitalVerdict::Unknown },
+            ],
+            audits: vec![AuditRow { name: "alt-text".into(), value: "2 missing".into(), pass: false }],
+            screenshot_url: None,
+            bench: vec![],
+            block_matches_surface: true,
+        }
+    }
+    // A bench-kind proof with NO bench measurements → the empty-bench notice.
+    fn bench_empty() -> ProofView {
+        ProofView {
+            surface: "api".into(),
+            kind: ProofMetricKind::Bench,
+            vitals: vec![],
+            audits: vec![],
+            screenshot_url: None,
+            bench: vec![],
+            block_matches_surface: true,
+        }
+    }
+    // Terminal-kind, with and without a snapshot → both terminal_block arms.
+    fn terminal_shot() -> ProofView {
+        ProofView {
+            surface: "cli".into(),
+            kind: ProofMetricKind::Terminal,
+            vitals: vec![],
+            audits: vec![],
+            screenshot_url: Some("/term.png".into()),
+            bench: vec![],
+            block_matches_surface: true,
+        }
+    }
+    fn terminal_bare() -> ProofView {
+        ProofView { screenshot_url: None, ..terminal_shot() }
+    }
+    fn App() -> Element {
+        rsx! {
+            ProofPanel { proof: web_mixed() }
+            ProofPanel { proof: bench_empty() }
+            ProofPanel { proof: terminal_shot() }
+            ProofPanel { proof: terminal_bare() }
+        }
+    }
+    let html = render(App);
+    assert!(html.contains("fair") && html.contains("poor"), "verdict labels render: {html}");
+    assert!(html.contains("fail"), "the failing audit chip renders");
+    assert!(html.contains("No bench measurements attached."));
+    assert!(html.contains("Snapshot") && html.contains("No snapshot attached."));
+}
+
+#[test]
 fn renders_alternate_component_states() {
     use darkrun_ui::components::feedback::{feedback_inbox, FeedbackEntry, Severity};
     use darkrun_ui::components::session_views::PickerItem;
