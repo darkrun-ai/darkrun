@@ -421,4 +421,87 @@ mod tests {
         assert!(doc.matches_station("build"));
         assert!(!doc.matches_station("frame"));
     }
+
+    #[test]
+    fn every_origin_token_round_trips() {
+        use FeedbackOrigin::*;
+        for o in [
+            AdversarialReview, StudioReview, EngineReview, Drift, Discovery, ExternalPr,
+            ExternalMr, UserVisual, UserChat, UserQuestion, UserRevisit, Agent,
+        ] {
+            assert_eq!(parse_origin(origin_token(o)), Some(o), "{o:?} round-trips");
+        }
+        assert_eq!(parse_origin("not-a-known-origin"), None);
+    }
+
+    #[test]
+    fn every_severity_token_round_trips() {
+        use FeedbackSeverity::*;
+        for s in [Blocker, High, Medium, Low] {
+            assert_eq!(parse_severity(severity_token(s)), Some(s), "{s:?} round-trips");
+        }
+        assert_eq!(parse_severity("catastrophic"), None);
+    }
+
+    #[test]
+    fn quote_and_unquote_handle_special_chars() {
+        // quote() wraps values that would break the flat parser.
+        assert_eq!(quote("plain"), "plain");
+        assert_eq!(quote("has: colon"), "\"has: colon\"");
+        assert_eq!(quote("-leading-dash"), "\"-leading-dash\"");
+        assert_eq!(quote("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quote("line\nbreak"), "\"line\nbreak\"");
+        // unquote() strips one layer + unescapes; passes bare values through.
+        assert_eq!(unquote("\"wrapped\""), "wrapped");
+        assert_eq!(unquote("\"a\\\"b\""), "a\"b");
+        assert_eq!(unquote("bare"), "bare");
+        assert_eq!(unquote("\""), "\""); // a lone quote is too short to strip
+    }
+
+    #[test]
+    fn split_frontmatter_handles_crlf_and_unclosed_fences() {
+        // CRLF-fenced frontmatter parses its fields.
+        let crlf = "---\r\nstatus: pending\r\n---\r\nbody here";
+        let doc = FeedbackDoc::parse("FB-1", crlf);
+        assert_eq!(doc.body, "body here");
+        // An opened-but-unclosed fence falls back to treating it all as body.
+        let unclosed = "---\ntitle: x\nstill front, no close";
+        let d2 = FeedbackDoc::parse("FB-2", unclosed);
+        assert!(d2.body.contains("still front"));
+        assert!(d2.title.is_empty(), "no closing fence → nothing parsed as frontmatter");
+    }
+
+    #[test]
+    fn parse_reads_all_fields_and_tolerates_junk() {
+        let raw = "---\n\
+            title: \"Wire: importer\"\n\
+            status: addressed\n\
+            origin: drift\n\
+            severity: high\n\
+            station: build\n\
+            author: agent\n\
+            created_at: 2026-06-06T00:00:00Z\n\
+            visit: 4\n\
+            source_ref: payment.rs:42\n\
+            closed_by: u3\n\
+            bogus_key: ignored\n\
+            visit_again: nope\n\
+            replies:\n  - \"first reply\"\n  - \"second\"\n\
+            ---\nThe finding body.";
+        let doc = FeedbackDoc::parse("FB-12", raw);
+        assert_eq!(doc.title, "Wire: importer");
+        assert_eq!(doc.origin, FeedbackOrigin::Drift);
+        assert_eq!(doc.severity, Some(FeedbackSeverity::High));
+        assert_eq!(doc.station.as_deref(), Some("build"));
+        assert_eq!(doc.author, "agent");
+        assert_eq!(doc.visit, 4);
+        assert_eq!(doc.source_ref.as_deref(), Some("payment.rs:42"));
+        assert_eq!(doc.closed_by.as_deref(), Some("u3"));
+        assert_eq!(doc.replies, vec!["first reply".to_string(), "second".to_string()]);
+        assert_eq!(doc.body, "The finding body.");
+        // An unknown origin token falls back to the user-visual default.
+        let fb = FeedbackDoc::parse("FB-13", "---\norigin: mystery\nvisit: oops\n---\n");
+        assert_eq!(fb.origin, FeedbackOrigin::UserVisual);
+        assert_eq!(fb.visit, 0); // unparseable visit → 0
+    }
 }
