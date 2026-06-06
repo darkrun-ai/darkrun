@@ -3399,4 +3399,16 @@ mod handler_smoke {
         assert!(is_err(s.darkrun_checkpoint_choose(Parameters(CheckpointChooseInput { slug: "r".into(), station: "frame".into(), kind: "bogus".into() })).unwrap()));
         assert!(is_err(s.darkrun_review_stamp(Parameters(ReviewStampInput { slug: "r".into(), station: "frame".into(), role: "x".into(), kind: "bogus".into() })).unwrap()));
     }
+
+    #[test]
+    fn resolve_run_slug_uses_the_active_run_pointer() {
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+        let store = s.store();
+        run_start(&store, "first", "software", None, "continuous").unwrap();
+        run_start(&store, "second", "software", None, "continuous").unwrap();
+        // Two runs -> the sole-run shortcut cannot fire; the active pointer wins.
+        store.set_active_run("second").unwrap();
+        assert_eq!(s.resolve_run_slug(&store, None).as_deref(), Some("second"));
+    }
 }
