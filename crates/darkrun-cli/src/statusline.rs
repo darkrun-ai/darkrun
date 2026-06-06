@@ -341,7 +341,10 @@ pub fn uninstall(global: bool, repo: &Path) -> Result<(), Dyn> {
 
 #[cfg(test)]
 mod tests {
-    use super::{osc8, paint, parse_git_url, phase_chrome, web_base};
+    use super::{
+        fallback_path, install, osc8, paint, parse_git_url, phase_chrome, read_json,
+        settings_path, uninstall, web_base, write_json,
+    };
     use darkrun_core::domain::StationPhase;
 
     // ── phase chrome (label + hue) ───────────────────────────────────────
@@ -522,5 +525,52 @@ mod tests {
         assert!(parse_git_url("git@github.com:owner/repo.git").is_some());
         assert!(parse_git_url("https://gitlab.com/owner/repo.git").is_some());
         assert!(parse_git_url("garbage").is_none());
+    }
+
+    #[test]
+    fn read_json_tolerates_missing_and_empty_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.json");
+        assert_eq!(read_json(&missing).unwrap(), serde_json::json!({}));
+        let empty = dir.path().join("empty.json");
+        std::fs::write(&empty, "   \n").unwrap();
+        assert_eq!(read_json(&empty).unwrap(), serde_json::json!({}));
+        let real = dir.path().join("real.json");
+        write_json(&real, &serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(read_json(&real).unwrap()["a"], 1);
+    }
+
+    #[test]
+    fn install_then_uninstall_roundtrips_project_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let settings = settings_path(false, repo).unwrap();
+        let fallback = fallback_path(false, repo).unwrap();
+
+        // Pre-seed an existing, different status line so install saves a fallback.
+        write_json(
+            &settings,
+            &serde_json::json!({"statusLine": {"type": "command", "command": "old-line"}}),
+        )
+        .unwrap();
+
+        install(false, repo, "darkrun statusline").unwrap();
+        let after = read_json(&settings).unwrap();
+        assert_eq!(after["statusLine"]["command"], "darkrun statusline");
+        assert!(fallback.exists(), "the prior status line is saved as a fallback");
+        assert_eq!(read_json(&fallback).unwrap()["command"], "old-line");
+
+        // Uninstall restores the saved fallback and clears the fallback file.
+        uninstall(false, repo).unwrap();
+        let restored = read_json(&settings).unwrap();
+        assert_eq!(restored["statusLine"]["command"], "old-line");
+        assert!(!fallback.exists(), "the fallback is consumed on restore");
+
+        // Installing fresh (no prior statusLine) then uninstalling removes the key.
+        let clean = tempfile::tempdir().unwrap();
+        install(false, clean.path(), "darkrun statusline").unwrap();
+        uninstall(false, clean.path()).unwrap();
+        let gone = read_json(&settings_path(false, clean.path()).unwrap()).unwrap();
+        assert!(gone.get("statusLine").is_none(), "no fallback → the key is removed");
     }
 }
