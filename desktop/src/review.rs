@@ -2408,4 +2408,30 @@ mod tab_render_tests {
             let _ = render(f);
         }
     }
+
+    #[test]
+    fn tab_body_renders_populated_units_and_knowledge() {
+        use darkrun_api::session::KnowledgeFile;
+        fn UnitsPop() -> Element {
+            let at = use_signal(|| None::<AnnotateTarget>);
+            let io = use_signal(|| false);
+            let review = ReviewSessionPayload::default();
+            let uo: BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>> = BTreeMap::new();
+            let units = vec![
+                crate::map::unit_view(&serde_json::json!({"slug":"u1","title":"Burst limiter","status":"completed","unit_type":"code"})),
+                crate::map::unit_view(&serde_json::json!({"slug":"u2","title":"Tests","status":"in_progress"})),
+            ];
+            tab_body("units", &units, &[], &[], &uo, &[], &review, at, io)
+        }
+        let mut dom = VirtualDom::new(UnitsPop); dom.rebuild_in_place(); let _ = dioxus_ssr::render(&dom);
+        fn KnowPop() -> Element {
+            let at = use_signal(|| None::<AnnotateTarget>);
+            let io = use_signal(|| false);
+            let review = ReviewSessionPayload::default();
+            let uo: BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>> = BTreeMap::new();
+            let know = vec![KnowledgeFile { name: "notes.md".into(), content: "# notes\nbody".into() }];
+            tab_body("knowledge", &[], &[], &know, &uo, &[], &review, at, io)
+        }
+        let mut dom2 = VirtualDom::new(KnowPop); dom2.rebuild_in_place(); let _ = dioxus_ssr::render(&dom2);
+    }
 }
