@@ -1564,4 +1564,54 @@ mod tests {
         let capped = station_re_reference(&store, &root, "run", "build", 1).unwrap();
         assert_eq!(capped.items.len(), 1, "the cap bounds resolved items");
     }
+
+    #[test]
+    fn rect_of_bounds_an_arrow_rect_and_pin() {
+        use darkrun_api::{ImageShape, NormPoint, NormRect, PixelMark};
+        // An arrow's bounding box spans its two endpoints.
+        let arrow = PixelMark {
+            shape: ImageShape::Arrow, point: None, rect: None,
+            arrow_from: Some(NormPoint { x: 0.6, y: 0.2 }),
+            arrow_to: Some(NormPoint { x: 0.2, y: 0.5 }),
+            path: vec![], render_w: 100, render_h: 100,
+        };
+        let r = rect_of(&arrow).expect("an arrow has a bounding box");
+        assert!((r.x - 0.2).abs() < 1e-9 && (r.y - 0.2).abs() < 1e-9);
+        assert!((r.w - 0.4).abs() < 1e-9 && (r.h - 0.3).abs() < 1e-9);
+        // A rect mark returns its rect; a pin returns None.
+        let rect = PixelMark {
+            shape: ImageShape::Rect, point: None,
+            rect: Some(NormRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }),
+            arrow_from: None, arrow_to: None, path: vec![], render_w: 1, render_h: 1,
+        };
+        assert!(rect_of(&rect).is_some());
+        let pin = PixelMark {
+            shape: ImageShape::Pin, point: Some(NormPoint { x: 0.5, y: 0.5 }),
+            rect: None, arrow_from: None, arrow_to: None, path: vec![], render_w: 1, render_h: 1,
+        };
+        assert!(rect_of(&pin).is_none());
+    }
+
+    #[test]
+    fn resolve_source_passes_through_pdf_svg_and_video_anchors() {
+        use darkrun_api::NormRect;
+        let (_d, store, root) = store();
+        // Seed a real annotation, then re-anchor it onto each passthrough type.
+        submit(&store, &root, "run", text_args(AskSeverity::Should)).unwrap();
+        let base = store.list_annotations("run").unwrap().pop().expect("one annotation");
+        let rect = || NormRect { x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
+        let anchors = [
+            Anchor::Pdf { page: 3, rect: rect() },
+            Anchor::Svg { element_id: Some("e1".into()), xpath: None, bbox: rect() },
+            Anchor::Video { t_start: 1.0, t_end: 2.5, rect: Some(rect()) },
+        ];
+        for anchor in anchors {
+            let mut a = base.clone();
+            a.anchor = Some(anchor);
+            assert!(matches!(
+                resolve_source(&store, "run", &root, &a),
+                ResolvedSource::Passthrough { .. }
+            ));
+        }
+    }
 }
