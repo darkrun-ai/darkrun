@@ -105,6 +105,8 @@ pub fn validate_target(url: &str) -> Result<()> {
 ///
 /// Returns the proof; if `opts.screenshot_path` is set, the PNG is written
 /// there and its path becomes the proof's `screenshot_url`.
+/// Excluded from coverage: drives a real headless browser (CDP) — no test process.
+#[cfg(not(tarpaulin_include))]
 pub async fn verify_web(url: &str, opts: &WebOpts) -> Result<WebProof> {
     validate_target(url)?;
     // The whole capture is bounded by `opts.timeout` so a wedged browser can't
@@ -127,6 +129,7 @@ fn chrome_path() -> Option<PathBuf> {
 }
 
 /// The actual CDP capture (wrapped in a timeout by [`verify_web`]).
+#[cfg(not(tarpaulin_include))]
 async fn capture(url: &str, opts: &WebOpts) -> Result<WebProof> {
     use chromiumoxide::browser::{Browser, BrowserConfig};
 
@@ -157,6 +160,7 @@ async fn capture(url: &str, opts: &WebOpts) -> Result<WebProof> {
 
 /// The page-level capture, factored out so the browser teardown in [`capture`]
 /// runs on every path.
+#[cfg(not(tarpaulin_include))]
 async fn capture_on_browser(
     browser: &chromiumoxide::Browser,
     url: &str,
