@@ -3451,6 +3451,39 @@ mod handler_smoke {
     }
 
     #[test]
+    fn read_handlers_surface_a_corrupt_state_dir_as_a_tool_error() {
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+        let store = s.store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+
+        // A unit file with unparseable YAML frontmatter → read_units errors, so
+        // the unit-list and unit-get handlers return a tool error rather than
+        // panicking on the malformed state.
+        let units = store.units_dir("r");
+        std::fs::create_dir_all(&units).unwrap();
+        std::fs::write(units.join("broken.md"), "---\nstatus: \"unterminated\n---\nbody\n").unwrap();
+        assert_eq!(
+            s.darkrun_unit_list(Parameters(RunRef { slug: "r".into() })).unwrap().is_error,
+            Some(true)
+        );
+        assert_eq!(
+            s.darkrun_unit_get(Parameters(UnitRef { slug: "r".into(), unit: "broken".into() }))
+                .unwrap()
+                .is_error,
+            Some(true)
+        );
+
+        // A run.md with unparseable frontmatter → read_run errors; run_show with
+        // an explicit slug surfaces it.
+        std::fs::write(store.run_dir("r").join("run.md"), "---\nfactory: \"oops\n---\n").unwrap();
+        assert_eq!(
+            s.darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap().is_error,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn run_show_reports_a_connected_desktop_when_a_session_is_live() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
