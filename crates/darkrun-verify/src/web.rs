@@ -308,4 +308,13 @@ mod tests {
         write_screenshot(&path, b"\x89PNG fake").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG fake");
     }
+
+    #[test]
+    fn shape_web_proof_and_into_map_cleanly() {
+        let snap = crate::audit::DomSnapshot::default();
+        let vitals = crate::audit::PageVitals::default();
+        let proof = shape_web_proof(&snap, &vitals, Some("/shot.png".into()));
+        assert_eq!(proof.screenshot_url.as_deref(), Some("/shot.png"));
+        let _ = web_proof_into(proof, darkrun_api::proof::Surface::WebUi);
+    }
 }
