@@ -1435,4 +1435,38 @@ mod tests {
         store2.write_state("r2", &state).unwrap();
         assert_eq!(run_main_status(&store2, "r2"), RunMainStatus::NotForked);
     }
+
+    #[test]
+    fn lifecycle_ops_noop_when_their_branch_is_absent() {
+        let (_d, _root, store) = init_repo();
+        // No run-main forked yet → land_run is a clean no-op.
+        assert!(!land_run(&store, "r").performed);
+        // The station branch isn't forked → a fix on it can't enter.
+        assert!(!enter_fix(&store, "r", "build", "fix-1").performed);
+        // land_station on a never-entered station is a no-op too.
+        assert!(!land_station(&store, "r", "build").performed);
+    }
+
+    #[test]
+    fn with_worktree_on_branch_handles_clean_dirty_and_temp() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+        let git = darkrun_git::Git::open(&root).unwrap();
+        let branch = station_branch("r", "build");
+
+        // A clean registered worktree runs the closure on its path.
+        let ran = with_worktree_on_branch(&git, &root, &branch, "r", |_| 42).unwrap();
+        assert_eq!(ran, 42);
+
+        // A dirty worktree on that branch is refused.
+        let wt = station_worktree_path(&root, "r", "build");
+        std::fs::write(wt.join("uncommitted.txt"), "wip").unwrap();
+        assert!(with_worktree_on_branch(&git, &root, &branch, "r", |_| 1).is_err());
+
+        // run-main has no checkout → a detached temp worktree is created + cleaned.
+        let run_main = run_main_branch("r");
+        let saw = with_worktree_on_branch(&git, &root, &run_main, "r", |p| p.exists()).unwrap();
+        assert!(saw, "the temp worktree path exists while the closure runs");
+    }
 }
