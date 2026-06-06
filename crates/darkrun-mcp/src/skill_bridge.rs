@@ -141,4 +141,16 @@ mod tests {
         assert_eq!(d, "A thing");
         assert_eq!(b.trim(), "Body here.");
     }
+
+    #[test]
+    fn parse_skill_without_frontmatter_returns_the_whole_body() {
+        // No `---` fence, and an opened-but-unclosed fence both fall through to
+        // the whole-source body with empty name/description.
+        let (n, d, b) = parse_skill("Just a body, no frontmatter.\n");
+        assert!(n.is_empty() && d.is_empty());
+        assert_eq!(b.trim(), "Just a body, no frontmatter.");
+        let (n2, _d2, b2) = parse_skill("---\nname: x\nunterminated frontmatter");
+        assert!(n2.is_empty());
+        assert!(b2.contains("unterminated"));
+    }
 }
