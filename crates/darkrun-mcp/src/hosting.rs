@@ -765,6 +765,104 @@ mod tests {
     }
 
     #[test]
+    fn json_id_accepts_strings_and_numbers_only() {
+        use serde_json::json;
+        assert_eq!(json_id(&json!({"id": "abc"})).as_deref(), Some("abc"));
+        assert_eq!(json_id(&json!({"id": 42})).as_deref(), Some("42"));
+        assert!(json_id(&json!({"id": ""})).is_none()); // empty string
+        assert!(json_id(&json!({"id": true})).is_none()); // a bool is not an id
+        assert!(json_id(&json!({"other": 1})).is_none()); // absent
+    }
+
+    #[test]
+    fn parse_bool_field_reads_or_rejects() {
+        assert_eq!(parse_bool_field(r#"{"isDraft":true}"#, "isDraft"), Some(true));
+        assert_eq!(parse_bool_field(r#"{"isDraft":false}"#, "isDraft"), Some(false));
+        assert_eq!(parse_bool_field(r#"{"x":1}"#, "isDraft"), None); // absent
+        assert_eq!(parse_bool_field(r#"{"isDraft":"yes"}"#, "isDraft"), None); // non-bool
+        assert_eq!(parse_bool_field("not json", "isDraft"), None); // unparseable
+    }
+
+    #[test]
+    fn gitlab_state_unknown_for_unrecognized() {
+        assert_eq!(parse_gitlab_state(r#"{"state":"locked"}"#), MergeState::Unknown);
+    }
+
+    #[test]
+    fn github_review_comments_skip_empty_and_keep_bodyless_change_requests() {
+        let json = r#"{
+            "comments": [
+                {"id": 1, "body": "real note", "author": {"login": "a"}},
+                {"id": 2, "body": "   ", "author": {"login": "b"}},
+                {"body": "no id", "author": {"login": "c"}}
+            ],
+            "reviews": [
+                {"id": 10, "state": "APPROVED", "body": "", "author": {"login": "d"}},
+                {"id": 11, "state": "CHANGES_REQUESTED", "body": "", "author": {"login": "e"}}
+            ]
+        }"#;
+        let got = parse_github_review_comments(json);
+        // The real comment + the bodyless change-request survive; empty/idless drop.
+        assert_eq!(got.len(), 2);
+        let cr = got.iter().find(|c| c.change_request).expect("a change request files");
+        assert!(cr.body.contains("requested changes"));
+        assert_eq!(cr.id, "r11");
+        assert_eq!(cr.author, "e");
+        assert!(got.iter().any(|c| c.id == "c1" && c.author == "a"));
+    }
+
+    #[test]
+    fn gitlab_notes_skip_idless_and_empty_bodies() {
+        let json = r#"{"notes":[
+            {"id": 5, "body": "keep me", "author": {"username": "u"}},
+            {"body": "no id"},
+            {"id": 6, "body": "  "}
+        ]}"#;
+        let got = parse_gitlab_notes(json);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "c5");
+        assert_eq!(got[0].author, "u");
+    }
+
+    #[test]
+    fn push_head_recovers_from_a_genuine_non_fast_forward() {
+        use darkrun_git::Git;
+        use std::process::Command;
+        let g = |dir: &std::path::Path, args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success(), "git {args:?}");
+        };
+        let bare = tempfile::tempdir().unwrap();
+        g(bare.path(), &["init", "-q", "--bare"]);
+        let remote = bare.path().to_string_lossy().to_string();
+
+        // Clone A: seed origin/main with one commit.
+        let a = tempfile::tempdir().unwrap();
+        g(a.path(), &["init", "-q", "-b", "main"]);
+        g(a.path(), &["config", "user.email", "a@x.io"]); g(a.path(), &["config", "user.name", "A"]);
+        std::fs::write(a.path().join("a.txt"), "1").unwrap();
+        g(a.path(), &["add", "-A"]); g(a.path(), &["commit", "-qm", "base"]);
+        g(a.path(), &["remote", "add", "origin", &remote]);
+        g(a.path(), &["push", "-q", "origin", "main"]);
+
+        // Clone B from origin, then A advances origin so B is behind (NFF on push).
+        let b = tempfile::tempdir().unwrap();
+        g(b.path(), &["clone", "-q", &remote, "."]);
+        g(b.path(), &["config", "user.email", "b@x.io"]); g(b.path(), &["config", "user.name", "B"]);
+        std::fs::write(a.path().join("a.txt"), "2").unwrap();
+        g(a.path(), &["commit", "-aqm", "advance"]); g(a.path(), &["push", "-q", "origin", "main"]);
+
+        // B commits on top of the stale base → its push is a genuine non-fast-forward;
+        // the recovery fetches + rebases onto origin/main and retries successfully.
+        std::fs::write(b.path().join("c.txt"), "x").unwrap();
+        g(b.path(), &["add", "-A"]); g(b.path(), &["commit", "-qm", "b-work"]);
+        let bgit = Git::open(b.path()).unwrap();
+        assert!(matches!(
+            push_head_with_nff_recovery(&bgit, b.path(), "main"),
+            PushOutcome::Pushed
+        ), "a genuine NFF is recovered by fetch+rebase+retry");
+    }
+
+    #[test]
     fn push_head_recovery_pushes_then_reports_a_non_nff_failure() {
         use darkrun_git::Git;
         use std::process::Command;
