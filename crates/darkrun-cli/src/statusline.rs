@@ -343,7 +343,7 @@ pub fn uninstall(global: bool, repo: &Path) -> Result<(), Dyn> {
 mod tests {
     use super::{
         fallback_path, install, osc8, paint, parse_git_url, phase_chrome, read_json,
-        settings_path, uninstall, web_base, write_json,
+        render, settings_path, uninstall, web_base, write_json,
     };
     use darkrun_core::domain::StationPhase;
 
@@ -572,5 +572,51 @@ mod tests {
         uninstall(false, clean.path()).unwrap();
         let gone = read_json(&settings_path(false, clean.path()).unwrap()).unwrap();
         assert!(gone.get("statusLine").is_none(), "no fallback → the key is removed");
+    }
+
+    #[test]
+    fn render_builds_a_statusline_for_an_active_run() {
+        use darkrun_core::domain::{Run, RunFrontmatter, Status, Unit, UnitFrontmatter};
+        use darkrun_core::StateStore;
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A git repo with a github origin → the slug chip becomes a browse link
+        // (the origin_coords Some-arm).
+        let git = |args: &[&str]| { Command::new("git").current_dir(root).args(args).output().unwrap(); };
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "https://github.com/acme/store.git"]);
+
+        let store = StateStore::new(root);
+        let run = Run {
+            slug: "store-r".into(),
+            title: "Store".into(),
+            body: String::new(),
+            frontmatter: RunFrontmatter {
+                factory: "software".into(),
+                active_station: "frame".into(),
+                ..Default::default()
+            },
+        };
+        store.write_run(&run).unwrap();
+        store.set_active_run("store-r").unwrap();
+        // A completed + a pending unit → the `done/total units` tail renders.
+        for (slug, status) in [("u1", Status::Completed), ("u2", Status::Pending)] {
+            store.write_unit("store-r", &Unit {
+                slug: slug.into(),
+                frontmatter: UnitFrontmatter { status, station: Some("frame".into()), ..Default::default() },
+                title: slug.into(),
+                body: String::new(),
+            }).unwrap();
+        }
+
+        let line = render(Some(root.to_path_buf())).expect("an active run renders a line");
+        assert!(line.contains("store-r"), "the run slug is shown: {line}");
+        assert!(line.contains("1/2 units"), "the unit tally renders: {line}");
+        assert!(line.contains("github.com") || line.contains("/browse/"), "the slug links its browse page: {line}");
+
+        // No active run → nothing to render.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(render(Some(empty.path().to_path_buf())).is_none());
     }
 }
