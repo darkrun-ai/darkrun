@@ -3431,4 +3431,76 @@ mod handler_smoke {
         assert!(!info2.instructions.unwrap().contains("DARKRUN_PORT"));
         assert!(info2.capabilities.prompts.is_none());
     }
+
+    #[test]
+    fn annotation_submit_rejects_each_malformed_field() {
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+        let base = || AnnotationSubmitInput {
+            slug: "r".into(),
+            author: Some("human".into()),
+            work_item: WorkItemInput { kind: "output".into(), id: "x".into(), station: "build".into() },
+            artifact: None,
+            anchor: None,
+            expression: None,
+            comment: "c".into(),
+            ask: serde_json::json!({"kind": "change", "severity": "should"}),
+            suggestion: None,
+        };
+        let is_err = |r: CallToolResult| r.is_error == Some(true);
+
+        // Each malformed field trips its own parse-error arm in turn.
+        let mut bad_kind = base();
+        bad_kind.work_item.kind = "nonsense".into();
+        assert!(is_err(s.darkrun_annotation_submit(Parameters(bad_kind)).unwrap()));
+
+        let mut bad_author = base();
+        bad_author.author = Some("wizard".into());
+        assert!(is_err(s.darkrun_annotation_submit(Parameters(bad_author)).unwrap()));
+
+        let mut bad_artifact = base();
+        bad_artifact.artifact = Some(serde_json::json!(5));
+        assert!(is_err(s.darkrun_annotation_submit(Parameters(bad_artifact)).unwrap()));
+
+        let mut bad_anchor = base();
+        bad_anchor.anchor = Some(serde_json::json!("not-an-anchor"));
+        assert!(is_err(s.darkrun_annotation_submit(Parameters(bad_anchor)).unwrap()));
+
+        let mut bad_expr = base();
+        bad_expr.expression = Some(serde_json::json!(true));
+        assert!(is_err(s.darkrun_annotation_submit(Parameters(bad_expr)).unwrap()));
+
+        let mut bad_suggestion = base();
+        bad_suggestion.suggestion = Some(serde_json::json!(1));
+        assert!(is_err(s.darkrun_annotation_submit(Parameters(bad_suggestion)).unwrap()));
+
+        let mut bad_ask = base();
+        bad_ask.ask = serde_json::json!("nope");
+        assert!(is_err(s.darkrun_annotation_submit(Parameters(bad_ask)).unwrap()));
+
+        // annotation_list rejects a malformed work_item too.
+        assert!(is_err(s.darkrun_annotation_list(Parameters(AnnotationListInput {
+            slug: "r".into(),
+            work_item: WorkItemInput { kind: "bogus".into(), id: "x".into(), station: "build".into() },
+            open_only: false,
+        })).unwrap()));
+    }
+
+    #[test]
+    fn unit_iterate_requires_a_note_on_reject() {
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+        s.darkrun_run_start(Parameters(RunStartInput {
+            slug: "r".into(), factory: "software".into(), title: None, mode: "continuous".into(),
+        })).unwrap();
+        s.darkrun_unit_create(Parameters(UnitCreateInput {
+            slug: "r".into(), unit: "u1".into(), station: "build".into(), title: None, depends_on: vec![],
+        })).unwrap();
+        // A reject with no note is exactly the story-loss this guards against.
+        let res = s.darkrun_unit_iterate(Parameters(UnitIterateInput {
+            slug: "r".into(), unit: "u1".into(), worker: "w".into(),
+            result: "reject".into(), note: None, next_worker: None,
+        })).unwrap();
+        assert_eq!(res.is_error, Some(true));
+    }
 }
