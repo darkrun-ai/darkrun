@@ -177,3 +177,27 @@ fn exchange_code_transport_error_when_no_mock_queued() {
     .expect_err("no queued response");
     assert!(matches!(err, VcsError::Transport(_)));
 }
+
+#[test]
+fn exchange_code_non_2xx_without_oauth_error_surfaces_an_api_error() {
+    // A 500 whose body carries no `error` field → the generic Api error arm.
+    let mock = MockTransport::new();
+    mock.expect(
+        Method::Post,
+        "https://github.com/login/oauth/access_token",
+        HttpResponse::new(500, r#"{"message":"upstream is down"}"#),
+    );
+    let err = exchange_code(
+        &mock,
+        Provider::GitHub,
+        "id",
+        "secret",
+        "code",
+        "https://darkrun.ai/auth/github/callback",
+    )
+    .expect_err("a non-2xx surfaces an Api error");
+    match err {
+        VcsError::Api { status, .. } => assert_eq!(status, 500),
+        other => panic!("expected Api error, got {other:?}"),
+    }
+}
