@@ -597,6 +597,79 @@ pub fn push_head_with_nff_recovery(
 mod tests {
     use super::*;
 
+    /// A GitBackend whose remote primitives are scripted; every other method is
+    /// unreachable in these tests. `pushes` is consumed front-to-back (first push,
+    /// then the post-rebase retry); `rebase_ok` toggles the rebase result.
+    struct PushMock {
+        pushes: std::cell::RefCell<Vec<darkrun_git::Result<()>>>,
+        rebase_ok: bool,
+    }
+    impl darkrun_git::GitBackend for PushMock {
+        fn push(&self, _: &Path, _: &str) -> darkrun_git::Result<()> {
+            self.pushes.borrow_mut().remove(0)
+        }
+        fn fetch(&self, _: &Path, _: &str) -> darkrun_git::Result<()> { Ok(()) }
+        fn rebase_onto(&self, _: &Path, _: &str) -> darkrun_git::Result<()> {
+            if self.rebase_ok { Ok(()) } else { Err(darkrun_git::GitError::NotARepo("rebase".into())) }
+        }
+        fn rebase_abort(&self, _: &Path) -> darkrun_git::Result<()> { Ok(()) }
+        // ── Unused by push_head_with_nff_recovery ──
+        fn create_worktree(&self, _: &str, _: &Path, _: &darkrun_git::CreateOptions) -> darkrun_git::Result<darkrun_git::WorktreeInfo> { unimplemented!() }
+        fn list_worktrees(&self) -> darkrun_git::Result<Vec<darkrun_git::WorktreeInfo>> { unimplemented!() }
+        fn remove_worktree(&self, _: &str, _: bool) -> darkrun_git::Result<()> { unimplemented!() }
+        fn current_branch(&self) -> darkrun_git::Result<Option<String>> { unimplemented!() }
+        fn is_clean(&self) -> darkrun_git::Result<bool> { unimplemented!() }
+        fn branch_exists(&self, _: &str) -> darkrun_git::Result<bool> { unimplemented!() }
+        fn create_branch(&self, _: &str, _: &str) -> darkrun_git::Result<()> { unimplemented!() }
+        fn is_ancestor(&self, _: &str, _: &str) -> darkrun_git::Result<bool> { unimplemented!() }
+        fn merge_no_commit(&self, _: &Path, _: &str) -> darkrun_git::Result<darkrun_git::MergeOutcome> { unimplemented!() }
+        fn merge_in_progress(&self, _: &Path) -> darkrun_git::Result<bool> { unimplemented!() }
+        fn checkout_paths(&self, _: &Path, _: &str, _: &[String]) -> darkrun_git::Result<()> { unimplemented!() }
+        fn add_paths(&self, _: &Path, _: &[String]) -> darkrun_git::Result<()> { unimplemented!() }
+        fn commit(&self, _: &Path, _: &str) -> darkrun_git::Result<()> { unimplemented!() }
+        fn ls_tree(&self, _: &Path, _: &str, _: &str) -> darkrun_git::Result<Vec<String>> { unimplemented!() }
+        fn unresolved_paths(&self, _: &Path) -> darkrun_git::Result<Vec<String>> { unimplemented!() }
+        fn refs_have_identical_trees(&self, _: &str, _: &str) -> darkrun_git::Result<bool> { unimplemented!() }
+    }
+
+    #[test]
+    fn push_recovery_handles_non_nff_rejection_and_rebase_outcomes() {
+        let wt = Path::new("/tmp/x");
+        // A non-NFF rejection (protected branch / permission) is NOT rebased.
+        let m = PushMock {
+            pushes: std::cell::RefCell::new(vec![Err(darkrun_git::GitError::NotARepo("denied".into()))]),
+            rebase_ok: true,
+        };
+        assert!(matches!(push_head_with_nff_recovery(&m, wt, "b"), PushOutcome::Failed { .. }));
+
+        // Genuine NFF, but the rebase itself fails → Failed (rebase aborted).
+        let m = PushMock {
+            pushes: std::cell::RefCell::new(vec![Err(darkrun_git::GitError::WorktreeNotFound("fetch first".into()))]),
+            rebase_ok: false,
+        };
+        assert!(matches!(push_head_with_nff_recovery(&m, wt, "b"), PushOutcome::Failed { .. }));
+
+        // Genuine NFF, rebase succeeds, but the retry push fails → Failed.
+        let m = PushMock {
+            pushes: std::cell::RefCell::new(vec![
+                Err(darkrun_git::GitError::WorktreeNotFound("fetch first".into())),
+                Err(darkrun_git::GitError::NotARepo("still rejected".into())),
+            ]),
+            rebase_ok: true,
+        };
+        assert!(matches!(push_head_with_nff_recovery(&m, wt, "b"), PushOutcome::Failed { .. }));
+
+        // Genuine NFF, rebase succeeds, retry push succeeds → Pushed.
+        let m = PushMock {
+            pushes: std::cell::RefCell::new(vec![
+                Err(darkrun_git::GitError::WorktreeNotFound("fetch first".into())),
+                Ok(()),
+            ]),
+            rebase_ok: true,
+        };
+        assert!(matches!(push_head_with_nff_recovery(&m, wt, "b"), PushOutcome::Pushed));
+    }
+
     #[test]
     fn nff_matcher_fires_only_on_genuine_nff() {
         // Genuine NFF phrasings → recover.
