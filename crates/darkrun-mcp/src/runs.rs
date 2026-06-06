@@ -169,6 +169,18 @@ mod tests {
     }
 
     #[test]
+    fn list_skips_a_run_with_an_unparseable_doc() {
+        let (d, store) = store();
+        run_start(&store, "good", "software", None, "continuous").unwrap();
+        run_start(&store, "bad", "software", None, "continuous").unwrap();
+        // Corrupt one run's doc → it's skipped, not fatal to the whole listing.
+        std::fs::write(store.run_dir("bad").join("run.md"), "---\nfactory: \"oops\n---\n").unwrap();
+        let runs = list(&store, d.path(), true).unwrap();
+        assert_eq!(runs.len(), 1, "the corrupt run is skipped");
+        assert_eq!(runs[0].slug, "good");
+    }
+
+    #[test]
     fn archive_hides_run_from_default_list() {
         let (d, store) = store();
         run_start(&store, "a", "software", None, "continuous").unwrap();
