@@ -109,4 +109,26 @@ mod tests {
         assert!(r.diff.contains("+two"));
         assert!(r.instructions.contains("Dispatch the station's Reviewers"));
     }
+
+    #[test]
+    fn gate_review_truncates_a_very_large_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(root).args(args).output().unwrap();
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(root.join("big.txt"), "seed\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "init"]);
+        // A working-tree change whose diff comfortably exceeds MAX_DIFF (60k).
+        let huge: String = (0..8000).map(|i| format!("line {i} added\n")).collect();
+        std::fs::write(root.join("big.txt"), huge).unwrap();
+
+        let r = gate_review(root);
+        assert!(r.truncated, "a >60k diff is flagged truncated");
+        assert!(r.diff.contains("diff truncated"));
+    }
 }
