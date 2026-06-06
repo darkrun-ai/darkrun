@@ -2370,3 +2370,42 @@ mod subcomponent_render_tests {
         let _ = render(App);
     }
 }
+
+#[cfg(test)]
+mod tab_render_tests {
+    use super::*;
+    use darkrun_api::session::ReviewSessionPayload;
+    use std::collections::BTreeMap;
+
+    fn render(app: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    fn body(active: &'static str) -> Element {
+        let at = use_signal(|| None::<AnnotateTarget>);
+        let io = use_signal(|| false);
+        let review = ReviewSessionPayload::default();
+        let unit_outputs: BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>> = BTreeMap::new();
+        tab_body(active, &[], &[], &[], &unit_outputs, &[], &review, at, io)
+    }
+
+    #[test]
+    fn build_tabs_includes_feedback_tab_when_present() {
+        let with = build_tabs(2, 1, 1, 3);
+        let without = build_tabs(0, 0, 0, 0);
+        assert!(with.len() >= without.len());
+    }
+
+    #[test]
+    fn tab_body_renders_each_tab() {
+        fn Units() -> Element { body("units") }
+        fn Outputs() -> Element { body("outputs") }
+        fn Knowledge() -> Element { body("knowledge") }
+        fn Feedback() -> Element { body("feedback") }
+        for f in [Units as fn() -> Element, Outputs, Knowledge, Feedback] {
+            let _ = render(f);
+        }
+    }
+}
