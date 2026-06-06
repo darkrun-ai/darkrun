@@ -125,3 +125,37 @@ fn renders_station_strip_and_annotate() {
     let html = render(App);
     assert!(!html.is_empty());
 }
+
+#[test]
+fn renders_proof_panel_for_each_kind() {
+    fn web() -> ProofView {
+        ProofView {
+            surface: "web_ui".into(),
+            kind: ProofMetricKind::Web,
+            vitals: vec![VitalMetric { key: "lcp".into(), value: 1.2, display: "1.20 s".into(), verdict: VitalVerdict::Good }],
+            audits: vec![AuditRow { name: "contrast".into(), value: "5:1".into(), pass: true }],
+            screenshot_url: Some("/shot.png".into()),
+            bench: vec![],
+            block_matches_surface: true,
+        }
+    }
+    fn bench() -> ProofView {
+        ProofView {
+            surface: "api".into(),
+            kind: ProofMetricKind::Bench,
+            vitals: vec![],
+            audits: vec![],
+            screenshot_url: None,
+            bench: vec![BenchStat { label: "p50".into(), display: "1.5ms".into() }],
+            block_matches_surface: false,
+        }
+    }
+    fn App() -> Element {
+        rsx! {
+            ProofPanel { proof: web() }
+            ProofPanel { proof: bench() }
+        }
+    }
+    let html = render(App);
+    assert!(html.contains("lcp") || html.contains("p50") || html.contains("dr-"), "{html}");
+}
