@@ -3485,6 +3485,29 @@ mod handler_smoke {
     }
 
     #[test]
+    fn drift_accept_re_witnesses_a_known_input() {
+        use darkrun_core::domain::{Unit, UnitFrontmatter};
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+        let store = s.store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+        // A unit that witnessed `frame/in.md` as one of its inputs.
+        let mut fm = UnitFrontmatter::default();
+        fm.station = Some("frame".into());
+        fm.input_witnesses.insert("frame/in.md".into(), "oldhash".into());
+        store.write_unit("r", &Unit { slug: "u".into(), frontmatter: fm, title: "u".into(), body: String::new() }).unwrap();
+        // The artifact exists on disk so it re-witnesses to its current content.
+        std::fs::create_dir_all(dir.path().join("frame")).unwrap();
+        std::fs::write(dir.path().join("frame/in.md"), b"new content").unwrap();
+
+        let out = s.darkrun_drift_accept(Parameters(DriftAcceptInput {
+            slug: "r".into(), path: "frame/in.md".into(),
+        })).unwrap();
+        assert!(out.is_error != Some(true), "accepting a witnessed input succeeds");
+        assert_eq!(out.structured_content.unwrap()["accepted"], "frame/in.md");
+    }
+
+    #[test]
     fn handler_edge_arms_success_and_error_paths() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
@@ -3799,6 +3822,10 @@ mod handler_smoke {
         assert_eq!(dbg("nonsense_op", None, None, None, None).is_error, Some(true));
         // set_run_field with field+value mutates (or errors cleanly on a bad field).
         let _ = dbg("set_run_field", None, Some("title"), Some("New"), None);
+        // The mutating ops with their required args PRESENT actually run the
+        // recovery call (not just the missing-arg guard).
+        let _ = dbg("force_station_complete", Some("frame"), None, None, None);
+        let _ = dbg("mutate_feedback", None, None, Some("closed"), Some("fb-1"));
     }
 
     #[test]
@@ -3817,6 +3844,15 @@ mod handler_smoke {
         assert_eq!(bl(Some("add"), None, None).is_error, Some(true));
         assert_eq!(bl(Some("promote"), None, None).is_error, Some(true));
         let _ = bl(Some("promote"), None, Some("bl-999")); // unknown id → error json (ok status)
+
+        // Promote a REAL backlog item → the success arm.
+        let added = bl(Some("add"), Some("ship the thing"), None);
+        let id = added.structured_content.unwrap()["added"]["id"].as_str().unwrap().to_string();
+        let promoted = bl(Some("promote"), None, Some(&id));
+        assert!(
+            promoted.structured_content.unwrap().get("promoted").is_some(),
+            "promoting a real item takes the success arm"
+        );
     }
 
     #[test]
