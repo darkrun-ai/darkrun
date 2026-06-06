@@ -292,3 +292,21 @@ pub async fn get_run(State(state): State<AppState>, Path(slug): Path<String>) ->
 
     (StatusCode::OK, Json(payload)).into_response()
 }
+
+#[cfg(test)]
+mod base_branch_tests {
+    use super::*;
+
+    #[test]
+    fn base_branch_reads_default_branch_or_falls_back_to_main() {
+        let dir = tempfile::tempdir().unwrap();
+        // No settings file → the `main` default.
+        assert_eq!(base_branch(dir.path()), "main");
+        // A `default_branch:` line is read (quotes + whitespace trimmed).
+        std::fs::write(dir.path().join("settings.yml"), "default_branch: \"develop\"\nhosting: github\n").unwrap();
+        assert_eq!(base_branch(dir.path()), "develop");
+        // An empty value falls back to main.
+        std::fs::write(dir.path().join("settings.yml"), "default_branch:   \n").unwrap();
+        assert_eq!(base_branch(dir.path()), "main");
+    }
+}
