@@ -3052,6 +3052,48 @@ mod tests {
     }
 
     #[test]
+    fn a_run_with_an_unmet_seal_gate_holds_at_pending_seal() {
+        use darkrun_core::domain::{SealKind, Status};
+        let (_d, store) = store();
+        // Quick mode: plan = [build, prove], auto_gates → the cross-station run
+        // review is skipped, so once both stations lock the cursor goes straight
+        // to the seal decision.
+        run_start(&store, "r", "software", Some("ship".into()), "quick").expect("start");
+
+        let mut state = store.read_state("r").unwrap().unwrap();
+        // Only the first planned station is seeded at start; mark every station in
+        // the plan complete so the cursor reaches the seal decision.
+        let template = state.stations.get("build").unwrap().clone();
+        for st in ["build", "prove"] {
+            let mut entry = template.clone();
+            entry.station = st.to_string();
+            entry.status = Status::Completed;
+            state.stations.insert(st.to_string(), entry);
+        }
+        store.write_state("r", &state).unwrap();
+
+        // Declare a final `seal: external` gate but leave the run un-completed →
+        // the run hangs at PendingSeal awaiting the external merge decision.
+        let mut run = store.read_run("r").unwrap();
+        run.frontmatter.seal = Some(SealKind::External);
+        run.frontmatter.status = Status::Active;
+        store.write_run(&run).unwrap();
+
+        match derive_position(&store, "r").expect("derive").action {
+            Some(RunAction::PendingSeal { kind, .. }) => assert_eq!(kind, SealKind::External),
+            other => panic!("expected PendingSeal hold, got {other:?}"),
+        }
+
+        // Once the run is marked delivered, the same shape seals.
+        run.frontmatter.status = Status::Completed;
+        store.write_run(&run).unwrap();
+        assert!(
+            matches!(derive_position(&store, "r").unwrap().action, Some(RunAction::Sealed { .. })),
+            "a completed run seals rather than holding"
+        );
+    }
+
+    #[test]
     fn choose_checkpoint_rejects_a_station_not_yet_active() {
         use darkrun_core::domain::CheckpointKind;
         let (_d, store) = store();

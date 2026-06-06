@@ -1490,6 +1490,51 @@ mod tests {
     }
 
     #[test]
+    fn landing_refuses_a_dirty_checkout_of_the_target_branch() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+        // Real station work so there's genuine merge debt (the no-debt
+        // short-circuit doesn't fire).
+        let wt = station_worktree_path(&root, "r", "build");
+        commit_in(&wt, "feature.txt", "built\n", "build work");
+
+        // Check run-main out in a separate worktree and leave it dirty.
+        let rm_wt = root.join("rm-checkout");
+        assert!(Command::new("git")
+            .arg("-C").arg(&root)
+            .args(["worktree", "add", "-q", rm_wt.to_str().unwrap(), "darkrun/r/main"])
+            .status().unwrap().success());
+        std::fs::write(rm_wt.join("dirty.txt"), "wip").unwrap();
+
+        // The land finds the dirty target checkout and refuses with a remediation
+        // note rather than merging into an unclean tree.
+        let out = land_station(&store, "r", "build");
+        assert!(!out.performed, "a dirty target checkout blocks the land");
+        let note = out.note.unwrap_or_default();
+        assert!(note.contains("uncommitted") || note.contains("untracked"), "remediation note: {note}");
+    }
+
+    #[test]
+    fn landing_noops_when_the_parent_branch_is_missing() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+        let wt = station_worktree_path(&root, "r", "build");
+        commit_in(&wt, "feature.txt", "built\n", "build work");
+
+        // Delete run-main so the child branch exists but its parent does not.
+        assert!(Command::new("git")
+            .arg("-C").arg(&root)
+            .args(["branch", "-D", "darkrun/r/main"])
+            .status().unwrap().success());
+
+        let out = land_station(&store, "r", "build");
+        assert!(!out.performed, "a missing parent cannot be landed into");
+        assert!(out.note.unwrap_or_default().contains("cannot land"));
+    }
+
+    #[test]
     fn with_worktree_on_branch_handles_clean_dirty_and_temp() {
         let (_d, root, store) = init_repo();
         ensure_run_main(&store, "r");
