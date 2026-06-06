@@ -4652,6 +4652,34 @@ mod tests {
     }
 
     #[test]
+    fn validate_units_flags_naming_deps_and_cycles() {
+        use darkrun_core::domain::{Unit, UnitFrontmatter};
+        let mk = |slug: &str, deps: &[&str]| Unit {
+            slug: slug.into(),
+            frontmatter: UnitFrontmatter {
+                depends_on: deps.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            title: slug.into(),
+            body: String::new(),
+        };
+        // Invalid naming (uppercase / whitespace).
+        let bad = mk("Bad Name", &[]);
+        assert_eq!(validate_units(std::slice::from_ref(&bad), &[&bad]).unwrap().0, "invalid_naming");
+        // A dependency on a unit that doesn't exist.
+        let dangling = mk("a", &["ghost"]);
+        assert_eq!(validate_units(std::slice::from_ref(&dangling), &[&dangling]).unwrap().0, "unresolved_deps");
+        // A dependency cycle a -> b -> a.
+        let a = mk("a", &["b"]);
+        let b = mk("b", &["a"]);
+        let all = vec![a.clone(), b.clone()];
+        assert_eq!(validate_units(&all, &[&a, &b]).unwrap().0, "dependency_cycle");
+        // A clean, acyclic, well-named set passes.
+        let clean = mk("c", &[]);
+        assert!(validate_units(std::slice::from_ref(&clean), &[&clean]).is_none());
+    }
+
+    #[test]
     fn elaborate_seal_and_choose_checkpoint_reject_an_unknown_station() {
         let (_d, store) = store();
         run_start(&store, "r", "software", None, "continuous").unwrap();
