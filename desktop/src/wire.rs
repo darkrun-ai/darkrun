@@ -536,6 +536,7 @@ impl DiscoveredEngine {
 /// registry's [`list_live_engines`](darkrun_mcp::registry::list_live_engines), so
 /// the desktop and the engine agree exactly on what "live" means. Returns an
 /// empty list when the tree doesn't exist (no engine has ever booted).
+#[cfg(not(tarpaulin_include))] // reads the real ~/.darkrun registry; list_live_engines_in is tested
 pub async fn discover_live_engines() -> io::Result<Vec<DiscoveredEngine>> {
     let descriptors = darkrun_mcp::registry::list_live_engines()?;
     Ok(descriptors
@@ -829,8 +830,8 @@ mod async_client_tests {
 
     #[tokio::test]
     async fn client_success_paths_against_a_fixture_server() {
-        // 9 client calls below → the server handles 9 connections.
-        let port = serve_canned(9).await;
+        // 11 client calls below → the server handles 11 connections.
+        let port = serve_canned(11).await;
         let cfg = ConnConfig { host: "127.0.0.1".into(), port, session_id: "s".into() };
 
         // GETs decode their typed payloads off a real socket.
@@ -857,6 +858,41 @@ mod async_client_tests {
         submit_question_answer(&cfg, &QuestionAnswerRequest {
             selected: vec!["a".into()], text: None, annotations: None,
         }).await.expect("answer ok");
+        submit_direction_select(&cfg, &DirectionSelectRequest {
+            archetype: "editorial".into(), annotations: None,
+        }).await.expect("direction ok");
+        submit_picker_select(&cfg, &PickerSelectRequest { id: "yes".into() })
+            .await.expect("picker ok");
+    }
+
+    #[tokio::test]
+    async fn focus_is_none_for_a_non_review_session_and_get_surfaces_a_non_2xx() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A server that returns a non-review session for /current and a 404 for runs.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let mut buf = [0u8; 1024];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("/").to_string();
+                let resp = if path == "/api/session/current" {
+                    let body = r#"{"session_type":"question","run_slug":"r1"}"#;
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let cfg = ConnConfig { host: "127.0.0.1".into(), port, session_id: "s".into() };
+        // A non-review focus session yields None.
+        assert!(fetch_current_focus(&cfg).await.is_none());
+        // A 404 GET surfaces a Status error (the non-2xx arm).
+        assert!(matches!(fetch_runs(&cfg).await, Err(WireError::Status(404))));
     }
 
     #[tokio::test]
