@@ -3052,6 +3052,26 @@ mod tests {
     }
 
     #[test]
+    fn blocking_a_pre_execution_user_gate_files_spec_feedback_and_holds() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").expect("start");
+        // Park frame at the pre-execution operator gate.
+        let mut state = store.read_state("r").unwrap().unwrap();
+        state.stations.get_mut("frame").unwrap().phase = StationPhase::UserGate;
+        store.write_state("r", &state).unwrap();
+
+        // Blocking the gate with feedback files a pending spec-gate finding and
+        // holds the station (it must NOT complete — nothing is manufactured yet).
+        checkpoint_decide(&store, "r", false, Some("tighten the success metric".into()))
+            .expect("decide");
+        let raw = store.read_feedback_raw("r").unwrap();
+        assert!(raw.contains_key("fb-spec-gate"), "the block files spec-gate feedback");
+        assert!(raw["fb-spec-gate"].contains("tighten the success metric"));
+        let st = store.read_state("r").unwrap().unwrap();
+        assert_eq!(st.stations["frame"].phase, StationPhase::UserGate, "still held at the gate");
+    }
+
+    #[test]
     fn build_prompt_context_threads_wave_handoffs_and_the_factory_model() {
         use darkrun_core::domain::{IterationResult, Unit, UnitIteration, UnitFrontmatter};
         let (_d, store) = store();
