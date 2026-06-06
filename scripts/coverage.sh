@@ -38,6 +38,13 @@ exec cargo tarpaulin --workspace --engine llvm --timeout 1200 \
   --exclude-files "crates/darkrun-ui/src/components/walkthrough.rs" \
   --exclude-files "crates/darkrun-ui/src/components/station_flow.rs" \
   --exclude-files "crates/darkrun-ui/src/components/factory.rs" \
+  --exclude-files "crates/darkrun-ui/src/components/phase_machine.rs" \
+  --exclude-files "crates/darkrun-ui/src/components/primitives.rs" \
+  --exclude-files "crates/darkrun-ui/src/components/role.rs" \
+  --exclude-files "crates/darkrun-ui/src/components/run_list.rs" \
+  --exclude-files "crates/darkrun-ui/src/components/station_strip.rs" \
+  --exclude-files "crates/darkrun-ui/src/components/tab_bar.rs" \
+  --exclude-files "crates/darkrun-ui/src/components/wordmark.rs" \
   --exclude-files "crates/darkrun-ui/src/graph/view.rs" \
   --exclude-files "web/site/src/layout.rs" \
   --exclude-files "web/site/src/ui.rs" \

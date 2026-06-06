@@ -161,6 +161,25 @@ fn renders_proof_panel_for_each_kind() {
 }
 
 #[test]
+fn renders_right_size_strip_with_kept_and_dropped() {
+    use darkrun_ui::components::chips::{RightSizeStrip, RightSizeTier};
+    fn App() -> Element {
+        rsx! {
+            RightSizeStrip {
+                full: vec!["frame".to_string(), "build".to_string(), "harden".to_string()],
+                tiers: vec![
+                    RightSizeTier::new("tiny", vec!["build".to_string()]),
+                    RightSizeTier::new("full", vec!["frame".to_string(), "build".to_string(), "harden".to_string()]),
+                ],
+            }
+        }
+    }
+    let html = render(App);
+    // A kept chip reads present=true; a collapsed one present=false (struck through).
+    assert!(html.contains("data-present=\"true\"") && html.contains("data-present=\"false\""), "{html}");
+}
+
+#[test]
 fn renders_proof_panel_alternate_blocks_and_verdicts() {
     // A web proof carrying every non-Good vital verdict + a failing audit.
     fn web_mixed() -> ProofView {

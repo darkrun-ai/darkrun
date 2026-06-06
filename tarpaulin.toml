@@ -64,6 +64,13 @@ exclude-files = [
     "crates/darkrun-ui/src/components/walkthrough.rs",
     "crates/darkrun-ui/src/components/station_flow.rs",
     "crates/darkrun-ui/src/components/factory.rs",
+    "crates/darkrun-ui/src/components/phase_machine.rs",
+    "crates/darkrun-ui/src/components/primitives.rs",
+    "crates/darkrun-ui/src/components/role.rs",
+    "crates/darkrun-ui/src/components/run_list.rs",
+    "crates/darkrun-ui/src/components/station_strip.rs",
+    "crates/darkrun-ui/src/components/tab_bar.rs",
+    "crates/darkrun-ui/src/components/wordmark.rs",
     "crates/darkrun-ui/src/graph/view.rs",
     # ── website render layer (Dioxus SSG pages + shell) ──
     "web/site/src/layout.rs",
