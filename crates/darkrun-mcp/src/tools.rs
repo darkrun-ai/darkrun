@@ -3510,6 +3510,52 @@ mod handler_smoke {
     }
 
     #[test]
+    fn meta_handlers_surface_filesystem_write_faults() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let darkrun = dir.path().join(".darkrun");
+        std::fs::create_dir_all(&darkrun).unwrap();
+        let s = DarkrunServer::new(dir.path());
+
+        // report: a FILE where `.darkrun/reports` belongs fails the create_dir_all.
+        std::fs::write(darkrun.join("reports"), b"x").unwrap();
+        assert_eq!(
+            s.darkrun_report(Parameters(ReportInput {
+                message: "broken".into(), contact_email: None, name: None,
+            })).unwrap().is_error,
+            Some(true)
+        );
+
+        // backlog: a FILE where `.darkrun/backlog` belongs fails the read_dir.
+        std::fs::write(darkrun.join("backlog"), b"x").unwrap();
+        assert_eq!(
+            s.darkrun_backlog(Parameters(BacklogInput { action: None, description: None, id: None }))
+                .unwrap().is_error,
+            Some(true)
+        );
+
+        // setup --apply: a read-only `.darkrun` fails the settings.yml write.
+        std::fs::set_permissions(&darkrun, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(
+            s.darkrun_setup(Parameters(SetupInput { apply: true })).unwrap().is_error,
+            Some(true)
+        );
+        std::fs::set_permissions(&darkrun, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn run_list_surfaces_an_unreadable_state_root() {
+        // A FILE where the `.darkrun` state root belongs makes list_runs fail.
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".darkrun"), b"not a dir").unwrap();
+        let s = DarkrunServer::new(dir.path());
+        assert_eq!(
+            s.darkrun_run_list(Parameters(RunListInput { include_archived: true })).unwrap().is_error,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn drift_accept_re_witnesses_a_known_input() {
         use darkrun_core::domain::{Unit, UnitFrontmatter};
         let dir = tempdir().unwrap();
@@ -3639,6 +3685,13 @@ mod handler_smoke {
             s.darkrun_run_reset(Parameters(RunResetInput {
                 slug: "r".into(), station: Some("frame".into()), confirm: false,
             })).unwrap().is_error,
+            Some(true)
+        );
+
+        // drift_accept reads units to find the witness → the corrupt unit errors.
+        assert_eq!(
+            s.darkrun_drift_accept(Parameters(DriftAcceptInput { slug: "r".into(), path: "x.md".into() }))
+                .unwrap().is_error,
             Some(true)
         );
 
