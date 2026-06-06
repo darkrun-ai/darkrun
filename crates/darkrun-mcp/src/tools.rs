@@ -3451,6 +3451,75 @@ mod handler_smoke {
     }
 
     #[test]
+    fn handler_edge_arms_success_and_error_paths() {
+        let dir = tempdir().unwrap();
+        let s = DarkrunServer::new(dir.path());
+        let store = s.store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+
+        // checkpoint_choose SUCCESS arm: seed `shape` (which offers [ask, external])
+        // into state, then choose its external gate.
+        let mut state = store.read_state("r").unwrap().unwrap();
+        let mut shape = state.stations.get("frame").unwrap().clone();
+        shape.station = "shape".into();
+        state.stations.insert("shape".into(), shape);
+        store.write_state("r", &state).unwrap();
+        let ok = s.darkrun_checkpoint_choose(Parameters(CheckpointChooseInput {
+            slug: "r".into(), station: "shape".into(), kind: "external".into(),
+        })).unwrap();
+        assert!(ok.is_error != Some(true), "choosing an offered gate succeeds");
+
+        // annotation_payload: a malformed work_item kind is rejected.
+        assert_eq!(
+            s.darkrun_annotation_payload(Parameters(AnnotationListInput {
+                slug: "r".into(),
+                work_item: WorkItemInput { kind: "bogus".into(), id: "x".into(), station: "frame".into() },
+                open_only: true,
+            })).unwrap().is_error,
+            Some(true)
+        );
+
+        // drift_accept: a path with no recorded witness → a tool error.
+        assert_eq!(
+            s.darkrun_drift_accept(Parameters(DriftAcceptInput { slug: "r".into(), path: "nope.md".into() }))
+                .unwrap().is_error,
+            Some(true)
+        );
+
+        // zap with an unknown factory returns a structured error payload.
+        let z = s.darkrun_zap(Parameters(ZapInput {
+            task: "fix it".into(), factory: Some("ghost-factory".into()), station: None,
+        })).unwrap();
+        let zbody = z.structured_content.expect("zap structured");
+        assert!(zbody.get("error").is_some() || zbody.get("factory").is_some());
+
+        // backlog promote of an unknown id → "no backlog item".
+        let b = s.darkrun_backlog(Parameters(BacklogInput {
+            action: Some("promote".into()), description: None, id: Some("nope".into()),
+        })).unwrap();
+        assert!(b.structured_content.unwrap()["error"].as_str().unwrap_or("").contains("no backlog item"));
+
+        // unit_reset on a ghost unit → a tool error.
+        assert_eq!(
+            s.darkrun_unit_reset(Parameters(UnitResetInput {
+                slug: "r".into(), unit: "ghost-unit".into(), confirm: true,
+            })).unwrap().is_error,
+            Some(true)
+        );
+
+        // feedback_resolve closed+reply takes the close_with_reply branch.
+        let fb = s.darkrun_feedback_create(Parameters(FeedbackCreateInput {
+            slug: "r".into(), station: "frame".into(), body: "needs work".into(),
+            severity: None, origin: None, invalidates: None,
+        })).unwrap();
+        let fb_id = fb.structured_content.unwrap()["id"].as_str().unwrap().to_string();
+        let resolved = s.darkrun_feedback_resolve(Parameters(FeedbackResolveInput {
+            slug: "r".into(), feedback_id: fb_id, status: "closed".into(), reply: Some("fixed".into()),
+        })).unwrap();
+        assert!(resolved.is_error != Some(true), "a closed+reply resolution succeeds");
+    }
+
+    #[test]
     fn read_handlers_surface_a_corrupt_state_dir_as_a_tool_error() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
