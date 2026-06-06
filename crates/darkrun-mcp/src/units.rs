@@ -759,4 +759,41 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, McpError::InvalidInput(_)));
     }
+
+    #[test]
+    fn reset_notes_dependent_units() {
+        let (_d, store) = store1();
+        create(&store, "r", "u1", "build", None, vec![]).unwrap();
+        // u2 depends on u1 → resetting u1 surfaces the dependent note.
+        create(&store, "r", "u2", "build", None, vec!["u1".into()]).unwrap();
+        let plan = reset(&store, "r", "u1", true).unwrap();
+        let note = format!("{plan:?}");
+        assert!(note.contains("depend on it") && note.contains("u2"), "{note}");
+    }
+
+    #[test]
+    fn record_gate_result_rejects_an_empty_gate_name() {
+        let (_d, store) = store1();
+        create(&store, "r", "u1", "build", None, vec![]).unwrap();
+        assert!(matches!(
+            record_gate_result(&store, "r", "u1", "  ", GateStatus::Pass, None, None),
+            Err(McpError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn stamp_role_rejects_empty_role_and_stamps_approvals() {
+        let (_d, store) = store1();
+        create(&store, "r", "u1", "build", None, vec![]).unwrap();
+        // Empty role is rejected.
+        assert!(matches!(
+            stamp_role(&store, "r", "build", "  ", StampKind::Approval, &[]),
+            Err(McpError::InvalidInput(_))
+        ));
+        // An Approval stamp lands on the approvals map.
+        let out = stamp_role(&store, "r", "build", "user", StampKind::Approval, &[]).unwrap();
+        assert_eq!(out.stamped, vec!["u1".to_string()]);
+        let u = get(&store, "r", "u1").unwrap();
+        assert!(u.frontmatter.approvals.contains_key("user"));
+    }
 }
