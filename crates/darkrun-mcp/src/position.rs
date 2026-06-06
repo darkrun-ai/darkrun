@@ -4633,6 +4633,48 @@ mod tests {
     }
 
     #[test]
+    fn resolve_discrete_gate_pushes_and_opens_a_pr_at_an_external_checkpoint() {
+        use darkrun_core::domain::{Checkpoint, CheckpointKind, Station, StationPhase, Status};
+        struct MockHosting;
+        impl crate::hosting::Hosting for MockHosting {
+            fn available(&self) -> bool { true }
+            fn open_draft(&self, _req: &crate::hosting::OpenRequest) -> Option<String> {
+                Some("https://example.test/pr/1".into())
+            }
+            fn merge_state(&self, _pr_ref: &str) -> crate::hosting::MergeState {
+                crate::hosting::MergeState::Open
+            }
+        }
+        let dir = tempdir().unwrap();
+        // A git repo so the head-push branch runs (it fails silently — no remote).
+        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["init", "-q"]).status().unwrap();
+        let store = StateStore::new(dir.path());
+        run_start(&store, "r", "software", None, "discrete").unwrap();
+        // Force the run to sit at frame's checkpoint; full-discrete makes its
+        // effective kind External, so the discrete gate opens a PR.
+        let mut state = store.read_state("r").unwrap().unwrap();
+        state.discrete = true;
+        state.discrete_hybrid = false;
+        state.active_station = "frame".into();
+        state.stations.insert("frame".into(), Station {
+            station: "frame".into(), status: Status::Active, phase: StationPhase::Checkpoint,
+            elaborated: true, checkpoint: Some(Checkpoint { kind: CheckpointKind::External, entered_at: None, outcome: None }),
+            chosen_checkpoint: None, branch: None, pr_ref: None, pr_status: None,
+            pr_ready_at: None, pr_merged_at: None, verifier_nonce: None,
+            started_at: None, completed_at: None,
+        });
+        store.write_state("r", &state).unwrap();
+
+        resolve_discrete_gate(&store, "r", &MockHosting).unwrap();
+        // The mock's PR ref is recorded on the station.
+        let after = store.read_state("r").unwrap().unwrap();
+        assert_eq!(
+            after.stations.get("frame").and_then(|s| s.pr_ref.as_deref()),
+            Some("https://example.test/pr/1")
+        );
+    }
+
+    #[test]
     fn build_prompt_context_threads_action_specifics() {
         use darkrun_core::domain::SealKind;
         let (_d, store) = store();
