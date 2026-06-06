@@ -169,6 +169,18 @@ fn summarize(
     }
 }
 
+/// Walk order for a run's stations: by `started_at` (stamped before unstamped),
+/// then by name. A station that has started sorts ahead of one that hasn't; two
+/// unstarted (or two same-time) stations fall back to name order.
+fn station_walk_order(a: &RunDetailStation, b: &RunDetailStation) -> std::cmp::Ordering {
+    match (&a.started_at, &b.started_at) {
+        (Some(x), Some(y)) => x.cmp(y).then_with(|| a.name.cmp(&b.name)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.name.cmp(&b.name),
+    }
+}
+
 /// Project a single derived [`Station`] into a detail row.
 fn detail_station(station: &Station) -> RunDetailStation {
     RunDetailStation {
@@ -249,12 +261,7 @@ pub async fn get_run(State(state): State<AppState>, Path(slug): Path<String>) ->
         .as_ref()
         .map(|s| s.stations.values().map(detail_station).collect())
         .unwrap_or_default();
-    stations.sort_by(|a, b| match (&a.started_at, &b.started_at) {
-        (Some(x), Some(y)) => x.cmp(y).then_with(|| a.name.cmp(&b.name)),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => a.name.cmp(&b.name),
-    });
+    stations.sort_by(station_walk_order);
     let active_index = stations
         .iter()
         .position(|s| s.name == run.frontmatter.active_station);
@@ -296,6 +303,29 @@ pub async fn get_run(State(state): State<AppState>, Path(slug): Path<String>) ->
 #[cfg(test)]
 mod base_branch_tests {
     use super::*;
+
+    #[test]
+    fn station_walk_order_covers_every_started_at_arm() {
+        use std::cmp::Ordering;
+        let row = |name: &str, started: Option<&str>| RunDetailStation {
+            name: name.into(),
+            status: "pending".into(),
+            phase: None,
+            started_at: started.map(str::to_string),
+            completed_at: None,
+        };
+        let stamped_a = row("a", Some("2026-05-30T00:00:00Z"));
+        let stamped_b = row("b", Some("2026-05-30T01:00:00Z"));
+        let unstamped_a = row("a", None);
+        let unstamped_z = row("z", None);
+        // Both stamped → by time, then name.
+        assert_eq!(station_walk_order(&stamped_a, &stamped_b), Ordering::Less);
+        // Stamped before unstamped, and the reverse.
+        assert_eq!(station_walk_order(&stamped_a, &unstamped_z), Ordering::Less);
+        assert_eq!(station_walk_order(&unstamped_z, &stamped_a), Ordering::Greater);
+        // Both unstamped → by name.
+        assert_eq!(station_walk_order(&unstamped_a, &unstamped_z), Ordering::Less);
+    }
 
     #[test]
     fn base_branch_reads_default_branch_or_falls_back_to_main() {
