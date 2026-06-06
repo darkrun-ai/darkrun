@@ -742,4 +742,149 @@ mod async_client_tests {
         .await;
         assert!(saw_disconnect, "a dead engine yields a Disconnected event");
     }
+
+    // ── A loopback fixture server exercising the success paths ───────────────
+    // Stands up a TCP listener that speaks just enough HTTP/1.1 to drive the
+    // hand-rolled client: it reads each request line, routes on the path, and
+    // writes a canned 200 + JSON body, then closes (Connection: close) so the
+    // client's read_to_end returns. Covers get_json/post_json/send_json,
+    // split_body, parse_status_code, and every fetch_*/submit_* Ok path.
+
+    fn body_for(path: &str) -> String {
+        if path == "/api/runs" {
+            r#"{"runs":[],"count":0}"#.to_string()
+        } else if path.starts_with("/api/runs/") {
+            r#"{"slug":"r","title":"T","factory":"software","active_station":"build",
+                "status":"active","progress":{"completed":1,"total":3},
+                "stations":[],"units":[]}"#
+                .to_string()
+        } else if path.starts_with("/api/feedback/") {
+            r#"{"run":"r","station":"build","count":0,"items":[]}"#.to_string()
+        } else if path == "/api/session/current" {
+            r#"{"session_type":"review","run_slug":"r1"}"#.to_string()
+        } else {
+            "{}".to_string()
+        }
+    }
+
+    async fn serve_canned(n: usize) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for _ in 0..n {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                // Drain the full request (headers + any Content-Length body) so the
+                // client finishes writing before we respond — otherwise closing the
+                // socket mid-write resets the peer.
+                let mut acc = Vec::new();
+                let mut chunk = [0u8; 2048];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    acc.extend_from_slice(&chunk[..n]);
+                    let head = String::from_utf8_lossy(&acc);
+                    if let Some(hdr_end) = acc.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let len = head
+                            .lines()
+                            .find_map(|l| {
+                                let l = l.to_ascii_lowercase();
+                                l.strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if acc.len() >= hdr_end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let head = String::from_utf8_lossy(&acc);
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let body = body_for(&path);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+                // Drop closes the socket → the client's read_to_end completes.
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn client_success_paths_against_a_fixture_server() {
+        // 9 client calls below → the server handles 9 connections.
+        let port = serve_canned(9).await;
+        let cfg = ConnConfig { host: "127.0.0.1".into(), port, session_id: "s".into() };
+
+        // GETs decode their typed payloads off a real socket.
+        let runs = fetch_runs(&cfg).await.expect("runs decode");
+        assert_eq!(runs.count, 0);
+        let detail = fetch_run_detail(&cfg, "r").await.expect("detail decode");
+        assert_eq!(detail.slug, "r");
+        let fb = fetch_feedback(&cfg, "r", "build").await.expect("feedback decode");
+        assert_eq!(fb.station, "build");
+        assert_eq!(fetch_current_focus(&cfg).await.as_deref(), Some("r1"));
+
+        // POST / PUT success paths just check the 2xx status.
+        submit_decision(&cfg, &ReviewDecisionRequest {
+            decision: "approved".into(), feedback: None, annotations: None,
+        }).await.expect("decision ok");
+        submit_unit_reset(&cfg, "r", "u1").await.expect("reset ok");
+        submit_annotation(&cfg, "r", "build", &FeedbackCreateRequest {
+            title: "n".into(), body: "b".into(), origin: None, author: None,
+            source_ref: None, anchor: None, inline_anchor: None, resolution: None,
+            attachment_data_url: None,
+        }).await.expect("annotation ok");
+        update_feedback(&cfg, "r", "build", "FB-1", &FeedbackUpdateRequest::default())
+            .await.expect("update ok");
+        submit_question_answer(&cfg, &QuestionAnswerRequest {
+            selected: vec!["a".into()], text: None, annotations: None,
+        }).await.expect("answer ok");
+    }
+
+    #[tokio::test]
+    async fn parse_and_helpers_cover_their_arms() {
+        assert_eq!(parse_status_code(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap(), 204);
+        assert!(parse_status_code(b"garbage").is_err());
+        assert_eq!(split_body(b"HTTP/1.1 200 OK\r\n\r\nbody"), b"body");
+        assert_eq!(split_body(b"no-terminator"), b"no-terminator");
+
+        // The path builders + config helpers.
+        let cfg = ConnConfig { host: "127.0.0.1".into(), port: 9, session_id: "sess".into() };
+        assert_eq!(cfg.feedback_item_path("r", "build", "FB-1"), "/api/feedback/r/build/FB-1");
+        assert!(cfg.ws_url().starts_with("ws://127.0.0.1:9/ws/session/sess"));
+        assert_eq!(cfg.with_session("other").session_id, "other");
+
+        // WireError Display covers every variant.
+        for e in [
+            WireError::Connect(std::io::Error::other("x")),
+            WireError::Io(std::io::Error::other("y")),
+            WireError::Encode(serde_json::from_str::<i32>("bad").unwrap_err()),
+            WireError::Status(503),
+        ] {
+            assert!(!e.to_string().is_empty());
+        }
+
+        // from_env_pinned + find_engine_for_project.
+        let (_c, _pinned) = ConnConfig::from_env_pinned();
+        let engines = vec![DiscoveredEngine {
+            project_path: std::path::PathBuf::from("/repo"),
+            port: 7, slug: "s".into(), pid: 1, harness: "claude-code".into(),
+            started_at: "t".into(),
+        }];
+        assert_eq!(find_engine_for_project(&engines, std::path::Path::new("/repo")), Some(7));
+        assert_eq!(find_engine_for_project(&engines, std::path::Path::new("/other")), None);
+    }
 }
