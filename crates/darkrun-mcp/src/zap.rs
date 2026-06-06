@@ -53,16 +53,7 @@ pub fn zap(
         valid_stations: Vec::new(),
     })?;
 
-    let station_name = station.map(str::to_string).unwrap_or_else(|| {
-        if factory.station("build").is_some() {
-            "build".to_string()
-        } else {
-            factory
-                .first_station()
-                .map(|s| s.name.clone())
-                .unwrap_or_default()
-        }
-    });
+    let station_name = default_station(&factory, station);
     // Clone the fields we need out of the station def so the immutable borrow of
     // `factory` ends before we move `factory.name` into the result.
     let (station, kills, workers) = {
@@ -74,11 +65,7 @@ pub fn zap(
         (def.name.clone(), def.kills.clone(), def.workers.clone())
     };
 
-    let worker_line = if workers.is_empty() {
-        "the station's Worker loop".to_string()
-    } else {
-        workers.join(" → ")
-    };
+    let worker_line = worker_line(&workers);
     let message = format!(
         "Zap: run `{task}` straight through the **{station}** station's Worker loop — \
          stateless, no Run, nothing under `.darkrun/`.\n\n\
@@ -108,9 +95,62 @@ pub fn zap(
     })
 }
 
+/// The station a zap targets: an explicit one, else `build` when the factory
+/// has it, else the factory's first station. (The non-`build` fallbacks support
+/// factories whose pipeline doesn't include a build station.)
+fn default_station(factory: &crate::factory::FactoryDef, station: Option<&str>) -> String {
+    station.map(str::to_string).unwrap_or_else(|| {
+        if factory.station("build").is_some() {
+            "build".to_string()
+        } else {
+            factory.first_station().map(|s| s.name.clone()).unwrap_or_default()
+        }
+    })
+}
+
+/// The worker-sequence line: the station's workers joined, or a generic note
+/// when a station declares none.
+fn worker_line(workers: &[String]) -> String {
+    if workers.is_empty() {
+        "the station's Worker loop".to_string()
+    } else {
+        workers.join(" → ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_station_falls_back_and_worker_line_handles_empty() {
+        use crate::factory::{FactoryDef, StationDef};
+        use darkrun_core::domain::CheckpointKind;
+        let station = StationDef {
+            name: "frame".into(), label: None, kills: "wrong-thing".into(), artifact: "o.md".into(),
+            checkpoint: CheckpointKind::Auto, checkpoint_options: vec![], explorers: vec![],
+            workers: vec![], reviewers: vec![], role_models: Default::default(),
+            role_interpretations: Default::default(), worker_roles: Default::default(),
+            inputs: vec![], role_applies_to: Default::default(),
+        };
+        let def = FactoryDef {
+            name: "no-build".into(), stations: vec![station], surfaces: vec![],
+            default_model: "sonnet".into(), run_reviewers: vec![], run_reviewer_applies_to: Default::default(),
+        };
+        // A factory with no `build` station falls back to the first station.
+        assert_eq!(default_station(&def, None), "frame");
+        // An explicit station always wins.
+        assert_eq!(default_station(&def, Some("specify")), "specify");
+        // A factory with no stations at all → empty.
+        let empty = FactoryDef {
+            name: "e".into(), stations: vec![], surfaces: vec![], default_model: String::new(),
+            run_reviewers: vec![], run_reviewer_applies_to: Default::default(),
+        };
+        assert_eq!(default_station(&empty, None), "");
+        // worker_line: empty → the generic loop note; populated → joined.
+        assert_eq!(worker_line(&[]), "the station's Worker loop");
+        assert_eq!(worker_line(&["a".into(), "b".into()]), "a → b");
+    }
 
     #[test]
     fn defaults_to_software_build_station() {
