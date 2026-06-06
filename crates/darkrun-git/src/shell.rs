@@ -329,6 +329,7 @@ fn run_in(dir: &str, args: &[&str]) -> Result<String> {
 /// fails fast instead of hanging the manager. Returns the same
 /// [`GitError::Command`] (with the remote's stderr) as [`run_in`] so the
 /// NFF matcher can inspect the message.
+#[cfg(not(tarpaulin_include))] // network git (push/fetch) with a wall-clock timeout — irreducible I/O
 fn run_net(dir: &str, args: &[&str]) -> Result<String> {
     use std::io::Read;
     use std::process::Stdio;
@@ -634,5 +635,18 @@ mod tests {
         std::fs::write(root.join("a.txt"), "dirty-again\n").unwrap();
         let refused = be.merge_no_commit(root, "other").unwrap();
         assert!(!refused.performed, "a dirty tree blocks the merge");
+    }
+
+    #[test]
+    fn checkout_and_add_paths_short_circuit_on_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).status().unwrap();
+        };
+        g(&["init", "-q"]);
+        let be = ShellBackend::open(dir.path()).unwrap();
+        // An empty path set is a no-op (no git invocation) — the restore-sweep guard.
+        assert!(be.checkout_paths(dir.path(), "HEAD", &[]).is_ok());
+        assert!(be.add_paths(dir.path(), &[]).is_ok());
     }
 }
