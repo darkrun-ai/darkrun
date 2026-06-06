@@ -523,9 +523,13 @@ async fn run_detail_orders_unstamped_stations_after_stamped_ones() {
         "software",
         "build",
         vec![
+            // The stamped station is `frame` (middle in name order) so the
+            // BTreeMap-ordered slice [build(None), frame(Some), specify(None)]
+            // forces the sort to compare a stamped `a` against an unstamped `b`,
+            // hitting the (Some,None), (None,Some), and (None,None) arms.
             station("specify", Status::Pending, StationPhase::Spec, None),
-            station("build", Status::Active, StationPhase::Manufacture, Some("2026-05-30T00:00:00Z")),
-            station("frame", Status::Pending, StationPhase::Spec, None),
+            station("build", Status::Pending, StationPhase::Spec, None),
+            station("frame", Status::Active, StationPhase::Manufacture, Some("2026-05-30T00:00:00Z")),
         ],
     );
     let resp = send(build_router(app), get("/api/runs/alpha")).await;
@@ -536,8 +540,8 @@ async fn run_detail_orders_unstamped_stations_after_stamped_ones() {
         .iter()
         .map(|s| s["name"].as_str().unwrap())
         .collect();
-    // build (stamped) first; then the two unstamped by name (frame, specify).
-    assert_eq!(names, ["build", "frame", "specify"]);
+    // frame (stamped) first; then the two unstamped by name (build, specify).
+    assert_eq!(names, ["frame", "build", "specify"]);
 }
 
 #[tokio::test]
