@@ -1437,6 +1437,48 @@ mod tests {
     }
 
     #[test]
+    fn sync_downstream_surfaces_a_mainline_conflict() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success(), "git {args:?}");
+        };
+        // Conflicting edits to README on base (main) vs run-main.
+        std::fs::write(root.join("README.md"), "BASE EDIT\n").unwrap();
+        git(&["add", "-A"]); git(&["commit", "-qm", "base edit"]);
+        git(&["checkout", "-q", "darkrun/r/main"]);
+        std::fs::write(root.join("README.md"), "RUN-MAIN EDIT\n").unwrap();
+        git(&["add", "-A"]); git(&["commit", "-qm", "run-main edit"]);
+        git(&["checkout", "-q", "main"]);
+        // base -> run-main conflicts on README → the mainline-to-run-main step.
+        let out = sync_branch_downstream(&store, "r", "build");
+        assert_eq!(out.conflict_step, Some(SyncConflictStep::MainlineToRunMain));
+        assert!(!out.conflict_paths.is_empty(), "the conflicting path is surfaced");
+    }
+
+    #[test]
+    fn sync_downstream_surfaces_a_run_main_to_station_conflict() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success(), "git {args:?}");
+        };
+        // Conflicting edits on run-main vs the station branch. run-main has no
+        // checkout (edit via root); the station branch lives in its worktree.
+        git(&["checkout", "-q", "darkrun/r/main"]);
+        std::fs::write(root.join("README.md"), "RUN-MAIN SIDE\n").unwrap();
+        git(&["commit", "-aqm", "run-main edit"]);
+        git(&["checkout", "-q", "main"]);
+        let wt = station_worktree_path(&root, "r", "build");
+        commit_in(&wt, "README.md", "STATION SIDE\n", "station edit");
+        // No base→run-main debt, but run-main→station conflicts → step 2.
+        let out = sync_branch_downstream(&store, "r", "build");
+        assert_eq!(out.conflict_step, Some(SyncConflictStep::RunMainToStation));
+        assert!(!out.conflict_paths.is_empty());
+    }
+
+    #[test]
     fn lifecycle_ops_noop_when_their_branch_is_absent() {
         let (_d, _root, store) = init_repo();
         // No run-main forked yet → land_run is a clean no-op.
