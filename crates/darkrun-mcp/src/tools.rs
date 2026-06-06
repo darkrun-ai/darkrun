@@ -3634,6 +3634,14 @@ mod handler_smoke {
             Some(true)
         );
 
+        // run_reset reads units to plan the wipe → the corrupt unit surfaces an error.
+        assert_eq!(
+            s.darkrun_run_reset(Parameters(RunResetInput {
+                slug: "r".into(), station: Some("frame".into()), confirm: false,
+            })).unwrap().is_error,
+            Some(true)
+        );
+
         // A run.md with unparseable frontmatter → read_run errors; run_show with
         // an explicit slug surfaces it.
         std::fs::write(store.run_dir("r").join("run.md"), "---\nfactory: \"oops\n---\n").unwrap();
