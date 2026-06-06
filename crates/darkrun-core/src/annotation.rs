@@ -916,4 +916,33 @@ mod tests {
         assert_eq!(pixel_region(&img), Some(inb));
         assert_eq!(pixel_region(&text_anno("c", AskSeverity::Must, AnnotationStatus::Open)), None);
     }
+
+    #[test]
+    fn reanchor_annotation_is_a_noop_on_exact_and_none_for_a_non_text_anchor() {
+        // Exact: the quote still sits at the recorded range → range untouched,
+        // version_sha re-pinned (the Exact arm).
+        let mut anno = text_anno("a1", AskSeverity::Should, AnnotationStatus::Open);
+        let bytes = b"alpha\nworld\nbeta\n";
+        let out = reanchor_annotation(&mut anno, bytes);
+        assert!(matches!(out, Some(ReAnchor::Exact(_))));
+        assert_eq!(anno.artifact.as_ref().unwrap().version_sha, hash_bytes(bytes));
+        if let Some(Anchor::Text { range, .. }) = &anno.anchor {
+            assert_eq!(range.start_line, 2, "exact match leaves the range");
+        }
+        // A non-text (here: absent) anchor → None outcome, but the sha still re-pins.
+        let mut note = text_anno("a2", AskSeverity::Nit, AnnotationStatus::Open);
+        note.anchor = None;
+        assert!(reanchor_annotation(&mut note, b"anything").is_none());
+        assert_eq!(note.artifact.as_ref().unwrap().version_sha, hash_bytes(b"anything"));
+    }
+
+    #[test]
+    fn anchor_search_helpers_cover_their_guards() {
+        // start_line 0 is invalid (1-based) → never a hash match.
+        assert!(!lines_match_at(&["a", "b"], 0, "a"));
+        // An empty quote has no offsets.
+        assert!(find_quote_offsets("abcabc", "").is_empty());
+        // A quote_len running past the end yields an empty `after` (no panic).
+        assert!(context_matches("ab", 1, 5, "", ""));
+    }
 }
