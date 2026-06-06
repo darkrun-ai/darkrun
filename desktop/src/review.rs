@@ -2262,3 +2262,61 @@ mod review_state_render_tests {
         let _ = render(Failed);
     }
 }
+
+#[cfg(test)]
+mod subcomponent_render_tests {
+    use super::*;
+    use crate::wire::ConnConfig;
+
+    fn render(app: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn decision_and_submit_status_render_every_state() {
+        fn App() -> Element {
+            rsx! {
+                DecisionStatus { decision: Decision::Idle, gate_open: true }
+                DecisionStatus { decision: Decision::Sending, gate_open: true }
+                DecisionStatus { decision: Decision::Sent("approved".to_string()), gate_open: false }
+                DecisionStatus { decision: Decision::Failed("net".to_string()), gate_open: true }
+                SubmitStatus { state: Submit::Idle }
+                SubmitStatus { state: Submit::Sending }
+                SubmitStatus { state: Submit::Sent("ok".to_string()) }
+                SubmitStatus { state: Submit::Failed("err".to_string()) }
+            }
+        }
+        let _ = render(App);
+    }
+
+    #[test]
+    fn review_header_and_annotate_surface_render() {
+        fn App() -> Element {
+            rsx! {
+                ReviewHeader {
+                    title: "Ship it".to_string(),
+                    station: Some("build".to_string()),
+                    phase: Some(Phase::Manufacture),
+                    status: Tone::Info,
+                    status_label: "in progress".to_string(),
+                    stations: vec![StationItem::new("build", StationStatus::Current)],
+                    feedback_count: 3,
+                    feedback_alert: true,
+                    on_open_feedback: move |_| {},
+                }
+                AnnotateSurface {
+                    cfg: ConnConfig::from_env(),
+                    label: "home.png".to_string(),
+                    path: "build/home.png".to_string(),
+                    work_id: "a2".to_string(),
+                    visual: true,
+                    screenshot_url: Some("/shot.png".to_string()),
+                    on_close: move |_| {},
+                }
+            }
+        }
+        let _ = render(App);
+    }
+}
