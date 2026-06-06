@@ -350,4 +350,50 @@ mod tests {
         };
         assert!(check(&store, "r", &a2).is_none());
     }
+
+    #[test]
+    fn action_station_reads_the_station_off_every_carrying_variant() {
+        assert_eq!(
+            action_station(&RunAction::UserGate { run: "r".into(), station: "frame".into() }),
+            Some("frame")
+        );
+        assert_eq!(
+            action_station(&RunAction::Escalate {
+                run: "r".into(), station: "build".into(), reason: "x".into(),
+            }),
+            Some("build")
+        );
+        assert_eq!(
+            action_station(&RunAction::MergeConflict {
+                run: "r".into(), station: "harden".into(), branch: "b".into(), conflict_paths: vec![],
+            }),
+            Some("harden")
+        );
+        // A variant with no station → None.
+        assert_eq!(action_station(&RunAction::Sealed { run: "r".into() }), None);
+    }
+
+    #[test]
+    fn corrupt_history_file_is_treated_as_a_fresh_start() {
+        let (_d, store) = store_with_run("r");
+        // Plant an unparseable deadlock.json; load() must swallow it and reset.
+        let path = history_path(&store, "r");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ not valid json").unwrap();
+        // The tick proceeds (no carried count) rather than erroring.
+        assert!(check(&store, "r", &spec("r")).is_none());
+    }
+
+    #[test]
+    fn recent_window_drains_past_the_churn_bound() {
+        let (_d, store) = store_with_run("r");
+        let a = spec("r");
+        // Ticking the same action well past CHURN_WINDOW grows then drains the
+        // bounded `recent` history (it stays capped, never unbounded).
+        for _ in 0..(CHURN_WINDOW + 4) {
+            let _ = check(&store, "r", &a);
+        }
+        let h = load(&store, "r");
+        assert!(h.recent.len() <= CHURN_WINDOW, "recent stays bounded: {}", h.recent.len());
+    }
 }
