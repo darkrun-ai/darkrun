@@ -4631,4 +4631,34 @@ mod tests {
             assert!(required_station_inputs(&factory, &plan, &absent).is_empty());
         }
     }
+
+    #[test]
+    fn action_tag_and_station_of_cover_the_remaining_variants() {
+        use darkrun_core::domain::SealKind;
+        let with_station = [
+            RunAction::FeedbackQuestion { run: "r".into(), station: "s".into(), feedback_id: "f".into() },
+            RunAction::SafeRepair { run: "r".into(), station: "s".into(), reason: "x".into() },
+            RunAction::ReviseUnitSpecs { run: "r".into(), station: "s".into(), units: vec!["u".into()] },
+            RunAction::MergeConflict { run: "r".into(), station: "s".into(), branch: "b".into(), conflict_paths: vec![] },
+        ];
+        for a in &with_station {
+            assert!(!action_tag(a).is_empty(), "{a:?} has a tag");
+            assert_eq!(station_of(a), Some("s"), "{a:?} carries its station");
+        }
+        // PendingSeal carries a run but no station.
+        let seal = RunAction::PendingSeal { run: "r".into(), kind: SealKind::External };
+        assert_eq!(action_tag(&seal), "pending_seal");
+        assert_eq!(station_of(&seal), None);
+    }
+
+    #[test]
+    fn elaborate_seal_and_choose_checkpoint_reject_an_unknown_station() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+        // A station the run's state doesn't carry → the not-active error arm.
+        assert!(matches!(
+            elaborate_seal(&store, "r", "no-such-station"),
+            Err(McpError::InvalidInput(_))
+        ));
+    }
 }
