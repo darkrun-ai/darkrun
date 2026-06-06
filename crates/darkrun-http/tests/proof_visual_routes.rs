@@ -451,3 +451,11 @@ async fn visual_review_title_defaults_from_artifact_path_or_a_generic_label() {
     let list2 = body_json(send(build_router(state2), get("/api/feedback/run/build")).await).await;
     assert!(list2["items"][0]["title"].as_str().unwrap().contains("Visual review of output"));
 }
+
+#[tokio::test]
+async fn live_connections_starts_at_zero() {
+    // A fresh state has no WebSocket subscribers (the engine's "launch the
+    // desktop" signal).
+    let state = test_state();
+    assert_eq!(state.sessions.live_connections(), 0);
+}

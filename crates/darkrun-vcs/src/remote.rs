@@ -131,4 +131,13 @@ mod remote_tests {
         assert!(parse_remote_url("https://github.com").is_err());
         assert!(parse_remote_url("not-a-url").is_err());
     }
+
+    #[test]
+    fn remote_url_with_a_repo_but_no_owner_is_rejected() {
+        // A single path segment leaves the owner empty → RemoteParse.
+        assert!(matches!(
+            parse_remote_url("https://github.com/onlyrepo"),
+            Err(VcsError::RemoteParse(_))
+        ));
+    }
 }
