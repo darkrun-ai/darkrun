@@ -220,6 +220,18 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_override_is_served_from_the_mtime_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".darkrun").join("prompts").join("phases").join("spec.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "custom spec body").unwrap();
+        let c = Cascade::new(dir.path());
+        // First read populates the cache; the second (same mtime) is a cache hit.
+        assert_eq!(c.resolve("phases/spec").unwrap(), "custom spec body");
+        assert_eq!(c.resolve("phases/spec").unwrap(), "custom spec body");
+    }
+
+    #[test]
     fn unknown_template_errors() {
         let dir = tempfile::tempdir().unwrap();
         let c = Cascade::new(dir.path());
