@@ -1008,6 +1008,39 @@ fn create_new_branch_off_reference() {
 }
 
 #[test]
+fn create_from_a_non_branch_revision_detaches() {
+    // A reference that resolves to a commit but is NOT a local branch (a raw
+    // SHA) attaches no branch — the worktree is detached at that commit.
+    let (_d, root, base) = init_repo_two_commits();
+    for (label, open) in backends() {
+        let g = open(&root).unwrap();
+        let path = sibling(&root, &format!("det-{label}"));
+        let opts = CreateOptions { reference: Some(base.clone()), new_branch: None };
+        let info = g
+            .create_worktree("det", &path, &opts)
+            .unwrap_or_else(|e| panic!("[{label}] detached create: {e}"));
+        assert!(info.path.exists(), "[{label}] worktree dir exists");
+        cleanup(&root, &info.path);
+    }
+}
+
+#[test]
+fn create_with_no_options_detaches_at_head() {
+    // No reference and no new branch → a fully detached worktree at HEAD.
+    let (_d, root) = init_repo();
+    let head = git_out(&root, &["rev-parse", "HEAD"]);
+    for (label, open) in backends() {
+        let g = open(&root).unwrap();
+        let path = sibling(&root, &format!("bare-{label}"));
+        let info = g
+            .create_worktree("bare", &path, &CreateOptions::default())
+            .unwrap_or_else(|e| panic!("[{label}] bare create: {e}"));
+        assert_eq!(git_out(&info.path, &["rev-parse", "HEAD"]), head, "[{label}] detached at HEAD");
+        cleanup(&root, &info.path);
+    }
+}
+
+#[test]
 fn create_default_forks_from_head() {
     // No reference + new branch => the new branch starts at current HEAD.
     let (_d, root) = init_repo();
