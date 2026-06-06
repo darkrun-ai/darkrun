@@ -1196,6 +1196,32 @@ mod tests {
         assert_eq!(before, after, "run-main HEAD must be unchanged (no empty commit)");
     }
 
+    /// land_run no-ops when run-main carries no debt against base (identical
+    /// trees) — the merge_into_branch debt short-circuit, not the land_child one.
+    #[test]
+    fn land_run_with_no_debt_is_a_clean_noop() {
+        let (_d, _root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        // run-main was just forked off main and has no new commits → no debt.
+        let out = land_run(&store, "r");
+        assert!(!out.performed, "a no-debt run land must not mint a commit: {out:?}");
+        assert!(out.note.unwrap_or_default().contains("no merge debt"));
+    }
+
+    /// land_run refuses when the recorded base branch doesn't exist.
+    #[test]
+    fn land_run_noops_when_the_base_branch_is_missing() {
+        let (_d, _root, store) = init_repo();
+        ensure_run_main(&store, "r");
+        // Point the run at a base branch that doesn't exist.
+        let mut state = store.read_state("r").ok().flatten().unwrap_or_default();
+        state.base_branch = Some("ghost-base".into());
+        store.write_state("r", &state).unwrap();
+        let out = land_run(&store, "r");
+        assert!(!out.performed);
+        assert!(out.note.unwrap_or_default().contains("cannot land run"));
+    }
+
     /// #8: the station worktree is gone but its branch still carries unmerged
     /// commits — land_station must merge the durable branch, not report done.
     #[test]
