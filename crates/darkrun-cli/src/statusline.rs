@@ -619,4 +619,34 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         assert!(render(Some(empty.path().to_path_buf())).is_none());
     }
+
+    #[test]
+    fn render_marks_a_gated_checkpoint_station() {
+        use darkrun_core::domain::{
+            Checkpoint, CheckpointKind, Run, RunFrontmatter, Station, StationPhase, Status,
+        };
+        use darkrun_core::state::RunState;
+        use darkrun_core::StateStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        store.write_run(&Run {
+            slug: "r".into(), title: "T".into(), body: String::new(),
+            frontmatter: RunFrontmatter { factory: "software".into(), active_station: "build".into(), ..Default::default() },
+        }).unwrap();
+        store.set_active_run("r").unwrap();
+        // The active station sits at a non-auto Checkpoint → an operator hold.
+        let mut state = RunState { factory: "software".into(), active_station: "build".into(), ..Default::default() };
+        state.stations.insert("build".into(), Station {
+            station: "build".into(), status: Status::Active, phase: StationPhase::Checkpoint,
+            elaborated: true,
+            checkpoint: Some(Checkpoint { kind: CheckpointKind::Ask, entered_at: None, outcome: None }),
+            chosen_checkpoint: None, branch: None, pr_ref: None, pr_status: None,
+            pr_ready_at: None, pr_merged_at: None, verifier_nonce: None,
+            started_at: None, completed_at: None,
+        });
+        store.write_state("r", &state).unwrap();
+        let line = render(Some(dir.path().to_path_buf())).expect("renders an active run");
+        // The gated-hold flow mark appears for a non-auto checkpoint.
+        assert!(line.contains('⊘'), "a gated checkpoint shows the hold mark: {line}");
+    }
 }
