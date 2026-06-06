@@ -57,3 +57,21 @@ impl HttpTransport for ReqwestTransport {
         Ok(HttpResponse::new(status, body))
     }
 }
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn execute_builds_the_request_and_surfaces_a_connection_error() {
+        let t = ReqwestTransport::new().expect("client builds");
+        // Port 1 on loopback refuses fast — exercises method/header/body wiring
+        // and the send-error path without a live server.
+        let req = HttpRequest::post("http://127.0.0.1:1/x")
+            .header("authorization", "Bearer t")
+            .raw_body(vec![1, 2, 3]);
+        assert!(t.execute(req).is_err());
+        let get = HttpRequest::get("http://127.0.0.1:1/y");
+        assert!(t.execute(get).is_err());
+    }
+}

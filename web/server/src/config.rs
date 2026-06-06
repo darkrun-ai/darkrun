@@ -151,4 +151,21 @@ mod tests {
         assert!(cfg.credentials(Provider::GitHub).is_some());
         assert!(cfg.credentials(Provider::GitLab).is_some());
     }
+
+    #[test]
+    fn from_env_reads_web_base_and_provider_pairs() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("DARKRUN_WEB_BASE", "https://example.test/");
+        std::env::set_var("GITHUB_CLIENT_ID", "gid");
+        std::env::set_var("GITHUB_CLIENT_SECRET", "gsec");
+        std::env::remove_var("GITLAB_CLIENT_ID");
+        let cfg = WebConfig::from_env();
+        assert_eq!(cfg.web_base, "https://example.test");
+        assert!(cfg.github.is_some());
+        assert!(cfg.gitlab.is_none(), "missing gitlab pair -> None");
+        let _ = WebConfig::default();
+        for v in ["DARKRUN_WEB_BASE", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"] { std::env::remove_var(v); }
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

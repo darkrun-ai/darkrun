@@ -124,3 +124,22 @@ pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lib_env_tests {
+    use super::*;
+
+    #[test]
+    fn site_dir_and_state_resolve_from_env() {
+        let _g = LIB_ENV_LOCK.lock().unwrap();
+        std::env::set_var("DARKRUN_SITE_DIR", "/tmp/darkrun-site-xyz");
+        assert_eq!(site_dir_from_env(), PathBuf::from("/tmp/darkrun-site-xyz"));
+        std::env::remove_var("DARKRUN_SITE_DIR");
+        // Falls back to the default when unset/blank.
+        assert_eq!(site_dir_from_env(), PathBuf::from(DEFAULT_SITE_DIR));
+        // state_from_env builds a live state (config + transport + broker).
+        assert!(state_from_env().is_ok());
+    }
+
+    static LIB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
