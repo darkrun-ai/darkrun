@@ -763,4 +763,36 @@ mod tests {
             assert!(client.review_comments("1").is_empty(), "{provider} review_comments");
         }
     }
+
+    #[test]
+    fn push_head_recovery_pushes_then_reports_a_non_nff_failure() {
+        use darkrun_git::Git;
+        use std::process::Command;
+        let g = |dir: &std::path::Path, args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success(), "git {args:?}");
+        };
+        // Bare remote + work repo with one commit.
+        let bare = tempfile::tempdir().unwrap();
+        g(bare.path(), &["init", "-q", "--bare"]);
+        let work = tempfile::tempdir().unwrap();
+        g(work.path(), &["init", "-q", "-b", "main"]);
+        g(work.path(), &["config", "user.email", "t@x.io"]);
+        g(work.path(), &["config", "user.name", "T"]);
+        std::fs::write(work.path().join("a.txt"), "1").unwrap();
+        g(work.path(), &["add", "-A"]); g(work.path(), &["commit", "-qm", "c1"]);
+        g(work.path(), &["remote", "add", "origin", &bare.path().to_string_lossy()]);
+        let git = Git::open(work.path()).unwrap();
+        // Success: pushes HEAD -> origin/main.
+        assert!(matches!(push_head_with_nff_recovery(&git, work.path(), "main"), PushOutcome::Pushed));
+        // Non-NFF failure: a repo whose origin points nowhere fails without rebase.
+        let broken = tempfile::tempdir().unwrap();
+        g(broken.path(), &["init", "-q", "-b", "main"]);
+        g(broken.path(), &["config", "user.email", "t@x.io"]);
+        g(broken.path(), &["config", "user.name", "T"]);
+        std::fs::write(broken.path().join("b.txt"), "1").unwrap();
+        g(broken.path(), &["add", "-A"]); g(broken.path(), &["commit", "-qm", "c1"]);
+        g(broken.path(), &["remote", "add", "origin", "/nope/missing.git"]);
+        let bgit = Git::open(broken.path()).unwrap();
+        assert!(matches!(push_head_with_nff_recovery(&bgit, broken.path(), "main"), PushOutcome::Failed { .. }));
+    }
 }
