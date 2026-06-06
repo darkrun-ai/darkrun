@@ -517,6 +517,22 @@ mod tests {
     }
 
     #[test]
+    fn origin_str_maps_every_origin_including_unspecified() {
+        assert_eq!(origin_str(FeedbackOrigin::Unspecified), "unspecified");
+        assert_eq!(origin_str(FeedbackOrigin::Drift), "drift");
+        assert_eq!(origin_str(FeedbackOrigin::External), "external");
+    }
+
+    #[test]
+    fn reject_appends_a_nonempty_reason_to_the_body() {
+        let (_d, store) = store();
+        let fb = create(&store, "r", "frame", "no newline tail", None).unwrap();
+        let rejected = reject(&store, "r", &fb.id, "out of scope").unwrap();
+        assert_eq!(rejected.status, FeedbackStatus::Rejected);
+        assert!(rejected.body.contains("Rejected: out of scope"), "reason appended: {}", rejected.body);
+    }
+
+    #[test]
     fn create_allocates_sequential_ids() {
         let (_d, store) = store();
         let a = create(&store, "r", "frame", "first", None).unwrap();

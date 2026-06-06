@@ -382,4 +382,26 @@ mod tests {
         // gate → opening a change request is refused (InvalidInput).
         assert!(change_request_intent(&store, "r", None).is_err());
     }
+
+    #[test]
+    fn change_request_intent_errors_mid_wave_with_no_pending_action() {
+        use darkrun_core::domain::StationPhase;
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, "continuous").unwrap();
+        // Force frame into Manufacture with an in-flight (InProgress) unit: no
+        // wave-ready work and not all complete → derive_position yields no action.
+        let mut state = store.read_state("r").unwrap().unwrap();
+        state.stations.get_mut("frame").unwrap().phase = StationPhase::Manufacture;
+        store.write_state("r", &state).unwrap();
+        let unit = Unit {
+            slug: "frame-u".into(),
+            frontmatter: UnitFrontmatter { status: Status::InProgress, station: Some("frame".into()), ..Default::default() },
+            title: "u".into(),
+            body: String::new(),
+        };
+        store.write_unit("r", &unit).unwrap();
+
+        let err = change_request_intent(&store, "r", None).expect_err("mid-wave has no action");
+        assert!(format!("{err}").contains("no pending action"), "got {err}");
+    }
 }
