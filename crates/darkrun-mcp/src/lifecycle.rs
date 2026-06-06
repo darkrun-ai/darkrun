@@ -1404,4 +1404,35 @@ mod tests {
         .expect("closure runs on a fresh worktree");
         assert!(saw, "the run-main worktree carries the base README");
     }
+
+    #[test]
+    fn sync_conflict_step_labels_are_stable() {
+        assert_eq!(SyncConflictStep::MainlineToRunMain.as_str(), "mainline_to_run_main");
+        assert_eq!(SyncConflictStep::RunMainToStation.as_str(), "run_main_to_station");
+    }
+
+    #[test]
+    fn run_main_status_reports_diverged_and_unforked_base() {
+        let (_d, root, store) = init_repo();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success(), "git {args:?}");
+        };
+        ensure_run_main(&store, "r");
+        // Advance BOTH branches independently → neither is an ancestor → Diverged.
+        std::fs::write(root.join("base.txt"), "on main\n").unwrap();
+        git(&["add", "-A"]); git(&["commit", "-q", "-m", "main advance"]);
+        git(&["checkout", "-q", "darkrun/r/main"]);
+        std::fs::write(root.join("rm.txt"), "on run-main\n").unwrap();
+        git(&["add", "-A"]); git(&["commit", "-q", "-m", "run-main advance"]);
+        git(&["checkout", "-q", "main"]);
+        assert_eq!(run_main_status(&store, "r"), RunMainStatus::Diverged);
+
+        // A run whose recorded base branch no longer exists reads as not-forked.
+        let (_d2, _root2, store2) = init_repo();
+        ensure_run_main(&store2, "r2");
+        let mut state = store2.read_state("r2").unwrap().unwrap_or_default();
+        state.base_branch = Some("ghost-base".into());
+        store2.write_state("r2", &state).unwrap();
+        assert_eq!(run_main_status(&store2, "r2"), RunMainStatus::NotForked);
+    }
 }
