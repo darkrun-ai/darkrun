@@ -257,3 +257,12 @@ fn fix_workers_are_declared() {
         "factory must declare fix-workers for drift repair"
     );
 }
+
+#[test]
+fn load_validated_errors_on_an_unknown_factory() {
+    use darkrun_content::ContentError;
+    assert!(matches!(
+        load_validated("no-such-factory-xyz"),
+        Err(ContentError::FactoryNotFound(_))
+    ));
+}
