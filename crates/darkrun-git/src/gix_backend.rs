@@ -232,6 +232,9 @@ impl GitBackend for GixBackend {
     }
 
     fn commit(&self, _worktree_path: &Path, _message: &str) -> Result<()> {
+        // BLOCKED on a hand-rolled write-tree: gix provides `commit(...)` and
+        // `write_blob(...)`, but NO index→tree (`git write-tree`) — we must build
+        // the tree object from index entries ourselves (Phase 2 write-tree work).
         Err(GitError::Unsupported("commit"))
     }
 
