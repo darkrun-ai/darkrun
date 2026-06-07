@@ -37,6 +37,14 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 
+      # Some darkrun-git tests build throwaway repos by shelling out to the `git`
+      # CLI; a fresh runner has no identity, so `git commit` fails. Give it one.
+      - name: Configure git identity (for fixture tests)
+        run: |
+          git config --global user.email "ci@darkrun.ai"
+          git config --global user.name "darkrun ci"
+          git config --global init.defaultBranch main
+
       # No `cargo fmt --check`: this codebase is intentionally hand-formatted
       # (no rustfmt.toml, never run through rustfmt), so default-rustfmt would
       # rewrite ~all of it. The hard gates are correctness — test + build.
