@@ -114,25 +114,57 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// [`SCHEMA_VERSION`].
 pub const SCHEMA_VERSION_LEGACY: u32 = 0;
 
-/// Migrate a freshly-deserialized [`RunState`] forward on read. Idempotent and
-/// pure (no I/O): shape migrators key on the run's
-/// [`schema_version`](RunState::schema_version) so a future state-shape change
-/// is applied only to the runs that predate it.
-///
-/// Today: a run with no recorded plugin provenance is tagged
-/// [`LEGACY_VERSION`], and a run with no recorded schema version is treated as
-/// the pre-versioning [`SCHEMA_VERSION_LEGACY`] baseline. No shape migrators are
-/// needed yet (v0 and v1 are structurally compatible via serde defaults); the
-/// hook is in place for the first real shape change.
-fn migrate_state(state: &mut RunState) {
-    if state.created_with_version.is_none() {
-        state.created_with_version = Some(LEGACY_VERSION.to_string());
+/// A single step migrator: transforms the RAW `state.json` value from one schema
+/// version to the next-higher one. Running on the JSON (not the typed struct)
+/// before deserialization is what lets a step rename/restructure fields an old
+/// doc carries that the current `RunState` shape no longer accepts.
+type StateMigrator = fn(&mut serde_json::Value);
+
+/// The ordered migrator chain — index `i` migrates schema version `i` → `i+1`.
+/// To add a real shape change: bump [`SCHEMA_VERSION`] and append the matching
+/// `v<N>_to_v<N+1>` step here. The chain length always equals [`SCHEMA_VERSION`].
+const STATE_MIGRATORS: &[StateMigrator] = &[migrate_state_v0_to_v1];
+
+/// v0 → v1: the pre-versioning baseline. A legacy doc carries no engine
+/// provenance, so stamp [`LEGACY_VERSION`] (its origin would otherwise be lost).
+/// A real, registered step — the template every future shape migrator follows.
+fn migrate_state_v0_to_v1(value: &mut serde_json::Value) {
+    if let Some(obj) = value.as_object_mut() {
+        let needs = obj
+            .get("created_with_version")
+            .map(|v| v.is_null())
+            .unwrap_or(true);
+        if needs {
+            obj.insert(
+                "created_with_version".to_string(),
+                serde_json::Value::String(LEGACY_VERSION.to_string()),
+            );
+        }
     }
-    let from = state.schema_version.unwrap_or(SCHEMA_VERSION_LEGACY);
-    // Future shape migrators run here, gated on `from < N`, in ascending order.
-    // (None yet — v0→v1 is a no-op beyond the stamp.)
-    let _ = from;
-    state.schema_version = Some(SCHEMA_VERSION);
+}
+
+/// Migrate a raw `state.json` value forward to [`SCHEMA_VERSION`] on read, by
+/// walking [`STATE_MIGRATORS`] from the doc's recorded version. Idempotent and
+/// pure: a doc already at the current version runs no steps. Stamps the version
+/// after migrating so the next read is a no-op.
+fn migrate_state_value(value: &mut serde_json::Value) {
+    let from = value
+        .get("schema_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(SCHEMA_VERSION_LEGACY as u64) as u32;
+    // Apply every step whose source version is at-or-after the doc's version,
+    // in ascending order — so a doc at version K runs steps K, K+1, … to latest.
+    for (i, step) in STATE_MIGRATORS.iter().enumerate() {
+        if from <= i as u32 {
+            step(value);
+        }
+    }
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "schema_version".to_string(),
+            serde_json::Value::from(SCHEMA_VERSION),
+        );
+    }
 }
 
 /// The derived position of one station in a run's ordered plan — the strip
@@ -461,8 +493,11 @@ impl StateStore {
             return Ok(None);
         }
         let raw = io(&path, fs::read_to_string(&path))?;
-        let mut state: RunState = serde_json::from_str(&raw)?;
-        migrate_state(&mut state);
+        // Migrate at the JSON level BEFORE deserialization, so a step can
+        // restructure fields the current `RunState` shape no longer accepts.
+        let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+        migrate_state_value(&mut value);
+        let state: RunState = serde_json::from_value(value)?;
         Ok(Some(state))
     }
 
@@ -746,6 +781,55 @@ mod tests {
         let back = store.read_state("r").unwrap().unwrap();
         // Plugin provenance is preserved verbatim; schema version is independent.
         assert_eq!(back.created_with_version.as_deref(), Some("9.9.9"));
+        assert_eq!(back.schema_version, Some(SCHEMA_VERSION));
+    }
+
+    /// Gap #18: the migrator chain runs on the RAW json before deserialization,
+    /// applies its registered steps from the doc's version, stamps the result,
+    /// and is idempotent.
+    #[test]
+    fn migrate_state_value_applies_the_chain_and_is_idempotent() {
+        use serde_json::json;
+        // A legacy doc: no schema_version, no provenance — the v0→v1 step stamps
+        // provenance and the chain stamps the version.
+        let mut v = json!({ "factory": "software", "active_station": "frame" });
+        migrate_state_value(&mut v);
+        assert_eq!(v["created_with_version"], json!(LEGACY_VERSION));
+        assert_eq!(v["schema_version"], json!(SCHEMA_VERSION));
+
+        // Idempotent: re-running migrates nothing and preserves provenance.
+        let before = v.clone();
+        migrate_state_value(&mut v);
+        assert_eq!(v, before, "a doc already at the current version is unchanged");
+
+        // A doc that already carries provenance keeps it (the step is a no-op).
+        let mut keep = json!({ "created_with_version": "7.7.7", "schema_version": 0 });
+        migrate_state_value(&mut keep);
+        assert_eq!(keep["created_with_version"], json!("7.7.7"));
+        assert_eq!(keep["schema_version"], json!(SCHEMA_VERSION));
+
+        // The chain length equals SCHEMA_VERSION — every version has its step.
+        assert_eq!(STATE_MIGRATORS.len(), SCHEMA_VERSION as usize);
+    }
+
+    /// A raw legacy `state.json` carrying a now-deprecated field still reads:
+    /// JSON-level migration runs, the version is stamped, and the doc
+    /// deserializes (the value real shape migrators add over typed migration).
+    #[test]
+    fn read_state_migrates_a_raw_legacy_doc_with_an_unknown_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        let path = store.run_dir("r").join("state.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Hand-write a pre-versioning doc with a deprecated key.
+        std::fs::write(
+            &path,
+            r#"{"factory":"software","active_station":"frame","deprecated_legacy_field":true}"#,
+        )
+        .unwrap();
+        let back = store.read_state("r").unwrap().unwrap();
+        assert_eq!(back.factory, "software");
+        assert_eq!(back.created_with_version.as_deref(), Some(LEGACY_VERSION));
         assert_eq!(back.schema_version, Some(SCHEMA_VERSION));
     }
 
