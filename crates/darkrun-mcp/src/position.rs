@@ -4742,6 +4742,39 @@ mod tests {
     /// `MergeConflict` action and the merge is left in-tree (MERGE_HEAD set, not
     /// aborted); the next derive keeps re-deriving it until the merge clears.
     #[test]
+    fn enter_unit_and_record_tolerates_a_missing_unit_doc() {
+        let (_d, _root, store) = git_store();
+        crate::lifecycle::ensure_run_main(&store, "r");
+        crate::lifecycle::enter_station(&store, "r", "build");
+        // enter_unit forks a branch/worktree for the unit (a git op that performs
+        // regardless), but the unit document was never written → read_unit errors
+        // and the branch-stamp step bails cleanly instead of propagating.
+        enter_unit_and_record(&store, "r", "build", "ghost-unit").expect("clean no-op on missing doc");
+    }
+
+    #[test]
+    fn merge_conflict_action_infers_a_branch_for_detached_worktrees() {
+        let (_d, root, store) = git_store();
+        crate::lifecycle::ensure_run_main(&store, "r");
+        crate::lifecycle::enter_station(&store, "r", "build");
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success(), "git {args:?}");
+        };
+        // A detached `_merge-<x>` worktree whose target does NOT end in `-main`
+        // (a station-targeted merge) → the station-branch inference arm.
+        let merge_wt = root.join(".darkrun/_merge-darkrun-r-build");
+        git(&["worktree", "add", "--detach", merge_wt.to_str().unwrap(), "HEAD"]);
+        // A plain detached worktree with no `_merge-` prefix → the catch-all
+        // station-branch inference arm.
+        let plain_wt = root.join(".darkrun/plaindetached");
+        git(&["worktree", "add", "--detach", plain_wt.to_str().unwrap(), "HEAD"]);
+
+        // No merge is in progress, so it surfaces nothing — but building the
+        // candidate list exercised both detached-worktree inference arms.
+        assert!(merge_conflict_action(&store, "r", "build").unwrap().is_none());
+    }
+
+    #[test]
     fn derive_preempts_everything_with_an_in_tree_merge_conflict() {
         let (_d, root, store) = git_store();
         // A real run document so derive_position can resolve run/factory/state.
