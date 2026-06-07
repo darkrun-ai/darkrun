@@ -244,3 +244,22 @@ pub async fn serve_router_on(
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod from_ref_tests {
+    use super::*;
+    use darkrun_core::StateStore;
+
+    #[test]
+    fn router_state_projects_both_substates() {
+        // The axum extractors project AppState and RateLimiter out of the
+        // composite RouterState via FromRef.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = RouterState {
+            app: AppState::new(StateStore::new(tmp.path()), Limits::default()),
+            limiter: RateLimiter::new(),
+        };
+        let _app: AppState = AppState::from_ref(&state);
+        let _limiter: RateLimiter = RateLimiter::from_ref(&state);
+    }
+}

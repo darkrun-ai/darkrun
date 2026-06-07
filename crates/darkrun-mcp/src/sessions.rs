@@ -526,6 +526,23 @@ mod tests {
     }
 
     #[test]
+    fn create_show_handles_a_run_with_no_state_yet() {
+        use darkrun_core::domain::{Run, RunFrontmatter};
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        // A run document with NO state.json (never ticked) → the station strip is
+        // empty and there's no current phase, but the payload still builds.
+        store.write_run(&Run {
+            slug: "r".into(), title: "R".into(), body: String::new(),
+            frontmatter: RunFrontmatter { factory: "software".into(), active_station: "frame".into(), ..Default::default() },
+        }).unwrap();
+        let reg = registry();
+        let id = create_show(&reg, &store, "r").expect("show builds without state");
+        assert_eq!(id, "r");
+        assert!(reg.get("r").is_some(), "the session is still registered");
+    }
+
+    #[test]
     fn create_show_raises_run_review_under_slug_and_current() {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path());

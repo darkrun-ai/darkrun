@@ -485,6 +485,7 @@ mod tests {
             source_ref: payment.rs:42\n\
             closed_by: u3\n\
             bogus_key: ignored\n\
+            a-bare-line-with-no-colon-is-skipped\n\
             visit_again: nope\n\
             replies:\n  - \"first reply\"\n  - \"second\"\n\
             ---\nThe finding body.";
