@@ -541,6 +541,38 @@ mod tests {
     }
 
     #[test]
+    fn global_fallback_path_roots_under_home_darkrun() {
+        // The global branch of fallback_path roots the saved status line under
+        // `$HOME/.darkrun` rather than the repo.
+        let repo = tempfile::tempdir().unwrap();
+        let p = fallback_path(true, repo.path()).unwrap();
+        assert!(p.to_string_lossy().contains(".darkrun"), "global fallback under .darkrun: {p:?}");
+        assert!(!p.starts_with(repo.path()), "not under the repo");
+    }
+
+    #[test]
+    fn render_tolerates_unreadable_units() {
+        use darkrun_core::domain::{Run, RunFrontmatter};
+        use darkrun_core::StateStore;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let store = StateStore::new(root);
+        store.write_run(&Run {
+            slug: "r".into(), title: "R".into(), body: String::new(),
+            frontmatter: RunFrontmatter { factory: "software".into(), active_station: "frame".into(), ..Default::default() },
+        }).unwrap();
+        store.set_active_run("r").unwrap();
+        // A corrupt unit makes read_units error → the unit tally degrades to 0/0
+        // rather than failing the whole status line.
+        let units = store.units_dir("r");
+        std::fs::create_dir_all(&units).unwrap();
+        std::fs::write(units.join("broken.md"), "---\nstatus: \"x\n---\n").unwrap();
+        let line = render(Some(root.to_path_buf())).expect("still renders");
+        // The unit tally degrades (read error → 0/0) without failing the line.
+        assert!(line.contains('r'), "the run still renders: {line}");
+    }
+
+    #[test]
     fn install_then_uninstall_roundtrips_project_settings() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
