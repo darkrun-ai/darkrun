@@ -1,41 +1,36 @@
 #!/usr/bin/env bash
-# One-time bootstrap for the darkrun Terraform state + required GCP APIs.
+# One-time bootstrap for the darkrun stack. State + runs live in HCP Terraform
+# (Terraform Cloud), so there is no state bucket to create — this script handles
+# the two things Terraform can't do for itself:
 #
-# Terraform can create everything EXCEPT its own state bucket (chicken/egg), so
-# this script creates the GCS state bucket and turns on the APIs Terraform needs
-# to authenticate against. Run it once, with an identity that has owner/editor on
-# the `darkrun` project, BEFORE the first `terraform init`.
+#   1. Enable the GCP APIs the first plan needs to authenticate + read.
+#   2. Create the operator-managed OAuth secrets in Secret Manager. Their VALUES
+#      never pass through Terraform — they live only here, in Google.
+#
+# Run once, with a darkrun-scoped identity that has owner/editor on the project,
+# BEFORE the first `terraform init`. Idempotent: re-running is safe.
 #
 #   ./infra/bootstrap.sh
 #
-# Idempotent: re-running it is safe (skips anything already present).
+# Secret values are read from env vars if set (CI-friendly), else prompted
+# (hidden). Leave a prompt blank to create the empty secret and populate it later
+# with `gcloud secrets versions add <NAME> --data-file=-`.
 set -euo pipefail
 
 PROJECT="${GCP_PROJECT:-darkrun}"
-REGION="${GCP_REGION:-us-central1}"
-STATE_BUCKET="${TF_STATE_BUCKET:-darkrun-tfstate}"
 
-echo "==> Project:       ${PROJECT}"
-echo "==> Region:        ${REGION}"
-echo "==> State bucket:  gs://${STATE_BUCKET}"
-echo
+echo "==> Project: ${PROJECT}"
 
-# Guard: make sure the active gcloud identity is actually pointed at darkrun.
+# Guard: make sure the active gcloud identity is darkrun-scoped.
 active_account="$(gcloud config get-value account 2>/dev/null || true)"
-active_project="$(gcloud config get-value project 2>/dev/null || true)"
 echo "==> Active gcloud account: ${active_account:-<none>}"
-echo "==> Active gcloud project: ${active_project:-<none>}"
-if [ "${active_project}" != "${PROJECT}" ]; then
-  echo
-  echo "!! Active project is '${active_project}', not '${PROJECT}'."
-  echo "!! Set it first:  gcloud config set project ${PROJECT}"
-  echo "!! (and confirm the account above is darkrun-scoped, not a borrowed CI SA)."
-  read -r -p "Continue anyway? [y/N] " ok
-  [ "${ok}" = "y" ] || { echo "Aborted."; exit 1; }
+if ! gcloud projects describe "${PROJECT}" >/dev/null 2>&1; then
+  echo "!! Cannot access project '${PROJECT}' as '${active_account}'."
+  echo "!! Authenticate as a darkrun-scoped identity first."
+  exit 1
 fi
 
-# 1. Enable the APIs Terraform needs (Terraform also declares these in apis.tf,
-#    but the very first apply needs them on already to read state + plan).
+# 1. Enable required APIs.
 echo
 echo "==> Enabling required APIs..."
 gcloud services enable \
@@ -46,26 +41,41 @@ gcloud services enable \
   cloudresourcemanager.googleapis.com \
   --project "${PROJECT}"
 
-# 2. Create the Terraform state bucket (versioned, uniform access). The `gcs`
-#    backend in versions.tf points here.
-echo
-if gcloud storage buckets describe "gs://${STATE_BUCKET}" --project "${PROJECT}" >/dev/null 2>&1; then
-  echo "==> State bucket gs://${STATE_BUCKET} already exists, skipping create."
-else
-  echo "==> Creating state bucket gs://${STATE_BUCKET}..."
-  gcloud storage buckets create "gs://${STATE_BUCKET}" \
-    --project "${PROJECT}" \
-    --location "${REGION}" \
-    --uniform-bucket-level-access \
-    --public-access-prevention
-fi
+# 2. Operator-managed OAuth secrets (stored ONLY in Secret Manager).
+create_secret() {
+  local name="$1"
+  if gcloud secrets describe "${name}" --project "${PROJECT}" >/dev/null 2>&1; then
+    echo "==> Secret ${name} exists."
+  else
+    echo "==> Creating secret ${name}..."
+    gcloud secrets create "${name}" --project "${PROJECT}" --replication-policy=automatic
+  fi
 
-echo "==> Enabling object versioning on the state bucket..."
-gcloud storage buckets update "gs://${STATE_BUCKET}" --versioning --project "${PROJECT}"
+  # Value from env var of the same name, else an interactive hidden prompt.
+  local val="${!name:-}"
+  if [ -z "${val}" ]; then
+    read -r -s -p "    Value for ${name} (blank to skip): " val; echo
+  fi
+  if [ -n "${val}" ]; then
+    printf '%s' "${val}" | gcloud secrets versions add "${name}" --project "${PROJECT}" --data-file=-
+    echo "    + added a version to ${name}"
+  else
+    echo "    (skipped — add later: gcloud secrets versions add ${name} --data-file=-)"
+  fi
+}
+
+echo
+echo "==> OAuth secrets (stored only in Secret Manager, never in Terraform)..."
+create_secret GITHUB_CLIENT_ID
+create_secret GITHUB_CLIENT_SECRET
+create_secret GITLAB_CLIENT_ID
+create_secret GITLAB_CLIENT_SECRET
 
 echo
 echo "==> Bootstrap complete. Next:"
+echo "      terraform login                       # auth to HCP Terraform"
 echo "      cd infra"
-echo "      cp terraform.tfvars.example terraform.tfvars   # fill in secrets"
+echo "      cp terraform.tfvars.example terraform.tfvars   # non-secret knobs only"
+echo "      export SENTRY_AUTH_TOKEN=...          # or set it as a TFC workspace var"
 echo "      terraform init"
 echo "      terraform apply"

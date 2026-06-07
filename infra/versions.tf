@@ -1,12 +1,6 @@
-# darkrun infrastructure — provider + Terraform version pins.
-#
-# Two providers:
-#   - google: the GCP project `darkrun` (Cloud Run, Artifact Registry, Secret
-#     Manager) that hosts the `darkrun-web` server (OAuth broker + static site).
-#   - sentry: provisions one Sentry project per app surface and exposes their
-#     DSNs as outputs (the web DSN is wired straight into Cloud Run; the CLI +
-#     desktop DSNs are read by the release pipeline and compiled into the
-#     distributed binaries).
+# darkrun infrastructure — provider pins + the HCP Terraform (Terraform Cloud)
+# backend. All resources live in the single GCP project `darkrun`; the modules/
+# split is for organization only.
 
 terraform {
   required_version = ">= 1.6.0"
@@ -22,10 +16,15 @@ terraform {
     }
   }
 
-  # State lives in a GCS bucket in the darkrun project (created by the bootstrap
-  # step — see infra/README.md). Comment this block out to use local state.
-  backend "gcs" {
-    bucket = "darkrun-tfstate"
-    prefix = "infra"
+  # State + runs in HCP Terraform (Terraform Cloud). The org/workspace can also
+  # be supplied via the TF_CLOUD_ORGANIZATION / TF_WORKSPACE environment vars
+  # (which override these). Auth: `terraform login` locally, or a
+  # TF_TOKEN_app_terraform_io token in CI. Confirm the org slug matches your TFC
+  # organization before the first `terraform init` (init migrates state here).
+  cloud {
+    organization = "darkrun"
+    workspaces {
+      name = "darkrun-infra"
+    }
   }
 }
