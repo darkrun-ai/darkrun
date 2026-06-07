@@ -124,7 +124,7 @@ resource "google_cloud_run_v2_service_iam_member" "public" {
 # Map the custom domain. Requires the domain verified for the project. Disabled
 # when var.web_domain is empty (use the run.app URL).
 resource "google_cloud_run_domain_mapping" "web" {
-  count    = var.web_domain != "" ? 1 : 0
+  count    = var.web_domain != "" && var.manage_domain_mapping ? 1 : 0
   name     = var.web_domain
   location = var.region
   metadata {
@@ -138,7 +138,7 @@ resource "google_cloud_run_domain_mapping" "web" {
 # www subdomain mapping (paired with the www CNAME in the dns module). A
 # subdomain under the verified apex needs no separate verification.
 resource "google_cloud_run_domain_mapping" "www" {
-  count    = var.web_domain != "" && var.manage_www ? 1 : 0
+  count    = var.web_domain != "" && var.manage_www && var.manage_domain_mapping ? 1 : 0
   name     = "www.${var.web_domain}"
   location = var.region
   metadata {
