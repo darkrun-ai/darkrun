@@ -1968,3 +1968,32 @@ fn gix_create_branch_agrees() {
     // Idempotent: a second create is a clean no-op.
     gx.create_branch("gixmade/feature", "HEAD").unwrap();
 }
+
+/// The hand-rolled gix write-tree must produce a tree hash IDENTICAL to
+/// `git write-tree` (any sort/mode error changes the hash), and the resulting
+/// commit must pass `git fsck`.
+#[test]
+fn gix_commit_produces_a_git_identical_tree() {
+    let (_d, root) = init_repo();
+    std::fs::create_dir_all(root.join("a/b")).unwrap();
+    std::fs::write(root.join("a/b/c.txt"), "deep\n").unwrap();
+    std::fs::write(root.join("top.txt"), "top\n").unwrap();
+    std::fs::write(root.join("run.sh"), "#!/bin/sh\n").unwrap();
+    git(&root, &["add", "-A"]);
+    let _ = std::process::Command::new("chmod").arg("+x").arg(root.join("run.sh")).status();
+    git(&root, &["add", "-A"]);
+
+    // The exact tree git would write for the current index.
+    let want_tree = git_out(&root, &["write-tree"]);
+
+    // gix commits the same index via our hand-rolled write-tree.
+    Git::open_gix(&root).unwrap().commit(&root, "gix commit").unwrap();
+
+    // HEAD's tree equals git's write-tree, byte-for-byte.
+    let got_tree = git_out(&root, &["rev-parse", "HEAD^{tree}"]);
+    assert_eq!(got_tree, want_tree, "gix-built tree must hash-match git write-tree");
+    assert_eq!(git_out(&root, &["log", "-1", "--pretty=%s"]), "gix commit", "message recorded");
+    let fsck = std::process::Command::new("git").arg("-C").arg(&root)
+        .args(["fsck", "--strict"]).output().unwrap();
+    assert!(fsck.status.success(), "git fsck: {}", String::from_utf8_lossy(&fsck.stderr));
+}

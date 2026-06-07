@@ -30,6 +30,106 @@ fn head_branch_of(repo: &gix::Repository) -> Option<String> {
         .map(|n| n.shorten().to_string())
 }
 
+// ── write-tree (built ourselves: gix has no `git write-tree`) ────────────────
+
+/// A node in the tree assembled from index entries: a blob leaf or a subtree.
+enum TreeNode {
+    Blob {
+        mode: gix::objs::tree::EntryMode,
+        oid: gix::ObjectId,
+    },
+    Dir(std::collections::BTreeMap<Vec<u8>, TreeNode>),
+}
+
+/// Map an index entry's mode to a tree entry mode.
+fn index_mode_to_tree(mode: gix::index::entry::Mode) -> Result<gix::objs::tree::EntryMode> {
+    use gix::objs::tree::EntryKind;
+    let kind = match mode.bits() {
+        0o100644 => EntryKind::Blob,
+        0o100755 => EntryKind::BlobExecutable,
+        0o120000 => EntryKind::Link,
+        0o160000 => EntryKind::Commit, // gitlink / submodule
+        other => return Err(GitError::Gix(format!("unsupported index mode {other:o}"))),
+    };
+    Ok(kind.into())
+}
+
+/// Insert a slash-separated `path` into the nested tree node map.
+fn insert_path(
+    dir: &mut std::collections::BTreeMap<Vec<u8>, TreeNode>,
+    path: &[u8],
+    mode: gix::objs::tree::EntryMode,
+    oid: gix::ObjectId,
+) {
+    match path.iter().position(|&b| b == b'/') {
+        Some(i) => {
+            let name = path[..i].to_vec();
+            let rest = &path[i + 1..];
+            let sub = dir
+                .entry(name)
+                .or_insert_with(|| TreeNode::Dir(std::collections::BTreeMap::new()));
+            if let TreeNode::Dir(m) = sub {
+                insert_path(m, rest, mode, oid);
+            }
+        }
+        None => {
+            dir.insert(path.to_vec(), TreeNode::Blob { mode, oid });
+        }
+    }
+}
+
+/// Git's canonical tree-entry ordering: byte order on the name, but a tree
+/// (directory) entry sorts as if its name had a trailing `/`.
+fn tree_sort_key(name: &[u8], mode: gix::objs::tree::EntryMode) -> Vec<u8> {
+    let mut k = name.to_vec();
+    if mode.is_tree() {
+        k.push(b'/');
+    }
+    k
+}
+
+/// Write a single tree node (recursively writing its subtrees) and return its id.
+fn write_tree_node(
+    repo: &gix::Repository,
+    dir: &std::collections::BTreeMap<Vec<u8>, TreeNode>,
+) -> Result<gix::ObjectId> {
+    let mut entries: Vec<gix::objs::tree::Entry> = Vec::with_capacity(dir.len());
+    for (name, node) in dir {
+        let (mode, oid) = match node {
+            TreeNode::Blob { mode, oid } => (*mode, *oid),
+            TreeNode::Dir(sub) => (
+                gix::objs::tree::EntryKind::Tree.into(),
+                write_tree_node(repo, sub)?,
+            ),
+        };
+        entries.push(gix::objs::tree::Entry {
+            mode,
+            filename: name.clone().into(),
+            oid,
+        });
+    }
+    entries.sort_by(|a, b| {
+        tree_sort_key(&a.filename, a.mode).cmp(&tree_sort_key(&b.filename, b.mode))
+    });
+    let tree = gix::objs::Tree { entries };
+    Ok(repo.write_object(&tree).map_err(gix_err)?.detach())
+}
+
+/// Assemble and write the tree for the (stage-0) index — our `git write-tree`.
+fn write_index_tree(repo: &gix::Repository, index: &gix::index::State) -> Result<gix::ObjectId> {
+    let mut root = std::collections::BTreeMap::new();
+    for entry in index.entries() {
+        if entry.stage() != gix::index::entry::Stage::Unconflicted {
+            return Err(GitError::Gix(
+                "cannot write a tree from a conflicted index".into(),
+            ));
+        }
+        let mode = index_mode_to_tree(entry.mode)?;
+        insert_path(&mut root, entry.path(index).as_ref(), mode, entry.id);
+    }
+    write_tree_node(repo, &root)
+}
+
 /// Recursively collect blob (file) paths under `tree`, slash-joined relative to
 /// the tree root — the building block for a recursive `ls-tree`.
 fn collect_tree_paths(
@@ -231,11 +331,18 @@ impl GitBackend for GixBackend {
         Err(GitError::Unsupported("add_paths"))
     }
 
-    fn commit(&self, _worktree_path: &Path, _message: &str) -> Result<()> {
-        // BLOCKED on a hand-rolled write-tree: gix provides `commit(...)` and
-        // `write_blob(...)`, but NO index→tree (`git write-tree`) — we must build
-        // the tree object from index entries ourselves (Phase 2 write-tree work).
-        Err(GitError::Unsupported("commit"))
+    fn commit(&self, worktree_path: &Path, message: &str) -> Result<()> {
+        // gix has commit()/write_blob() but no `git write-tree`, so build the
+        // tree from the staged index ourselves, then commit it on HEAD with the
+        // current HEAD as parent (no parent on an unborn branch).
+        let repo = gix::open(worktree_path).map_err(gix_err)?;
+        let index = repo.index_or_empty().map_err(gix_err)?;
+        let tree_id = write_index_tree(&repo, &index)?;
+        let parents: Vec<gix::ObjectId> =
+            repo.head_commit().ok().map(|c| c.id).into_iter().collect();
+        repo.commit("HEAD", message, tree_id, parents)
+            .map_err(gix_err)?;
+        Ok(())
     }
 
     fn ls_tree(&self, worktree_path: &Path, from_ref: &str, prefix: &str) -> Result<Vec<String>> {
