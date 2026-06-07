@@ -13,3 +13,10 @@ provider "google" {
 provider "sentry" {
   # token read from SENTRY_AUTH_TOKEN in the environment.
 }
+
+provider "github" {
+  # Owner (the org); token read from GITHUB_TOKEN in the environment (a TFC
+  # workspace variable). Used only to push the cli/desktop Sentry DSNs into the
+  # repo's Actions secrets. The token needs repo admin / "secrets: write".
+  owner = var.github_owner
+}

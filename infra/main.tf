@@ -60,3 +60,15 @@ module "web" {
 
   depends_on = [google_project_service.services]
 }
+
+# Push the cli/desktop Sentry DSNs into the repo's GitHub Actions secrets so the
+# release workflow bakes them into the binaries. Gated on Sentry being on AND the
+# toggle (which needs a GITHUB_TOKEN). The DSNs are known after apply.
+module "release_secrets" {
+  source = "./modules/release-secrets"
+
+  enable      = var.enable_sentry && var.manage_release_secrets
+  repository  = var.github_repository
+  cli_dsn     = try(module.sentry.dsns["cli"], "")
+  desktop_dsn = try(module.sentry.dsns["desktop"], "")
+}

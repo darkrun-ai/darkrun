@@ -67,3 +67,24 @@ variable "enable_sentry" {
   type        = bool
   default     = true
 }
+
+# ── GitHub (release-secrets wiring) ──────────────────────────────────────
+# Used only to push the cli/desktop Sentry DSNs into the repo's Actions secrets.
+# The token is the GITHUB_TOKEN env (a TFC workspace variable), never a TF var.
+variable "github_owner" {
+  description = "GitHub org/user that owns the repo whose Actions secrets are set."
+  type        = string
+  default     = "darkrun-ai"
+}
+
+variable "github_repository" {
+  description = "Repo name (under github_owner) whose Actions secrets receive the DSNs."
+  type        = string
+  default     = "darkrun"
+}
+
+variable "manage_release_secrets" {
+  description = "Have Terraform push the cli/desktop Sentry DSNs into the repo's GitHub Actions secrets. Needs GITHUB_TOKEN set. Turn off to manage those secrets by hand."
+  type        = bool
+  default     = true
+}

@@ -14,6 +14,10 @@ terraform {
       source  = "jianyuan/sentry"
       version = "~> 0.14"
     }
+    github = {
+      source  = "integrations/github"
+      version = "~> 6.0"
+    }
   }
 
   # State + runs in HCP Terraform (Terraform Cloud). The org/workspace can also
