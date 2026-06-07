@@ -211,6 +211,19 @@ async fn runs_populated_count_matches() {
 }
 
 #[tokio::test]
+async fn runs_list_skips_a_corrupt_run() {
+    let (app, store) = state_with_store();
+    seed_run(&store, "alpha", Some("Alpha"), "software", "frame", Status::Active, None, false);
+    seed_run(&store, "beta", None, "software", "build", Status::Completed, None, false);
+    // Corrupt one run's doc → the browse list skips it rather than 500-ing.
+    std::fs::write(store.run_dir("beta").join("run.md"), "---\nfactory: \"oops\n---\n").unwrap();
+    let resp = send(build_router(app), get("/api/runs")).await;
+    let json = body_json(resp).await;
+    assert_eq!(json["count"], 1, "the corrupt run is skipped");
+    assert_eq!(json["runs"][0]["slug"], "alpha");
+}
+
+#[tokio::test]
 async fn runs_summary_carries_all_fields() {
     let (app, store) = state_with_store();
     seed_run(
