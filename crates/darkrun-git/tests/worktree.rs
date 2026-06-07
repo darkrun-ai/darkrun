@@ -2175,3 +2175,31 @@ fn gix_merge_already_up_to_date_noop() {
     assert!(out.ok && !out.performed, "no-op: {out:?}");
     assert!(!gx.merge_in_progress(&root).unwrap(), "no MERGE_HEAD");
 }
+
+/// gix fetch pulls from a local remote and advances the remote-tracking ref to
+/// the commit another clone pushed.
+#[test]
+fn gix_fetch_advances_remote_tracking_ref() {
+    let bare = TempDir::new().unwrap();
+    git(bare.path(), &["init", "-q", "--bare"]);
+    let (_da, a) = init_repo();
+    git(&a, &["remote", "add", "origin", &bare.path().to_string_lossy()]);
+    git(&a, &["push", "-q", "origin", "main"]);
+
+    // A second clone pushes a new commit to the bare remote.
+    let bdir = TempDir::new().unwrap();
+    let b = bdir.path().join("b");
+    assert!(std::process::Command::new("git")
+        .args(["clone", "-q", &bare.path().to_string_lossy(), b.to_str().unwrap()])
+        .status().unwrap().success());
+    std::fs::write(b.join("new.txt"), "new\n").unwrap();
+    git(&b, &["add", "-A"]);
+    git(&b, &["commit", "-qm", "newcommit"]);
+    git(&b, &["push", "-q", "origin", "main"]);
+    let want = git_out(&b, &["rev-parse", "HEAD"]);
+
+    // A fetches via the pure-Rust backend.
+    Git::open_gix(&a).unwrap().fetch(&a, "main").unwrap();
+    let got = git_out(&a, &["rev-parse", "refs/remotes/origin/main"]);
+    assert_eq!(got, want, "gix fetch advanced origin/main to the pushed commit");
+}

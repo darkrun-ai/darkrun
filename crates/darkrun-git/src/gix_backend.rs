@@ -730,8 +730,27 @@ impl GitBackend for GixBackend {
         Err(GitError::Unsupported("push"))
     }
 
-    fn fetch(&self, _worktree_path: &Path, _branch: &str) -> Result<()> {
-        Err(GitError::Unsupported("fetch"))
+    fn fetch(&self, worktree_path: &Path, branch: &str) -> Result<()> {
+        // `git fetch origin <branch>` — pure-Rust transport (local/file + rustls
+        // HTTPS). Under `blocking-network-client`, gix's async fetch fns are
+        // maybe_async-stripped to blocking, so there's no `.await`.
+        let repo = gix::open(worktree_path).map_err(gix_err)?;
+        let remote = repo
+            .find_remote("origin")
+            .map_err(gix_err)?
+            .with_refspecs(
+                Some(format!("+refs/heads/{branch}:refs/remotes/origin/{branch}").as_str()),
+                gix::remote::Direction::Fetch,
+            )
+            .map_err(gix_err)?;
+        remote
+            .connect(gix::remote::Direction::Fetch)
+            .map_err(gix_err)?
+            .prepare_fetch(gix::progress::Discard, Default::default())
+            .map_err(gix_err)?
+            .receive(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+            .map_err(gix_err)?;
+        Ok(())
     }
 
     fn rebase_onto(&self, _worktree_path: &Path, _upstream: &str) -> Result<()> {
