@@ -158,6 +158,40 @@ fn upsert_index_entries(
     Ok(())
 }
 
+/// Check out every entry of `tree` into `dir` (recursively), writing blobs as
+/// files, executables with the +x bit, and symlinks as real links — the
+/// worktree-population half of `git worktree add`.
+fn checkout_tree_into(repo: &gix::Repository, tree: &gix::Tree<'_>, dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for entry in tree.iter() {
+        let entry = entry.map_err(gix_err)?;
+        let dest = dir.join(entry.filename().to_string());
+        let mode = entry.mode();
+        if mode.is_tree() {
+            let sub = repo.find_tree(entry.oid()).map_err(gix_err)?;
+            checkout_tree_into(repo, &sub, &dest)?;
+        } else if mode.is_link() {
+            let data = repo.find_object(entry.oid()).map_err(gix_err)?.data.clone();
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&data), &dest)?;
+            }
+            #[cfg(not(unix))]
+            std::fs::write(&dest, &data)?;
+        } else {
+            let data = repo.find_object(entry.oid()).map_err(gix_err)?.data.clone();
+            std::fs::write(&dest, &data)?;
+            #[cfg(unix)]
+            if matches!(mode.kind(), gix::objs::tree::EntryKind::BlobExecutable) {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Assemble and write the tree for the (stage-0) index — our `git write-tree`.
 fn write_index_tree(repo: &gix::Repository, index: &gix::index::State) -> Result<gix::ObjectId> {
     let mut root = std::collections::BTreeMap::new();
@@ -256,11 +290,80 @@ impl GitBackend for GixBackend {
 
     fn create_worktree(
         &self,
-        _name: &str,
-        _path: &Path,
-        _opts: &CreateOptions,
+        name: &str,
+        path: &Path,
+        opts: &CreateOptions,
     ) -> Result<WorktreeInfo> {
-        Err(GitError::Unsupported("create_worktree"))
+        // gix can't `git worktree add`, so build it: write the linked-worktree
+        // admin files (.git/worktrees/<name>/{HEAD,commondir,gitdir,index}) + the
+        // worktree's `.git` gitdir file, then check out the base commit's tree.
+        let repo = self.repo()?;
+        let admin = repo.common_dir().join("worktrees").join(name);
+        if admin.exists() {
+            return Err(GitError::WorktreeExists(name.to_string()));
+        }
+
+        // Resolve the base commit (a reference, else HEAD).
+        let base = match &opts.reference {
+            Some(r) => repo
+                .rev_parse_single(r.as_str())
+                .map_err(gix_err)?
+                .object()
+                .map_err(gix_err)?
+                .peel_to_commit()
+                .map_err(gix_err)?,
+            None => repo.head_commit().map_err(gix_err)?,
+        };
+        let base_id = base.id;
+        let tree_id = base.tree_id().map_err(gix_err)?.detach();
+
+        // Decide the worktree's HEAD + which branch it attaches to (if any).
+        let (head_content, branch) = if let Some(nb) = &opts.new_branch {
+            self.create_branch(nb, &base_id.to_string())?;
+            (format!("ref: refs/heads/{nb}\n"), Some(nb.clone()))
+        } else if opts.reference.as_deref().is_some_and(|r| {
+            self.branch_exists(r).unwrap_or(false)
+        }) {
+            let r = opts.reference.clone().unwrap();
+            (format!("ref: refs/heads/{r}\n"), Some(r))
+        } else {
+            (format!("{base_id}\n"), None) // detached
+        };
+
+        let abs_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+
+        // Admin files.
+        std::fs::create_dir_all(&admin)?;
+        std::fs::write(admin.join("HEAD"), &head_content)?;
+        std::fs::write(admin.join("commondir"), "../..\n")?;
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", abs_path.join(".git").display()),
+        )?;
+        let idx = repo.index_from_tree(&tree_id).map_err(gix_err)?;
+        let mut idx_out = std::fs::File::create(admin.join("index"))?;
+        idx.write_to(&mut idx_out, gix::index::write::Options::default())
+            .map_err(gix_err)?;
+
+        // The worktree directory + its `.git` gitdir file, then the checkout.
+        std::fs::create_dir_all(&abs_path)?;
+        std::fs::write(
+            abs_path.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )?;
+        let tree = base.tree().map_err(gix_err)?;
+        checkout_tree_into(&repo, &tree, &abs_path)?;
+
+        Ok(WorktreeInfo {
+            name: name.to_string(),
+            path: abs_path,
+            branch,
+            locked: false,
+        })
     }
 
     fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
@@ -299,8 +402,22 @@ impl GitBackend for GixBackend {
         Ok(out)
     }
 
-    fn remove_worktree(&self, _name: &str, _force: bool) -> Result<()> {
-        Err(GitError::Unsupported("remove_worktree"))
+    fn remove_worktree(&self, name: &str, _force: bool) -> Result<()> {
+        // Remove the worktree directory and prune its admin entry. (The engine
+        // always removes with force; a dirty-tree refusal isn't modeled.)
+        let repo = self.repo()?;
+        let admin = repo.common_dir().join("worktrees").join(name);
+        if !admin.exists() {
+            return Err(GitError::WorktreeNotFound(name.to_string()));
+        }
+        // `gitdir` admin file points at `<worktree>/.git`; its parent is the tree.
+        if let Ok(gitdir) = std::fs::read_to_string(admin.join("gitdir")) {
+            if let Some(wt_dir) = std::path::PathBuf::from(gitdir.trim()).parent() {
+                let _ = std::fs::remove_dir_all(wt_dir);
+            }
+        }
+        std::fs::remove_dir_all(&admin)?;
+        Ok(())
     }
 
     fn create_branch(&self, name: &str, from_ref: &str) -> Result<()> {

@@ -2050,3 +2050,49 @@ fn gix_checkout_paths_restores_from_ref() {
     let staged = git_out(&root, &["diff", "--cached", "--name-only"]);
     assert!(staged.is_empty(), "index restored to HEAD; staged: {staged:?}");
 }
+
+/// A gix-built linked worktree is a fully valid git worktree: git recognizes it,
+/// the checkout is correct, and `git status` inside it is clean (proving the
+/// admin files + index + checked-out files are all mutually consistent).
+#[test]
+fn gix_create_worktree_is_a_valid_git_worktree() {
+    let (_d, root) = init_repo();
+    std::fs::create_dir_all(root.join("d")).unwrap();
+    std::fs::write(root.join("d/f.txt"), "hello\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "files"]);
+
+    let wt_path = root.join("wt-new");
+    let gx = Git::open_gix(&root).unwrap();
+    let info = gx
+        .create_worktree("wtnew", &wt_path, &CreateOptions {
+            reference: None,
+            new_branch: Some("feature/x".into()),
+        })
+        .unwrap();
+    assert!(info.path.exists());
+    assert_eq!(info.branch.as_deref(), Some("feature/x"));
+
+    // The checked-out content is present.
+    assert_eq!(std::fs::read_to_string(wt_path.join("d/f.txt")).unwrap(), "hello\n");
+
+    // git itself accepts the worktree and runs there with a CLEAN status.
+    let st = std::process::Command::new("git").arg("-C").arg(&wt_path)
+        .args(["status", "--porcelain"]).output().unwrap();
+    assert!(st.status.success(), "git status runs in the gix-made worktree");
+    assert!(String::from_utf8_lossy(&st.stdout).trim().is_empty(),
+        "worktree clean: {}", String::from_utf8_lossy(&st.stdout));
+
+    // HEAD is on the new branch.
+    let head = std::process::Command::new("git").arg("-C").arg(&wt_path)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "feature/x");
+
+    // gix lists it too, agreeing with libgit2 on the branch set.
+    assert!(gx.list_worktrees().unwrap().iter().any(|w| w.branch.as_deref() == Some("feature/x")));
+
+    // remove it.
+    gx.remove_worktree("wtnew", true).unwrap();
+    assert!(!wt_path.exists(), "worktree dir removed");
+    let _ = std::process::Command::new("git").arg("-C").arg(&root).args(["worktree", "prune"]).output();
+}
