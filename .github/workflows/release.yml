@@ -1,22 +1,51 @@
 name: release
 
-# Build per-arch native `darkrun` binaries and distribute them via npm:
-#   - the `darkrun` package + per-arch `@darkrun/<os>-<arch>` sub-packages
-#   - GitHub Release tarballs are attached as raw downloads (not a package manager)
+# Build per-arch native `darkrun` binaries and publish them to npm. Triggered by
+# the GitHub Release that release-please publishes when its release PR is merged
+# (NOT by raw tags). npm publish uses OIDC Trusted Publishing — no NPM_TOKEN
+# (configure the trusted publisher on each package: repo darkrun-ai/darkrun,
+# workflow release.yml).
 #
-# Distribution is npm-only. No Homebrew. No JavaScript is shipped — npm carries
-# the native binary only.
+# Distribution is npm-only: the `darkrun` package + per-arch `@darkrun/<os>-<arch>`
+# sub-packages. GitHub Release tarballs are attached as raw downloads.
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 0.2.0). Defaults to the Cargo.toml version."
+        required: false
 
 permissions:
   contents: write
 
 jobs:
+  version:
+    name: resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      ref: ${{ steps.v.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            tag="v${{ inputs.version }}"
+          else
+            ver=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/')
+            tag="v${ver}"
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "ref=${tag}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -53,6 +82,8 @@ jobs:
             desktop_bin: darkrun-desktop.exe
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -85,7 +116,7 @@ jobs:
         # ingest key, not a secret — set as a repo secret only to keep it out of logs.
         env:
           DARKRUN_SENTRY_DSN: ${{ secrets.DARKRUN_CLI_SENTRY_DSN }}
-          DARKRUN_RELEASE: ${{ github.ref_name }}
+          DARKRUN_RELEASE: ${{ needs.version.outputs.version }}
         run: |
           cargo build --release -p darkrun-cli --target ${{ matrix.target }}
           if [ -n "${{ matrix.desktop_bin }}" ]; then
@@ -126,7 +157,7 @@ jobs:
           path: dist/*.tar.gz
 
   github-release:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -134,20 +165,39 @@ jobs:
           pattern: tarball-*
           path: dist
           merge-multiple: true
-      - name: Publish GitHub Release
+      # Attach the tarballs to the existing release (release-please already created it).
+      - name: Attach tarballs to the release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.version.outputs.ref }}
           files: dist/*.tar.gz
 
   npm-publish:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
+    # OIDC Trusted Publishing — no NPM_TOKEN.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing needs npm >= 11.5.1; Node 20 ships an older npm.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      # Re-assert the version everywhere from the tag — in particular the main
+      # package's @darkrun/* optionalDependencies pins (release-please bumps the
+      # .version fields but not these), so the published darkrun depends on the
+      # matching arch packages.
+      - name: Stamp version
+        run: ./scripts/set-version.sh "${{ needs.version.outputs.version }}"
 
       - name: Download all per-arch binaries
         uses: actions/download-artifact@v4
@@ -166,8 +216,6 @@ jobs:
           done
 
       - name: Publish per-arch sub-packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         shell: bash
         run: |
           for plat in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
@@ -175,6 +223,4 @@ jobs:
           done
 
       - name: Publish main darkrun package (plugin)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish plugin --access public

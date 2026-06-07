@@ -1,0 +1,36 @@
+name: release-please
+
+# Versioning by release PR (no release-on-every-push, no auto-majors). On each
+# push to main, release-please opens/updates a "chore: release X.Y.Z" PR with the
+# computed version + changelog from the Conventional Commits since the last
+# release. Merging THAT PR cuts the release: it tags vX.Y.Z and publishes a GitHub
+# Release, which triggers release.yml to build + publish.
+#
+# Versioning policy (release-please-config.json):
+#   - Pre-1.0 (0.x): breaking changes bump the MINOR, features bump the MINOR,
+#     fixes bump the PATCH. NO automatic majors — 1.0 is a deliberate human call
+#     (cut it with a `Release-As: 1.0.0` commit when the API is stable).
+#
+# Note: PRs opened by the default GITHUB_TOKEN do NOT trigger other workflows, so
+# CI won't run on the release PR unless `token` below is a PAT / App token. Swap
+# secrets.GITHUB_TOKEN for a RELEASE_PLEASE_TOKEN to get CI on the release PR.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

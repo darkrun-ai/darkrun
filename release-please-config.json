@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "rust",
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+  "draft": false,
+  "prerelease": false,
+  "packages": {
+    ".": {
+      "release-type": "rust",
+      "component": "darkrun",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        { "type": "json", "path": "plugin/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "npm/darwin-arm64/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "npm/darwin-x64/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "npm/linux-x64/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "npm/linux-arm64/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "npm/win32-x64/package.json", "jsonpath": "$.version" }
+      ]
+    }
+  }
+}

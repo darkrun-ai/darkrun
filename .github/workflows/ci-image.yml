@@ -1,0 +1,31 @@
+name: ci-image
+
+# Validate the darkrun-web container builds (no push) on PRs that touch build
+# inputs. Heavier than the rust checks, so it's path-scoped — most PRs skip it.
+# Post-merge, the real image is built + pushed by the Cloud Build trigger.
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "cloudbuild.yaml"
+      - "web/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+concurrency:
+  group: ci-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docker-build:
+    name: docker build (validate only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (no push)
+        run: docker build -t darkrun-web:ci .
