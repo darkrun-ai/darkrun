@@ -471,8 +471,83 @@ impl GitBackend for GixBackend {
         Ok(base.detach() == a)
     }
 
-    fn merge_no_commit(&self, _worktree_path: &Path, _source_ref: &str) -> Result<MergeOutcome> {
-        Err(GitError::Unsupported("merge_no_commit"))
+    fn merge_no_commit(&self, worktree_path: &Path, source_ref: &str) -> Result<MergeOutcome> {
+        // `--no-ff --no-commit`: three-way merge `source_ref` into the worktree's
+        // branch, leaving the result staged (conflict stages in the index,
+        // conflict markers in the worktree) with MERGE_HEAD set, but NOT
+        // committed. The caller re-scans conflicts via `unresolved_paths`.
+        use gix::merge::tree::TreatAsUnresolved;
+        let repo = gix::open(worktree_path).map_err(gix_err)?;
+        let ours = repo.head_commit().map_err(gix_err)?;
+        let ours_id = ours.id;
+        let theirs = repo
+            .rev_parse_single(source_ref)
+            .map_err(gix_err)?
+            .object()
+            .map_err(gix_err)?
+            .peel_to_commit()
+            .map_err(gix_err)?;
+        let theirs_id = theirs.id;
+
+        // Already up to date: `theirs` is an ancestor of `ours` (the merge base
+        // IS theirs) → nothing to merge, no MERGE_HEAD.
+        let base_id = repo.merge_base(ours_id, theirs_id).map_err(gix_err)?.detach();
+        if base_id == theirs_id {
+            return Ok(MergeOutcome {
+                ok: true,
+                performed: false,
+                conflict_paths: Vec::new(),
+                message: None,
+            });
+        }
+
+        let ours_tree = ours.tree_id().map_err(gix_err)?.detach();
+        let theirs_tree = theirs.tree_id().map_err(gix_err)?.detach();
+        let base_tree = repo
+            .find_commit(base_id)
+            .map_err(gix_err)?
+            .tree_id()
+            .map_err(gix_err)?
+            .detach();
+
+        let options = repo.tree_merge_options().map_err(gix_err)?;
+        let labels = gix::merge::blob::builtin_driver::text::Labels::default();
+        let mut outcome = repo
+            .merge_trees(base_tree, ours_tree, theirs_tree, labels, options)
+            .map_err(gix_err)?;
+        let how = TreatAsUnresolved::git();
+        let has_conflicts = outcome.has_unresolved_conflicts(how);
+        let merged_tree = outcome.tree.write().map_err(gix_err)?.detach();
+
+        // Worktree index = merged tree + conflict stages applied.
+        let mut index = repo.index_from_tree(&merged_tree).map_err(gix_err)?;
+        outcome.index_changed_after_applying_conflicts(
+            &mut index,
+            how,
+            gix::merge::tree::apply_index_entries::RemovalMode::Mark,
+        );
+        let mut idx_out = std::fs::File::create(repo.git_dir().join("index"))?;
+        index
+            .write_to(&mut idx_out, gix::index::write::Options::default())
+            .map_err(gix_err)?;
+
+        // Worktree files = merged tree (conflict-marked blobs for conflicts).
+        let merged = repo
+            .find_object(merged_tree)
+            .map_err(gix_err)?
+            .peel_to_tree()
+            .map_err(gix_err)?;
+        checkout_tree_into(&repo, &merged, worktree_path)?;
+
+        // MERGE_HEAD records the in-progress merge for the caller.
+        std::fs::write(repo.git_dir().join("MERGE_HEAD"), format!("{theirs_id}\n"))?;
+
+        Ok(MergeOutcome {
+            ok: !has_conflicts,
+            performed: true,
+            conflict_paths: Vec::new(),
+            message: None,
+        })
     }
 
     fn merge_in_progress(&self, worktree_path: &Path) -> Result<bool> {
@@ -567,10 +642,19 @@ impl GitBackend for GixBackend {
         let repo = gix::open(worktree_path).map_err(gix_err)?;
         let index = repo.index_or_empty().map_err(gix_err)?;
         let tree_id = write_index_tree(&repo, &index)?;
-        let parents: Vec<gix::ObjectId> =
+        let mut parents: Vec<gix::ObjectId> =
             repo.head_commit().ok().map(|c| c.id).into_iter().collect();
+        // Merge-aware (like `git commit` after a merge): a present MERGE_HEAD is
+        // the second parent, making this a real merge commit. Cleared after.
+        let merge_head = repo.git_dir().join("MERGE_HEAD");
+        if let Ok(raw) = std::fs::read_to_string(&merge_head) {
+            if let Ok(id) = gix::ObjectId::from_hex(raw.trim().as_bytes()) {
+                parents.push(id);
+            }
+        }
         repo.commit("HEAD", message, tree_id, parents)
             .map_err(gix_err)?;
+        let _ = std::fs::remove_file(&merge_head);
         Ok(())
     }
 

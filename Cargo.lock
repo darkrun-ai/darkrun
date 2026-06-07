@@ -2732,6 +2732,7 @@ dependencies = [
  "gix-index",
  "gix-lock",
  "gix-mailmap",
+ "gix-merge",
  "gix-negotiate",
  "gix-object",
  "gix-odb",
@@ -3164,6 +3165,32 @@ dependencies = [
  "gix-actor",
  "gix-date",
  "gix-error",
+]
+
+[[package]]
+name = "gix-merge"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7543e1eceb25fbbd1a29459c794148d8bafc1c77555eb386617a2d99b5371971"
+dependencies = [
+ "bstr",
+ "gix-command",
+ "gix-diff",
+ "gix-filter",
+ "gix-fs",
+ "gix-hash",
+ "gix-imara-diff",
+ "gix-index",
+ "gix-object",
+ "gix-path",
+ "gix-quote",
+ "gix-revision",
+ "gix-revwalk",
+ "gix-tempfile",
+ "gix-trace",
+ "gix-worktree",
+ "nonempty",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

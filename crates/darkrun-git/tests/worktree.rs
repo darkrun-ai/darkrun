@@ -2096,3 +2096,69 @@ fn gix_create_worktree_is_a_valid_git_worktree() {
     assert!(!wt_path.exists(), "worktree dir removed");
     let _ = std::process::Command::new("git").arg("-C").arg(&root).args(["worktree", "prune"]).output();
 }
+
+/// A clean gix merge stages the result; committing it yields a real two-parent
+/// merge commit that git accepts.
+#[test]
+fn gix_merge_clean_then_commit_is_a_two_parent_merge() {
+    let (_d, root) = init_repo();
+    std::fs::write(root.join("base.txt"), "base\n").unwrap();
+    git(&root, &["add", "-A"]); git(&root, &["commit", "-qm", "base"]);
+    git(&root, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(root.join("feat.txt"), "feature\n").unwrap();
+    git(&root, &["add", "-A"]); git(&root, &["commit", "-qm", "feat"]);
+    git(&root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("main.txt"), "main\n").unwrap();
+    git(&root, &["add", "-A"]); git(&root, &["commit", "-qm", "main2"]);
+
+    let gx = Git::open_gix(&root).unwrap();
+    let out = gx.merge_no_commit(&root, "feature").unwrap();
+    assert!(out.ok && out.performed, "clean merge staged: {out:?}");
+    assert!(gx.merge_in_progress(&root).unwrap(), "MERGE_HEAD set");
+    assert!(gx.unresolved_paths(&root).unwrap().is_empty(), "no conflicts");
+    assert_eq!(std::fs::read_to_string(root.join("feat.txt")).unwrap(), "feature\n");
+
+    gx.commit(&root, "merge feature").unwrap();
+    let parents = git_out(&root, &["log", "-1", "--pretty=%P"]);
+    assert_eq!(parents.split_whitespace().count(), 2, "two-parent merge commit: {parents}");
+    assert!(!gx.merge_in_progress(&root).unwrap(), "MERGE_HEAD cleared");
+    let fsck = std::process::Command::new("git").arg("-C").arg(&root).args(["fsck", "--strict"]).output().unwrap();
+    assert!(fsck.status.success(), "fsck: {}", String::from_utf8_lossy(&fsck.stderr));
+    assert!(root.join("feat.txt").exists() && root.join("main.txt").exists(), "both sides present");
+}
+
+/// A conflicting gix merge leaves the conflict in-tree: MERGE_HEAD set, the path
+/// surfaces via unresolved_paths, and the worktree file carries conflict markers.
+#[test]
+fn gix_merge_conflict_left_in_tree() {
+    let (_d, root) = init_repo();
+    std::fs::write(root.join("c.txt"), "base\n").unwrap();
+    git(&root, &["add", "-A"]); git(&root, &["commit", "-qm", "base"]);
+    git(&root, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(root.join("c.txt"), "side\n").unwrap();
+    git(&root, &["add", "-A"]); git(&root, &["commit", "-qm", "side"]);
+    git(&root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("c.txt"), "main\n").unwrap();
+    git(&root, &["add", "-A"]); git(&root, &["commit", "-qm", "main"]);
+
+    let gx = Git::open_gix(&root).unwrap();
+    let out = gx.merge_no_commit(&root, "side").unwrap();
+    assert!(out.performed && !out.ok, "performed but conflicted: {out:?}");
+    assert!(gx.merge_in_progress(&root).unwrap(), "MERGE_HEAD set");
+    assert_eq!(gx.unresolved_paths(&root).unwrap(), vec!["c.txt".to_string()]);
+    let content = std::fs::read_to_string(root.join("c.txt")).unwrap();
+    assert!(content.contains("<<<<<<<") && content.contains(">>>>>>>"), "markers: {content}");
+}
+
+/// Merging an ancestor is a no-op (already up to date) — no MERGE_HEAD.
+#[test]
+fn gix_merge_already_up_to_date_noop() {
+    let (_d, root) = init_repo();
+    git(&root, &["branch", "old"]);
+    std::fs::write(root.join("new.txt"), "new\n").unwrap();
+    git(&root, &["add", "-A"]); git(&root, &["commit", "-qm", "ahead"]);
+    let gx = Git::open_gix(&root).unwrap();
+    let out = gx.merge_no_commit(&root, "old").unwrap();
+    assert!(out.ok && !out.performed, "no-op: {out:?}");
+    assert!(!gx.merge_in_progress(&root).unwrap(), "no MERGE_HEAD");
+}
