@@ -1,0 +1,60 @@
+# Keep every dependency ecosystem in the repo current. npm is intentionally
+# omitted: the published packages have zero external dependencies (only the
+# internal @darkrun/* pins), so there's nothing for Dependabot to bump there.
+#
+# Commits use the `chore(deps)` conventional prefix so release-please treats them
+# as chores (no version bump on their own); they ride along in the next release.
+# Minor + patch updates are grouped into one PR per ecosystem to cut noise; major
+# updates come as individual PRs for deliberate review.
+version: 2
+updates:
+  # ── Rust (the workspace) ────────────────────────────────────────────────
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "rust"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # ── GitHub Actions (the workflow `uses:` refs) ──────────────────────────
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "github-actions"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # ── Docker (the darkrun-web base images) ────────────────────────────────
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "docker"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # ── Terraform (provider version constraints in infra/) ──────────────────
+  - package-ecosystem: terraform
+    directory: "/infra"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "terraform"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      terraform:
+        patterns: ["*"]
