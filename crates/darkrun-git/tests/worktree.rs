@@ -1291,6 +1291,28 @@ fn create_worktree_content_isolated_from_primary() {
 // ===========================================================================
 
 #[test]
+fn libgit2_remove_worktree_surfaces_a_disk_removal_fault() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, root) = init_repo();
+    // libgit2 backend specifically (its remove does an in-process remove_dir_all).
+    let g = Git::open(&root).unwrap();
+    let info = make_branch_worktree(&g, "rmfault", "gone", "gone-br");
+    let name = g
+        .list_worktrees()
+        .unwrap()
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some("gone-br"))
+        .map(|w| w.name)
+        .expect("created worktree name");
+    // Make the worktree dir read-only so removing its contents fails (EACCES).
+    std::fs::set_permissions(&info.path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let err = g.remove_worktree(&name, true);
+    std::fs::set_permissions(&info.path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    cleanup(&root, &info.path);
+    assert!(err.is_err(), "an unremovable worktree dir surfaces an error");
+}
+
+#[test]
 fn remove_worktree_cleans_disk_and_registry() {
     let (_d, root) = init_repo();
     for (label, open) in backends() {
