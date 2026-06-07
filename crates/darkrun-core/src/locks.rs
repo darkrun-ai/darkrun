@@ -219,3 +219,17 @@ impl LockManager {
         self.try_acquire(lock_dir, tag)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_alive_reports_live_for_self_and_dead_for_a_nonexistent_pid() {
+        // The running test process is alive.
+        assert!(is_alive(std::process::id() as i32));
+        // A pid that cannot map to any process → the kill probe errors (ESRCH),
+        // which is read as "not alive" (the stale-lock recovery signal).
+        assert!(!is_alive(i32::MAX));
+    }
+}

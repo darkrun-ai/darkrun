@@ -130,6 +130,9 @@ mod tests {
         let p = human_write(d.path(), "docs/./notes.md", "ok\n").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "ok\n");
         assert!(p.ends_with("docs/notes.md"));
+        // A bare `.` is the one shape whose Components actually yields CurDir; it
+        // normalizes to an empty path and so can't be written (it's the root dir).
+        assert!(human_write(d.path(), ".", "x").is_err());
     }
 
     #[test]
