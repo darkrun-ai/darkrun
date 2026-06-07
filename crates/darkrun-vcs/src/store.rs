@@ -180,4 +180,15 @@ mod store_tests {
         let store = CredentialStore::at(&path);
         assert!(store.get(Provider::GitHub).unwrap().is_none());
     }
+
+    #[test]
+    fn unreadable_credential_path_surfaces_an_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A DIRECTORY where the cred file is expected → reading it fails with a
+        // non-NotFound error, surfaced rather than treated as empty.
+        let path = dir.path().join("creds-as-dir");
+        std::fs::create_dir(&path).unwrap();
+        let store = CredentialStore::at(&path);
+        assert!(store.get(Provider::GitHub).is_err());
+    }
 }
