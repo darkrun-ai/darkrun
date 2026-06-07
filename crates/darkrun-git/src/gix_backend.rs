@@ -22,6 +22,40 @@ fn gix_err(e: impl std::fmt::Display) -> GitError {
     GitError::Gix(e.to_string())
 }
 
+/// The short branch name HEAD points at, or `None` when HEAD is detached.
+fn head_branch_of(repo: &gix::Repository) -> Option<String> {
+    repo.head_name()
+        .ok()
+        .flatten()
+        .map(|n| n.shorten().to_string())
+}
+
+/// Recursively collect blob (file) paths under `tree`, slash-joined relative to
+/// the tree root — the building block for a recursive `ls-tree`.
+fn collect_tree_paths(
+    repo: &gix::Repository,
+    tree: &gix::Tree<'_>,
+    base: &str,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    for entry in tree.iter() {
+        let entry = entry.map_err(gix_err)?;
+        let name = entry.filename().to_string();
+        let full = if base.is_empty() {
+            name
+        } else {
+            format!("{base}/{name}")
+        };
+        if entry.mode().is_tree() {
+            let sub = repo.find_tree(entry.oid()).map_err(gix_err)?;
+            collect_tree_paths(repo, &sub, &full, out)?;
+        } else {
+            out.push(full);
+        }
+    }
+    Ok(())
+}
+
 impl GixBackend {
     /// Open the git repository that contains `repo_root` (walks up, like
     /// `Repository::discover` / running `git` from a subdirectory).
@@ -48,10 +82,7 @@ impl GitBackend for GixBackend {
     // ── Reads (native in gitoxide) ───────────────────────────────────────────
 
     fn current_branch(&self) -> Result<Option<String>> {
-        let repo = self.repo()?;
-        // `head_name()` is `None` when HEAD is detached.
-        let name = repo.head_name().map_err(gix_err)?;
-        Ok(name.map(|n| n.shorten().to_string()))
+        Ok(head_branch_of(&self.repo()?))
     }
 
     fn is_clean(&self) -> Result<bool> {
@@ -90,7 +121,39 @@ impl GitBackend for GixBackend {
     }
 
     fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
-        Err(GitError::Unsupported("list_worktrees"))
+        let repo = self.repo()?;
+        let mut out = Vec::new();
+
+        // The primary working tree isn't enumerated by `worktrees()`; include it
+        // explicitly as "(main)" so callers see the complete picture.
+        if let Some(workdir) = repo.work_dir() {
+            out.push(WorktreeInfo {
+                name: "(main)".to_string(),
+                path: workdir.to_path_buf(),
+                branch: head_branch_of(&repo),
+                locked: false,
+            });
+        }
+
+        for proxy in repo.worktrees().map_err(gix_err)? {
+            let name = proxy.id().to_string();
+            let path = proxy.base().map_err(gix_err)?;
+            // Open the linked worktree to read its checked-out branch.
+            let branch = proxy
+                .clone()
+                .into_repo_with_possibly_inaccessible_worktree()
+                .ok()
+                .and_then(|r| head_branch_of(&r));
+            let locked = proxy.is_locked();
+            out.push(WorktreeInfo {
+                name,
+                path,
+                branch,
+                locked,
+            });
+        }
+
+        Ok(out)
     }
 
     fn remove_worktree(&self, _name: &str, _force: bool) -> Result<()> {
@@ -151,12 +214,41 @@ impl GitBackend for GixBackend {
         Err(GitError::Unsupported("commit"))
     }
 
-    fn ls_tree(&self, _worktree_path: &Path, _from_ref: &str, _prefix: &str) -> Result<Vec<String>> {
-        Err(GitError::Unsupported("ls_tree"))
+    fn ls_tree(&self, worktree_path: &Path, from_ref: &str, prefix: &str) -> Result<Vec<String>> {
+        // Recursive tracked paths under `prefix` at `from_ref`, mirroring
+        // `git ls-tree -r --name-only <from_ref> -- <prefix>`.
+        let repo = gix::open(worktree_path).map_err(gix_err)?;
+        let tree = repo
+            .rev_parse_single(from_ref)
+            .map_err(gix_err)?
+            .object()
+            .map_err(gix_err)?
+            .peel_to_tree()
+            .map_err(gix_err)?;
+        let mut out = Vec::new();
+        collect_tree_paths(&repo, &tree, "", &mut out)?;
+        let prefix = prefix.trim_matches('/');
+        if !prefix.is_empty() {
+            out.retain(|p| p == prefix || p.starts_with(&format!("{prefix}/")));
+        }
+        Ok(out)
     }
 
-    fn unresolved_paths(&self, _worktree_path: &Path) -> Result<Vec<String>> {
-        Err(GitError::Unsupported("unresolved_paths"))
+    fn unresolved_paths(&self, worktree_path: &Path) -> Result<Vec<String>> {
+        // Conflicted paths = index entries carrying a non-zero merge stage,
+        // mirroring `git diff --name-only --diff-filter=U`.
+        let repo = gix::open(worktree_path).map_err(gix_err)?;
+        let index = repo.index_or_empty().map_err(gix_err)?;
+        let mut out: Vec<String> = Vec::new();
+        for entry in index.entries() {
+            if entry.stage() != gix::index::entry::Stage::Unconflicted {
+                let path = entry.path(&index).to_string();
+                if !out.contains(&path) {
+                    out.push(path);
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn refs_have_identical_trees(&self, ref_a: &str, ref_b: &str) -> Result<bool> {

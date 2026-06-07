@@ -1874,3 +1874,81 @@ fn gix_merge_in_progress_agrees() {
     assert!(gx2.merge_in_progress(&root).unwrap(), "MERGE_HEAD present => in progress");
     assert_eq!(gx2.merge_in_progress(&root).unwrap(), Git::open(&root).unwrap().merge_in_progress(&root).unwrap());
 }
+
+/// gix ls_tree (recursive, prefix-filtered) + unresolved_paths agree with the reference.
+#[test]
+fn gix_ls_tree_and_unresolved_paths_agree() {
+    let (_d, root) = init_repo();
+    std::fs::create_dir_all(root.join("sub/deep")).unwrap();
+    std::fs::write(root.join("sub/a.txt"), "a").unwrap();
+    std::fs::write(root.join("sub/deep/b.txt"), "b").unwrap();
+    std::fs::write(root.join("top.txt"), "t").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "files"]);
+
+    let gx = Git::open_gix(&root).unwrap();
+    let lib = Git::open(&root).unwrap();
+
+    let mut g = gx.ls_tree(&root, "HEAD", "sub").unwrap();
+    g.sort();
+    let mut l = lib.ls_tree(&root, "HEAD", "sub").unwrap();
+    l.sort();
+    assert_eq!(g, l, "gix and libgit2 list the same paths under the prefix");
+    assert_eq!(g, vec!["sub/a.txt".to_string(), "sub/deep/b.txt".to_string()]);
+
+    // Empty prefix → every tracked path (recursive).
+    let all = gx.ls_tree(&root, "HEAD", "").unwrap();
+    assert!(all.contains(&"top.txt".to_string()) && all.contains(&"sub/deep/b.txt".to_string()));
+
+    // unresolved_paths: clean → empty; then a real conflict surfaces the path.
+    assert!(gx.unresolved_paths(&root).unwrap().is_empty());
+    git(&root, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(root.join("c.txt"), "side\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "s"]);
+    git(&root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("c.txt"), "main\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "m"]);
+    let _ = std::process::Command::new("git").arg("-C").arg(&root)
+        .args(["merge", "--no-edit", "side"]).output().unwrap();
+
+    let gx2 = Git::open_gix(&root).unwrap();
+    let mut up = gx2.unresolved_paths(&root).unwrap();
+    up.sort();
+    assert_eq!(up, vec!["c.txt".to_string()]);
+    let mut lp = Git::open(&root).unwrap().unresolved_paths(&root).unwrap();
+    lp.sort();
+    assert_eq!(up, lp, "gix and libgit2 agree on the conflicted path set");
+}
+
+/// gix list_worktrees agrees with libgit2 on the branch set (a linked worktree
+/// is created via the reference backend; gix must enumerate it identically).
+#[test]
+fn gix_list_worktrees_agrees() {
+    let (_d, root) = init_repo();
+    let setup = Git::open(&root).unwrap();
+    let info = make_branch_worktree(&setup, "gixwt", "gixwt", "gixwt-branch");
+
+    let gx_branches: BTreeSet<Option<String>> = Git::open_gix(&root)
+        .unwrap()
+        .list_worktrees()
+        .unwrap()
+        .into_iter()
+        .map(|w| w.branch)
+        .collect();
+    let lib_branches: BTreeSet<Option<String>> = Git::open(&root)
+        .unwrap()
+        .list_worktrees()
+        .unwrap()
+        .into_iter()
+        .map(|w| w.branch)
+        .collect();
+
+    assert!(
+        gx_branches.contains(&Some("gixwt-branch".to_string())),
+        "gix sees the linked worktree's branch"
+    );
+    assert_eq!(gx_branches, lib_branches, "gix and libgit2 agree on the worktree branch set");
+    cleanup(&root, &info.path);
+}
