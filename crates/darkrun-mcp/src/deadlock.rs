@@ -369,6 +369,10 @@ mod tests {
             }),
             Some("harden")
         );
+        assert_eq!(
+            action_station(&RunAction::Checkpoint { run: "r".into(), station: "prove".into() }),
+            Some("prove")
+        );
         // A variant with no station → None.
         assert_eq!(action_station(&RunAction::Sealed { run: "r".into() }), None);
     }
