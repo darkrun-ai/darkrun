@@ -1826,6 +1826,24 @@ fn moving_feedback_station_does_not_change_open_preemption() {
     }
 }
 
+/// Gap #2: a RUN-SCOPE finding (`_run`) dispatches at run scope — its
+/// FixFeedback carries `_run`, independent of the active station, so a
+/// closeout / cross-station item isn't forced onto a station.
+#[test]
+fn run_scope_feedback_dispatches_at_run_scope() {
+    let (_d, store) = started();
+    // The active station is `frame`; a `_run`-scoped finding is filed.
+    feedback::create(&store, "r", "_run", "cross-station seam leaks", None).unwrap();
+    let pos = derive_position(&store, "r").unwrap();
+    assert_eq!(pos_track(&pos), Track::Feedback);
+    match pos.action {
+        Some(RunAction::FixFeedback { station, .. }) => {
+            assert_eq!(station, "_run", "run-scope finding stays run-scope, not the active station");
+        }
+        other => panic!("got {other:?}"),
+    }
+}
+
 #[test]
 fn setting_severity_keeps_feedback_open() {
     let (_d, store) = started();

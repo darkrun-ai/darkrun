@@ -422,7 +422,11 @@ pub struct GateRecordInput {
 pub struct FeedbackCreateInput {
     /// The run slug.
     pub slug: String,
-    /// The station the finding targets.
+    /// The station the finding targets. Pass `_run` for a RUN-SCOPE finding — a
+    /// closeout or cross-station item that belongs to the run as a whole (the
+    /// run-level reviewers file here); its fix lands on run-main, not a station
+    /// branch. Omit for the active station.
+    #[serde(default)]
     pub station: String,
     /// The finding text.
     pub body: String,

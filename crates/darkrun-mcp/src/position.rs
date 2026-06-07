@@ -1048,11 +1048,24 @@ fn walk_feedback(store: &StateStore, slug: &str, station: &str) -> Result<Option
     // Stable by id first, so equal-severity ties resolve in filing order.
     open.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // A RUN-SCOPE finding (the `_run` sentinel — a closeout / cross-station
+    // item) dispatches at run scope and fixes on run-main. Every OTHER finding
+    // dispatches in the run's ACTIVE station context (the long-standing
+    // invariant: the feedback's own `station` is an informational/grouping
+    // attribute, the fix happens where the run currently is).
+    let action_station = |content: &str| -> String {
+        if feedback_station(content) == crate::lifecycle::RUN_SCOPE_STATION {
+            crate::lifecycle::RUN_SCOPE_STATION.to_string()
+        } else {
+            station.to_string()
+        }
+    };
+
     // Questions preempt fixes.
-    if let Some((id, _)) = open.iter().find(|(_, c)| feedback_is_question(c)) {
+    if let Some((id, c)) = open.iter().find(|(_, c)| feedback_is_question(c)) {
         return Ok(Some(RunAction::FeedbackQuestion {
             run: slug.to_string(),
-            station: station.to_string(),
+            station: action_station(c),
             feedback_id: id.clone(),
         }));
     }
@@ -1061,9 +1074,9 @@ fn walk_feedback(store: &StateStore, slug: &str, station: &str) -> Result<Option
         .iter()
         .filter(|(_, c)| !feedback_is_question(c))
         .min_by_key(|(_, c)| feedback_severity_rank(c));
-    Ok(next.map(|(id, _)| RunAction::FixFeedback {
+    Ok(next.map(|(id, c)| RunAction::FixFeedback {
         run: slug.to_string(),
-        station: station.to_string(),
+        station: action_station(c),
         feedback_id: id.clone(),
     }))
 }
@@ -1095,6 +1108,17 @@ fn feedback_is_question(raw: &str) -> bool {
         }
     }
     false
+}
+
+/// The station a feedback doc targets, or empty for a RUN-SCOPE finding (a
+/// closeout / cross-station item that belongs to the run, not one station).
+fn feedback_station(raw: &str) -> String {
+    for line in raw.lines() {
+        if let Some(rest) = line.trim().strip_prefix("station:") {
+            return rest.trim().trim_matches('"').to_string();
+        }
+    }
+    String::new()
 }
 
 /// Whether a feedback document is still open (no terminal status line).

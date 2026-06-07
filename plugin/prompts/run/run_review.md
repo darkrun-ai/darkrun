@@ -14,7 +14,7 @@ Dispatch the run reviewers{% if reviewers %} ({% for r in reviewers %}`{{ r }}`{
 - **Regression** — did building this break a flow no single station owned? What collateral damage is there to untouched behaviour?
 - **Security / readiness** — the attacker's view of the *whole* result, and whether it's genuinely fit to ship.
 
-A run reviewer that clears records its sign-off with **`darkrun_run_review_stamp`** (its `role`) — that stamps only its role without advancing, so the parallel pass never contends on the tick. A run reviewer that finds a cross-station problem files it with `darkrun_feedback_create` **instead of** stamping — the finding routes back as a fix, and the run holds here until it's clean. You call `darkrun_tick` once, after every run reviewer returns.
+A run reviewer that clears records its sign-off with **`darkrun_run_review_stamp`** (its `role`) — that stamps only its role without advancing, so the parallel pass never contends on the tick. A run reviewer that finds a cross-station problem files it with `darkrun_feedback_create` **instead of** stamping. A whole-run finding belongs to no single station — file it **run-scope** by passing `station: "_run"`; its fix lands on run-main rather than a station branch. The finding routes back as a fix, and the run holds here until it's clean. You call `darkrun_tick` once, after every run reviewer returns.
 
 ## Done when
 

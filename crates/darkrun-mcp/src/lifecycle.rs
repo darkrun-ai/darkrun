@@ -98,18 +98,38 @@ pub fn unit_worktree_path(repo_root: &Path, slug: &str, station: &str, unit: &st
 /// fresh unit. Fixes live in a `fixes/` namespace parallel to the stations for
 /// the same directory/file ref reason as [`unit_branch`].
 pub fn fix_branch(slug: &str, station: &str, fix_id: &str) -> String {
-    format!("{BRANCH_PREFIX}/{slug}/fixes/{station}/{fix_id}")
+    format!("{BRANCH_PREFIX}/{slug}/fixes/{}/{fix_id}", fix_station_component(station))
+}
+
+/// The station sentinel for a RUN-SCOPE feedback — a closeout / cross-station
+/// finding that belongs to the run as a whole, fixed on run-main rather than a
+/// station branch.
+pub const RUN_SCOPE_STATION: &str = "_run";
+
+/// Whether `station` denotes a run-scope fix (the `_run` sentinel, or empty).
+pub fn is_run_scope_station(station: &str) -> bool {
+    station.is_empty() || station == RUN_SCOPE_STATION
+}
+
+/// The path component for a fix's station — the station slug, or `_run` for a
+/// run-scope feedback.
+fn fix_station_component(station: &str) -> &str {
+    if is_run_scope_station(station) {
+        RUN_SCOPE_STATION
+    } else {
+        station
+    }
 }
 
 /// The on-disk worktree path for a fix's branch:
-/// `<repo>/.darkrun/worktrees/<slug>/fixes/<station>/<id>`.
+/// `<repo>/.darkrun/worktrees/<slug>/fixes/<station|_run>/<id>`.
 pub fn fix_worktree_path(repo_root: &Path, slug: &str, station: &str, fix_id: &str) -> PathBuf {
     repo_root
         .join(".darkrun")
         .join("worktrees")
         .join(slug)
         .join("fixes")
-        .join(station)
+        .join(fix_station_component(station))
         .join(fix_id)
 }
 
@@ -369,18 +389,24 @@ pub fn enter_fix(store: &StateStore, slug: &str, station: &str, fix_id: &str) ->
     let Some((git, root)) = open_git(store) else {
         return LifecycleOutcome::noop("not a git repo");
     };
-    let parent = station_branch(slug, station);
+    // A run-scope fix (`_run`) forks off run-main; a station fix off its branch.
+    let parent = if is_run_scope_station(station) {
+        run_main_branch(slug)
+    } else {
+        station_branch(slug, station)
+    };
     if !git.branch_exists(&parent).unwrap_or(false) {
         return LifecycleOutcome::noop(format!("{parent} unavailable; cannot enter fix"));
     }
     let branch = fix_branch(slug, station, fix_id);
     let wt_path = fix_worktree_path(&root, slug, station, fix_id);
+    let label = fix_station_component(station);
     fork_and_worktree(
         &git,
         &parent,
         &branch,
         &wt_path,
-        &format!("{slug}-{station}-fix-{fix_id}"),
+        &format!("{slug}-{label}-fix-{fix_id}"),
     )
 }
 
@@ -440,8 +466,15 @@ pub fn land_fix(store: &StateStore, slug: &str, station: &str, fix_id: &str) -> 
         return LifecycleOutcome::noop("not a git repo");
     };
     let branch = fix_branch(slug, station, fix_id);
-    let parent = station_branch(slug, station);
+    // A RUN-SCOPE feedback (the `_run` sentinel) is a run-level / closeout
+    // finding — its fix lands on run-main, not a station branch.
+    let parent = if is_run_scope_station(station) {
+        run_main_branch(slug)
+    } else {
+        station_branch(slug, station)
+    };
     let wt_path = fix_worktree_path(&root, slug, station, fix_id);
+    let label = fix_station_component(station);
     land_child(
         store,
         &git,
@@ -450,7 +483,7 @@ pub fn land_fix(store: &StateStore, slug: &str, station: &str, fix_id: &str) -> 
         &parent,
         &branch,
         &wt_path,
-        &format!("{slug}-{station}-fix-{fix_id}"),
+        &format!("{slug}-{label}-fix-{fix_id}"),
         &format!("darkrun: land fix '{fix_id}' -> {parent}"),
     )
 }
@@ -1148,6 +1181,31 @@ mod tests {
             .output()
             .unwrap();
         assert!(on_station.status.success(), "the fix should land on the station branch");
+    }
+
+    /// Gap #2: a RUN-SCOPE fix (`_run`) forks off run-main and lands back onto
+    /// run-main — not a station branch.
+    #[test]
+    fn run_scope_fix_forks_and_lands_on_run_main() {
+        let (_d, root, store) = init_repo();
+        ensure_run_main(&store, "r");
+
+        let enter = enter_fix(&store, "r", "_run", "fb-9");
+        assert!(enter.performed, "enter_fix run-scope should perform: {enter:?}");
+        assert_eq!(enter.note.as_deref(), Some("darkrun/r/fixes/_run/fb-9"));
+        let wt = fix_worktree_path(&root, "r", "_run", "fb-9");
+        assert!(wt.exists(), "run-scope fix worktree exists");
+
+        commit_in(&wt, "runfix.txt", "run repair\n", "fix fb-9");
+        let land = land_fix(&store, "r", "_run", "fb-9");
+        assert!(land.performed, "land_fix run-scope should perform: {land:?}");
+
+        // The fix landed on RUN-MAIN, not any station branch.
+        let on_run_main = Command::new("git")
+            .arg("-C").arg(&root)
+            .args(["show", "darkrun/r/main:runfix.txt"])
+            .output().unwrap();
+        assert!(on_run_main.status.success(), "the run-scope fix lands on run-main");
     }
 
     #[test]
