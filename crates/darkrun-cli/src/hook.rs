@@ -465,6 +465,18 @@ mod tests {
         })
     }
 
+    #[test]
+    fn guards_ignore_a_write_with_no_file_path() {
+        let tmp = TempDir::new().unwrap();
+        let (_store, _slug) = with_active_run(tmp.path());
+        // A Write event whose tool_input carries no file path.
+        let ev = write_event("", "body");
+        // The pre-execution workflow guard doesn't gate a pathless write.
+        assert!(guard_workflow_fields(&ev, tmp.path()).is_none());
+        // The post-write advisory guard (with an active run present) also bails.
+        assert!(workflow_guard(&ev, tmp.path()).is_none());
+    }
+
     // ── run(): every handler drains stdin and never panics ───────────────
 
     #[test]
