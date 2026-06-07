@@ -1,0 +1,6 @@
+# `tarpaulin_include` is a cfg set by cargo-tarpaulin during coverage runs; the
+# codebase uses `#[cfg(not(tarpaulin_include))]` to exclude irreducible-I/O paths
+# from coverage. Declare it as a known cfg so rustc's `unexpected_cfgs` lint (and
+# thus `clippy -D warnings`) doesn't flag it. Applies to local + CI builds alike.
+[build]
+rustflags = ["--check-cfg=cfg(tarpaulin_include)"]
