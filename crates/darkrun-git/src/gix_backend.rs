@@ -160,8 +160,29 @@ impl GitBackend for GixBackend {
         Err(GitError::Unsupported("remove_worktree"))
     }
 
-    fn create_branch(&self, _name: &str, _from_ref: &str) -> Result<()> {
-        Err(GitError::Unsupported("create_branch"))
+    fn create_branch(&self, name: &str, from_ref: &str) -> Result<()> {
+        // Idempotent: a no-op when the branch already exists (matches the other
+        // backends). Does not check the branch out.
+        if self.branch_exists(name)? {
+            return Ok(());
+        }
+        let repo = self.repo()?;
+        let target = repo
+            .rev_parse_single(from_ref)
+            .map_err(gix_err)?
+            .object()
+            .map_err(gix_err)?
+            .peel_to_commit()
+            .map_err(gix_err)?
+            .id;
+        repo.reference(
+            format!("refs/heads/{name}"),
+            target,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            format!("branch: created from {from_ref}"),
+        )
+        .map_err(gix_err)?;
+        Ok(())
     }
 
     fn is_ancestor(&self, maybe_ancestor: &str, descendant: &str) -> Result<bool> {

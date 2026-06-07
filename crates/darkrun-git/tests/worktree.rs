@@ -1952,3 +1952,19 @@ fn gix_list_worktrees_agrees() {
     assert_eq!(gx_branches, lib_branches, "gix and libgit2 agree on the worktree branch set");
     cleanup(&root, &info.path);
 }
+
+/// gix create_branch creates a branch at the ref and is idempotent.
+#[test]
+fn gix_create_branch_agrees() {
+    let (_d, root) = init_repo();
+    let head = git_out(&root, &["rev-parse", "HEAD"]);
+    let gx = Git::open_gix(&root).unwrap();
+
+    gx.create_branch("gixmade/feature", "HEAD").unwrap();
+    assert!(gx.branch_exists("gixmade/feature").unwrap());
+    assert!(Git::open(&root).unwrap().branch_exists("gixmade/feature").unwrap());
+    assert_eq!(git_out(&root, &["rev-parse", "gixmade/feature"]), head, "points at HEAD");
+
+    // Idempotent: a second create is a clean no-op.
+    gx.create_branch("gixmade/feature", "HEAD").unwrap();
+}
