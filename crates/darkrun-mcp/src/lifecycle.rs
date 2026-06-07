@@ -771,6 +771,16 @@ pub fn sync_branch_downstream(store: &StateStore, slug: &str, station: &str) -> 
 
     let mut performed = false;
 
+    // Pretick remote reconciliation (#5): when an `origin` remote is configured,
+    // FETCH it so teammate work pushed to the default branch can be folded into
+    // the run before any land — without this, run-main silently falls behind
+    // origin and accumulates non-fast-forward divergence. Best-effort: offline /
+    // no-remote simply skips, and the origin merge below is debt-gated.
+    let has_origin = git.remote_url("origin").ok().flatten().is_some();
+    if has_origin {
+        let _ = git.fetch(&root, &base);
+    }
+
     // Step 1: base -> run-main (only when both exist and there's debt).
     if git.branch_exists(&run_main).unwrap_or(false)
         && git.branch_exists(&base).unwrap_or(false)
@@ -795,6 +805,35 @@ pub fn sync_branch_downstream(store: &StateStore, slug: &str, station: &str) -> 
             };
         }
         performed |= out.performed;
+    }
+
+    // Step 1b: origin/<base> -> run-main — incorporate work other clones pushed
+    // to the default branch (the predecessor's `run-main <- origin/<default>`
+    // reconciliation). Debt-gated; the merge resolves `origin/<base>` from the
+    // tracking ref the fetch above advanced, and no-ops when it's absent.
+    if has_origin && git.branch_exists(&run_main).unwrap_or(false) {
+        let origin_base = format!("origin/{base}");
+        if !has_no_merge_debt(&git, &origin_base, &run_main) {
+            let out = merge_into_branch(
+                store,
+                &git,
+                &root,
+                &run_main,
+                &origin_base,
+                slug,
+                &format!("darkrun: sync {origin_base} -> {run_main} (pre-land)"),
+            );
+            if out.has_conflicts() {
+                return LifecycleOutcome {
+                    performed,
+                    note: out.note,
+                    conflict_paths: out.conflict_paths,
+                    conflict_branch: Some(run_main.clone()),
+                    conflict_step: Some(SyncConflictStep::MainlineToRunMain),
+                };
+            }
+            performed |= out.performed;
+        }
     }
 
     // Step 2: run-main -> station branch (only when both exist and there's debt).
@@ -1404,6 +1443,46 @@ mod tests {
             .args(["cat-file", "-e", "darkrun/r/build:base-new.txt"])
             .status().unwrap().success();
         assert!(reachable, "base advance should reach the station branch after sync");
+    }
+
+    /// Gap #5: the pre-tick sync FETCHES origin and folds work another clone
+    /// pushed to the default branch into run-main — without it, run-main silently
+    /// falls behind origin.
+    #[test]
+    fn sync_downstream_pulls_origin_into_run_main() {
+        let (_d, root, store) = init_repo();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success(), "git {args:?}");
+        };
+        // A bare origin seeded from this repo's `main`.
+        let bare = TempDir::new().unwrap();
+        assert!(Command::new("git").args(["init", "-q", "--bare", &bare.path().to_string_lossy()]).status().unwrap().success());
+        git(&["remote", "add", "origin", &bare.path().to_string_lossy()]);
+        git(&["push", "-q", "origin", "main"]);
+
+        // The run forks run-main + a station off the current base.
+        ensure_run_main(&store, "r");
+        enter_station(&store, "r", "build");
+
+        // Another clone pushes a new commit to origin/main (teammate work).
+        let other = TempDir::new().unwrap();
+        let o = other.path().join("o");
+        assert!(Command::new("git").args(["clone", "-q", &bare.path().to_string_lossy(), &o.to_string_lossy()]).status().unwrap().success());
+        let og = |args: &[&str]| { assert!(Command::new("git").arg("-C").arg(&o).args(args).status().unwrap().success(), "git {args:?}"); };
+        og(&["config", "user.email", "o@x.io"]); og(&["config", "user.name", "O"]);
+        std::fs::write(o.join("teammate.txt"), "pushed\n").unwrap();
+        og(&["add", "-A"]); og(&["commit", "-qm", "teammate work"]); og(&["push", "-q", "origin", "main"]);
+
+        // Sync fetches origin and merges origin/main into run-main → the teammate
+        // file becomes reachable from run-main (and the station) even though the
+        // LOCAL `main` was never advanced.
+        let out = sync_branch_downstream(&store, "r", "build");
+        assert!(out.conflict_step.is_none(), "non-conflicting origin sync: {out:?}");
+        let reachable = Command::new("git")
+            .arg("-C").arg(&root)
+            .args(["cat-file", "-e", "darkrun/r/main:teammate.txt"])
+            .status().unwrap().success();
+        assert!(reachable, "origin/main's teammate commit should reach run-main after sync");
     }
 
     #[test]
