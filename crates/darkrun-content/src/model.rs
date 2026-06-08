@@ -201,9 +201,16 @@ pub struct Station {
 }
 
 impl Station {
-    /// The station's slug.
+    /// The station's slug — the fixed FSSBPH position, used for routing/URLs.
     pub fn name(&self) -> &str {
         &self.frontmatter.name
+    }
+
+    /// The station's domain-facing display name (e.g. legal → `Intake`),
+    /// falling back to the position slug when no `label` is declared.
+    /// Display-only; never use this for routing or lookup.
+    pub fn label(&self) -> &str {
+        self.frontmatter.label.as_deref().unwrap_or(self.name())
     }
 }
 
