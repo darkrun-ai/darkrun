@@ -25,7 +25,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Run, RunFrontmatter, Station, StationPhase, Status, Unit, UnitFrontmatter};
+use crate::domain::{
+    Mode, Run, RunFrontmatter, Station, StationPhase, Status, Unit, UnitFrontmatter,
+};
 use crate::error::{CoreError, Result};
 use crate::frontmatter;
 
@@ -48,26 +50,13 @@ pub struct RunState {
     /// existing runs and full-size runs need no plan recorded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plan: Vec<String>,
-    /// When `true`, every checkpoint in this run is treated as `auto` — the
-    /// right-sized fast path for small work, where the operator opted out of
-    /// per-station gates.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub auto_gates: bool,
-    /// When `true`, this run is in DISCRETE mode: each station's checkpoint
-    /// resolves on a human PR/MR merge rather than in-process. Snapshotted at
-    /// run start from the mode so the (pure) cursor can resolve the External
-    /// gate without re-parsing the mode string. (The discrete gate-resolution
-    /// itself is a later phase; the branch hierarchy is universal regardless.)
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub discrete: bool,
-    /// When `true`, this run is in DISCRETE-HYBRID mode: it runs continuous
-    /// (in-process gate resolution) within stations EXCEPT those whose factory
-    /// checkpoint is `external`, which open a per-station draft PR/MR that the
-    /// human merges. Snapshotted at run start alongside `discrete` so the (pure)
-    /// cursor resolves each station's gate without re-parsing the mode string.
-    /// Only meaningful when `discrete` is also set.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub discrete_hybrid: bool,
+    /// The run's global review mode (team/solo/dark), snapshotted at run start so
+    /// the (pure) cursor resolves every station's gate ([`Mode::gate`]) without
+    /// re-reading the run frontmatter. `team` opens a per-station PR the human
+    /// merges; `solo` asks for local review; `dark` runs without review stops.
+    /// The branch hierarchy is universal regardless of mode.
+    #[serde(default)]
+    pub mode: Mode,
     /// The base branch this run's `darkrun/<slug>/main` forked from, snapshotted
     /// at run start so the run-completion land has a stable target even if
     /// `settings.yml` changes mid-run. Absent on legacy state (resolved live).
@@ -727,7 +716,6 @@ mod tests {
             phase,
             elaborated: false,
             checkpoint: None,
-            chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
             pr_status: None,
@@ -910,7 +898,7 @@ mod tests {
         // new fields taking their defaults.
         let legacy = r#"{"factory":"software","active_station":"build","stations":{}}"#;
         let state: RunState = serde_json::from_str(legacy).expect("legacy deserializes");
-        assert!(!state.discrete, "discrete defaults to false");
+        assert_eq!(state.mode, Mode::Solo, "mode defaults to solo");
         assert!(state.base_branch.is_none(), "base_branch defaults to None");
 
         // A station record without `branch` deserializes with branch = None.
@@ -920,7 +908,7 @@ mod tests {
 
         // Round-trip the new fields when set.
         let mut state = RunState {
-            discrete: true,
+            mode: Mode::Team,
             base_branch: Some("trunk".into()),
             ..Default::default()
         };
@@ -933,17 +921,16 @@ mod tests {
         }
         let json = serde_json::to_string(&state).unwrap();
         let back: RunState = serde_json::from_str(&json).unwrap();
-        assert!(back.discrete);
+        assert_eq!(back.mode, Mode::Team);
         assert_eq!(back.base_branch.as_deref(), Some("trunk"));
         assert_eq!(
             back.stations.get("build").unwrap().branch.as_deref(),
             Some("darkrun/r/build")
         );
 
-        // Defaults are skipped on the wire (no migration churn for existing state).
+        // Optional defaults are skipped on the wire (no migration churn).
         let plain = RunState::default();
         let plain_json = serde_json::to_string(&plain).unwrap();
-        assert!(!plain_json.contains("discrete"));
         assert!(!plain_json.contains("base_branch"));
     }
 

@@ -6,7 +6,6 @@ kills: drafting-defects
 explorers: [clause_library]
 workers: [clause_drafter, redline_challenger, draft_reconciler]
 reviewers: [drafting_reviewer]
-checkpoint: ask
 locked_artifact: draft
 inputs: [matter.md, terms.md, structure.md]
 ---

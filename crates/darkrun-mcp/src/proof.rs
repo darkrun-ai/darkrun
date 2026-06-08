@@ -296,6 +296,7 @@ pub fn station_proof_markdown(store: &StateStore, slug: &str, station: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use darkrun_core::domain::Mode;
     use crate::position::run_start;
     use darkrun_api::proof::{AuditResult, BenchProof, WebProof};
     use tempfile::tempdir;
@@ -307,7 +308,7 @@ mod tests {
     }
 
     fn started(store: &StateStore, slug: &str) {
-        run_start(store, slug, "software", None, "continuous").unwrap();
+        run_start(store, slug, "software", None, Mode::Solo, "full").unwrap();
     }
 
     #[test]

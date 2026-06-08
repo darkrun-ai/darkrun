@@ -33,8 +33,8 @@
 
 use chrono::Utc;
 use darkrun_core::domain::{
-    Checkpoint, CheckpointKind, CheckpointOutcome, IterationResult, PrStatus, Run, RunFrontmatter,
-    SealKind, Station, StationPhase, Status, Unit,
+    Checkpoint, CheckpointKind, CheckpointOutcome, IterationResult, Mode, PrStatus, Run,
+    RunFrontmatter, SealKind, Station, StationPhase, Status, Unit,
 };
 use darkrun_core::{RunState, StateStore};
 use darkrun_git::{Git, GitBackend};
@@ -291,13 +291,10 @@ pub struct PromptContext {
     /// What the active station eliminates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kills: Option<String>,
-    /// The checkpoint gate kind (`auto`/`ask`/`external`/`await`).
+    /// The checkpoint gate kind (`auto`/`ask`/`external`), derived from the run's
+    /// global mode — `team` → external, `solo` → ask, `dark` → auto.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<CheckpointKind>,
-    /// The alternative gate paths the operator may pick for a compound
-    /// checkpoint (snake_case tokens). Empty → a single fixed gate.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub checkpoint_options: Vec<String>,
     /// The durable artifact the station locks on completion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locked_artifact: Option<String>,
@@ -779,34 +776,6 @@ fn next_in_plan(factory: &FactoryDef, state: &RunState, station: &str) -> Option
     plan.get(idx + 1).cloned()
 }
 
-/// How a run resolves its per-station Checkpoint gates — the DISCRETE axis,
-/// orthogonal to the right-sizing plan. Derived from the run's `mode` at start
-/// and snapshotted into `RunState` so the (pure) cursor never re-parses the mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiscreteMode {
-    /// Non-discrete: every station's gate resolves in-process (auto/ask/await).
-    /// The station branch lands onto run-main the moment its gate clears.
-    Off,
-    /// Fully discrete: EVERY station opens a per-station draft PR/MR
-    /// (`darkrun/<slug>/<station>` -> `darkrun/<slug>/main`) and its gate
-    /// resolves when a human merges that PR. No station lands in-process.
-    Full,
-    /// Discrete-hybrid: continuous within stations EXCEPT those whose factory
-    /// checkpoint is `external` — those open a per-station PR the human merges.
-    Hybrid,
-}
-
-/// Resolve the [`DiscreteMode`] for a run-sizing `mode` string. `discrete` /
-/// `discrete-hybrid` (any `-`/`_`/space spelling) opt into the PR-merge gate;
-/// every other mode is non-discrete.
-pub fn resolve_discrete(mode: &str) -> DiscreteMode {
-    match mode.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
-        "discrete" => DiscreteMode::Full,
-        "discrete_hybrid" => DiscreteMode::Hybrid,
-        _ => DiscreteMode::Off,
-    }
-}
-
 /// Mark a station's Spec as elaborated-with-the-operator, clearing the
 /// collaboration hold so the Spec phase can advance to Review. Idempotent.
 pub fn elaborate_seal(store: &StateStore, slug: &str, station: &str) -> Result<()> {
@@ -823,53 +792,6 @@ pub fn elaborate_seal(store: &StateStore, slug: &str, station: &str) -> Result<(
     }
     store.write_state(slug, &state)?;
     Ok(())
-}
-
-/// Record the operator's chosen gate path for a compound checkpoint. The kind
-/// must be one the station offers in `checkpoint_options`. Re-derives nothing;
-/// the next tick routes the checkpoint to the chosen kind.
-pub fn choose_checkpoint(
-    store: &StateStore,
-    slug: &str,
-    station: &str,
-    kind: CheckpointKind,
-) -> Result<()> {
-    let run = store.read_run(slug)?;
-    let factory = resolve_factory_for(store, &run.frontmatter.factory)
-        .ok_or_else(|| McpError::UnknownFactory(run.frontmatter.factory.clone()))?;
-    let def = factory
-        .station(station)
-        .ok_or_else(|| McpError::UnknownStation(station.to_string()))?;
-    if !def.checkpoint_options.contains(&kind) {
-        return Err(McpError::InvalidInput(format!(
-            "station `{station}` does not offer the `{}` gate path (offers: {:?})",
-            checkpoint_kind_str(kind),
-            def.checkpoint_options
-        )));
-    }
-    let mut state = store
-        .read_state(slug)?
-        .ok_or_else(|| McpError::Core(darkrun_core::CoreError::RunNotFound(slug.to_string())))?;
-    match state.stations.get_mut(station) {
-        Some(st) => st.chosen_checkpoint = Some(kind),
-        None => {
-            return Err(McpError::InvalidInput(format!(
-                "station `{station}` is not active; cannot choose its gate"
-            )))
-        }
-    }
-    store.write_state(slug, &state)?;
-    Ok(())
-}
-
-/// The snake_case token for a checkpoint kind.
-fn checkpoint_kind_str(kind: CheckpointKind) -> &'static str {
-    match kind {
-        CheckpointKind::Auto => "auto",
-        CheckpointKind::Ask => "ask",
-        CheckpointKind::External => "external",
-        CheckpointKind::Await => "await",
-    }
 }
 
 /// Stamp one whole-Run reviewer's sign-off in the run-level review — without
@@ -938,19 +860,17 @@ fn effective_station_reviewers(
 }
 
 /// The run-level reviewers that actually fire for this run — run-level **mode
-/// shaping** (C5). A right-sized run (`auto_gates` — the quick/bugfix/refactor
-/// fast path) has a collapsed plan with no cross-station seams to audit, so the
-/// whole-run review is skipped; a full-size run (continuous/discrete/autopilot)
-/// keeps every declared run reviewer. This is the run-level twin of the
-/// per-station gate shaping (`derived_station_phase` trims the station user gate
-/// under autopilot). The final seal gate is honored regardless of mode, so the
-/// operator's last say is never shaped away.
+/// shaping** (C5). A `dark` run is "on the loop": the operator pre-elaborated up
+/// front and the system never stops for review, so the whole-run review is
+/// skipped. `team`/`solo` keep every declared run reviewer — the cross-station
+/// audit of the integrated result before the run seals. The final seal gate is
+/// honored regardless of mode, so the operator's last say is never shaped away.
 fn effective_run_reviewers(
     factory: &FactoryDef,
     state: &RunState,
     surface: Option<darkrun_core::domain::Surface>,
 ) -> Vec<String> {
-    if state.auto_gates {
+    if state.mode == Mode::Dark {
         return Vec::new();
     }
     // E6: drop a run reviewer whose surface scope doesn't match the run's
@@ -968,82 +888,39 @@ fn effective_run_reviewers(
         .collect()
 }
 
-/// Whether a run is in the dedicated **collaborative** mode — the one that wants
-/// the operator in the loop *during elaboration*, enforced by a hard Spec hold.
-/// Only this explicit mode gates; `continuous`/`discrete`/`autopilot`/`quick`
-/// keep the linear Spec→Review progression untouched. (Operator decision: the
-/// backpressure is opt-in via mode rather than the continuous default.)
-pub fn collaborative_mode(mode: &str) -> bool {
-    matches!(mode.trim().to_ascii_lowercase().as_str(), "collaborative" | "collab")
+/// A station's EFFECTIVE Checkpoint kind — now a pure function of the run's
+/// global [`Mode`]. There are no per-station gate settings: `team` → every
+/// station opens an external PR the human merges, `solo` → every station asks the
+/// local operator, `dark` → every station auto-advances once reviews pass.
+fn effective_checkpoint_kind(state: &RunState) -> CheckpointKind {
+    state.mode.gate()
 }
 
-/// Resolve a station's EFFECTIVE Checkpoint kind for a run — the single place
-/// the gate axes compose, so the cursor and every gate-aware caller agree.
+/// Resolve a right-sizing `size` into a station plan — the right-sizing pass at
+/// run start. Orthogonal to [`Mode`] (which decides gating); the agent picks the
+/// size from the problem during pre-elaboration.
 ///
-/// Precedence:
-/// 1. `auto_gates` (a right-sized fast-path run) downgrades every gate to `Auto`.
-/// 2. Otherwise the DISCRETE axis applies:
-///    - [`RunState::discrete`] without `discrete_hybrid` → `External` for EVERY
-///      station (full discrete: each station gets a PR the human merges).
-///    - `discrete_hybrid` → the factory kind, so only stations the factory marks
-///      `external` open a PR; the rest resolve in-process as declared.
-/// 3. Plain runs use the factory-declared kind.
-fn effective_checkpoint_kind(state: &RunState, def: &crate::factory::StationDef) -> CheckpointKind {
-    if state.auto_gates {
-        return CheckpointKind::Auto;
-    }
-    if state.discrete && !state.discrete_hybrid {
-        // Full discrete: every station resolves on a human PR merge.
-        return CheckpointKind::External;
-    }
-    // Compound gate: if the operator picked an offered path, honour it; else the
-    // declared default. (Hybrid/plain runs both defer to the declared kind.)
-    if !def.checkpoint_options.is_empty() {
-        if let Some(chosen) = state
-            .stations
-            .get(&def.name)
-            .and_then(|st| st.chosen_checkpoint)
-        {
-            if def.checkpoint_options.contains(&chosen) {
-                return chosen;
-            }
-        }
-    }
-    def.checkpoint
-}
-
-/// Resolve a run-sizing `mode` into `(station_plan, auto_gates)` — the
-/// right-sizing pass at run start.
-///
-/// The plan is the factory's stations filtered to those the mode keeps, in
-/// factory order. `full`/`standard`/`continuous`/`discrete`/`discrete-hybrid`/
-/// unknown → the full plan (empty sentinel) with the factory's own gates. A mode
-/// whose kept stations don't exist in the factory falls back to the full plan,
-/// so right-sizing can never strand a run with no stations. Right-sized modes
-/// run with `auto` gates; discrete modes keep the factory's gates (their gate
-/// resolution is the DISCRETE axis, resolved separately by [`resolve_discrete`]).
-fn resolve_template(mode: &str, factory: &FactoryDef) -> (Vec<String>, bool) {
-    let keep: &[&str] = match mode.trim().to_ascii_lowercase().as_str() {
+/// The plan is the factory's stations filtered to those the size keeps, in
+/// factory order. `full`/`standard`/unknown → the full plan (empty sentinel). A
+/// size whose kept stations don't exist in the factory falls back to the full
+/// plan, so right-sizing can never strand a run with no stations.
+fn resolve_size(size: &str, factory: &FactoryDef) -> Vec<String> {
+    let keep: &[&str] = match size.trim().to_ascii_lowercase().as_str() {
         // Small work: build + prove only — skip framing/design and hardening.
         "quick" => &["build", "prove"],
         // A localized fix: keep the spec for the regression, build, prove.
         "bugfix" => &["specify", "build", "prove"],
         // Structural change: keep the design pressure-test, build, prove.
         "refactor" => &["shape", "build", "prove"],
-        // Full traversal with the factory's own gates (continuous/discrete/…).
-        _ => return (Vec::new(), false),
+        // Full traversal.
+        _ => return Vec::new(),
     };
-    let plan: Vec<String> = factory
+    factory
         .stations
         .iter()
         .map(|s| s.name.clone())
         .filter(|name| keep.contains(&name.as_str()))
-        .collect();
-    if plan.is_empty() {
-        (Vec::new(), false)
-    } else {
-        (plan, true)
-    }
+        .collect()
 }
 
 /// Track B — feedback. Resolves the single most-urgent open item:
@@ -1327,7 +1204,7 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
     // The phase comes from the SHARED pure derivation over on-disk unit signals
     // (the same `darkrun_core::derive` the HTTP browse and website run); until the
     // engine stamps those signals it falls back to the recorded/imperative phase.
-    let autopilot = run.frontmatter.mode.contains("auto");
+    let autopilot = run.frontmatter.mode == Mode::Dark;
     // A held USER gate is AUTHORITATIVE: once the cursor parks at the
     // pre-execution operator gate, the derived signals (which know nothing of the
     // gate) must not skip it back into Manufacture. The gate is cleared only by
@@ -1456,7 +1333,7 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
             station: station.clone(),
         },
         StationPhase::Checkpoint => {
-            let kind = effective_checkpoint_kind(&state, def);
+            let kind = effective_checkpoint_kind(&state);
             // An `external` gate hands off to an external review surface (a
             // PR/MR) rather than a local prompt — a distinct action so the
             // agent gets focused "open/annotate the review" instructions. In
@@ -1695,9 +1572,8 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
                 ctx.label = Some(def.label.clone().unwrap_or_else(|| station.to_string()));
                 ctx.kills = Some(def.kills.clone());
                 ctx.locked_artifact = Some(def.artifact.clone());
-                ctx.kind = Some(def.checkpoint);
-                ctx.checkpoint_options =
-                    def.checkpoint_options.iter().map(|k| checkpoint_kind_str(*k).to_string()).collect();
+                // The gate is global: every station resolves the run mode's kind.
+                ctx.kind = Some(run.frontmatter.mode.gate());
                 ctx.explorers = def.explorers.clone();
                 ctx.workers = def.workers.clone();
                 ctx.reviewers = def.reviewers.clone();
@@ -1798,10 +1674,11 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
             }
         }
         RunAction::Spec { station: sstation, .. } => {
-            // Collaboration backpressure flag: collaborative mode + the station's
-            // Spec not yet elaborated with the operator.
+            // Collaboration backpressure flag: in `team`/`solo` every station holds
+            // its Spec for operator elaboration; `dark` pre-elaborates once up
+            // front and skips the per-station hold.
             if let Ok(run) = store.read_run(slug) {
-                if collaborative_mode(&run.frontmatter.mode) {
+                if run.frontmatter.mode.holds_each_station() {
                     let elaborated = store
                         .read_state(slug)
                         .ok()
@@ -1945,7 +1822,7 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
         Some(s) => s,
         None => return Ok(()),
     };
-    if !state.discrete {
+    if !state.mode.opens_station_pr() {
         return Ok(());
     }
     let station = match current_station(&factory, &state) {
@@ -1957,11 +1834,10 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
     if station_phase(&state, &station) != StationPhase::Checkpoint {
         return Ok(());
     }
-    let def = match factory.station(&station) {
-        Some(d) => d,
-        None => return Ok(()),
-    };
-    if !matches!(effective_checkpoint_kind(&state, def), CheckpointKind::External) {
+    if factory.station(&station).is_none() {
+        return Ok(());
+    }
+    if !matches!(effective_checkpoint_kind(&state), CheckpointKind::External) {
         return Ok(());
     }
 
@@ -2228,7 +2104,7 @@ fn sync_downstream_before_land(store: &StateStore, slug: &str) {
     };
     // Discrete runs land via the human PR merge, not in-process — the sync only
     // matters for the in-process land path.
-    if state.discrete {
+    if state.mode.opens_station_pr() {
         return;
     }
     if let Some(station) = current_station(&factory, &state) {
@@ -2281,13 +2157,13 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
                 entered_station = Some(station.clone());
             }
             st.status = Status::InProgress;
-            // Collaboration backpressure (C1): in the dedicated `collaborative`
-            // mode the Spec phase HOLDS until the operator has been involved
+            // Collaboration backpressure (C1): in `team`/`solo` the Spec phase
+            // HOLDS at every station until the operator has been involved
             // (`darkrun_elaborate_seal`) — the agent can't author the spec solo
             // and skip the human. A stalled, never-sealed Spec is caught by the
-            // deadlock guard and escalated to the operator. Every other mode
-            // keeps the linear Spec→Review progression.
-            if collaborative_mode(&run.frontmatter.mode) && !st.elaborated {
+            // deadlock guard and escalated to the operator. `dark` pre-elaborates
+            // once up front and keeps the linear Spec→Review progression.
+            if run.frontmatter.mode.holds_each_station() && !st.elaborated {
                 st.phase = StationPhase::Spec;
             } else {
                 st.phase = StationPhase::Review;
@@ -2298,14 +2174,14 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
             state.active_station = station.clone();
         }
         RunAction::Review { station, .. } => {
-            // After the review work lands, an INTERACTIVE station holds at the
-            // pre-execution USER gate so the operator can review the spec/brief
-            // before any Unit is manufactured; an `auto` station (autopilot, or a
-            // station whose checkpoint is `auto`) advances straight into
-            // Manufacture. The gate is cleared by `darkrun_checkpoint_decide`.
+            // After the review work lands, an INTERACTIVE station (team/solo)
+            // holds at the pre-execution USER gate so the operator can review the
+            // spec/brief before any Unit is manufactured; a `dark` run advances
+            // straight into Manufacture (its gate is `auto`). The gate is cleared
+            // by `darkrun_checkpoint_decide`.
             let kind = factory
                 .station(station)
-                .map(|def| effective_checkpoint_kind(&state, def))
+                .map(|_| effective_checkpoint_kind(&state))
                 .unwrap_or(CheckpointKind::Auto);
             let st = ensure_station(&mut state, &factory, station)?;
             st.phase = if matches!(kind, CheckpointKind::Auto) {
@@ -2387,7 +2263,7 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
                 // branch is identical to / already an ancestor of run-main has
                 // nothing to merge, and enqueuing a land would mint an empty
                 // --no-ff commit that triggers the alternating no-op-merge loop.
-                if !state.discrete && station_has_merge_debt(store, slug, station) {
+                if !state.mode.opens_station_pr() && station_has_merge_debt(store, slug, station) {
                     landed_station = Some(station.clone());
                 }
             }
@@ -2422,7 +2298,7 @@ fn advance_state(store: &StateStore, slug: &str, action: &RunAction) -> Result<(
     // the auto-completion (not the land) so a no-debt final station still lands
     // the run onto base — #4 only suppresses the empty per-station merge.
     let run_now_complete = auto_completed
-        && !state.discrete
+        && !state.mode.opens_station_pr()
         && current_station(&factory, &state).is_none();
 
     store.write_state(slug, &state)?;
@@ -2556,9 +2432,11 @@ fn ensure_station<'a>(
     station: &str,
 ) -> Result<&'a mut Station> {
     if !state.stations.contains_key(station) {
-        let def = factory
+        // Validate the station exists in the factory before seeding its state.
+        factory
             .station(station)
             .ok_or_else(|| McpError::UnknownStation(station.to_string()))?;
+        let gate = state.mode.gate();
         state.stations.insert(
             station.to_string(),
             Station {
@@ -2567,11 +2445,10 @@ fn ensure_station<'a>(
                 phase: StationPhase::Spec,
                 elaborated: false,
                 checkpoint: Some(Checkpoint {
-                    kind: def.checkpoint,
+                    kind: gate,
                     entered_at: None,
                     outcome: None,
                 }),
-                chosen_checkpoint: None,
                 branch: None,
                 pr_ref: None,
                 pr_status: None,
@@ -2630,19 +2507,20 @@ fn mint_verifier_nonce(st: &mut Station, slug: &str, station: &str, now: &str) {
     }
 }
 
-/// Start a fresh run: write `run.md`, right-size the station plan from `mode`,
+/// Start a fresh run: write `run.md`, right-size the station plan from `size`,
 /// seed `state.json` at the plan's first station in the `Spec` phase, and return
 /// the run slug.
 ///
-/// `mode` selects a [`resolve_template`]: `full`/unknown walks every factory
-/// station with its own gates; `quick`/`bugfix`/`refactor` collapse to a station
-/// subset with `auto` gates.
+/// `mode` is the global review posture (team/solo/dark) — it decides every
+/// station's gate. `size` is the orthogonal right-sizing axis: `full`/unknown
+/// walks every factory station; `quick`/`bugfix`/`refactor` collapse to a subset.
 pub fn run_start(
     store: &StateStore,
     slug: &str,
     factory_name: &str,
     title: Option<String>,
-    mode: &str,
+    mode: Mode,
+    size: &str,
 ) -> Result<Run> {
     let factory = resolve_factory_for(store, factory_name)
         .ok_or_else(|| McpError::UnknownFactory(factory_name.into()))?;
@@ -2650,11 +2528,8 @@ pub fn run_start(
         .first_station()
         .ok_or_else(|| McpError::UnknownFactory(factory_name.into()))?;
 
-    // Right-size: the plan is the mode's station subset (empty = full factory).
-    let (plan, auto_gates) = resolve_template(mode, &factory);
-    // Discrete axis (orthogonal to the plan): does each station's gate resolve
-    // on a human PR/MR merge?
-    let discrete_mode = resolve_discrete(mode);
+    // Right-size: the plan is the size's station subset (empty = full factory).
+    let plan = resolve_size(size, &factory);
     let first_name = plan
         .first()
         .cloned()
@@ -2665,7 +2540,7 @@ pub fn run_start(
     let frontmatter = RunFrontmatter {
         title: title.clone(),
         factory: factory_name.to_string(),
-        mode: mode.to_string(),
+        mode,
         active_station: first_name.clone(),
         status: Status::Active,
         started_at: Some(now.clone()),
@@ -2688,9 +2563,7 @@ pub fn run_start(
         factory: factory_name.to_string(),
         active_station: first_name.clone(),
         plan,
-        auto_gates,
-        discrete: matches!(discrete_mode, DiscreteMode::Full | DiscreteMode::Hybrid),
-        discrete_hybrid: matches!(discrete_mode, DiscreteMode::Hybrid),
+        mode,
         base_branch: Some(base),
         // Stamp the plugin provenance (which build authored the run) and the
         // on-disk schema version (what shape-migrators key on) — versioned
@@ -2783,7 +2656,7 @@ pub fn checkpoint_decide(
         crate::drift::record_station_witnesses(store, slug, &station)?;
         // Non-discrete in-process land of the just-verified station; discrete
         // stations land via the human's PR merge (a later phase).
-        if !state.discrete {
+        if !state.mode.opens_station_pr() {
             // #4: only enqueue the station land when there's merge debt — a
             // no-debt station has nothing to merge, and a land would mint an
             // empty --no-ff commit that triggers the alternating-sync loop.
@@ -2961,7 +2834,7 @@ mod tests {
         let (_d, store) = store();
         // A prior recorded by an earlier run's explorer (project-scoped).
         crate::knowledge::record(&store, "auth-store", "tokens live in the CredentialStore").unwrap();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         let t = run_tick(&store, "r").expect("tick");
         assert!(matches!(t.action, RunAction::Spec { .. }), "first action is Spec");
         let prompt = t.prompt.expect("spec renders a prompt");
@@ -2974,7 +2847,7 @@ mod tests {
     #[test]
     fn run_tick_persists_the_rendered_prompt() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         let t = run_tick(&store, "r").expect("tick");
         let prompt = t.prompt.clone().expect("the first tick renders a prompt");
 
@@ -2994,7 +2867,7 @@ mod tests {
     #[test]
     fn cursor_holds_station_inputs_dropped_until_a_unit_consumes_them() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
         // Drive frame to completion so the run reaches `specify`, which carries
         // `frame.md` forward.
@@ -3029,6 +2902,10 @@ mod tests {
                     checkpoint_decide(&store, "r", true, None).expect("decide");
                 }
                 RunAction::Spec { station, .. } if station == "specify" => break,
+                // Solo holds each station's Spec until the elaboration is sealed.
+                RunAction::Spec { station, .. } => {
+                    elaborate_seal(&store, "r", station).expect("seal");
+                }
                 _ => {}
             }
         }
@@ -3186,7 +3063,7 @@ mod tests {
     #[test]
     fn engine_guards_degrade_cleanly_on_a_ghost_factory_or_corrupt_run() {
         let (_d, store) = store();
-        run_start(&store, "g", "software", None, "continuous").unwrap();
+        run_start(&store, "g", "software", None, Mode::Solo, "full").unwrap();
         // Point the run at a factory that doesn't exist.
         let mut run = store.read_run("g").unwrap();
         run.frontmatter.factory = "ghost-factory".into();
@@ -3203,33 +3080,9 @@ mod tests {
     }
 
     #[test]
-    fn discrete_gate_skips_a_station_whose_effective_kind_is_not_external() {
-        use darkrun_core::domain::{Checkpoint, CheckpointKind, Station, Status};
-        let (_d, store) = store();
-        run_start(&store, "r", "software", None, "discrete-hybrid").unwrap();
-        // Discrete-hybrid: a station whose factory checkpoint is `ask` (frame)
-        // resolves in-process, NOT via a PR — so the discrete gate is a no-op even
-        // when the station sits at its Checkpoint.
-        let mut state = store.read_state("r").unwrap().unwrap();
-        state.discrete = true;
-        state.discrete_hybrid = true;
-        state.stations.insert("frame".into(), Station {
-            station: "frame".into(), status: Status::Active, phase: StationPhase::Checkpoint,
-            elaborated: true, checkpoint: Some(Checkpoint { kind: CheckpointKind::Ask, entered_at: None, outcome: None }),
-            chosen_checkpoint: None, branch: None, pr_ref: None, pr_status: None,
-            pr_ready_at: None, pr_merged_at: None, verifier_nonce: None,
-            started_at: None, completed_at: None,
-        });
-        store.write_state("r", &state).unwrap();
-        resolve_discrete_gate(&store, "r", &MockHosting::new(MergeState::Open)).unwrap();
-        // No PR was opened — the gate didn't engage.
-        assert!(store.read_state("r").unwrap().unwrap().stations["frame"].pr_ref.is_none());
-    }
-
-    #[test]
     fn apply_requested_unit_resets_tolerates_unreadable_units() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         // A corrupt unit doc makes read_units error; the reset pass must no-op.
         let units = store.units_dir("r");
         std::fs::create_dir_all(&units).unwrap();
@@ -3240,7 +3093,7 @@ mod tests {
     #[test]
     fn blocking_a_pre_execution_user_gate_files_spec_feedback_and_holds() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         // Park frame at the pre-execution operator gate.
         let mut state = store.read_state("r").unwrap().unwrap();
         state.stations.get_mut("frame").unwrap().phase = StationPhase::UserGate;
@@ -3261,7 +3114,7 @@ mod tests {
     fn build_prompt_context_threads_wave_handoffs_and_the_factory_model() {
         use darkrun_core::domain::{IterationResult, Unit, UnitIteration, UnitFrontmatter};
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
         // Three wave units, each carrying a most-recent handoff note with a
         // different terminal result (advance / reject / in-flight).
@@ -3308,10 +3161,10 @@ mod tests {
     fn a_run_with_an_unmet_seal_gate_holds_at_pending_seal() {
         use darkrun_core::domain::{SealKind, Status};
         let (_d, store) = store();
-        // Quick mode: plan = [build, prove], auto_gates → the cross-station run
-        // review is skipped, so once both stations lock the cursor goes straight
-        // to the seal decision.
-        run_start(&store, "r", "software", Some("ship".into()), "quick").expect("start");
+        // Dark + quick: plan = [build, prove], and Dark skips the cross-station
+        // run review, so once both stations lock the cursor goes straight to the
+        // seal decision.
+        run_start(&store, "r", "software", Some("ship".into()), Mode::Dark, "quick").expect("start");
 
         let mut state = store.read_state("r").unwrap().unwrap();
         // Only the first planned station is seeded at start; mark every station in
@@ -3347,31 +3200,14 @@ mod tests {
     }
 
     #[test]
-    fn choose_checkpoint_rejects_a_station_not_yet_active() {
-        use darkrun_core::domain::CheckpointKind;
-        let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
-        // `shape` offers the `external` gate path, but a fresh run has only
-        // entered `frame` — `shape` has no recorded state entry yet, so choosing
-        // its gate is rejected as not-active (not an unknown-gate error).
-        let err = choose_checkpoint(&store, "r", "shape", CheckpointKind::External)
-            .expect_err("shape is not active");
-        assert!(
-            format!("{err}").contains("not active"),
-            "expected a not-active rejection, got {err}"
-        );
-    }
-
-    #[test]
-    fn resolve_template_falls_back_when_a_right_sized_plan_keeps_no_real_stations() {
+    fn resolve_size_falls_back_when_a_right_sized_plan_keeps_no_real_stations() {
         use crate::factory::{FactoryDef, StationDef};
-        use darkrun_core::domain::CheckpointKind;
         // A factory that defines neither `build` nor `prove`: the `quick` template
         // keeps [build, prove], which filters to nothing, so right-sizing degrades
         // to the full plan rather than stranding the run with zero stations.
         let only = StationDef {
             name: "frame".into(), label: None, kills: "wrong-thing".into(), artifact: "o.md".into(),
-            checkpoint: CheckpointKind::Auto, checkpoint_options: vec![], explorers: vec![],
+            explorers: vec![],
             workers: vec![], fix_workers: vec![], reviewers: vec![], role_models: Default::default(),
             role_interpretations: Default::default(), worker_roles: Default::default(),
             inputs: vec![], role_applies_to: Default::default(),
@@ -3380,16 +3216,15 @@ mod tests {
             name: "frame-only".into(), stations: vec![only], surfaces: vec![],
             default_model: "sonnet".into(), run_reviewers: vec![], run_reviewer_applies_to: Default::default(),
         };
-        let (plan, auto) = resolve_template("quick", &factory);
+        let plan = resolve_size("quick", &factory);
         assert!(plan.is_empty(), "an empty kept-set falls back to the full plan");
-        assert!(!auto, "the fallback keeps the factory's own gates");
     }
 
     #[test]
     fn a_unit_past_its_pass_budget_escalates() {
         use darkrun_core::domain::{IterationResult, Unit, UnitIteration, UnitFrontmatter};
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         // A frame unit that has burned more than MAX_PASSES iterations without
         // converging. `pass()` counts iterations, so seed MAX_PASSES + 1 beats.
         let iterations = (0..=MAX_PASSES)
@@ -3429,7 +3264,7 @@ mod tests {
         let dir = tempdir().expect("tmp");
         let repo = dir.path().to_path_buf();
         let store = StateStore::new(&repo);
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
         // Force the recorded phase to Manufacture: a completed unit with no
         // derivation signals leaves the pure phase undetermined, so the cursor
@@ -3498,7 +3333,7 @@ mod tests {
             UnitFrontmatter, UnitIteration,
         };
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         let factory = crate::factory::resolve_factory("software").unwrap();
         let def = factory.station("frame").unwrap();
         let stamp = || Some(Stamp { at: "2026-01-01T00:00:00Z".into() });
@@ -3561,7 +3396,7 @@ mod tests {
     #[test]
     fn run_start_seeds_state_at_first_station() {
         let (_d, store) = store();
-        let run = run_start(&store, "my-run", "software", Some("Ship it".into()), "continuous")
+        let run = run_start(&store, "my-run", "software", Some("Ship it".into()), Mode::Solo, "full")
             .expect("start");
         assert_eq!(run.frontmatter.active_station, "frame");
 
@@ -3575,20 +3410,18 @@ mod tests {
     #[test]
     fn full_mode_leaves_plan_empty_and_gates_intact() {
         let (_d, store) = store();
-        run_start(&store, "f", "software", None, "continuous").expect("start");
+        run_start(&store, "f", "software", None, Mode::Solo, "full").expect("start");
         let state = store.read_state("f").unwrap().unwrap();
         assert!(state.plan.is_empty(), "full mode walks the whole factory");
-        assert!(!state.auto_gates);
         assert_eq!(state.active_station, "frame");
     }
 
     #[test]
-    fn quick_mode_right_sizes_plan_and_auto_gates() {
+    fn quick_mode_right_sizes_plan() {
         let (_d, store) = store();
-        run_start(&store, "q", "software", Some("Small fix".into()), "quick").expect("start");
+        run_start(&store, "q", "software", Some("Small fix".into()), Mode::Solo, "quick").expect("start");
         let state = store.read_state("q").unwrap().unwrap();
         assert_eq!(state.plan, vec!["build".to_string(), "prove".to_string()]);
-        assert!(state.auto_gates);
         // The run starts at the plan's first station, not the factory's.
         assert_eq!(state.active_station, "build");
         assert_eq!(state.stations["build"].phase, StationPhase::Spec);
@@ -3596,14 +3429,14 @@ mod tests {
 
     #[test]
     fn run_level_review_is_shaped_by_mode() {
-        // C5: a full-size run keeps every declared run reviewer; a right-sized
-        // (auto_gates) run skips the cross-station run review entirely.
+        // C5: a non-dark run keeps every declared run reviewer; a dark run skips
+        // the cross-station run review entirely.
         let factory = crate::factory::resolve_factory("software").unwrap();
         assert!(!factory.run_reviewers.is_empty(), "software declares run reviewers");
 
-        // A full-size visual run keeps every reviewer (the surface-scoped a11y
+        // A non-dark visual run keeps every reviewer (the surface-scoped a11y
         // auditor included).
-        let full = RunState { auto_gates: false, ..Default::default() };
+        let full = RunState::default();
         let visual = effective_run_reviewers(
             &factory,
             &full,
@@ -3611,12 +3444,12 @@ mod tests {
         );
         assert_eq!(visual, factory.run_reviewers);
 
-        // A right-sized run skips the whole-run review regardless of surface.
-        let right_sized = RunState { auto_gates: true, ..Default::default() };
+        // A dark run skips the whole-run review regardless of surface.
+        let dark = RunState { mode: Mode::Dark, ..Default::default() };
         assert!(
-            effective_run_reviewers(&factory, &right_sized, Some(darkrun_core::domain::Surface::WebUi))
+            effective_run_reviewers(&factory, &dark, Some(darkrun_core::domain::Surface::WebUi))
                 .is_empty(),
-            "a right-sized run skips the run-level review"
+            "a dark run skips the run-level review"
         );
     }
 
@@ -3641,7 +3474,7 @@ mod tests {
         // The software factory's accessibility-auditor is scoped [web_ui, desktop,
         // mobile]. It joins the run review on a visual run, not on a library run.
         let factory = crate::factory::resolve_factory("software").unwrap();
-        let full = RunState { auto_gates: false, ..Default::default() };
+        let full = RunState::default();
 
         let visual = effective_run_reviewers(&factory, &full, Some(Surface::WebUi));
         assert!(visual.iter().any(|r| r == "accessibility-auditor"), "{visual:?}");
@@ -3655,10 +3488,10 @@ mod tests {
     #[test]
     fn quick_run_walks_only_planned_stations_to_sealed() {
         let (_d, store) = store();
-        run_start(&store, "q", "software", None, "quick").expect("start");
+        run_start(&store, "q", "software", None, Mode::Solo, "quick").expect("start");
 
-        // Drive to sealed. auto_gates downgrades every checkpoint to auto, so no
-        // operator decision is needed; we just decompose+complete each station.
+        // Drive to sealed. Every station holds its Spec until the operator seals
+        // the elaboration; we seal then decompose+complete each station.
         let mut guard = 0;
         loop {
             guard += 1;
@@ -3687,6 +3520,8 @@ mod tests {
                         body: String::new(),
                     };
                     store.write_unit("q", &unit).expect("write unit");
+                    // Solo holds the Spec phase until the elaboration is sealed.
+                    elaborate_seal(&store, "q", station).expect("seal");
                 }
                 RunAction::Manufacture { station, units, .. } => {
                     let _ = station;
@@ -3700,6 +3535,11 @@ mod tests {
                     for r in reviewers.clone() {
                         run_review_stamp(&store, "q", &r).expect("run review stamp");
                     }
+                }
+                // Solo gates `ask` at every station: clear the pre-execution
+                // operator gate and the post-execution checkpoint.
+                RunAction::UserGate { .. } | RunAction::Checkpoint { .. } => {
+                    checkpoint_decide(&store, "q", true, None).expect("decide");
                 }
                 _ => {}
             }
@@ -3744,7 +3584,7 @@ mod tests {
         git(&["commit", "-q", "-m", "base"]);
 
         let store = StateStore::new(root);
-        run_start(&store, "q", "software", None, "quick").expect("start");
+        run_start(&store, "q", "software", None, Mode::Solo, "quick").expect("start");
 
         // run-main forked off the base at run start.
         let run_main_exists = |b: &str| {
@@ -3795,6 +3635,8 @@ mod tests {
                         body: String::new(),
                     };
                     store.write_unit("q", &unit).expect("write unit");
+                    // Solo holds the Spec phase until the elaboration is sealed.
+                    elaborate_seal(&store, "q", station).expect("seal");
                 }
                 RunAction::Manufacture { station, units, .. } => {
                     // Commit real code on the station's worktree so the branch
@@ -3820,6 +3662,11 @@ mod tests {
                         run_review_stamp(&store, "q", &r).expect("run review stamp");
                     }
                 }
+                // Solo gates `ask` at every station: clear the pre-execution
+                // operator gate and the post-execution checkpoint.
+                RunAction::UserGate { .. } | RunAction::Checkpoint { .. } => {
+                    checkpoint_decide(&store, "q", true, None).expect("decide");
+                }
                 _ => {}
             }
         }
@@ -3840,48 +3687,30 @@ mod tests {
     #[test]
     fn unknown_mode_falls_back_to_full_plan() {
         let (_d, store) = store();
-        run_start(&store, "u", "software", None, "nonsense-mode").expect("start");
+        run_start(&store, "u", "software", None, Mode::Solo, "nonsense-mode").expect("start");
         let state = store.read_state("u").unwrap().unwrap();
         assert!(state.plan.is_empty());
         assert_eq!(state.active_station, "frame");
     }
 
     #[test]
-    fn compound_gate_defaults_then_honours_the_operator_pick() {
-        let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
-        // shape is a compound gate: ask (default) | external.
-        let factory = resolve_factory_for(&store, "software").unwrap();
-        let shape = factory.station("shape").unwrap();
-        // Seed shape into state so a choice can be recorded against it.
-        let mut state = store.read_state("r").unwrap().unwrap();
-        ensure_station(&mut state, &factory, "shape").unwrap();
-        store.write_state("r", &state).unwrap();
-        let state = store.read_state("r").unwrap().unwrap();
-
-        // No pick → the declared default (ask).
-        assert_eq!(effective_checkpoint_kind(&state, shape), CheckpointKind::Ask);
-
-        // The operator picks external → effective routes to external.
-        choose_checkpoint(&store, "r", "shape", CheckpointKind::External).unwrap();
-        let state = store.read_state("r").unwrap().unwrap();
-        assert_eq!(effective_checkpoint_kind(&state, shape), CheckpointKind::External);
-
-        // A path the station does not offer is rejected.
-        assert!(choose_checkpoint(&store, "r", "shape", CheckpointKind::Auto).is_err());
-        // A single-gate station (frame) offers no choice.
-        let mut state = store.read_state("r").unwrap().unwrap();
-        ensure_station(&mut state, &factory, "frame").unwrap();
-        store.write_state("r", &state).unwrap();
-        assert!(choose_checkpoint(&store, "r", "frame", CheckpointKind::External).is_err());
+    fn gate_is_a_pure_function_of_mode() {
+        // The effective checkpoint kind is now a pure function of the run's
+        // global Mode: team → external, solo → ask, dark → auto.
+        let team = RunState { mode: Mode::Team, ..Default::default() };
+        assert_eq!(effective_checkpoint_kind(&team), CheckpointKind::External);
+        let solo = RunState { mode: Mode::Solo, ..Default::default() };
+        assert_eq!(effective_checkpoint_kind(&solo), CheckpointKind::Ask);
+        let dark = RunState { mode: Mode::Dark, ..Default::default() };
+        assert_eq!(effective_checkpoint_kind(&dark), CheckpointKind::Auto);
     }
 
     #[test]
-    fn collaborative_mode_holds_spec_until_elaboration_is_sealed() {
+    fn solo_mode_holds_spec_until_elaboration_is_sealed() {
         let (_d, store) = store();
-        run_start(&store, "c", "software", None, "collaborative").expect("start");
+        run_start(&store, "c", "software", None, Mode::Solo, "full").expect("start");
 
-        // Tick 1: Spec — but the collaborative hold keeps the station in Spec
+        // Tick 1: Spec — but the solo hold keeps the station in Spec
         // (not Review) until the operator has been involved.
         let t1 = run_tick(&store, "c").expect("t1");
         assert!(matches!(t1.action, RunAction::Spec { .. }));
@@ -3905,11 +3734,11 @@ mod tests {
     }
 
     #[test]
-    fn continuous_mode_does_not_hold_spec() {
+    fn dark_mode_does_not_hold_spec() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Dark, "full").expect("start");
         run_tick(&store, "r").expect("spec");
-        // Continuous is linear — Spec advances to Review without an elaborate seal.
+        // Dark is on-the-loop — Spec advances to Review without an elaborate seal.
         assert_eq!(
             store.read_state("r").unwrap().unwrap().stations["frame"].phase,
             StationPhase::Review
@@ -3919,7 +3748,8 @@ mod tests {
     #[test]
     fn each_tick_appends_to_the_action_log() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        // Dark walks linearly with no Spec hold: one tick per phase.
+        run_start(&store, "r", "software", None, Mode::Dark, "full").expect("start");
         run_tick(&store, "r").expect("t1"); // Spec
         run_tick(&store, "r").expect("t2"); // Review
         let log = store.read_journal("r", "action-log.jsonl");
@@ -3933,21 +3763,24 @@ mod tests {
     #[test]
     fn run_next_walks_first_station_through_its_phases() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
-        // Tick 1: Spec (frame). State advances to Review.
+        // Tick 1: Spec (frame). Solo holds the Spec until the elaboration is
+        // sealed; sealing then advances it to Review.
         let t1 = run_tick(&store, "r").expect("t1");
         assert!(matches!(
             t1.action,
             RunAction::Spec { ref station, .. } if station == "frame"
         ));
+        elaborate_seal(&store, "r", "frame").expect("seal");
+        run_tick(&store, "r").expect("post-seal advance");
         assert_eq!(
             store.read_state("r").unwrap().unwrap().stations["frame"].phase,
             StationPhase::Review
         );
 
         // Tick 2: Review (frame). State advances to the pre-execution user gate
-        // (frame is an interactive `ask` station in continuous mode).
+        // (frame is an interactive `ask` station in solo mode).
         let t2 = run_tick(&store, "r").expect("t2");
         assert!(matches!(
             t2.action,
@@ -4059,7 +3892,7 @@ mod tests {
     #[test]
     fn audit_absorbs_tests_and_reflect_precedes_checkpoint() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
         // Force the frame station onto its Audit phase.
         let mut state = store.read_state("r").unwrap().unwrap();
@@ -4111,7 +3944,7 @@ mod tests {
     #[test]
     fn open_feedback_preempts_run_track() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         store
             .write_feedback_raw("r", "fb-1", "---\nstatus: pending\n---\nbroken thing\n")
             .expect("fb");
@@ -4126,7 +3959,7 @@ mod tests {
     #[test]
     fn checkpoint_reject_holds_and_files_feedback() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         let res = checkpoint_decide(&store, "r", false, Some("not good enough".into()))
             .expect("decide");
         // Rejecting files feedback, which now preempts the run track.
@@ -4144,7 +3977,7 @@ mod tests {
         use darkrun_api::common::AuthorType;
 
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
         // A global station note + a per-artifact mark, both OPEN on `frame`.
         let note = Annotation {
@@ -4220,7 +4053,7 @@ mod tests {
         use darkrun_api::common::AuthorType;
 
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
         // An OPEN per-artifact mark on a unit in the active `frame` station.
         let mark = Annotation {
@@ -4287,7 +4120,7 @@ mod tests {
     #[test]
     fn no_annotations_means_no_bundle_in_context() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         let action = derive_position(&store, "r")
             .expect("pos")
             .action
@@ -4303,7 +4136,7 @@ mod tests {
     #[test]
     fn audit_prompt_routes_visual_surface_through_render() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         crate::proof::set_surface(&store, "r", "web-ui").expect("classify");
         let action = RunAction::Audit {
             run: "r".into(),
@@ -4322,7 +4155,7 @@ mod tests {
     #[test]
     fn audit_prompt_routes_bench_surface_through_render() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         crate::proof::set_surface(&store, "r", "api").expect("classify");
         let action = RunAction::Audit {
             run: "r".into(),
@@ -4340,7 +4173,7 @@ mod tests {
     #[test]
     fn audit_prompt_without_surface_has_no_route() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         let action = RunAction::Audit {
             run: "r".into(),
             station: "build".into(),
@@ -4447,7 +4280,7 @@ mod tests {
     #[test]
     fn reset_requested_flag_is_consumed_before_derive() {
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "quick").expect("start");
+        run_start(&store, "d", "software", None, Mode::Solo, "quick").expect("start");
         // A wedged InProgress unit the operator flagged for reset in the UI.
         let mut u = crate::units::create(&store, "d", "u1", "build", None, vec![]).unwrap();
         u.frontmatter.status = Status::InProgress;
@@ -4474,74 +4307,20 @@ mod tests {
         assert_eq!(after.pass(), 0, "pass budget reset");
     }
 
-    /// `discrete` mode snapshots the discrete flag (not hybrid) and keeps the
-    /// full factory plan with the factory's own gates.
+    /// `team` mode keeps the full factory plan with global external gates.
     #[test]
-    fn discrete_mode_sets_discrete_flag_full_plan() {
+    fn team_mode_full_plan() {
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "discrete").expect("start");
+        run_start(&store, "d", "software", None, Mode::Team, "full").expect("start");
         let state = store.read_state("d").unwrap().unwrap();
-        assert!(state.discrete, "discrete mode sets the discrete flag");
-        assert!(!state.discrete_hybrid, "plain discrete is not hybrid");
-        assert!(state.plan.is_empty(), "discrete walks the full factory");
-        assert!(!state.auto_gates, "discrete keeps real gates");
+        assert_eq!(state.mode, Mode::Team);
+        assert!(state.plan.is_empty(), "team walks the full factory");
         assert_eq!(state.active_station, "frame");
+        // Team opens a PR at every station's gate.
+        assert!(state.mode.opens_station_pr());
     }
 
-    /// `discrete-hybrid` mode sets BOTH flags (any `-`/`_` spelling).
-    #[test]
-    fn discrete_hybrid_mode_sets_both_flags() {
-        let (_d, store) = store();
-        run_start(&store, "h", "software", None, "discrete-hybrid").expect("start");
-        let state = store.read_state("h").unwrap().unwrap();
-        assert!(state.discrete);
-        assert!(state.discrete_hybrid);
-        // The underscore spelling resolves the same.
-        assert_eq!(resolve_discrete("discrete_hybrid"), DiscreteMode::Hybrid);
-        assert_eq!(resolve_discrete("discrete"), DiscreteMode::Full);
-        assert_eq!(resolve_discrete("continuous"), DiscreteMode::Off);
-    }
-
-    /// In FULL discrete every station's effective gate is `external` — even
-    /// `frame` (factory `ask`) and `build` (factory `auto`).
-    #[test]
-    fn full_discrete_makes_every_gate_external() {
-        let factory = crate::factory::resolve_factory("software").unwrap();
-        let state = RunState {
-            discrete: true,
-            ..Default::default()
-        };
-        for name in ["frame", "build", "harden"] {
-            let def = factory.station(name).unwrap();
-            assert_eq!(
-                effective_checkpoint_kind(&state, def),
-                CheckpointKind::External,
-                "full discrete makes {name} external"
-            );
-        }
-    }
-
-    /// In HYBRID every station keeps its factory-declared kind — and the
-    /// software factory now declares `ask` at every station, so hybrid gates ask
-    /// throughout (no station auto-opens a PR; only full discrete forces that).
-    #[test]
-    fn hybrid_keeps_factory_gates() {
-        let factory = crate::factory::resolve_factory("software").unwrap();
-        let state = RunState {
-            discrete: true,
-            discrete_hybrid: true,
-            ..Default::default()
-        };
-        for name in ["frame", "build", "harden"] {
-            assert_eq!(
-                effective_checkpoint_kind(&state, factory.station(name).unwrap()),
-                CheckpointKind::Ask,
-                "hybrid keeps {name}'s factory-declared ask gate"
-            );
-        }
-    }
-
-    /// Drive a discrete-mode `frame` station to its checkpoint without git, so
+    /// Drive a team-mode `frame` station to its checkpoint without git, so
     /// the gate surfaces. (No worktrees needed — the gate logic is what's under
     /// test; the hosting client is mocked.)
     fn drive_discrete_frame_to_gate(store: &StateStore, hosting: &MockHosting) -> RunAction {
@@ -4566,6 +4345,8 @@ mod tests {
                         body: String::new(),
                     };
                     store.write_unit("d", &unit).expect("unit");
+                    // Team holds the Spec phase until the elaboration is sealed.
+                    elaborate_seal(store, "d", station).expect("seal");
                 }
                 RunAction::ExternalReviewRequested { .. } => return t.action,
                 _ => {}
@@ -4581,7 +4362,7 @@ mod tests {
     #[test]
     fn discrete_station_opens_pr_and_holds() {
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "discrete").expect("start");
+        run_start(&store, "d", "software", None, Mode::Team, "full").expect("start");
         let hosting = MockHosting::new(MergeState::Open);
 
         let action = drive_discrete_frame_to_gate(&store, &hosting);
@@ -4611,7 +4392,7 @@ mod tests {
     #[test]
     fn discrete_pr_marked_ready_records_the_transition() {
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "discrete").expect("start");
+        run_start(&store, "d", "software", None, Mode::Team, "full").expect("start");
 
         // Reach the gate + open the draft PR.
         let open_host = MockHosting::new(MergeState::Open);
@@ -4643,7 +4424,7 @@ mod tests {
         use crate::hosting::ReviewComment;
         use darkrun_core::domain::{FeedbackOrigin, FeedbackSeverity};
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "discrete").expect("start");
+        run_start(&store, "d", "software", None, Mode::Team, "full").expect("start");
 
         // Reach the gate + open the draft PR (no notes yet).
         drive_discrete_frame_to_gate(&store, &MockHosting::new(MergeState::Open));
@@ -4701,7 +4482,7 @@ mod tests {
     fn discrete_open_uploads_the_station_proof_to_the_pr() {
         use darkrun_api::proof::{BenchProof, Proof, Surface as ApiSurface};
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "discrete").expect("start");
+        run_start(&store, "d", "software", None, Mode::Team, "full").expect("start");
         // Classify the run + attach a matching proof for the frame station.
         crate::proof::set_surface(&store, "d", "data").unwrap();
         crate::proof::attach_proof(
@@ -4728,7 +4509,7 @@ mod tests {
     #[test]
     fn discrete_open_without_proof_posts_no_comment() {
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "discrete").expect("start");
+        run_start(&store, "d", "software", None, Mode::Team, "full").expect("start");
         let hosting = MockHosting::new(MergeState::Open);
         drive_discrete_frame_to_gate(&store, &hosting);
         assert!(hosting.comments.borrow().is_empty(), "no proof → no comment");
@@ -4739,7 +4520,7 @@ mod tests {
     #[test]
     fn discrete_merge_records_merged_status_and_timestamp() {
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "discrete").expect("start");
+        run_start(&store, "d", "software", None, Mode::Team, "full").expect("start");
         let open_host = MockHosting::new(MergeState::Open);
         drive_discrete_frame_to_gate(&store, &open_host);
 
@@ -4756,7 +4537,7 @@ mod tests {
     #[test]
     fn discrete_pr_merge_resolves_the_gate_and_advances() {
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "discrete").expect("start");
+        run_start(&store, "d", "software", None, Mode::Team, "full").expect("start");
 
         // First, reach the gate and open the PR (state = Open).
         let open_host = MockHosting::new(MergeState::Open);
@@ -4784,16 +4565,15 @@ mod tests {
         let dir = tempdir().unwrap();
         std::process::Command::new("git").arg("-C").arg(dir.path()).args(["init", "-q"]).status().unwrap();
         let store = StateStore::new(dir.path());
-        run_start(&store, "r", "software", None, "discrete").unwrap();
+        run_start(&store, "r", "software", None, Mode::Team, "full").unwrap();
         let mut state = store.read_state("r").unwrap().unwrap();
-        state.discrete = true;
-        state.discrete_hybrid = false;
+        state.mode = Mode::Team;
         state.plan = plan;
         state.active_station = "frame".into();
         state.stations.insert("frame".into(), Station {
             station: "frame".into(), status: Status::Active, phase: StationPhase::Checkpoint,
             elaborated: true, checkpoint: Some(Checkpoint { kind: CheckpointKind::External, entered_at: None, outcome: None }),
-            chosen_checkpoint: None, branch: None, pr_ref: Some("42".into()), pr_status: Some(PrStatus::Draft),
+            branch: None, pr_ref: Some("42".into()), pr_status: Some(PrStatus::Draft),
             pr_ready_at: None, pr_merged_at: None, verifier_nonce: None,
             started_at: None, completed_at: None,
         });
@@ -4836,7 +4616,7 @@ mod tests {
     #[test]
     fn discrete_without_hosting_falls_back_to_manual_review() {
         let (_d, store) = store();
-        run_start(&store, "d", "software", None, "discrete").expect("start");
+        run_start(&store, "d", "software", None, Mode::Team, "full").expect("start");
         let hosting = MockHosting::unavailable();
         let action = drive_discrete_frame_to_gate(&store, &hosting);
         assert!(
@@ -4981,7 +4761,7 @@ mod tests {
     fn derive_preempts_everything_with_an_in_tree_merge_conflict() {
         let (_d, root, store) = git_store();
         // A real run document so derive_position can resolve run/factory/state.
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         // run_start entered frame, forking its branch + worktree.
         let git_root = |args: &[&str]| {
             std::process::Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success()
@@ -5076,7 +4856,7 @@ mod tests {
     #[test]
     fn manufacture_isolates_each_unit_then_lands_it_on_audit() {
         let (_d, root, store) = git_store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         // run_start entered the first station (frame), so its branch exists.
         assert!(branch_exists_at(&root, "darkrun/r/frame"));
 
@@ -5093,8 +4873,11 @@ mod tests {
         };
         store.write_unit("r", &unit).expect("write unit");
 
-        // Spec -> Review -> UserGate, then the operator clears the gate.
+        // Spec (held in solo until sealed) -> Review -> UserGate, then the
+        // operator clears the gate.
         run_tick(&store, "r").expect("spec");
+        elaborate_seal(&store, "r", "frame").expect("seal");
+        run_tick(&store, "r").expect("spec advance after seal");
         run_tick(&store, "r").expect("review");
         checkpoint_decide(&store, "r", true, None).expect("clear gate");
 
@@ -5143,7 +4926,7 @@ mod tests {
     #[test]
     fn feedback_fix_isolates_on_its_own_worktree_then_lands_on_close() {
         let (_d, root, store) = git_store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         assert!(branch_exists_at(&root, "darkrun/r/frame"));
 
         // Open feedback at the active station preempts the run onto the fix track.
@@ -5205,7 +4988,7 @@ mod tests {
     #[test]
     fn derive_emits_revise_for_a_flagged_unit() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         let mut u = crate::units::create(&store, "r", "u1", "frame", None, vec![]).unwrap();
         u.frontmatter.revise = true;
         store.write_unit("r", &u).unwrap();
@@ -5216,7 +4999,7 @@ mod tests {
     #[test]
     fn derive_emits_safe_repair_for_an_undefined_station_unit() {
         let (_d, store) = store();
-        run_start(&store, "r2", "software", None, "continuous").unwrap();
+        run_start(&store, "r2", "software", None, Mode::Solo, "full").unwrap();
         let bad = crate::units::create(&store, "r2", "ub", "ghost-station", None, vec![]).unwrap();
         store.write_unit("r2", &bad).unwrap();
         let pos = derive_position(&store, "r2").unwrap();
@@ -5231,14 +5014,6 @@ mod tests {
         assert_eq!(feedback_severity_rank("severity: low"), 3);
         assert_eq!(feedback_severity_rank("severity: spicy"), 4); // unknown token
         assert_eq!(feedback_severity_rank("no severity line here"), 4); // absent
-    }
-
-    #[test]
-    fn checkpoint_kind_str_covers_every_kind() {
-        assert_eq!(checkpoint_kind_str(CheckpointKind::Auto), "auto");
-        assert_eq!(checkpoint_kind_str(CheckpointKind::Ask), "ask");
-        assert_eq!(checkpoint_kind_str(CheckpointKind::External), "external");
-        assert_eq!(checkpoint_kind_str(CheckpointKind::Await), "await");
     }
 
     #[test]
@@ -5287,17 +5062,16 @@ mod tests {
         // A git repo so the head-push branch runs (it fails silently — no remote).
         std::process::Command::new("git").arg("-C").arg(dir.path()).args(["init", "-q"]).status().unwrap();
         let store = StateStore::new(dir.path());
-        run_start(&store, "r", "software", None, "discrete").unwrap();
-        // Force the run to sit at frame's checkpoint; full-discrete makes its
+        run_start(&store, "r", "software", None, Mode::Team, "full").unwrap();
+        // Force the run to sit at frame's checkpoint; team mode makes its
         // effective kind External, so the discrete gate opens a PR.
         let mut state = store.read_state("r").unwrap().unwrap();
-        state.discrete = true;
-        state.discrete_hybrid = false;
+        state.mode = Mode::Team;
         state.active_station = "frame".into();
         state.stations.insert("frame".into(), Station {
             station: "frame".into(), status: Status::Active, phase: StationPhase::Checkpoint,
             elaborated: true, checkpoint: Some(Checkpoint { kind: CheckpointKind::External, entered_at: None, outcome: None }),
-            chosen_checkpoint: None, branch: None, pr_ref: None, pr_status: None,
+            branch: None, pr_ref: None, pr_status: None,
             pr_ready_at: None, pr_merged_at: None, verifier_nonce: None,
             started_at: None, completed_at: None,
         });
@@ -5316,7 +5090,7 @@ mod tests {
     fn build_prompt_context_threads_action_specifics() {
         use darkrun_core::domain::SealKind;
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
 
         let fq = RunAction::FeedbackQuestion { run: "r".into(), station: "build".into(), feedback_id: "fb-1".into() };
         let rv = RunAction::ReviseUnitSpecs { run: "r".into(), station: "build".into(), units: vec!["u1".into()] };
@@ -5394,9 +5168,9 @@ mod tests {
     }
 
     #[test]
-    fn elaborate_seal_and_choose_checkpoint_reject_an_unknown_station() {
+    fn elaborate_seal_rejects_an_unknown_station() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         // A station the run's state doesn't carry → the not-active error arm.
         assert!(matches!(
             elaborate_seal(&store, "r", "no-such-station"),

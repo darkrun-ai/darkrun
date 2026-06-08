@@ -14,7 +14,7 @@
 //! structured-action shape returned by the manager.
 
 use darkrun_mcp::tools::{
-    ArchetypeInput, CheckpointDecideInput, DirectionInput, FactoryRef, FeedbackCreateInput,
+    ArchetypeInput, CheckpointDecideInput, DirectionInput, ElaborateSealInput, FactoryRef, FeedbackCreateInput,
     FeedbackListInput, FeedbackMoveInput, FeedbackRejectInput, FeedbackResolveInput,
     PickerInput, PickerOptionInput, ProofAttachInput, ProofGetInput, QuestionInput,
     QuestionOptionInput, RunArchiveInput, RunListInput, RunRef, RunReviewStampInput, RunShowRef,
@@ -90,13 +90,20 @@ fn start(server: &DarkrunServer, slug: &str) -> CallToolResult {
             factory: "software".into(),
             title: Some("Run".into()),
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap()
 }
 
 fn started(slug: &str) -> (TempDir, DarkrunServer) {
     let (d, s) = server();
     start(&s, slug);
+    // Solo holds the first station's Spec until the elaboration is sealed; seal
+    // it up front so callers that walk the run linearly aren't stalled at Spec.
+    s.darkrun_elaborate_seal(Parameters(ElaborateSealInput {
+        slug: slug.into(),
+        station: "frame".into(),
+    }))
+    .unwrap();
     (d, s)
 }
 
@@ -178,7 +185,7 @@ fn run_start_honors_explicit_title() {
             factory: "software".into(),
             title: Some("Ship the thing".into()),
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     let v = body(&res);
     assert_eq!(v["title"], "Ship the thing");
@@ -194,7 +201,7 @@ fn run_start_title_defaults_to_slug_when_absent() {
             factory: "software".into(),
             title: None,
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     let v = body(&res);
     assert_eq!(v["title"], "my-slug");
@@ -208,17 +215,17 @@ fn run_start_records_mode() {
             slug: "r".into(),
             factory: "software".into(),
             title: None,
-            mode: "right-sized".into(),
-        }))
+            mode: "team".into(),
+            size: "full".into(),        }))
         .unwrap();
-    assert_eq!(body(&res)["frontmatter"]["mode"], "right-sized");
+    assert_eq!(body(&res)["frontmatter"]["mode"], "team");
 }
 
 #[test]
 fn run_start_records_continuous_mode() {
     let (_d, server) = server();
     let v = body(&start(&server, "r"));
-    assert_eq!(v["frontmatter"]["mode"], "continuous");
+    assert_eq!(v["frontmatter"]["mode"], "solo");
 }
 
 #[test]
@@ -237,7 +244,7 @@ fn run_start_body_contains_title_heading() {
             factory: "software".into(),
             title: Some("Hello".into()),
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     assert!(body(&res)["body"].as_str().unwrap().contains("# Hello"));
 }
@@ -251,7 +258,7 @@ fn run_start_rejects_empty_slug() {
             factory: "software".into(),
             title: None,
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     assert!(is_err(&res));
 }
@@ -265,7 +272,7 @@ fn run_start_rejects_whitespace_slug() {
             factory: "software".into(),
             title: None,
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     assert!(is_err(&res));
     assert!(err_message(&res).contains("slug"));
@@ -280,7 +287,7 @@ fn run_start_rejects_unknown_factory() {
             factory: "nonexistent".into(),
             title: None,
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     assert!(is_err(&res));
     assert!(err_message(&res).contains("nonexistent"));
@@ -295,7 +302,7 @@ fn run_start_unknown_factory_does_not_create_state() {
             factory: "nope".into(),
             title: None,
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     assert!(!dir.path().join(".darkrun/r/run.md").exists());
 }
@@ -327,7 +334,7 @@ fn run_start_re_start_same_slug_overwrites_title() {
             factory: "software".into(),
             title: Some("Second".into()),
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     assert!(is_ok(&res));
     assert_eq!(body(&res)["title"], "Second");
@@ -1800,17 +1807,6 @@ fn factory_list_station_carries_kills_and_artifact() {
 }
 
 #[test]
-fn factory_list_station_carries_checkpoint_kind() {
-    let (_d, server) = server();
-    let v = body(&server.darkrun_factory_list().unwrap());
-    let sw = software_entry(&v);
-    // Every software station gates `ask` by default.
-    assert_eq!(sw["stations"][0]["checkpoint"], "ask");
-    assert_eq!(sw["stations"][3]["checkpoint"], "ask");
-    assert_eq!(sw["stations"][5]["checkpoint"], "ask");
-}
-
-#[test]
 fn factory_list_station_carries_workers_and_reviewers() {
     let (_d, server) = server();
     let v = body(&server.darkrun_factory_list().unwrap());
@@ -2107,6 +2103,16 @@ fn walk_station_to_checkpoint(server: &DarkrunServer, slug: &str, station: &str)
         // reaches the post-execution gate.
         if action == "user_gate" && on == station {
             approve(server, slug);
+            continue;
+        }
+        // Solo holds the Spec until the elaboration is sealed.
+        if action == "spec" && on == station {
+            server
+                .darkrun_elaborate_seal(Parameters(ElaborateSealInput {
+                    slug: slug.into(),
+                    station: station.into(),
+                }))
+                .unwrap();
             continue;
         }
         // The gate is a local checkpoint or, for an external station,
@@ -3060,17 +3066,11 @@ fn unit_create_body_has_heading() {
 // ── checkpoint kind reflected by detail vs next ────────────────────────────
 
 #[test]
-fn checkpoint_kind_in_next_matches_factory_detail() {
+fn checkpoint_kind_in_next_is_the_mode_gate() {
     let (_d, server) = started("r");
     let cp = walk_station_to_checkpoint(&server, "r", "frame");
-    let detail = body(
-        &server
-            .darkrun_factory_detail(Parameters(FactoryRef {
-                factory: "software".into(),
-            }))
-            .unwrap(),
-    );
-    assert_eq!(cp["action"]["kind"], detail["stations"][0]["checkpoint"]);
+    // The gate is now a pure function of the run's global mode; a solo run asks.
+    assert_eq!(cp["action"]["kind"], "ask");
 }
 
 // ── run_list status field follows lifecycle ────────────────────────────────
@@ -3231,19 +3231,19 @@ fn run_start_mode_right_sized_persists_in_show() {
             slug: "r".into(),
             factory: "software".into(),
             title: None,
-            mode: "right-sized".into(),
-        }))
+            mode: "dark".into(),
+            size: "full".into(),        }))
         .unwrap();
     let v = body(
         &server
             .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
-    assert_eq!(v["run"]["frontmatter"]["mode"], "right-sized");
+    assert_eq!(v["run"]["frontmatter"]["mode"], "dark");
 }
 
 #[test]
-fn run_start_custom_mode_is_preserved_verbatim() {
+fn run_start_unknown_mode_normalizes_to_solo() {
     let (_d, server) = server();
     let res = server
         .darkrun_run_start(Parameters(RunStartInput {
@@ -3251,9 +3251,10 @@ fn run_start_custom_mode_is_preserved_verbatim() {
             factory: "software".into(),
             title: None,
             mode: "experimental-xyz".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
-    assert_eq!(body(&res)["frontmatter"]["mode"], "experimental-xyz");
+    // An unrecognized mode label resolves to the in-the-loop default.
+    assert_eq!(body(&res)["frontmatter"]["mode"], "solo");
 }
 
 #[test]
@@ -3455,6 +3456,15 @@ fn two_runs_advance_independently() {
     let (_d, server) = server();
     start(&server, "a");
     start(&server, "b");
+    // Solo holds each run's Spec until sealed; seal both so they walk linearly.
+    for slug in ["a", "b"] {
+        server
+            .darkrun_elaborate_seal(Parameters(ElaborateSealInput {
+                slug: slug.into(),
+                station: "frame".into(),
+            }))
+            .unwrap();
+    }
     // Advance a twice, b once.
     next(&server, "a");
     next(&server, "a");
@@ -3515,7 +3525,6 @@ fn factory_detail_every_station_has_required_fields() {
         assert!(st["name"].is_string());
         assert!(st["kills"].is_string());
         assert!(st["artifact"].is_string());
-        assert!(st["checkpoint"].is_string());
         assert!(st["workers"].is_array());
         assert!(st["reviewers"].is_array());
     }
@@ -3553,22 +3562,6 @@ fn factory_detail_every_station_has_two_reviewers() {
 }
 
 #[test]
-fn factory_detail_checkpoint_kinds_are_known() {
-    let (_d, server) = server();
-    let v = body(
-        &server
-            .darkrun_factory_detail(Parameters(FactoryRef {
-                factory: "software".into(),
-            }))
-            .unwrap(),
-    );
-    for st in v["stations"].as_array().unwrap() {
-        let kind = st["checkpoint"].as_str().unwrap();
-        assert!(["auto", "ask", "external", "await"].contains(&kind));
-    }
-}
-
-#[test]
 fn factory_detail_shape_station_fields() {
     let (_d, server) = server();
     let v = body(
@@ -3582,7 +3575,6 @@ fn factory_detail_shape_station_fields() {
     assert_eq!(shape["name"], "shape");
     assert_eq!(shape["kills"], "expensive-structural-reversal");
     assert_eq!(shape["artifact"], "design.md");
-    assert_eq!(shape["checkpoint"], "ask");
 }
 
 #[test]
@@ -3599,7 +3591,6 @@ fn factory_detail_build_station_fields() {
     assert_eq!(build["name"], "build");
     assert_eq!(build["kills"], "implementation-defects");
     assert_eq!(build["artifact"], "code");
-    assert_eq!(build["checkpoint"], "ask");
 }
 
 #[test]
@@ -3616,7 +3607,6 @@ fn factory_detail_prove_station_fields() {
     assert_eq!(prove["name"], "prove");
     assert_eq!(prove["kills"], "escaped-defects");
     assert_eq!(prove["artifact"], "proof.md");
-    assert_eq!(prove["checkpoint"], "ask");
 }
 
 #[test]
@@ -3633,7 +3623,6 @@ fn factory_detail_harden_station_fields() {
     assert_eq!(harden["name"], "harden");
     assert_eq!(harden["kills"], "works-in-dev-dies-in-prod");
     assert_eq!(harden["artifact"], "release.md");
-    assert_eq!(harden["checkpoint"], "ask");
 }
 
 #[test]
@@ -3826,7 +3815,7 @@ fn run_show_body_preserves_title_heading() {
             factory: "software".into(),
             title: Some("My Run".into()),
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     let v = body(
         &server
@@ -3845,7 +3834,7 @@ fn run_show_title_resolves_from_frontmatter() {
             factory: "software".into(),
             title: Some("Titled".into()),
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     let v = body(
         &server
@@ -3915,6 +3904,12 @@ fn state_persists_across_server_reinstantiation() {
     {
         let s = DarkrunServer::new(dir.path());
         start(&s, "r");
+        // Solo holds the Spec until sealed; seal so the tick advances to Review.
+        s.darkrun_elaborate_seal(Parameters(ElaborateSealInput {
+            slug: "r".into(),
+            station: "frame".into(),
+        }))
+        .unwrap();
         next(&s, "r"); // spec -> review
     }
     // Fresh server over the same on-disk state.
@@ -4330,7 +4325,7 @@ fn run_start_whitespace_title_is_used_verbatim() {
             factory: "software".into(),
             title: Some("  spaced  ".into()),
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     // Title is not trimmed by the tool.
     assert_eq!(body(&res)["title"], "  spaced  ");
@@ -4641,6 +4636,15 @@ fn manufacture_first_unit(server: &DarkrunServer, slug: &str, station: &str, uni
         let p = phase(server);
         if p == "manufacture" || p == "user_gate" {
             break;
+        }
+        // Solo holds the Spec until the elaboration is sealed.
+        if p == "spec" {
+            server
+                .darkrun_elaborate_seal(Parameters(ElaborateSealInput {
+                    slug: slug.into(),
+                    station: station.into(),
+                }))
+                .unwrap();
         }
         next(server, slug);
     }
@@ -4983,40 +4987,6 @@ fn factory_list_each_station_matches_detail_workers() {
 }
 
 #[test]
-fn software_factory_has_no_await_checkpoints() {
-    let (_d, server) = server();
-    let v = body(
-        &server
-            .darkrun_factory_detail(Parameters(FactoryRef {
-                factory: "software".into(),
-            }))
-            .unwrap(),
-    );
-    for st in v["stations"].as_array().unwrap() {
-        assert_ne!(st["checkpoint"], "await");
-    }
-}
-
-#[test]
-fn software_factory_gates_ask_at_every_station() {
-    let (_d, server) = server();
-    let v = body(
-        &server
-            .darkrun_factory_detail(Parameters(FactoryRef {
-                factory: "software".into(),
-            }))
-            .unwrap(),
-    );
-    let kinds: Vec<&str> = v["stations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|st| st["checkpoint"].as_str().unwrap())
-        .collect();
-    assert_eq!(kinds, vec!["ask", "ask", "ask", "ask", "ask", "ask"]);
-}
-
-#[test]
 fn unit_get_missing_error_mentions_unit() {
     let (_d, server) = started("r");
     let res = server
@@ -5294,11 +5264,11 @@ fn next_station_seeded_pending_after_advance() {
             .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
-    // specify is now the active station. The approve re-tick already emitted
-    // its Spec action, so it sits at the Review phase, in_progress.
+    // specify is now the active station. Solo holds the freshly-entered
+    // station's Spec until its elaboration is sealed.
     assert_eq!(v["state"]["active_station"], "specify");
     assert_eq!(v["state"]["stations"]["specify"]["status"], "in_progress");
-    assert_eq!(v["state"]["stations"]["specify"]["phase"], "review");
+    assert_eq!(v["state"]["stations"]["specify"]["phase"], "spec");
 }
 
 #[test]
@@ -5391,7 +5361,7 @@ fn run_summary_title_field_present() {
             factory: "software".into(),
             title: Some("Named".into()),
             mode: "continuous".into(),
-        }))
+            size: "full".into(),        }))
         .unwrap();
     let v = body(
         &server

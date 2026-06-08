@@ -10,7 +10,7 @@
 //! factory definition in code: [`resolve_factory`] reads the corpus or returns
 //! `None`.
 
-use darkrun_core::domain::{CheckpointKind, Position};
+use darkrun_core::domain::Position;
 
 /// A resolved station within a factory plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,11 +24,6 @@ pub struct StationDef {
     pub kills: String,
     /// The durable artifact the station locks on completion.
     pub artifact: String,
-    /// The checkpoint gate that ends the station (the default path).
-    pub checkpoint: CheckpointKind,
-    /// Alternative gate paths the operator may pick (a compound gate). Empty →
-    /// a single fixed gate.
-    pub checkpoint_options: Vec<CheckpointKind>,
     /// The Explorers dispatched in the Spec phase — they gather context in
     /// **tandem** with the elaboration framing (discovery + elaboration run in
     /// parallel, mirroring the predecessor's `elaborate_loop`), before decompose.
@@ -201,8 +196,6 @@ impl StationDef {
             label: s.frontmatter.label.clone(),
             kills: s.frontmatter.kills.clone(),
             artifact: s.frontmatter.locked_artifact.clone(),
-            checkpoint: s.checkpoint(),
-            checkpoint_options: s.frontmatter.checkpoint_options.clone(),
             explorers: s.frontmatter.explorers.clone(),
             workers: s.frontmatter.workers.clone(),
             // Station-declared fix-workers; the factory fallback is filled in by
@@ -270,7 +263,6 @@ mod tests {
         let build = f.station("build").unwrap();
         assert_eq!(build.kills, "implementation-defects");
         assert_eq!(build.artifact, "code");
-        assert_eq!(build.checkpoint, CheckpointKind::Ask);
         assert_eq!(build.workers, vec!["test_author", "builder", "self_reviewer", "reconciler"]);
     }
 
@@ -303,15 +295,6 @@ mod tests {
         assert_eq!(build.role_interpretations.get("correctness").map(String::as_str), Some("strict"));
         // A worker that declares a pass-loop `role:` is captured for reject-routing.
         assert_eq!(build.worker_roles.get("self_reviewer").map(String::as_str), Some("verify"));
-        // shape offers a compound gate (ask default, external alternative).
-        let shape = f.station("shape").unwrap();
-        assert_eq!(shape.checkpoint, CheckpointKind::Ask);
-        assert_eq!(
-            shape.checkpoint_options,
-            vec![CheckpointKind::Ask, CheckpointKind::External]
-        );
-        // A single-gate station carries no options.
-        assert!(f.station("frame").unwrap().checkpoint_options.is_empty());
         // A station's declared inputs flow onto the def (for the runtime
         // input-coverage gate). frame is the first station — no upstream inputs.
         assert!(f.station("frame").unwrap().inputs.is_empty());
@@ -336,7 +319,6 @@ mod tests {
         use darkrun_content::{
             Factory, FactoryFrontmatter, Role, RoleFrontmatter, RoleKind, Station, StationFrontmatter,
         };
-        use darkrun_core::domain::CheckpointKind;
         let role = |name: &str, kind: RoleKind, applies: &[&str]| Role {
             frontmatter: RoleFrontmatter {
                 name: name.into(), agent_type: None, model: None, interpretation: None,
@@ -349,7 +331,6 @@ mod tests {
             frontmatter: StationFrontmatter {
                 name: "build".into(), description: "d".into(), kills: "k".into(), label: None,
                 explorers: vec![], workers: vec!["w".into()], fix_workers: vec![], reviewers: vec!["a11y".into()],
-                checkpoint: CheckpointKind::Auto, checkpoint_options: vec![],
                 locked_artifact: "o.md".into(), inputs: vec![], inputs_waived: vec![],
             },
             body: "# build".into(),
@@ -387,7 +368,6 @@ mod tests {
     #[test]
     fn fix_workers_resolve_station_override_then_factory_fallback() {
         use darkrun_content::{Factory, FactoryFrontmatter, Station, StationFrontmatter};
-        use darkrun_core::domain::CheckpointKind;
         let mk_station = |name: &str, fix: Vec<&str>| Station {
             frontmatter: StationFrontmatter {
                 name: name.into(),
@@ -398,8 +378,6 @@ mod tests {
                 workers: vec![],
                 fix_workers: fix.iter().map(|s| s.to_string()).collect(),
                 reviewers: vec![],
-                checkpoint: CheckpointKind::Auto,
-                checkpoint_options: vec![],
                 locked_artifact: "o.md".into(),
                 inputs: vec![],
                 inputs_waived: vec![],

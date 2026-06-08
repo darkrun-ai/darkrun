@@ -67,8 +67,15 @@ impl Http {
     fn start_mode(slug: &str, limits: Limits) -> Self {
         let dir = tempfile::tempdir().expect("tmpdir");
         let store = StateStore::new(dir.path());
-        run_start(&store, slug, "software", Some("Ship it".into()), "continuous")
-            .expect("run_start");
+        run_start(
+            &store,
+            slug,
+            "software",
+            Some("Ship it".into()),
+            darkrun_core::domain::Mode::Solo,
+            "full",
+        )
+        .expect("run_start");
         let state = AppState::new(store, limits);
         let sessions = state.sessions.clone();
         Http {

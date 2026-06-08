@@ -6,7 +6,6 @@ kills: escaped-defects
 explorers: [scenario]
 workers: [verifier, breaker, triage]
 reviewers: [evidence_reviewer]
-checkpoint: external
 locked_artifact: review.md
 inputs: [matter.md, terms.md, structure.md, draft]
 ---

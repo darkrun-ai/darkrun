@@ -5,7 +5,6 @@ kills: ambiguity
 explorers: [contract, edge_case]
 workers: [spec_writer, adversary, tightener]
 reviewers: [testability, completeness]
-checkpoint: ask
 locked_artifact: spec.md
 inputs: [frame.md]
 ---

@@ -6,7 +6,6 @@ kills: wrong-matter
 explorers: [client_context]
 workers: [intake_framer, conflict_challenger, scope_distiller]
 reviewers: [scope_reviewer]
-checkpoint: ask
 locked_artifact: matter.md
 inputs: []
 ---

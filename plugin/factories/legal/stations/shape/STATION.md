@@ -6,7 +6,6 @@ kills: wrong-instrument
 explorers: [precedent]
 workers: [structurer, risk_challenger, structure_resolver]
 reviewers: [structure_reviewer]
-checkpoint: ask
 locked_artifact: structure.md
 inputs: [matter.md, terms.md]
 ---

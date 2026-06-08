@@ -1,9 +1,8 @@
 //! Integration tests for the pure logic behind the `/factories` pages:
-//! the phase-index mapping, the checkpoint label, and the corpus data the
-//! tiles + detail view read out of `darkrun-content`.
+//! the phase-index mapping and the corpus data the tiles + detail view read out
+//! of `darkrun-content`.
 
-use darkrun_core::domain::CheckpointKind;
-use darkrun_site::pages::factories::{checkpoint_label, phase_for_index};
+use darkrun_site::pages::factories::phase_for_index;
 use darkrun_ui::prelude::Phase;
 
 #[test]
@@ -28,32 +27,6 @@ fn phase_for_index_zero_is_spec() {
 #[test]
 fn phase_for_index_five_is_checkpoint() {
     assert_eq!(phase_for_index(5), Some(Phase::Checkpoint));
-}
-
-#[test]
-fn checkpoint_label_covers_every_kind() {
-    assert_eq!(checkpoint_label(CheckpointKind::Auto), "auto");
-    assert_eq!(checkpoint_label(CheckpointKind::Ask), "ask");
-    assert_eq!(checkpoint_label(CheckpointKind::External), "external");
-    assert_eq!(checkpoint_label(CheckpointKind::Await), "await");
-}
-
-#[test]
-fn checkpoint_labels_are_lowercase_and_distinct() {
-    let labels = [
-        checkpoint_label(CheckpointKind::Auto),
-        checkpoint_label(CheckpointKind::Ask),
-        checkpoint_label(CheckpointKind::External),
-        checkpoint_label(CheckpointKind::Await),
-    ];
-    for l in &labels {
-        assert_eq!(*l, l.to_lowercase());
-        assert!(!l.is_empty());
-    }
-    let mut sorted = labels.to_vec();
-    sorted.sort();
-    sorted.dedup();
-    assert_eq!(sorted.len(), 4, "labels collide");
 }
 
 #[test]
@@ -120,18 +93,6 @@ fn software_factory_has_six_stations_each_mappable_to_a_phase() {
 }
 
 #[test]
-fn detail_view_can_label_every_station_checkpoint() {
-    let f = darkrun_content::load_validated("software").unwrap();
-    for station in &f.stations {
-        let label = checkpoint_label(station.checkpoint());
-        assert!(
-            ["auto", "ask", "external", "await"].contains(&label.as_str()),
-            "unexpected label {label}"
-        );
-    }
-}
-
-#[test]
 fn detail_view_renders_factory_body_to_html() {
     let f = darkrun_content::load_validated("software").unwrap();
     let html = darkrun_site::content::render_markdown(&f.body);
@@ -159,23 +120,3 @@ fn station_names_are_non_empty_and_capitalizable() {
     }
 }
 
-#[test]
-fn frame_station_checkpoint_labels_as_ask() {
-    let f = darkrun_content::load_validated("software").unwrap();
-    let frame = f.station("frame").unwrap();
-    assert_eq!(checkpoint_label(frame.checkpoint()), "ask");
-}
-
-#[test]
-fn build_station_checkpoint_labels_as_ask() {
-    let f = darkrun_content::load_validated("software").unwrap();
-    let build = f.station("build").unwrap();
-    assert_eq!(checkpoint_label(build.checkpoint()), "ask");
-}
-
-#[test]
-fn harden_station_checkpoint_labels_as_ask() {
-    let f = darkrun_content::load_validated("software").unwrap();
-    let harden = f.station("harden").unwrap();
-    assert_eq!(checkpoint_label(harden.checkpoint()), "ask");
-}

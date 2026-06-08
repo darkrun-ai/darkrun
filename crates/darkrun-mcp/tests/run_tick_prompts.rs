@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::Path;
 
-use darkrun_core::domain::{Status, Unit, UnitFrontmatter};
+use darkrun_core::domain::{Mode, Status, Unit, UnitFrontmatter};
 use darkrun_core::StateStore;
 use darkrun_mcp::{checkpoint_decide, run_start, run_tick, RunAction, TickResult};
 use tempfile::TempDir;
@@ -48,7 +48,7 @@ fn prompt(tick: &TickResult) -> &str {
 #[test]
 fn run_tick_renders_a_prompt_for_every_phase() {
     let (dir, store) = fresh();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
     // ── Spec ────────────────────────────────────────────────────────────────
     let t = run_tick(&store, "r").expect("spec tick");
@@ -59,6 +59,10 @@ fn run_tick_renders_a_prompt_for_every_phase() {
     assert!(p.contains("elaborate") && p.contains("explore"), "spec beats:\n{p}");
     // The announcement partial rendered with the live run/station.
     assert!(p.contains("`r`") && p.contains("`frame`"));
+
+    // Solo holds the Spec until sealed; seal then advance past it.
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
+    run_tick(&store, "r").expect("advance past sealed Spec");
 
     // ── Review ───────────────────────────────────────────────────────────────
     let t = run_tick(&store, "r").expect("review tick");
@@ -148,7 +152,7 @@ fn run_tick_renders_a_prompt_for_every_phase() {
 #[test]
 fn project_override_changes_run_tick_output_end_to_end() {
     let (dir, store) = fresh();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
     // Baseline: the embedded spec template renders the default heading.
     let baseline = run_tick(&store, "r").expect("baseline tick");
@@ -160,7 +164,7 @@ fn project_override_changes_run_tick_output_end_to_end() {
     // still consumes the live context (`station`) to prove rendering, not just
     // pass-through, runs against the override.
     let (dir2, store2) = fresh();
-    run_start(&store2, "r2", "software", None, "continuous").expect("start2");
+    run_start(&store2, "r2", "software", None, Mode::Solo, "full").expect("start2");
     write_override(
         dir2.path(),
         "phases/spec",
@@ -184,7 +188,7 @@ fn project_override_changes_run_tick_output_end_to_end() {
 #[test]
 fn override_of_shared_partial_flows_through_run_tick() {
     let (dir, store) = fresh();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
     // Override only the shared contracts partial; the top-level spec template is
     // still embedded and includes it — the cascade must honor the override
@@ -205,7 +209,7 @@ fn override_of_shared_partial_flows_through_run_tick() {
 #[test]
 fn checkpoint_decide_retick_carries_rendered_prompt() {
     let (dir, store) = fresh();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
     // Reject the checkpoint → files feedback, which preempts the run track. The
     // re-tick must still render the fix-feedback track prompt.
@@ -220,7 +224,7 @@ fn checkpoint_decide_retick_carries_rendered_prompt() {
 #[test]
 fn sealed_run_renders_the_sealed_prompt() {
     let (dir, store) = fresh();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
     // Seed every station a completed unit upfront so each Manufacture clears
     // cleanly. (A gate's `checkpoint_decide` re-ticks into the next station's
@@ -252,6 +256,10 @@ fn sealed_run_renders_the_sealed_prompt() {
         let t = run_tick(&store, "r").expect("tick");
         match &t.action {
             RunAction::Sealed { .. } => break,
+            // Solo holds each station's Spec until the elaboration is sealed.
+            RunAction::Spec { station, .. } => {
+                darkrun_mcp::position::elaborate_seal(&store, "r", station).expect("seal");
+            }
             RunAction::UserGate { .. }
             | RunAction::Checkpoint { .. }
             | RunAction::ExternalReviewRequested { .. } => {

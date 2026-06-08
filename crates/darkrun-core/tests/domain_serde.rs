@@ -812,8 +812,8 @@ fn run_frontmatter_always_emits_factory() {
 
 #[test]
 fn run_frontmatter_always_emits_mode_even_when_empty() {
-    // mode has #[serde(default)] but no skip rule -> always present.
-    assert_eq!(obj(&minimal_run_fm())["mode"], "");
+    // mode has #[serde(default)] but no skip rule -> always present as its token.
+    assert_eq!(obj(&minimal_run_fm())["mode"], "solo");
 }
 
 #[test]
@@ -867,7 +867,7 @@ fn run_frontmatter_emits_git_when_present() {
 fn run_frontmatter_defaults_fill_missing_fields_from_yaml() {
     let fm: RunFrontmatter = serde_yaml::from_str("factory: software\n").expect("de");
     assert_eq!(fm.factory, "software");
-    assert_eq!(fm.mode, "");
+    assert_eq!(fm.mode, Mode::Solo);
     assert_eq!(fm.active_station, "");
     assert_eq!(fm.status, Status::Pending);
     assert_eq!(fm.archived, None);
@@ -886,7 +886,7 @@ fn run_frontmatter_full_roundtrip_json() {
     let fm = RunFrontmatter {
         title: Some("Big Run".into()),
         factory: "software".into(),
-        mode: "continuous".into(),
+        mode: Mode::Solo,
         active_station: "frame".into(),
         status: Status::Active,
         surface: Some(Surface::WebUi),
@@ -909,7 +909,7 @@ fn run_frontmatter_full_roundtrip_json() {
     assert_eq!(back.surface, Some(Surface::WebUi));
     assert_eq!(back.title.as_deref(), Some("Big Run"));
     assert_eq!(back.factory, "software");
-    assert_eq!(back.mode, "continuous");
+    assert_eq!(back.mode, Mode::Solo);
     assert_eq!(back.active_station, "frame");
     assert_eq!(back.status, Status::Active);
     assert_eq!(back.archived, Some(false));
@@ -924,7 +924,7 @@ fn run_frontmatter_full_roundtrip_yaml() {
     let fm = RunFrontmatter {
         title: Some("Y".into()),
         factory: "f".into(),
-        mode: "m".into(),
+        mode: Mode::Team,
         active_station: "s".into(),
         status: Status::Completed,
         surface: Some(Surface::Cli),
@@ -1930,7 +1930,6 @@ fn sample_station() -> Station {
         phase: StationPhase::Manufacture,
             elaborated: false,
         checkpoint: None,
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,
@@ -2009,7 +2008,6 @@ fn station_full_roundtrips() {
             entered_at: Some("t1".into()),
             outcome: Some(CheckpointOutcome::Advanced),
         }),
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,
@@ -2082,7 +2080,6 @@ fn station_yaml_roundtrips() {
         phase: StationPhase::Audit,
             elaborated: false,
         checkpoint: None,
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,
@@ -2320,7 +2317,6 @@ fn double_roundtrip_is_idempotent_for_station() {
             entered_at: Some("t".into()),
             outcome: Some(CheckpointOutcome::Awaiting),
         }),
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,
@@ -2624,7 +2620,7 @@ fn run_with_full_git_policy_yaml_roundtrips() {
         frontmatter: RunFrontmatter {
             title: Some("Ship".into()),
             factory: "software".into(),
-            mode: "continuous".into(),
+            mode: Mode::Solo,
             active_station: "frame".into(),
             status: Status::Active,
             surface: None,
@@ -2643,7 +2639,7 @@ fn run_with_full_git_policy_yaml_roundtrips() {
         body: "# Ship\n".into(),
     };
     let back = yaml_round(&run);
-    assert_eq!(back.frontmatter.mode, "continuous");
+    assert_eq!(back.frontmatter.mode, Mode::Solo);
     let git = back.frontmatter.git.expect("git");
     assert!(git.auto_merge && git.auto_squash);
 }
@@ -2688,7 +2684,6 @@ fn station_with_each_checkpoint_kind_roundtrips() {
                 entered_at: None,
                 outcome: None,
             }),
-            chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
             pr_status: None,
@@ -2889,9 +2884,9 @@ fn feedback_field_order_does_not_matter() {
 #[test]
 fn run_frontmatter_extra_then_known_field_order_parses() {
     let fm: RunFrontmatter =
-        serde_json::from_str(r#"{"extra":1,"factory":"f","mode":"m"}"#).expect("de");
+        serde_json::from_str(r#"{"extra":1,"factory":"f","mode":"team"}"#).expect("de");
     assert_eq!(fm.factory, "f");
-    assert_eq!(fm.mode, "m");
+    assert_eq!(fm.mode, Mode::Team);
 }
 
 #[test]

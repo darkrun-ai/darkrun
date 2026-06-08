@@ -6,7 +6,6 @@ kills: ambiguous-terms
 explorers: [authority_researcher]
 workers: [term_drafter, adversary_counsel, term_tightener]
 reviewers: [enforceability_reviewer]
-checkpoint: ask
 locked_artifact: terms.md
 inputs: [matter.md]
 ---

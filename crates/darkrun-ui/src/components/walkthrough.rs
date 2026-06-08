@@ -122,7 +122,7 @@ pub fn RunWalkthrough(
             div { style: "{stage}",
                 // Station walker on top — full width, content centered.
                 div { style: "width:100%;",
-                    StationFlow { stations: stations.clone(), active: Some(active_station), full_width: true }
+                    StationFlow { stations: stations.clone(), active: Some(active_station), full_width: true, show_checkpoints: false }
                 }
                 // Phase machine below — full width, ring centered.
                 div { style: "width:100%;",

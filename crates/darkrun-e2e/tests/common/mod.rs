@@ -10,7 +10,7 @@
 
 #![allow(dead_code)]
 
-use darkrun_core::domain::{CheckpointKind, Status, StationPhase, Unit, UnitFrontmatter};
+use darkrun_core::domain::{CheckpointKind, Mode, Status, StationPhase, Unit, UnitFrontmatter};
 use darkrun_core::{RunState, StateStore};
 use darkrun_mcp::position::{
     checkpoint_decide, derive_position, run_start, run_tick, Position, RunAction, TickResult,
@@ -57,12 +57,28 @@ impl Harness {
     pub fn start_with(slug: &str, factory: &str, title: Option<&str>, mode: &str) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = StateStore::new(dir.path());
-        run_start(&store, slug, factory, title.map(String::from), mode).expect("run_start");
-        Harness {
+        run_start(
+            &store,
+            slug,
+            factory,
+            title.map(String::from),
+            Mode::from_label(mode),
+            "full",
+        )
+        .expect("run_start");
+        let h = Harness {
             _dir: dir,
             store,
             slug: slug.to_string(),
-        }
+        };
+        // The first station (frame) is seeded at start. Under team/solo every
+        // station HOLDS its Spec until elaborated; pre-seal frame so a plain
+        // tick walks Spec->Review the way these fixtures' tick sequences assume.
+        // (Subsequent stations are sealed by the walk helpers as the cursor
+        // reaches them — they aren't in `state.stations` yet at start.) In `dark`
+        // mode the hold is absent and this is a harmless no-op stamp.
+        h.seal("frame");
+        h
     }
 
     /// The repository root backing this harness — the parent of the store's
@@ -79,6 +95,14 @@ impl Harness {
     /// Tick once; return the action.
     pub fn tick(&self) -> TickResult {
         run_tick(&self.store, &self.slug).expect("tick")
+    }
+
+    /// Seal a station's Spec elaboration. Under team/solo modes every station
+    /// HOLDS its Spec phase until elaborated; this clears that hold so the next
+    /// `tick` can advance Spec→Review. (No-op semantics for the caller in `dark`
+    /// mode, but harness fixtures default to solo.)
+    pub fn seal(&self, station: &str) {
+        darkrun_mcp::position::elaborate_seal(&self.store, &self.slug, station).expect("seal");
     }
 
     /// Derive the current cursor position without advancing.
@@ -211,8 +235,16 @@ impl Harness {
     /// is included as the final action.
     pub fn walk_station_to_checkpoint(&self, station: &str, unit_slugs: &[&str]) -> Vec<RunAction> {
         let mut actions = Vec::new();
-        // Spec.
+        // Spec — under solo the station HOLDS here until elaborated. The first
+        // tick enters the held Spec; seal the elaboration; the next tick APPLIES
+        // the Spec action and advances Spec→Review. (A station seeded already
+        // sealed — e.g. the pre-sealed frame — clears Spec on the first tick, so
+        // the second Spec tick is a harmless re-derive collapsed below.)
         actions.push(self.tick().action);
+        if self.phase(station) == StationPhase::Spec {
+            self.seal(station);
+            actions.push(self.tick().action); // applies Spec → Review
+        }
         // Review (an interactive station advances to the pre-execution gate).
         actions.push(self.tick().action);
         // Manufacture: decompose the wave, then clear the pre-execution operator
@@ -295,6 +327,9 @@ impl Harness {
                     if self.store.read_unit(&self.slug, &unit).is_err() {
                         self.decompose(station, &[(unit.as_str(), &[])]);
                     }
+                    // Under solo the Spec is HELD until elaborated — seal so the
+                    // next tick applies Spec and advances to Review.
+                    self.seal(station);
                 }
                 RunAction::Manufacture { units, .. } => {
                     let owned: Vec<&str> = units.iter().map(|s| s.as_str()).collect();
@@ -316,6 +351,7 @@ impl Harness {
                         if self.store.read_unit(&self.slug, &unit).is_err() {
                             self.decompose(ns, &[(unit.as_str(), &[])]);
                         }
+                        self.seal(ns);
                     }
                     let _ = station;
                 }
@@ -329,6 +365,7 @@ impl Harness {
                         if self.store.read_unit(&self.slug, &unit).is_err() {
                             self.decompose(ns, &[(unit.as_str(), &[])]);
                         }
+                        self.seal(ns);
                     }
                     let _ = station;
                 }

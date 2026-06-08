@@ -5,7 +5,6 @@ kills: wrong-thing
 explorers: [context, value]
 workers: [framer, challenger, distiller]
 reviewers: [value, feasibility]
-checkpoint: ask
 locked_artifact: frame.md
 inputs: []
 ---

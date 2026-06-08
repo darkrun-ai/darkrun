@@ -125,10 +125,9 @@ mod tests {
     #[test]
     fn default_station_falls_back_and_worker_line_handles_empty() {
         use crate::factory::{FactoryDef, StationDef};
-        use darkrun_core::domain::CheckpointKind;
         let station = StationDef {
             name: "frame".into(), label: None, kills: "wrong-thing".into(), artifact: "o.md".into(),
-            checkpoint: CheckpointKind::Auto, checkpoint_options: vec![], explorers: vec![],
+            explorers: vec![],
             workers: vec![], fix_workers: vec![], reviewers: vec![], role_models: Default::default(),
             role_interpretations: Default::default(), worker_roles: Default::default(),
             inputs: vec![], role_applies_to: Default::default(),

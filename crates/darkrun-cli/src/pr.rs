@@ -186,7 +186,15 @@ mod tests {
     /// without approving it, and flip the run discrete so the gate re-derives as
     /// `external`.
     fn drive_to_external_checkpoint(store: &StateStore, slug: &str) {
-        run_start(store, slug, "software", Some("Add login".into()), "continuous").unwrap();
+        run_start(
+            store,
+            slug,
+            "software",
+            Some("Add login".into()),
+            darkrun_core::domain::Mode::Solo,
+            "full",
+        )
+        .unwrap();
         for station in ["frame", "specify", "shape", "build", "prove", "harden"] {
             // Consume the station's declared inputs so the runtime input-coverage
             // gate is satisfied (the run's distillation is carried forward).
@@ -208,6 +216,11 @@ mod tests {
             for _ in 0..14 {
                 let tick = run_tick(store, slug).unwrap();
                 match &tick.action {
+                    // Solo holds the Spec until it's elaborated with the operator;
+                    // seal it so the station advances to Review.
+                    RunAction::Spec { station: s, .. } if s == station => {
+                        darkrun_mcp::position::elaborate_seal(store, slug, station).unwrap();
+                    }
                     // Clear the pre-execution operator gate so the wave releases.
                     RunAction::UserGate { station: s, .. } if s == station => {
                         darkrun_mcp::checkpoint_decide(store, slug, true, None).unwrap();
@@ -227,9 +240,10 @@ mod tests {
                 break;
             }
         }
-        // Promote harden's held `ask` gate to an external review gate.
+        // Promote the run to `team` so every gate (including harden's parked one)
+        // re-derives as `external` — the per-station PR path.
         let mut state = store.read_state(slug).unwrap().unwrap();
-        state.discrete = true;
+        state.mode = darkrun_core::domain::Mode::Team;
         store.write_state(slug, &state).unwrap();
     }
 
@@ -444,7 +458,7 @@ mod tests {
     fn errors_when_not_at_external_checkpoint() {
         let (_d, state, cred_store) = stores();
         // Fresh run — sits at Spec, not an external checkpoint.
-        run_start(&state, "r", "software", None, "continuous").unwrap();
+        run_start(&state, "r", "software", None, darkrun_core::domain::Mode::Solo, "full").unwrap();
         cred_store
             .save(&Credential::new(Provider::GitHub, "gh-tok"))
             .unwrap();

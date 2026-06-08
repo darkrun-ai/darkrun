@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use darkrun_core::domain::{
-    Run, RunFrontmatter, Station, StationPhase, Status, Unit, UnitFrontmatter,
+    Mode, Run, RunFrontmatter, Station, StationPhase, Status, Unit, UnitFrontmatter,
 };
 use darkrun_core::error::CoreError;
 use darkrun_core::state::{run_is_complete, RunState, StateStore};
@@ -46,13 +46,13 @@ fn run_roundtrip_preserves_frontmatter() {
     let store = StateStore::new(tmp.path());
     let mut r = run("my-run", Status::Active);
     r.frontmatter.title = Some("My Run".into());
-    r.frontmatter.mode = "continuous".into();
+    r.frontmatter.mode = Mode::Team;
     store.write_run(&r).expect("write");
 
     let loaded = store.read_run("my-run").expect("read");
     assert_eq!(loaded.frontmatter.factory, "software");
     assert_eq!(loaded.frontmatter.status, Status::Active);
-    assert_eq!(loaded.frontmatter.mode, "continuous");
+    assert_eq!(loaded.frontmatter.mode, Mode::Team);
     assert_eq!(loaded.title, "My Run");
 }
 
@@ -375,7 +375,6 @@ fn state_json_roundtrip() {
             phase: StationPhase::Manufacture,
             elaborated: false,
             checkpoint: None,
-            chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
             pr_status: None,

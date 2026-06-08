@@ -67,7 +67,7 @@ pub fn Methodology() -> Element {
                      it catches."
                 }
                 div { style: "overflow-x:auto;",
-                    StationFlow { stations: flows.clone(), on_select: on_station }
+                    StationFlow { stations: flows.clone(), on_select: on_station, show_checkpoints: false }
                 }
             }
         }

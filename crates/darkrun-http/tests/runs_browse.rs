@@ -66,7 +66,7 @@ fn seed_run(
     let frontmatter = RunFrontmatter {
         title: title.map(str::to_string),
         factory: factory.to_string(),
-        mode: "continuous".to_string(),
+        mode: darkrun_core::domain::Mode::Solo,
         active_station: active_station.to_string(),
         status,
         archived: if archived { Some(true) } else { None },
@@ -90,7 +90,6 @@ fn station(name: &str, status: Status, phase: StationPhase, started_at: Option<&
         phase,
         elaborated: false,
         checkpoint: None,
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,

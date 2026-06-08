@@ -144,6 +144,7 @@ pub fn external_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use darkrun_core::domain::Mode;
     use crate::position::run_start;
     use tempfile::tempdir;
 
@@ -156,8 +157,8 @@ mod tests {
     #[test]
     fn list_returns_summaries() {
         let (d, store) = store();
-        run_start(&store, "a", "software", Some("Alpha".into()), "continuous").unwrap();
-        run_start(&store, "b", "software", None, "continuous").unwrap();
+        run_start(&store, "a", "software", Some("Alpha".into()), Mode::Solo, "full").unwrap();
+        run_start(&store, "b", "software", None, Mode::Solo, "full").unwrap();
         let runs = list(&store, d.path(), true).unwrap();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].slug, "a");
@@ -171,8 +172,8 @@ mod tests {
     #[test]
     fn list_skips_a_run_with_an_unparseable_doc() {
         let (d, store) = store();
-        run_start(&store, "good", "software", None, "continuous").unwrap();
-        run_start(&store, "bad", "software", None, "continuous").unwrap();
+        run_start(&store, "good", "software", None, Mode::Solo, "full").unwrap();
+        run_start(&store, "bad", "software", None, Mode::Solo, "full").unwrap();
         // Corrupt one run's doc → it's skipped, not fatal to the whole listing.
         std::fs::write(store.run_dir("bad").join("run.md"), "---\nfactory: \"oops\n---\n").unwrap();
         let runs = list(&store, d.path(), true).unwrap();
@@ -183,7 +184,7 @@ mod tests {
     #[test]
     fn archive_hides_run_from_default_list() {
         let (d, store) = store();
-        run_start(&store, "a", "software", None, "continuous").unwrap();
+        run_start(&store, "a", "software", None, Mode::Solo, "full").unwrap();
         set_archived(&store, "a", true).unwrap();
         assert!(list(&store, d.path(), false).unwrap().is_empty());
         assert_eq!(list(&store, d.path(), true).unwrap().len(), 1);
@@ -193,7 +194,7 @@ mod tests {
     #[test]
     fn archive_clears_active_pointer() {
         let (_d, store) = store();
-        run_start(&store, "a", "software", None, "continuous").unwrap();
+        run_start(&store, "a", "software", None, Mode::Solo, "full").unwrap();
         store.set_active_run("a").unwrap();
         set_archived(&store, "a", true).unwrap();
         // Active should no longer resolve to the archived run.
@@ -203,7 +204,7 @@ mod tests {
     #[test]
     fn unarchive_restores() {
         let (d, store) = store();
-        run_start(&store, "a", "software", None, "continuous").unwrap();
+        run_start(&store, "a", "software", None, Mode::Solo, "full").unwrap();
         set_archived(&store, "a", true).unwrap();
         set_archived(&store, "a", false).unwrap();
         assert_eq!(list(&store, d.path(), false).unwrap().len(), 1);
@@ -212,7 +213,7 @@ mod tests {
     #[test]
     fn external_refs_set_read_and_clear() {
         let (_d, store) = store();
-        run_start(&store, "a", "software", None, "continuous").unwrap();
+        run_start(&store, "a", "software", None, Mode::Solo, "full").unwrap();
         // Empty by default.
         assert!(external_refs(&store, "a").unwrap().is_empty());
 
@@ -267,8 +268,8 @@ mod tests {
         // (darkrun/<slug>/main) off `main` — the authorship head under the
         // hierarchy.
         let store = StateStore::new(root);
-        run_start(&store, "mine-run", "software", None, "continuous").unwrap();
-        run_start(&store, "their-run", "software", None, "continuous").unwrap();
+        run_start(&store, "mine-run", "software", None, Mode::Solo, "full").unwrap();
+        run_start(&store, "their-run", "software", None, Mode::Solo, "full").unwrap();
 
         // A commit I authored on mine-run's run-main branch.
         git(&["checkout", "-q", "darkrun/mine-run/main"]);

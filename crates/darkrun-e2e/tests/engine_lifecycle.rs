@@ -87,9 +87,9 @@ fn start_without_title_defaults_to_slug() {
 
 #[test]
 fn start_records_mode() {
-    let h = Harness::start_with("s1", "software", None, "right-sized");
+    let h = Harness::start_with("s1", "software", None, "team");
     let run = h.store.read_run("s1").unwrap();
-    assert_eq!(run.frontmatter.mode, "right-sized");
+    assert_eq!(run.frontmatter.mode, darkrun_core::domain::Mode::Team);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn start_frame_status_pending() {
 fn start_unknown_factory_errors() {
     let dir = tempfile::tempdir().unwrap();
     let store = darkrun_core::StateStore::new(dir.path());
-    let err = darkrun_mcp::position::run_start(&store, "x", "nope", None, "continuous");
+    let err = darkrun_mcp::position::run_start(&store, "x", "nope", None, darkrun_core::domain::Mode::Solo, "full");
     assert!(err.is_err());
 }
 
@@ -1157,8 +1157,8 @@ fn run_list_includes_archived_when_requested() {
 fn run_list_multiple_runs_sorted_by_slug() {
     let dir = tempfile::tempdir().unwrap();
     let store = darkrun_core::StateStore::new(dir.path());
-    darkrun_mcp::position::run_start(&store, "bravo", "software", None, "continuous").unwrap();
-    darkrun_mcp::position::run_start(&store, "alpha", "software", None, "continuous").unwrap();
+    darkrun_mcp::position::run_start(&store, "bravo", "software", None, darkrun_core::domain::Mode::Solo, "full").unwrap();
+    darkrun_mcp::position::run_start(&store, "alpha", "software", None, darkrun_core::domain::Mode::Solo, "full").unwrap();
     let runs = darkrun_mcp::runs::list(&store, dir.path(), true).unwrap();
     assert_eq!(runs[0].slug, "alpha");
     assert_eq!(runs[1].slug, "bravo");
@@ -1311,33 +1311,6 @@ fn content_station_order_matches_manager() {
     let f = darkrun_content::load_validated("software").unwrap();
     let names: Vec<&str> = f.stations.iter().map(|s| s.name()).collect();
     assert_eq!(names, STATIONS.to_vec());
-}
-
-#[test]
-fn content_frame_checkpoint_matches_manager() {
-    let f = darkrun_content::load_factory("software").unwrap();
-    assert_eq!(
-        f.station("frame").unwrap().checkpoint(),
-        manager_checkpoint("frame")
-    );
-}
-
-#[test]
-fn content_build_checkpoint_is_ask() {
-    let f = darkrun_content::load_factory("software").unwrap();
-    assert_eq!(
-        f.station("build").unwrap().checkpoint(),
-        CheckpointKind::Ask
-    );
-}
-
-#[test]
-fn content_harden_checkpoint_is_ask() {
-    let f = darkrun_content::load_factory("software").unwrap();
-    assert_eq!(
-        f.station("harden").unwrap().checkpoint(),
-        CheckpointKind::Ask
-    );
 }
 
 #[test]
@@ -1536,8 +1509,8 @@ fn each_phase_position_is_idempotent_across_run() {
 fn two_runs_are_isolated() {
     let dir = tempfile::tempdir().unwrap();
     let store = darkrun_core::StateStore::new(dir.path());
-    darkrun_mcp::position::run_start(&store, "a", "software", None, "continuous").unwrap();
-    darkrun_mcp::position::run_start(&store, "b", "software", None, "continuous").unwrap();
+    darkrun_mcp::position::run_start(&store, "a", "software", None, darkrun_core::domain::Mode::Solo, "full").unwrap();
+    darkrun_mcp::position::run_start(&store, "b", "software", None, darkrun_core::domain::Mode::Solo, "full").unwrap();
     // Advance a; b stays at frame/spec.
     run_tick(&store, "a").unwrap();
     let pb = derive_position(&store, "b").unwrap();

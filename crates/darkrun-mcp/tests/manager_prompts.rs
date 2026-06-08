@@ -18,7 +18,7 @@
 use std::fs;
 use std::path::Path;
 
-use darkrun_core::domain::{Status, StationPhase, Unit, UnitFrontmatter};
+use darkrun_core::domain::{Mode, Status, StationPhase, Unit, UnitFrontmatter};
 use darkrun_core::StateStore;
 use darkrun_mcp::position::{
     checkpoint_decide, derive_position, render_prompt, run_start, run_tick, RunAction,
@@ -33,7 +33,7 @@ use tempfile::TempDir;
 fn fresh(slug: &str) -> (TempDir, StateStore) {
     let dir = TempDir::new().expect("tmp");
     let store = StateStore::new(dir.path());
-    run_start(&store, slug, "software", None, "continuous").expect("start");
+    run_start(&store, slug, "software", None, Mode::Solo, "full").expect("start");
     (dir, store)
 }
 
@@ -92,11 +92,12 @@ fn set_phase(store: &StateStore, run: &str, station: &str, phase: StationPhase) 
 fn at_phase(store: &StateStore, run: &str, target: &str, phase: StationPhase) {
     let factory = resolve_factory("software").expect("factory");
     let mut state = store.read_state(run).expect("state").unwrap_or_default();
+    let gate = state.mode.gate();
     for station in STATIONS {
         if station == target {
             break;
         }
-        let def = factory.station(station).expect("def");
+        let _ = factory.station(station).expect("def");
         state.stations.insert(
             station.to_string(),
             darkrun_core::domain::Station {
@@ -105,11 +106,10 @@ fn at_phase(store: &StateStore, run: &str, target: &str, phase: StationPhase) {
                 phase: StationPhase::Checkpoint,
             elaborated: false,
                 checkpoint: Some(darkrun_core::domain::Checkpoint {
-                    kind: def.checkpoint,
+                    kind: gate,
                     entered_at: None,
                     outcome: Some(darkrun_core::domain::CheckpointOutcome::Advanced),
                 }),
-                chosen_checkpoint: None,
                 branch: None,
                 pr_ref: None,
                 pr_status: None,
@@ -121,7 +121,7 @@ fn at_phase(store: &StateStore, run: &str, target: &str, phase: StationPhase) {
             },
         );
     }
-    let def = factory.station(target).expect("target def");
+    let _ = factory.station(target).expect("target def");
     state.stations.insert(
         target.to_string(),
         darkrun_core::domain::Station {
@@ -130,11 +130,10 @@ fn at_phase(store: &StateStore, run: &str, target: &str, phase: StationPhase) {
             phase,
             elaborated: false,
             checkpoint: Some(darkrun_core::domain::Checkpoint {
-                kind: def.checkpoint,
+                kind: gate,
                 entered_at: None,
                 outcome: None,
             }),
-            chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
             pr_status: None,
@@ -275,7 +274,7 @@ fn checkpoint_prompt_branches_on_kind() {
     let (_d2, store2) = fresh("r2");
     at_phase(&store2, "r2", "build", StationPhase::Checkpoint);
     let mut s = store2.read_state("r2").unwrap().unwrap();
-    s.auto_gates = true;
+    s.mode = Mode::Dark;
     store2.write_state("r2", &s).unwrap();
     let t2 = run_tick(&store2, "r2").expect("tick");
     let auto = t2.prompt.expect("prompt");
@@ -290,7 +289,7 @@ fn checkpoint_prompt_external_for_discrete_station() {
     let (_d, store) = fresh("r");
     at_phase(&store, "r", "harden", StationPhase::Checkpoint);
     let mut s = store.read_state("r").unwrap().unwrap();
-    s.discrete = true;
+    s.mode = Mode::Team;
     store.write_state("r", &s).unwrap();
     let t = run_tick(&store, "r").expect("tick");
     let prompt = t.prompt.expect("prompt");
@@ -498,7 +497,6 @@ fn sealed_action_renders_run_completion_prompt() {
                 phase: StationPhase::Checkpoint,
             elaborated: false,
                 checkpoint: None,
-                chosen_checkpoint: None,
                 branch: None,
                 pr_ref: None,
                 pr_status: None,

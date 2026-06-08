@@ -27,7 +27,7 @@ use std::thread;
 
 use common::*;
 use darkrun_core::domain::{
-    CheckpointKind, CheckpointOutcome, Status, StationPhase, Unit, UnitFrontmatter,
+    CheckpointKind, CheckpointOutcome, Mode, Status, StationPhase, Unit, UnitFrontmatter,
 };
 use darkrun_core::{LockManager, RunState, StateStore};
 use darkrun_mcp::position::{
@@ -58,7 +58,12 @@ impl Durable {
     fn start_with(slug: &str, factory: &str, mode: &str) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = StateStore::new(dir.path());
-        run_start(&store, slug, factory, None, mode).expect("run_start");
+        run_start(&store, slug, factory, None, Mode::from_label(mode), "full").expect("run_start");
+        // Under team/solo every station HOLDS its Spec until elaborated. The
+        // first station (frame) is seeded at start; pre-seal it so a plain tick
+        // walks Spec→Review the way these recovery sequences assume. Subsequent
+        // stations are sealed by `walk_to_checkpoint_fresh` as they're reached.
+        darkrun_mcp::position::elaborate_seal(&store, slug, "frame").expect("seal frame");
         Durable {
             dir,
             slug: slug.to_string(),
@@ -150,7 +155,14 @@ impl Durable {
 /// Drive the run's active station to a held checkpoint, opening a fresh store
 /// for every step so the whole walk is reconstructed from disk each tick.
 fn walk_to_checkpoint_fresh(d: &Durable, station: &str, units: &[&str]) {
-    d.tick_fresh(); // spec -> review
+    d.tick_fresh(); // spec (held under solo until elaborated; pre-sealed frame clears it here)
+    // Solo holds the Spec until the elaboration is sealed; if the station is
+    // still at Spec, seal and re-tick to apply Spec -> Review. (A pre-sealed
+    // station — e.g. frame — already advanced on the tick above.)
+    if d.phase(station) == StationPhase::Spec {
+        darkrun_mcp::position::elaborate_seal(&d.reopen(), &d.slug, station).expect("seal");
+        d.tick_fresh(); // applies spec -> review
+    }
     d.tick_fresh(); // review -> user gate (interactive) / manufacture (auto)
     if !units.is_empty() {
         let pairs: Vec<(&str, &[&str])> = units.iter().map(|s| (*s, &[][..])).collect();
@@ -560,10 +572,10 @@ fn active_newest_run_wins_inference_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     {
         let store = StateStore::new(dir.path());
-        let mut older = run_start(&store, "older", "software", None, "continuous").unwrap();
+        let mut older = run_start(&store, "older", "software", None, Mode::Solo, "full").unwrap();
         older.frontmatter.started_at = Some("2020-01-01T00:00:00Z".to_string());
         store.write_run(&older).unwrap();
-        let mut newer = run_start(&store, "newer", "software", None, "continuous").unwrap();
+        let mut newer = run_start(&store, "newer", "software", None, Mode::Solo, "full").unwrap();
         newer.frontmatter.started_at = Some("2030-01-01T00:00:00Z".to_string());
         store.write_run(&newer).unwrap();
     }
@@ -577,10 +589,10 @@ fn active_explicit_pointer_overrides_inference_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     {
         let store = StateStore::new(dir.path());
-        let mut newer = run_start(&store, "newer", "software", None, "continuous").unwrap();
+        let mut newer = run_start(&store, "newer", "software", None, Mode::Solo, "full").unwrap();
         newer.frontmatter.started_at = Some("2030-01-01T00:00:00Z".to_string());
         store.write_run(&newer).unwrap();
-        run_start(&store, "pinned", "software", None, "continuous").unwrap();
+        run_start(&store, "pinned", "software", None, Mode::Solo, "full").unwrap();
         // Pin the OLDER-by-inference run explicitly.
         store.set_active_run("pinned").unwrap();
     }
@@ -869,8 +881,12 @@ fn concurrent_distinct_runs_under_lock_dont_interfere() {
     let root = dir.path().to_path_buf();
     {
         let store = StateStore::new(&root);
-        run_start(&store, "ra", "software", None, "continuous").unwrap();
-        run_start(&store, "rb", "software", None, "continuous").unwrap();
+        run_start(&store, "ra", "software", None, Mode::Solo, "full").unwrap();
+        run_start(&store, "rb", "software", None, Mode::Solo, "full").unwrap();
+        // Solo holds frame's Spec until elaborated; pre-seal so the single tick
+        // each thread fires advances Spec -> Review.
+        darkrun_mcp::position::elaborate_seal(&store, "ra", "frame").unwrap();
+        darkrun_mcp::position::elaborate_seal(&store, "rb", "frame").unwrap();
     }
     let handles: Vec<_> = ["ra", "rb"]
         .iter()
@@ -1077,7 +1093,11 @@ fn partial_state_recovers_and_can_retick() {
         "{\"factory\":\"software\",\"active_station\":\"frame\"}",
     )
     .unwrap();
-    // Re-ticking rebuilds the station entry and advances the phase from Spec.
+    // Re-ticking rebuilds the station entry from the partial snapshot. Under
+    // solo the rebuilt frame HOLDS its Spec until elaborated, so the walk is
+    // tick (seed + enter held Spec) → seal → tick (apply Spec → Review).
+    run_tick(&d.reopen(), "partial").unwrap();
+    darkrun_mcp::position::elaborate_seal(&d.reopen(), "partial", "frame").unwrap();
     run_tick(&d.reopen(), "partial").unwrap();
     assert_eq!(d.phase("frame"), StationPhase::Review);
 }

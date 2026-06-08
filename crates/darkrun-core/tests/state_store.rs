@@ -14,7 +14,7 @@ use std::fs;
 use std::path::Path;
 
 use darkrun_core::domain::{
-    Checkpoint, CheckpointKind, CheckpointOutcome, Run, RunFrontmatter, RunGit, Station,
+    Checkpoint, CheckpointKind, CheckpointOutcome, Mode, Run, RunFrontmatter, RunGit, Station,
     StationPhase, Status, Unit, UnitFrontmatter,
 };
 use darkrun_core::error::CoreError;
@@ -68,7 +68,6 @@ fn station(name: &str, status: Status, phase: StationPhase) -> Station {
         phase,
         elaborated: false,
         checkpoint: None,
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,
@@ -200,9 +199,9 @@ fn run_roundtrip_preserves_slug() {
 fn run_roundtrip_preserves_mode() {
     let (_t, store) = store();
     let mut r = run("r", Status::Active);
-    r.frontmatter.mode = "right-sized".into();
+    r.frontmatter.mode = Mode::Dark;
     store.write_run(&r).expect("w");
-    assert_eq!(store.read_run("r").expect("read").frontmatter.mode, "right-sized");
+    assert_eq!(store.read_run("r").expect("read").frontmatter.mode, Mode::Dark);
 }
 
 #[test]

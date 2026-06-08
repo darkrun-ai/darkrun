@@ -1,22 +1,19 @@
 //! Corpus-level integration tests over the embedded software factory.
 //!
 //! These assert the *shipped* content is coherent: every station listed by the
-//! factory loads, exposes a full role set (explorers, workers, reviewers), a
-//! known checkpoint kind, and a non-empty locked artifact — and that each role's
+//! factory loads, exposes a full role set (explorers, workers, reviewers) and
+//! a non-empty locked artifact — and that each role's
 //! markdown body actually carries instructions an agent could act on.
 
 use darkrun_content::{load_factory, load_validated, Role, RoleKind, Station};
-use darkrun_core::domain::CheckpointKind;
 
 /// The six software stations, in cost-of-late-discovery order, with the design's
-/// expected role counts and checkpoint gates. This is the contract the shipped
-/// corpus must satisfy.
+/// expected role counts. This is the contract the shipped corpus must satisfy.
 struct Expected {
     name: &'static str,
     explorers: &'static [&'static str],
     workers: &'static [&'static str],
     reviewers: &'static [&'static str],
-    checkpoint: CheckpointKind,
     locked_artifact: &'static str,
 }
 
@@ -26,7 +23,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["context", "value"],
         workers: &["framer", "challenger", "distiller"],
         reviewers: &["value", "feasibility"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "frame.md",
     },
     Expected {
@@ -34,7 +30,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["contract", "edge_case"],
         workers: &["spec_writer", "adversary", "tightener"],
         reviewers: &["testability", "completeness"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "spec.md",
     },
     Expected {
@@ -42,7 +37,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["surface", "architecture", "risk"],
         workers: &["designer", "visual_designer", "spiker", "pressure_tester", "resolver"],
         reviewers: &["fit", "reversibility", "simplicity"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "design.md",
     },
     Expected {
@@ -50,7 +44,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["reuse", "integration_point"],
         workers: &["test_author", "builder", "self_reviewer", "reconciler"],
         reviewers: &["correctness", "maintainability"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "code",
     },
     Expected {
@@ -58,7 +51,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["scenario", "regression"],
         workers: &["verifier", "breaker", "triage"],
         reviewers: &["evidence", "coverage"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "proof.md",
     },
     Expected {
@@ -66,7 +58,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["threat", "operability"],
         workers: &["hardener", "red_teamer", "releaser"],
         reviewers: &["security", "readiness"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "release.md",
     },
 ];
@@ -110,12 +101,6 @@ fn every_station_has_a_complete_role_set() {
             exp.name
         );
 
-        assert_eq!(
-            station.checkpoint(),
-            exp.checkpoint,
-            "{} checkpoint",
-            exp.name
-        );
         assert_eq!(
             station.frontmatter.locked_artifact, exp.locked_artifact,
             "{} locked_artifact",
@@ -212,20 +197,6 @@ fn station_bodies_describe_their_risk_class() {
             station.name()
         );
     }
-}
-
-#[test]
-fn checkpoint_kinds_are_all_recognized() {
-    // Loading parses each station's `checkpoint:` through the CheckpointKind
-    // enum; an unknown kind would fail the load. Reaching here proves every
-    // shipped station declares a recognized gate.
-    let factory = load_validated("software").expect("loads");
-    let kinds: Vec<CheckpointKind> = factory
-        .stations
-        .iter()
-        .map(Station::checkpoint)
-        .collect();
-    assert_eq!(kinds, vec![CheckpointKind::Ask; 6]);
 }
 
 #[test]

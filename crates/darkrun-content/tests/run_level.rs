@@ -18,7 +18,6 @@ use darkrun_content::{
     load_factory, load_validated, validate, ContentError, Factory, FactoryFrontmatter, Role,
     RoleFrontmatter, RoleKind, Station, StationFrontmatter,
 };
-use darkrun_core::domain::CheckpointKind;
 
 // ---------------------------------------------------------------------------
 // The shipped run-level contract.
@@ -70,8 +69,6 @@ fn valid_station() -> Station {
             workers: vec!["w1".into(), "w2".into(), "w3".into()],
             fix_workers: vec![],
             reviewers: vec!["r1".into()],
-            checkpoint: CheckpointKind::Auto,
-            checkpoint_options: vec![],
             locked_artifact: "out.md".into(),
             inputs: vec![],
             inputs_waived: vec![],

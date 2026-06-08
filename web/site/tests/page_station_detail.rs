@@ -82,10 +82,11 @@ fn flow_stations_feed_the_pipeline_and_walkthrough() {
     let f = software();
     let flows = flow_stations(&f);
     assert_eq!(flows.len(), 6);
-    // Each flow node carries the checkpoint kind the UI component needs — every
-    // software station gates `ask` by default.
+    // The gate is global (the run's mode), not per-station, so the static catalog
+    // renders the strip with `show_checkpoints: false` and every node carries a
+    // placeholder kind that is never displayed.
     for node in &flows {
-        assert_eq!(node.checkpoint, UiCheckpoint::Ask);
+        assert_eq!(node.checkpoint, UiCheckpoint::Auto);
     }
 }
 

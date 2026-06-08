@@ -39,6 +39,12 @@ pub fn StationFlow(
     /// viewBox) instead of capping at natural size.
     #[props(default = false)]
     full_width: bool,
+    /// Draw the per-node checkpoint mark under each station. The gate is now a
+    /// global property of the run's mode (team/solo/dark), so the static factory
+    /// catalog passes `false` — a per-node mark there would repeat the same gate
+    /// under every node. A live run (desktop) keeps it `true`.
+    #[props(default = true)]
+    show_checkpoints: bool,
 ) -> Element {
     let opts = FlowOptions::default();
     let layout = layout_flow(&stations, active, &opts);
@@ -146,11 +152,13 @@ pub fn StationFlow(
                                 text_anchor: "middle",
                                 "{s.label}"
                             }
-                            text {
-                                x: "{s.cx}", y: "{mark_y}",
-                                fill: tokens::var::TEXT_FAINT, font_size: "9",
-                                text_anchor: "middle",
-                                "◇ {checkpoint_mark(s.checkpoint)}"
+                            if show_checkpoints {
+                                text {
+                                    x: "{s.cx}", y: "{mark_y}",
+                                    fill: tokens::var::TEXT_FAINT, font_size: "9",
+                                    text_anchor: "middle",
+                                    "◇ {checkpoint_mark(s.checkpoint)}"
+                                }
                             }
                         }
                     }

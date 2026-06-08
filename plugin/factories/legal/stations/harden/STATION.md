@@ -6,7 +6,6 @@ kills: unenforceable-in-the-wild
 explorers: [jurisdiction]
 workers: [finalizer, redteam_counsel, executor]
 reviewers: [readiness_reviewer]
-checkpoint: external
 locked_artifact: execution.md
 inputs: [matter.md, terms.md, structure.md, draft, review.md]
 ---

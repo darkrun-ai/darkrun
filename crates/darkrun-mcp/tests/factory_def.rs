@@ -8,7 +8,6 @@
 //! resolver's known/unknown behavior, and structural invariants
 //! (determinism, uniqueness, external checkpoints where expected).
 
-use darkrun_core::domain::CheckpointKind;
 use darkrun_mcp::factory::list_factories;
 use darkrun_mcp::{resolve_factory, FactoryDef, StationDef};
 
@@ -462,79 +461,6 @@ fn station_lookup_matches_artifact_name_not_used() {
     // The lookup keys on station name, not artifact filename.
     assert!(sw().station("frame.md").is_none());
     assert!(sw().station("release.md").is_none());
-}
-
-// ---------------------------------------------------------------------------
-// Checkpoint kinds per station.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn frame_checkpoint_is_ask() {
-    assert_eq!(st("frame").checkpoint, CheckpointKind::Ask);
-}
-
-#[test]
-fn specify_checkpoint_is_ask() {
-    assert_eq!(st("specify").checkpoint, CheckpointKind::Ask);
-}
-
-#[test]
-fn shape_checkpoint_is_ask() {
-    assert_eq!(st("shape").checkpoint, CheckpointKind::Ask);
-}
-
-#[test]
-fn build_checkpoint_is_ask() {
-    assert_eq!(st("build").checkpoint, CheckpointKind::Ask);
-}
-
-#[test]
-fn prove_checkpoint_is_ask() {
-    assert_eq!(st("prove").checkpoint, CheckpointKind::Ask);
-}
-
-#[test]
-fn harden_checkpoint_is_ask() {
-    assert_eq!(st("harden").checkpoint, CheckpointKind::Ask);
-}
-
-#[test]
-fn final_station_uses_ask_checkpoint() {
-    let f = sw();
-    let last = f.stations.last().unwrap();
-    assert_eq!(last.checkpoint, CheckpointKind::Ask);
-}
-
-#[test]
-fn every_station_gates_ask() {
-    // The software factory gates the operator at every station by default; the
-    // auto / external downgrades are applied by mode (quick / discrete) via
-    // `effective_checkpoint_kind`, not baked into the factory plan.
-    let asks: Vec<String> = sw()
-        .stations
-        .iter()
-        .filter(|s| s.checkpoint == CheckpointKind::Ask)
-        .map(|s| s.name.clone())
-        .collect();
-    assert_eq!(
-        asks,
-        vec!["frame", "specify", "shape", "build", "prove", "harden"]
-    );
-}
-
-#[test]
-fn no_station_uses_auto_external_or_await_checkpoint() {
-    assert!(sw().stations.iter().all(|s| matches!(
-        s.checkpoint,
-        CheckpointKind::Ask
-    )));
-}
-
-#[test]
-fn checkpoint_kinds_in_order() {
-    use CheckpointKind::Ask;
-    let kinds: Vec<CheckpointKind> = sw().stations.iter().map(|s| s.checkpoint).collect();
-    assert_eq!(kinds, vec![Ask, Ask, Ask, Ask, Ask, Ask]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,9 +935,9 @@ fn distinct_stations_are_not_equal() {
 }
 
 #[test]
-fn station_def_differs_when_checkpoint_differs() {
+fn station_def_differs_when_artifact_differs() {
     let mut s = st("build");
-    s.checkpoint = CheckpointKind::Auto;
+    s.artifact = "different.md".to_string();
     assert_ne!(s, st("build"));
 }
 

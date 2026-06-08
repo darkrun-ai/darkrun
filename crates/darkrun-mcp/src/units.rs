@@ -698,7 +698,6 @@ mod tests {
             phase: darkrun_core::domain::StationPhase::Manufacture,
             elaborated: false,
             checkpoint: None,
-            chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
             pr_status: None,
