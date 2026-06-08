@@ -57,8 +57,11 @@ jobs:
             npm: darwin-arm64
             bin: darkrun
             desktop_bin: darkrun-desktop
+          # Cross-compile the Intel binary on an Apple-Silicon runner: GitHub's
+          # Intel macos-13 runners are scarce and the job can queue for ages;
+          # macos-14 (arm) builds the x86_64 target fine via --target.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             npm: darwin-x64
             bin: darkrun
             desktop_bin: darkrun-desktop
