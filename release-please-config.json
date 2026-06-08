@@ -12,6 +12,7 @@
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" },
+        { "type": "json", "path": "crates/darkrun-api/openapi.json", "jsonpath": "$.info.version" },
         { "type": "json", "path": "plugin/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "npm/darwin-arm64/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "npm/darwin-x64/package.json", "jsonpath": "$.version" },

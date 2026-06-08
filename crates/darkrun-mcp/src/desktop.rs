@@ -111,7 +111,8 @@ fn sh_quote(p: &Path) -> String {
 /// The minimal `Info.plist` for the macOS launch wrapper. `CFBundleName` is what
 /// the Dock/menu-bar show ("darkrun"); the window title is set by the app itself.
 #[cfg(target_os = "macos")]
-const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+const INFO_PLIST: &str = concat!(
+    r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleExecutable</key><string>darkrun-desktop</string>
@@ -119,11 +120,14 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <key>CFBundleName</key><string>darkrun</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>"#,
+    env!("CARGO_PKG_VERSION"),
+    r#"</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
-"#;
+"#
+);
 
 /// The app icon, embedded so the launch wrapper always ships its own `.icns`
 /// (referenced by `CFBundleIconFile` above) without depending on a sibling file.

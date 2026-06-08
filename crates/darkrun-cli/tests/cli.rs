@@ -183,7 +183,9 @@ fn version_flag_prints_name_and_semver() {
     let r = Cli::new().arg("--version").run();
     assert!(r.ok());
     assert!(r.stdout.starts_with("darkrun "));
-    assert!(r.stdout.trim().contains("0.1.0"));
+    // Track the workspace version rather than hardcoding it, so a release bump
+    // never strands this assertion (the 0.2.0 bump did exactly that).
+    assert!(r.stdout.trim().contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
