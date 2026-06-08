@@ -23,6 +23,7 @@ use darkrun_core::domain::{
     StationPhase, Unit, UnitFrontmatter,
 };
 use darkrun_core::StateStore;
+use darkrun_core::domain::Mode;
 use darkrun_mcp::position::{
     checkpoint_decide, derive_position, run_start, run_tick, Position, RunAction,
 };
@@ -40,7 +41,7 @@ fn store() -> (TempDir, StateStore) {
 /// Start a fresh software run named `r` and return the store.
 fn started() -> (TempDir, StateStore) {
     let (d, store) = store();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
     (d, store)
 }
 
@@ -49,7 +50,7 @@ fn started() -> (TempDir, StateStore) {
 fn started_auto() -> (TempDir, StateStore) {
     let (d, store) = started();
     let mut s = store.read_state("r").unwrap().unwrap();
-    s.auto_gates = true;
+    s.mode = Mode::Dark;
     store.write_state("r", &s).unwrap();
     (d, store)
 }
@@ -59,7 +60,7 @@ fn started_auto() -> (TempDir, StateStore) {
 fn started_discrete() -> (TempDir, StateStore) {
     let (d, store) = started();
     let mut s = store.read_state("r").unwrap().unwrap();
-    s.discrete = true;
+    s.mode = Mode::Team;
     store.write_state("r", &s).unwrap();
     (d, store)
 }
@@ -107,8 +108,11 @@ fn walk_to_checkpoint(store: &StateStore, run: &str, station: &str) -> RunAction
             {
                 return t.action
             }
-            RunAction::Spec { station: s, .. }
-            | RunAction::Review { station: s, .. }
+            // Solo/team hold the Spec until the elaboration is sealed.
+            RunAction::Spec { station: s, .. } if s == station => {
+                darkrun_mcp::position::elaborate_seal(store, run, station).expect("seal");
+            }
+            RunAction::Review { station: s, .. }
             | RunAction::Manufacture { station: s, .. }
             | RunAction::Audit { station: s, .. }
             | RunAction::Reflect { station: s, .. }
@@ -493,8 +497,9 @@ fn approve_emits_next_station_spec_action() {
     let res = checkpoint_decide(&store, "r", true, None).expect("approve");
     assert!(matches!(&res.action, RunAction::Spec { station, .. } if station == "specify"));
     let s = store.read_state("r").unwrap().unwrap();
-    // The re-tick advanced specify's phase off Spec onto Review.
-    assert_eq!(s.stations["specify"].phase, StationPhase::Review);
+    // Solo holds the freshly-entered station's Spec until its elaboration is
+    // sealed, so specify sits at Spec (not Review).
+    assert_eq!(s.stations["specify"].phase, StationPhase::Spec);
 }
 
 #[test]
@@ -995,6 +1000,8 @@ fn tickresult_action_mirrors_position_action() {
 #[test]
 fn noop_action_for_null_position() {
     let (_d, store) = started();
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
     run_tick(&store, "r").unwrap(); // spec → review
     run_tick(&store, "r").unwrap(); // review → manufacture
     // Pending unit with unmet dep → mid-wave noop.
@@ -1118,8 +1125,10 @@ fn runaction_sealed_serializes_run() {
 #[test]
 fn runaction_noop_serializes_message() {
     let (_d, store) = started();
-    run_tick(&store, "r").unwrap();
-    run_tick(&store, "r").unwrap();
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
+    run_tick(&store, "r").unwrap(); // spec→review
+    run_tick(&store, "r").unwrap(); // review→user_gate
     // A dispatched, in-flight unit yields the mid-wave noop. (A dangling dep
     // would be a UnitsInvalid decomposition error.)
     let blocked = Unit {
@@ -1143,6 +1152,9 @@ fn runaction_noop_serializes_message() {
 #[test]
 fn runaction_review_serializes_reviewers() {
     let (_d, store) = started();
+    // Solo holds the Spec until sealed; seal it then tick spec → review.
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
     run_tick(&store, "r").unwrap(); // spec → review
     let pos = derive_position(&store, "r").unwrap();
     let j = json_of(&pos.action.unwrap());
@@ -1154,6 +1166,8 @@ fn runaction_review_serializes_reviewers() {
 #[test]
 fn runaction_audit_serializes_reviewers() {
     let (_d, store) = started();
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
     run_tick(&store, "r").unwrap(); // spec→review
     run_tick(&store, "r").unwrap(); // review→user_gate
     // Seed a pending unit, clear the gate into Manufacture, THEN complete the
@@ -1181,8 +1195,10 @@ fn runaction_audit_serializes_reviewers() {
 #[test]
 fn runaction_manufacture_serializes_worker_and_units() {
     let (_d, store) = started();
-    run_tick(&store, "r").unwrap();
-    run_tick(&store, "r").unwrap();
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
+    run_tick(&store, "r").unwrap(); // spec→review
+    run_tick(&store, "r").unwrap(); // review→user_gate
     let unit = Unit {
         slug: "u1".into(),
         frontmatter: UnitFrontmatter {
@@ -1215,8 +1231,10 @@ fn position_serializes_track_and_action() {
 #[test]
 fn position_null_action_serializes_null() {
     let (_d, store) = started();
-    run_tick(&store, "r").unwrap();
-    run_tick(&store, "r").unwrap();
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
+    run_tick(&store, "r").unwrap(); // spec→review
+    run_tick(&store, "r").unwrap(); // review→user_gate
     // A dispatched, in-flight unit yields the mid-wave noop. (A dangling dep
     // would be a UnitsInvalid decomposition error.)
     let blocked = Unit {
@@ -1611,8 +1629,8 @@ fn sealed_takes_precedence_over_feedback() {
 #[test]
 fn two_independent_runs_track_separately() {
     let (_d, store) = store();
-    run_start(&store, "a", "software", None, "continuous").unwrap();
-    run_start(&store, "b", "software", None, "continuous").unwrap();
+    run_start(&store, "a", "software", None, Mode::Solo, "full").unwrap();
+    run_start(&store, "b", "software", None, Mode::Solo, "full").unwrap();
     feedback::create(&store, "a", "frame", "only a", None).unwrap();
     assert_eq!(pos_track(&derive_position(&store, "a").unwrap()), Track::Feedback);
     assert_eq!(pos_track(&derive_position(&store, "b").unwrap()), Track::Run);
@@ -1621,8 +1639,8 @@ fn two_independent_runs_track_separately() {
 #[test]
 fn feedback_isolated_per_run() {
     let (_d, store) = store();
-    run_start(&store, "a", "software", None, "continuous").unwrap();
-    run_start(&store, "b", "software", None, "continuous").unwrap();
+    run_start(&store, "a", "software", None, Mode::Solo, "full").unwrap();
+    run_start(&store, "b", "software", None, Mode::Solo, "full").unwrap();
     feedback::create(&store, "a", "frame", "x", None).unwrap();
     assert!(feedback::list(&store, "b").unwrap().is_empty());
 }
@@ -1893,6 +1911,8 @@ fn settled_feedback_cannot_reopen_via_typed_api() {
 #[test]
 fn feedback_pause_preserves_review_phase() {
     let (_d, store) = started();
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
     run_tick(&store, "r").unwrap(); // spec → review
     let fb = feedback::create(&store, "r", "frame", "x", None).unwrap();
     assert_eq!(pos_track(&derive_position(&store, "r").unwrap()), Track::Feedback);
@@ -1905,6 +1925,8 @@ fn feedback_pause_preserves_review_phase() {
 #[test]
 fn feedback_pause_preserves_manufacture_phase() {
     let (_d, store) = started();
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
     run_tick(&store, "r").unwrap(); // spec → review
     run_tick(&store, "r").unwrap(); // review → manufacture
     let unit = Unit {
@@ -1931,8 +1953,10 @@ fn feedback_during_manufacture_does_not_consume_wave() {
     // While feedback preempts, the manufacture wave is untouched — the same
     // units are still wave-ready once feedback clears.
     let (_d, store) = started();
-    run_tick(&store, "r").unwrap();
-    run_tick(&store, "r").unwrap();
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
+    run_tick(&store, "r").unwrap(); // spec → review
+    run_tick(&store, "r").unwrap(); // review → manufacture
     let unit = Unit {
         slug: "u1".into(),
         frontmatter: UnitFrontmatter {
@@ -2072,8 +2096,8 @@ fn feedback_blank_doc_is_open() {
 #[test]
 fn multiple_runs_feedback_dispatch_correct_id() {
     let (_d, store) = store();
-    run_start(&store, "a", "software", None, "continuous").unwrap();
-    run_start(&store, "b", "software", None, "continuous").unwrap();
+    run_start(&store, "a", "software", None, Mode::Solo, "full").unwrap();
+    run_start(&store, "b", "software", None, Mode::Solo, "full").unwrap();
     raw_feedback(&store, "a", "fb-05", "pending");
     raw_feedback(&store, "b", "fb-09", "pending");
     let pa = derive_position(&store, "a").unwrap();
@@ -2157,7 +2181,7 @@ fn fresh_run_frame_checkpoint_seeded_ask() {
 #[test]
 fn unknown_factory_run_start_errors() {
     let (_d, store) = store();
-    let err = run_start(&store, "r", "nope", None, "continuous").unwrap_err();
+    let err = run_start(&store, "r", "nope", None, Mode::Solo, "full").unwrap_err();
     assert!(matches!(err, darkrun_mcp::McpError::UnknownFactory(_)));
 }
 
@@ -2314,10 +2338,12 @@ fn blocked_specify_does_not_affect_completed_frame() {
 #[test]
 fn same_disk_same_action_equality() {
     let (_d, store) = started();
-    let a = run_tick(&store, "r").unwrap();
+    run_tick(&store, "r").unwrap(); // enter spec (held)
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
+    let a = run_tick(&store, "r").unwrap(); // spec → review
     // Re-derive (no further tick) → same position.
     let b = derive_position(&store, "r").unwrap();
-    // After one tick, the cursor is now at Review; deriving again gives Review.
+    // After sealing + ticking, the cursor is now at Review; deriving again gives Review.
     assert!(matches!(b.action, Some(RunAction::Review { .. })));
     assert_eq!(a.run, "r");
 }

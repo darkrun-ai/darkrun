@@ -98,7 +98,7 @@ pub fn set_run_field(
     let reason = require(confirm, reason, "set_run_field")?;
     let mut run = store.read_run(slug)?;
     match field {
-        "mode" => run.frontmatter.mode = value.to_string(),
+        "mode" => run.frontmatter.mode = darkrun_core::domain::Mode::from_label(value),
         "active_station" => run.frontmatter.active_station = value.to_string(),
         other => {
             return Err(McpError::InvalidInput(format!(
@@ -158,6 +158,7 @@ pub fn mutate_feedback(
 mod tests {
     use super::*;
     use crate::position::run_start;
+    use darkrun_core::domain::Mode;
 
     fn store() -> (tempfile::TempDir, StateStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -168,7 +169,7 @@ mod tests {
     #[test]
     fn preview_cursor_is_read_only() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         let r = preview_cursor(&store, "r").unwrap();
         assert!(!r.applied);
         assert!(r.data.is_some());
@@ -177,7 +178,7 @@ mod tests {
     #[test]
     fn mutating_ops_require_confirm_and_reason() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         // No reason → error.
         assert!(force_station_complete(&store, "r", "frame", true, None).is_err());
         // Reason but no confirm → error.
@@ -194,17 +195,17 @@ mod tests {
     #[test]
     fn set_run_field_mode() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
-        let r = set_run_field(&store, "r", "mode", "quick", true, Some("retune")).unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
+        let r = set_run_field(&store, "r", "mode", "team", true, Some("retune")).unwrap();
         assert!(r.applied);
-        assert_eq!(store.read_run("r").unwrap().frontmatter.mode, "quick");
+        assert_eq!(store.read_run("r").unwrap().frontmatter.mode, Mode::Team);
         assert!(set_run_field(&store, "r", "nope", "x", true, Some("y")).is_err());
     }
 
     #[test]
     fn set_run_field_active_station() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         let r = set_run_field(&store, "r", "active_station", "shape", true, Some("jump")).unwrap();
         assert!(r.applied);
         assert_eq!(store.read_run("r").unwrap().frontmatter.active_station, "shape");
@@ -213,7 +214,7 @@ mod tests {
     #[test]
     fn reset_drift_rebaselines_and_clears() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         let r = reset_drift(&store, "r", true, Some("stale witnesses")).unwrap();
         assert!(r.applied);
         assert!(r.note.contains("re-witnessed"));
@@ -222,7 +223,7 @@ mod tests {
     #[test]
     fn mutate_feedback_sets_status_and_rejects_bad_status() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         let fb = crate::feedback::create(&store, "r", "frame", "a finding", None).unwrap();
         let r = mutate_feedback(&store, "r", &fb.id, "closed", true, Some("force-close")).unwrap();
         assert!(r.applied);

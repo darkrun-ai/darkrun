@@ -3,20 +3,19 @@
 //!
 //! Three surfaces are driven:
 //!  - the corpus loader (`list_factories`, `load_factory`, `load_validated`)
-//!    over the *shipped* software factory — real role sets, checkpoints, bodies,
+//!    over the *shipped* software factory — real role sets, bodies,
 //!    the input/locked-artifact hand-off DAG, determinism, idempotency;
 //!  - the structural validator `validate()` driven against in-memory `Factory`
 //!    values assembled through the crate's public model fields, mutating exactly
 //!    one rule at a time to exercise every passing branch and every failure
 //!    branch with its boundary conditions;
-//!  - `RoleKind`/checkpoint serde — snake_case roundtrips through serde_yaml and
+//!  - `RoleKind` serde — snake_case roundtrips through serde_yaml and
 //!    the core frontmatter parser, the same path the loader walks.
 
 use darkrun_content::{
     list_factories, load_factory, load_validated, ContentError, Factory, FactoryFrontmatter, Role,
     RoleFrontmatter, RoleKind, Station, StationFrontmatter,
 };
-use darkrun_core::domain::CheckpointKind;
 
 // ---------------------------------------------------------------------------
 // Builders — assemble structurally valid model values, then mutate one field.
@@ -57,8 +56,6 @@ fn valid_station() -> Station {
             workers: vec!["w1".into(), "w2".into(), "w3".into()],
             fix_workers: vec![],
             reviewers: vec!["r1".into()],
-            checkpoint: CheckpointKind::Auto,
-            checkpoint_options: vec![],
             locked_artifact: "out.md".into(),
             inputs: vec![],
             inputs_waived: vec![],
@@ -393,7 +390,6 @@ struct Expected {
     explorers: &'static [&'static str],
     workers: &'static [&'static str],
     reviewers: &'static [&'static str],
-    checkpoint: CheckpointKind,
     locked_artifact: &'static str,
 }
 
@@ -403,7 +399,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["context", "value"],
         workers: &["framer", "challenger", "distiller"],
         reviewers: &["value", "feasibility"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "frame.md",
     },
     Expected {
@@ -411,7 +406,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["contract", "edge_case"],
         workers: &["spec_writer", "adversary", "tightener"],
         reviewers: &["testability", "completeness"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "spec.md",
     },
     Expected {
@@ -419,7 +413,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["surface", "architecture", "risk"],
         workers: &["designer", "visual_designer", "spiker", "pressure_tester", "resolver"],
         reviewers: &["fit", "reversibility", "simplicity"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "design.md",
     },
     Expected {
@@ -427,7 +420,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["reuse", "integration_point"],
         workers: &["test_author", "builder", "self_reviewer", "reconciler"],
         reviewers: &["correctness", "maintainability"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "code",
     },
     Expected {
@@ -435,7 +427,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["scenario", "regression"],
         workers: &["verifier", "breaker", "triage"],
         reviewers: &["evidence", "coverage"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "proof.md",
     },
     Expected {
@@ -443,7 +434,6 @@ const STATIONS: &[Expected] = &[
         explorers: &["threat", "operability"],
         workers: &["hardener", "red_teamer", "releaser"],
         reviewers: &["security", "readiness"],
-        checkpoint: CheckpointKind::Ask,
         locked_artifact: "release.md",
     },
 ];
@@ -476,15 +466,6 @@ fn every_station_loads_its_declared_reviewers() {
     for exp in STATIONS {
         let s = f.station(exp.name).unwrap();
         assert_eq!(slugs(&s.reviewers), exp.reviewers, "{} reviewers", exp.name);
-    }
-}
-
-#[test]
-fn every_station_has_expected_checkpoint() {
-    let f = load_factory("software").unwrap();
-    for exp in STATIONS {
-        let s = f.station(exp.name).unwrap();
-        assert_eq!(s.checkpoint(), exp.checkpoint, "{} checkpoint", exp.name);
     }
 }
 
@@ -1293,7 +1274,7 @@ fn load_validated_preserves_role_bodies() {
 }
 
 // ===========================================================================
-// SECTION 17 — RoleKind / CheckpointKind serde (the loader's parse path)
+// SECTION 17 — RoleKind serde (the loader's parse path)
 // ===========================================================================
 
 fn parse_role_kind(yaml: &str) -> Result<RoleKind, serde_yaml::Error> {
@@ -1417,17 +1398,16 @@ fn role_frontmatter_rejects_unknown_agent_type() {
 
 #[test]
 fn station_frontmatter_parses_with_all_fields() {
-    let yaml = "name: frame\ndescription: d\nexplorers: [a]\nworkers: [b, c, d]\nreviewers: [e]\ncheckpoint: ask\nlocked_artifact: frame.md\ninputs: [spec.md]";
+    let yaml = "name: frame\ndescription: d\nexplorers: [a]\nworkers: [b, c, d]\nreviewers: [e]\nlocked_artifact: frame.md\ninputs: [spec.md]";
     let fm: StationFrontmatter = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(fm.name, "frame");
     assert_eq!(fm.workers.len(), 3);
-    assert_eq!(fm.checkpoint, CheckpointKind::Ask);
     assert_eq!(fm.inputs, vec!["spec.md".to_string()]);
 }
 
 #[test]
 fn station_frontmatter_defaults_empty_role_lists() {
-    let yaml = "name: frame\ncheckpoint: auto";
+    let yaml = "name: frame";
     let fm: StationFrontmatter = serde_yaml::from_str(yaml).unwrap();
     assert!(fm.explorers.is_empty());
     assert!(fm.workers.is_empty());
@@ -1438,34 +1418,8 @@ fn station_frontmatter_defaults_empty_role_lists() {
 
 #[test]
 fn station_frontmatter_requires_name() {
-    let yaml = "checkpoint: auto";
+    let yaml = "description: d";
     assert!(serde_yaml::from_str::<StationFrontmatter>(yaml).is_err());
-}
-
-#[test]
-fn station_frontmatter_requires_checkpoint() {
-    let yaml = "name: frame";
-    assert!(serde_yaml::from_str::<StationFrontmatter>(yaml).is_err());
-}
-
-#[test]
-fn station_frontmatter_rejects_unknown_checkpoint() {
-    let yaml = "name: frame\ncheckpoint: maybe";
-    assert!(serde_yaml::from_str::<StationFrontmatter>(yaml).is_err());
-}
-
-#[test]
-fn station_frontmatter_accepts_each_known_checkpoint() {
-    for (text, want) in [
-        ("auto", CheckpointKind::Auto),
-        ("ask", CheckpointKind::Ask),
-        ("external", CheckpointKind::External),
-        ("await", CheckpointKind::Await),
-    ] {
-        let yaml = format!("name: s\ncheckpoint: {text}");
-        let fm: StationFrontmatter = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(fm.checkpoint, want, "checkpoint `{text}`");
-    }
 }
 
 // --- FactoryFrontmatter serde ---
@@ -1512,7 +1466,6 @@ fn station_frontmatter_roundtrips_through_yaml() {
     let yaml = serde_yaml::to_string(&s.frontmatter).unwrap();
     let back: StationFrontmatter = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(back.name, s.frontmatter.name);
-    assert_eq!(back.checkpoint, s.frontmatter.checkpoint);
     assert_eq!(back.workers, s.frontmatter.workers);
     assert_eq!(back.locked_artifact, s.frontmatter.locked_artifact);
 }
@@ -1529,43 +1482,3 @@ fn role_frontmatter_roundtrips_through_yaml() {
     assert_eq!(back.model.as_deref(), Some("opus"));
 }
 
-// ===========================================================================
-// SECTION 18 — checkpoint coverage across the shipped corpus
-// ===========================================================================
-
-#[test]
-fn checkpoint_kinds_in_order() {
-    let f = load_validated("software").unwrap();
-    let kinds: Vec<CheckpointKind> = f.stations.iter().map(Station::checkpoint).collect();
-    assert_eq!(kinds, vec![CheckpointKind::Ask; 6]);
-}
-
-#[test]
-fn no_station_is_auto_checkpoint() {
-    let f = load_factory("software").unwrap();
-    let autos = f
-        .stations
-        .iter()
-        .filter(|s| s.checkpoint() == CheckpointKind::Auto)
-        .count();
-    assert_eq!(autos, 0);
-}
-
-#[test]
-fn no_station_is_external_checkpoint() {
-    let f = load_factory("software").unwrap();
-    let externals = f
-        .stations
-        .iter()
-        .filter(|s| s.checkpoint() == CheckpointKind::External)
-        .count();
-    assert_eq!(externals, 0);
-}
-
-#[test]
-fn checkpoint_accessor_matches_frontmatter() {
-    let f = load_factory("software").unwrap();
-    for s in &f.stations {
-        assert_eq!(s.checkpoint(), s.frontmatter.checkpoint, "{}", s.name());
-    }
-}

@@ -539,6 +539,7 @@ fn awaiting(run: &str, session_id: &str, session_type: &str) -> AwaitingSession 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use darkrun_core::domain::Mode;
     use darkrun_api::session::{
         DirectionAnnotations, DirectionPin, PickerSelection, QuestionAnswer,
     };
@@ -568,7 +569,7 @@ mod tests {
     fn create_show_raises_run_review_under_slug_and_current() {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path());
-        crate::position::run_start(&store, "r", "software", None, "continuous").unwrap();
+        crate::position::run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         let reg = registry();
 
         let id = create_show(&reg, &store, "r").expect("show");
@@ -612,7 +613,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path());
-        crate::position::run_start(&store, "r", "software", None, "continuous").unwrap();
+        crate::position::run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
 
         // Hand-build a mid-run state: `frame` locked (Completed, gate advanced),
         // `specify` the active station mid-Manufacture, everything downstream
@@ -631,7 +632,6 @@ mod tests {
                     entered_at: Some("2026-05-31T00:00:00Z".into()),
                     outcome: Some(CheckpointOutcome::Advanced),
                 }),
-                chosen_checkpoint: None,
                 branch: None,
                 pr_ref: None,
                 pr_status: None,
@@ -650,7 +650,6 @@ mod tests {
                 phase: StationPhase::Manufacture,
             elaborated: false,
                 checkpoint: None,
-                chosen_checkpoint: None,
                 branch: None,
                 pr_ref: None,
                 pr_status: None,
@@ -1029,7 +1028,7 @@ mod tests {
     fn create_show_surfaces_persisted_briefs_and_outcomes() {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path());
-        crate::position::run_start(&store, "r", "software", None, "continuous").unwrap();
+        crate::position::run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         crate::brief::record(&store, "r", "frame", crate::brief::BriefPhase::Pre, "framing the problem").unwrap();
         crate::brief::record(&store, "r", "frame", crate::brief::BriefPhase::Post, "frame.md locked").unwrap();
 

@@ -13,8 +13,8 @@
 
 use darkrun_core::domain::{
     Checkpoint, CheckpointKind, CheckpointOutcome, Explorer, Feedback,
-    FeedbackSeverity, FeedbackStatus, Pass, PassBeat, Reviewer, RunFrontmatter, RunGit, Status,
-    Station, StationPhase, UnitFrontmatter, Worker,
+    FeedbackSeverity, FeedbackStatus, Mode, Pass, PassBeat, Reviewer, RunFrontmatter, RunGit,
+    Status, Station, StationPhase, UnitFrontmatter, Worker,
 };
 use darkrun_core::error::CoreError;
 use darkrun_core::frontmatter::{self, Document};
@@ -431,7 +431,7 @@ fn parse_unknown_status_value_errors() {
 fn parse_fills_defaults_for_absent_optional_fields() {
     let (fm, _) = parse_run("---\nfactory: software\n---\nbody\n");
     assert_eq!(fm.factory, "software");
-    assert_eq!(fm.mode, "");
+    assert_eq!(fm.mode, Mode::Solo);
     assert_eq!(fm.active_station, "");
     assert_eq!(fm.status, Status::Pending);
     assert!(fm.title.is_none());
@@ -559,18 +559,18 @@ fn parse_unicode_factory_unquoted() {
 
 #[test]
 fn parse_yaml_multiline_block_scalar_in_body_field() {
-    // serde_yaml literal block scalar `|` into a String field (mode).
-    let raw = "---\nfactory: software\nmode: |\n  line1\n  line2\n---\nbody\n";
+    // serde_yaml literal block scalar `|` into a String field (active_station).
+    let raw = "---\nfactory: software\nactive_station: |\n  line1\n  line2\n---\nbody\n";
     let (fm, _) = parse_run(raw);
-    assert_eq!(fm.mode, "line1\nline2\n");
+    assert_eq!(fm.active_station, "line1\nline2\n");
 }
 
 #[test]
 fn parse_yaml_folded_block_scalar() {
-    let raw = "---\nfactory: software\nmode: >\n  one\n  two\n---\nbody\n";
+    let raw = "---\nfactory: software\nactive_station: >\n  one\n  two\n---\nbody\n";
     let (fm, _) = parse_run(raw);
     // Folded scalar joins lines with spaces, trailing newline.
-    assert_eq!(fm.mode, "one two\n");
+    assert_eq!(fm.active_station, "one two\n");
 }
 
 #[test]
@@ -713,7 +713,7 @@ fn roundtrip_run_full_frontmatter() {
     let fm = RunFrontmatter {
         title: Some("Ship the thing".into()),
         factory: "software".into(),
-        mode: "continuous".into(),
+        mode: Mode::Solo,
         active_station: "frame".into(),
         status: Status::Active,
         surface: None,
@@ -813,28 +813,28 @@ fn roundtrip_run_title_with_leading_dash() {
 fn roundtrip_run_value_that_looks_like_bool() {
     // A string "true" must roundtrip as a string, not a bool.
     let mut fm = run_fm();
-    fm.mode = "true".into();
+    fm.active_station = "true".into();
     let doc = frontmatter::serialize(&fm, "").expect("ser");
     let (back, _) = parse_run(&doc);
-    assert_eq!(back.mode, "true");
+    assert_eq!(back.active_station, "true");
 }
 
 #[test]
 fn roundtrip_run_value_that_looks_like_number() {
     let mut fm = run_fm();
-    fm.mode = "12345".into();
+    fm.active_station = "12345".into();
     let doc = frontmatter::serialize(&fm, "").expect("ser");
     let (back, _) = parse_run(&doc);
-    assert_eq!(back.mode, "12345");
+    assert_eq!(back.active_station, "12345");
 }
 
 #[test]
 fn roundtrip_run_value_with_newlines() {
     let mut fm = run_fm();
-    fm.mode = "a\nb\nc".into();
+    fm.active_station = "a\nb\nc".into();
     let doc = frontmatter::serialize(&fm, "").expect("ser");
     let (back, _) = parse_run(&doc);
-    assert_eq!(back.mode, "a\nb\nc");
+    assert_eq!(back.active_station, "a\nb\nc");
 }
 
 #[test]
@@ -1073,7 +1073,6 @@ fn roundtrip_station_through_envelope() {
             entered_at: Some("2026-05-30T00:00:00Z".into()),
             outcome: Some(CheckpointOutcome::Paused),
         }),
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,
@@ -1110,7 +1109,6 @@ fn roundtrip_station_each_phase() {
             phase,
             elaborated: false,
             checkpoint: None,
-            chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
             pr_status: None,
@@ -1145,7 +1143,6 @@ fn roundtrip_checkpoint_each_kind() {
                 entered_at: None,
                 outcome: None,
             }),
-            chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
             pr_status: None,
@@ -1180,7 +1177,6 @@ fn roundtrip_checkpoint_each_outcome() {
                 entered_at: None,
                 outcome: Some(outcome),
             }),
-            chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
             pr_status: None,
@@ -1209,7 +1205,6 @@ fn roundtrip_station_skips_none_checkpoint() {
         phase: StationPhase::Spec,
             elaborated: false,
         checkpoint: None,
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,
@@ -1236,7 +1231,6 @@ fn roundtrip_station_idempotent() {
             entered_at: Some("2026-05-30T00:00:00Z".into()),
             outcome: Some(CheckpointOutcome::Advanced),
         }),
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,
@@ -1988,7 +1982,6 @@ fn serialize_station_emits_snake_case_phase() {
         phase: StationPhase::Manufacture,
             elaborated: false,
         checkpoint: None,
-        chosen_checkpoint: None,
         branch: None,
         pr_ref: None,
         pr_status: None,
@@ -2190,22 +2183,26 @@ fn roundtrip_run_factory_shapes() {
 
 #[test]
 fn roundtrip_run_mode_shapes() {
-    for mode in [
-        "continuous",
-        "right-sized",
-        "",
-        "true",
-        "false",
-        "null",
-        "42",
-        "multi\nline",
-        "tabs\there",
-    ] {
+    // Every mode round-trips through frontmatter as its canonical token.
+    for mode in Mode::ALL {
         let mut fm = run_fm();
-        fm.mode = mode.into();
+        fm.mode = mode;
         let doc = frontmatter::serialize(&fm, "").expect("ser");
         let (back, _) = parse_run(&doc);
         assert_eq!(back.mode, mode, "mode {mode:?}");
+    }
+    // Legacy mode strings still load, mapped onto the team/solo/dark model.
+    for (legacy, want) in [
+        ("continuous", Mode::Solo),
+        ("collaborative", Mode::Solo),
+        ("discrete", Mode::Team),
+        ("discrete-hybrid", Mode::Team),
+        ("autopilot", Mode::Dark),
+        ("quick", Mode::Solo),
+    ] {
+        let raw = format!("---\nfactory: software\nmode: {legacy}\n---\nbody\n");
+        let (back, _) = parse_run(&raw);
+        assert_eq!(back.mode, want, "legacy mode {legacy:?}");
     }
 }
 

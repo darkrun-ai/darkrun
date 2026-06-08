@@ -18,6 +18,7 @@ use darkrun_core::domain::{
     CheckpointKind, CheckpointOutcome, Status, StationPhase, Unit, UnitFrontmatter,
 };
 use darkrun_core::StateStore;
+use darkrun_core::domain::Mode;
 use darkrun_mcp::position::{
     checkpoint_decide, derive_position, run_start, run_tick, Position, RunAction,
 };
@@ -34,13 +35,13 @@ fn store() -> (TempDir, StateStore) {
 
 /// Start a fresh software run and return its store (keeping the tempdir alive).
 fn fresh(slug: &str) -> (TempDir, StateStore) {
-    fresh_with(slug, "continuous")
+    fresh_with(slug, Mode::Solo)
 }
 
 /// Start a fresh software run in a specific mode.
-fn fresh_with(slug: &str, mode: &str) -> (TempDir, StateStore) {
+fn fresh_with(slug: &str, mode: Mode) -> (TempDir, StateStore) {
     let (d, store) = store();
-    run_start(&store, slug, "software", None, mode).expect("start");
+    run_start(&store, slug, "software", None, mode, "full").expect("start");
     (d, store)
 }
 
@@ -150,6 +151,9 @@ fn set_phase(store: &StateStore, run: &str, station: &str, phase: StationPhase) 
     let mut state = store.read_state(run).expect("state").expect("some");
     let st = state.stations.get_mut(station).expect("station seeded");
     st.phase = phase;
+    // Positioning the cursor mid-station implies the operator-elaboration has
+    // happened — solo otherwise holds the Spec until it's sealed.
+    st.elaborated = true;
     if !matches!(st.status, Status::Completed) {
         st.status = Status::InProgress;
     }
@@ -176,6 +180,10 @@ fn advance_to_station(store: &StateStore, run: &str, target: &str) {
                 // Clear the pre-execution operator gate so the walk proceeds.
                 RunAction::UserGate { station: s, .. } if s == station => {
                     checkpoint_decide(store, run, true, None).expect("clear gate");
+                }
+                // Solo holds the Spec until the elaboration is sealed.
+                RunAction::Spec { station: s, .. } if s == station => {
+                    darkrun_mcp::position::elaborate_seal(store, run, station).expect("seal");
                 }
                 RunAction::Checkpoint { station: s, .. } if s == station => {
                     reached = true;
@@ -204,6 +212,7 @@ fn advance_to_station(store: &StateStore, run: &str, target: &str) {
     // pristine Spec/Pending so callers get a deterministic starting cursor.
     let factory = resolve_factory("software").expect("factory");
     let mut state = store.read_state(run).expect("state").unwrap_or_default();
+    let gate = state.mode.gate();
     for station in STATIONS {
         if station == target {
             break;
@@ -213,7 +222,7 @@ fn advance_to_station(store: &StateStore, run: &str, target: &str) {
         }
     }
     // Ensure a clean target entry.
-    let def = factory.station(target).expect("station def");
+    let _ = factory.station(target).expect("station def");
     state.stations.insert(
         target.to_string(),
         darkrun_core::domain::Station {
@@ -222,11 +231,10 @@ fn advance_to_station(store: &StateStore, run: &str, target: &str) {
             phase: StationPhase::Spec,
             elaborated: false,
             checkpoint: Some(darkrun_core::domain::Checkpoint {
-                kind: def.checkpoint,
+                kind: gate,
                 entered_at: None,
                 outcome: None,
             }),
-            chosen_checkpoint: None,
             branch: None,
             pr_ref: None,
             pr_status: None,
@@ -563,7 +571,7 @@ fn auto_gated_run_checkpoint_tick_completes_and_advances() {
     // Downgrade the gates (the quick/auto-mode behaviour): `effective_checkpoint_kind`
     // now forces Auto, so the checkpoint tick completes the station with no decide.
     let mut state = store.read_state("r").unwrap().unwrap();
-    state.auto_gates = true;
+    state.mode = Mode::Dark;
     store.write_state("r", &state).unwrap();
     let t = run_tick(&store, "r").expect("tick");
     assert!(matches!(t.action, RunAction::Checkpoint { kind: CheckpointKind::Auto, .. }));
@@ -702,6 +710,8 @@ fn run_start_seeds_only_first_station_in_state() {
 #[test]
 fn spec_tick_seeds_started_at_and_inprogress() {
     let (_d, store) = fresh("r");
+    // Solo holds the Spec until sealed; seal so the spec tick advances to Review.
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
     run_tick(&store, "r").expect("spec tick");
     let state = store.read_state("r").unwrap().unwrap();
     let frame = &state.stations["frame"];
@@ -771,6 +781,11 @@ fn sealed_after_all_six_stations() {
                 checkpoint_decide(&store, "r", true, None).expect("clear gate");
                 continue;
             }
+            // Solo holds the Spec until the elaboration is sealed.
+            if matches!(&t.action, RunAction::Spec { station: s, .. } if s == station) {
+                darkrun_mcp::position::elaborate_seal(&store, "r", station).expect("seal");
+                continue;
+            }
             // The gate is a local Checkpoint or, for harden, ExternalReviewRequested.
             let at_gate = matches!(&t.action, RunAction::Checkpoint { station: s, .. } if s == station)
                 || matches!(&t.action, RunAction::ExternalReviewRequested { station: s, .. } if s == station);
@@ -805,7 +820,6 @@ fn sealed_action_carries_run_slug() {
                 phase: StationPhase::Checkpoint,
             elaborated: false,
                 checkpoint: None,
-                chosen_checkpoint: None,
                 branch: None,
                 pr_ref: None,
                 pr_status: None,
@@ -1211,7 +1225,7 @@ fn derive_does_not_mutate_disk() {
 fn two_stores_same_disk_same_derive() {
     let dir = TempDir::new().unwrap();
     let a = StateStore::new(dir.path());
-    run_start(&a, "r", "software", None, "continuous").unwrap();
+    run_start(&a, "r", "software", None, Mode::Solo, "full").unwrap();
     at_phase(&a, "r", "frame", StationPhase::Manufacture);
     seed_unit(&a, "r", "frame", "u", Status::Pending, &[]);
     // A second store rooted at the same disk derives identically.
@@ -1273,10 +1287,12 @@ macro_rules! full_station_walk_test {
         fn $name() {
             let (_d, store) = fresh("r");
             advance_to_station(&store, "r", $station);
-            // Spec
+            // Spec — solo holds it until the elaboration is sealed.
             let t = run_tick(&store, "r").unwrap();
             assert_eq!(action_name(&t.action), "spec");
             assert_eq!(action_station(&t.action), Some($station));
+            darkrun_mcp::position::elaborate_seal(&store, "r", $station).unwrap();
+            run_tick(&store, "r").unwrap(); // advance past the sealed Spec
             // Review
             let t = run_tick(&store, "r").unwrap();
             assert_eq!(action_name(&t.action), "review");
@@ -1342,14 +1358,6 @@ fn stations_const_matches_factory_order() {
 }
 
 #[test]
-fn checkpoint_kind_helper_matches_factory() {
-    let f = resolve_factory("software").unwrap();
-    for s in STATIONS {
-        assert_eq!(f.station(s).unwrap().checkpoint, checkpoint_kind(s), "station {s}");
-    }
-}
-
-#[test]
 fn next_station_helper_matches_factory() {
     let f = resolve_factory("software").unwrap();
     for s in STATIONS {
@@ -1399,6 +1407,8 @@ fn all_station_phase_pairs_derive_expected_action() {
 #[test]
 fn tick_then_derive_reflects_advanced_phase() {
     let (_d, store) = fresh("r");
+    // Solo holds the Spec until sealed; seal so the tick advances to Review.
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").unwrap();
     // Spec → after tick, derive should now report Review.
     run_tick(&store, "r").unwrap();
     let pos = derive_position(&store, "r").unwrap();
@@ -1656,8 +1666,10 @@ fn manufacture_completes_when_last_pending_blocked_dep_resolves() {
 #[test]
 fn two_runs_in_same_store_are_independent() {
     let (_d, store) = store();
-    run_start(&store, "alpha", "software", None, "continuous").unwrap();
-    run_start(&store, "beta", "software", None, "continuous").unwrap();
+    run_start(&store, "alpha", "software", None, Mode::Solo, "full").unwrap();
+    run_start(&store, "beta", "software", None, Mode::Solo, "full").unwrap();
+    // Solo holds alpha's Spec until sealed; seal so it can advance past it.
+    darkrun_mcp::position::elaborate_seal(&store, "alpha", "frame").unwrap();
     // Advance alpha; beta stays at frame/spec.
     run_tick(&store, "alpha").unwrap();
     run_tick(&store, "alpha").unwrap();
@@ -2057,8 +2069,10 @@ macro_rules! station_phase_sequence_test {
             let (_d, store) = fresh("r");
             advance_to_station(&store, "r", $station);
             let mut seen = Vec::new();
-            // Spec.
+            // Spec — solo holds it until the elaboration is sealed.
             seen.push(action_name(&run_tick(&store, "r").unwrap().action));
+            darkrun_mcp::position::elaborate_seal(&store, "r", $station).unwrap();
+            run_tick(&store, "r").unwrap(); // advance past the sealed Spec
             // Review.
             seen.push(action_name(&run_tick(&store, "r").unwrap().action));
             // Manufacture (after decomposing a unit). An interactive station
@@ -2119,10 +2133,10 @@ fn manufacture_rederive_drops_completed_units_from_wave() {
 #[test]
 fn run_start_sets_active_station_and_status() {
     let (_d, store) = store();
-    let run = run_start(&store, "r", "software", Some("Title".into()), "continuous").unwrap();
+    let run = run_start(&store, "r", "software", Some("Title".into()), Mode::Solo, "full").unwrap();
     assert_eq!(run.frontmatter.active_station, "frame");
     assert_eq!(run.frontmatter.factory, "software");
-    assert_eq!(run.frontmatter.mode, "continuous");
+    assert_eq!(run.frontmatter.mode, Mode::Solo);
     assert_eq!(run.frontmatter.status, Status::Active);
     assert!(run.frontmatter.started_at.is_some());
     assert_eq!(run.title, "Title");
@@ -2131,13 +2145,13 @@ fn run_start_sets_active_station_and_status() {
 #[test]
 fn run_start_unknown_factory_errors() {
     let (_d, store) = store();
-    assert!(run_start(&store, "r", "nonexistent", None, "continuous").is_err());
+    assert!(run_start(&store, "r", "nonexistent", None, Mode::Solo, "full").is_err());
 }
 
 #[test]
 fn run_start_title_defaults_to_slug() {
     let (_d, store) = store();
-    let run = run_start(&store, "my-slug", "software", None, "continuous").unwrap();
+    let run = run_start(&store, "my-slug", "software", None, Mode::Solo, "full").unwrap();
     assert_eq!(run.title, "my-slug");
 }
 

@@ -180,8 +180,8 @@ fn action_name(action: &RunAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::position::{checkpoint_decide, run_start, run_tick};
-    use darkrun_core::domain::{CheckpointKind, Status, Unit, UnitFrontmatter};
+    use crate::position::{checkpoint_decide, elaborate_seal, run_start, run_tick};
+    use darkrun_core::domain::{CheckpointKind, Mode, Status, Unit, UnitFrontmatter};
     use tempfile::tempdir;
 
     fn store() -> (tempfile::TempDir, StateStore) {
@@ -195,7 +195,7 @@ mod tests {
     /// gates `ask` by default; the external-review surface is a discrete-mode
     /// concern, which `effective_checkpoint_kind` forces.
     fn drive_to_harden_checkpoint(store: &StateStore, slug: &str) {
-        run_start(store, slug, "software", Some("Ship the thing".into()), "continuous")
+        run_start(store, slug, "software", Some("Ship the thing".into()), Mode::Solo, "full")
             .expect("start");
         // Walk every upstream station's `ask` gate and approve it.
         for station in ["frame", "specify", "shape", "build", "prove"] {
@@ -204,9 +204,9 @@ mod tests {
         // harden: Spec -> Review -> UserGate -> Manufacture(empty -> Audit) ->
         // Reflect -> Checkpoint.
         walk_station_to_checkpoint(store, slug, "harden");
-        // Flip the run discrete so harden's held gate re-derives as External.
+        // Flip the run to Team so harden's held gate re-derives as External.
         let mut state = store.read_state(slug).unwrap().unwrap();
-        state.discrete = true;
+        state.mode = Mode::Team;
         store.write_state(slug, &state).unwrap();
     }
 
@@ -233,6 +233,9 @@ mod tests {
                 if s != station {
                     break; // advanced past it
                 }
+                // Solo holds the Spec until the elaboration is sealed.
+                elaborate_seal(store, slug, station).expect("seal");
+                continue;
             }
         }
     }
@@ -248,6 +251,11 @@ mod tests {
             // post-execution checkpoint / external review gate.
             if matches!(&tick.action, RunAction::UserGate { station: s, .. } if s == station) {
                 crate::position::checkpoint_decide(store, slug, true, None).expect("clear gate");
+                continue;
+            }
+            // Solo holds the Spec until the elaboration is sealed.
+            if matches!(&tick.action, RunAction::Spec { station: s, .. } if s == station) {
+                elaborate_seal(store, slug, station).expect("seal");
                 continue;
             }
             let at_gate = matches!(&tick.action, RunAction::Checkpoint { station: s, .. } if s == station)
@@ -309,7 +317,7 @@ mod tests {
     fn rejects_non_external_checkpoint() {
         let (_d, store) = store();
         // frame's checkpoint is `ask`, not `external`.
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         seed_one_unit(&store, "r", "frame");
         for _ in 0..12 {
             let tick = run_tick(&store, "r").expect("tick");
@@ -324,7 +332,7 @@ mod tests {
     #[test]
     fn rejects_when_not_at_checkpoint() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").expect("start");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         // Fresh run sits at Spec, not a Checkpoint.
         let err = change_request_intent(&store, "r", None).unwrap_err();
         assert!(matches!(err, McpError::InvalidInput(_)));
@@ -377,7 +385,7 @@ mod tests {
     #[test]
     fn change_request_intent_errors_off_an_external_gate() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         // A fresh run sits at frame's pre-execution gate, not an external review
         // gate → opening a change request is refused (InvalidInput).
         assert!(change_request_intent(&store, "r", None).is_err());
@@ -387,7 +395,7 @@ mod tests {
     fn change_request_intent_errors_mid_wave_with_no_pending_action() {
         use darkrun_core::domain::StationPhase;
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         // Force frame into Manufacture with an in-flight (InProgress) unit: no
         // wave-ready work and not all complete → derive_position yields no action.
         let mut state = store.read_state("r").unwrap().unwrap();

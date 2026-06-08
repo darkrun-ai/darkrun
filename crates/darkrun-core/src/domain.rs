@@ -142,6 +142,127 @@ pub enum CheckpointKind {
     Await,
 }
 
+/// The run's **mode** — the single, global control of how much human review the
+/// run involves. Chosen once at run start; every station's Checkpoint is derived
+/// from it ([`Mode::gate`]), so there are *no* per-station gate settings.
+///
+/// All three modes **pre-elaborate** up front — gathering as much context from
+/// the operator as possible before the run starts. They differ in what happens
+/// afterwards:
+/// - [`Team`](Mode::Team): each station elaborates with the operator and opens a
+///   per-station PR/MR the team reviews and merges — the team is *in the loop*.
+///   Gate: [`External`](CheckpointKind::External).
+/// - [`Solo`](Mode::Solo): each station elaborates with the operator and asks for
+///   a local review (desktop approval) — the operator is *in the loop*. Gate:
+///   [`Ask`](CheckpointKind::Ask).
+/// - [`Dark`](Mode::Dark): after the up-front pre-elaboration the run executes
+///   without stopping for review — the operator is *on the loop* (monitors, adds
+///   feedback, but the system never holds). Gate: [`Auto`](CheckpointKind::Auto).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// Team in the loop — external review, per-station PR, await merge.
+    Team,
+    /// Operator in the loop — local review, desktop approval.
+    #[default]
+    Solo,
+    /// Operator on the loop — pre-elaborate once, then run without review stops.
+    Dark,
+}
+
+impl Mode {
+    /// Every mode, in escalating-autonomy order (most human → least).
+    pub const ALL: [Mode; 3] = [Mode::Team, Mode::Solo, Mode::Dark];
+
+    /// The canonical lowercase token (`team` / `solo` / `dark`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Team => "team",
+            Mode::Solo => "solo",
+            Mode::Dark => "dark",
+        }
+    }
+
+    /// One-line description of who reviews under this mode.
+    pub fn description(self) -> &'static str {
+        match self {
+            Mode::Team => {
+                "team in the loop — each station opens a PR the team reviews and merges"
+            }
+            Mode::Solo => {
+                "you in the loop — each station asks for local review before it advances"
+            }
+            Mode::Dark => {
+                "you on the loop — pre-elaborate up front, then run without stopping for review"
+            }
+        }
+    }
+
+    /// The Checkpoint gate **every** station resolves under this mode — the global
+    /// gate axis. There are no per-station overrides.
+    pub fn gate(self) -> CheckpointKind {
+        match self {
+            Mode::Team => CheckpointKind::External,
+            Mode::Solo => CheckpointKind::Ask,
+            Mode::Dark => CheckpointKind::Auto,
+        }
+    }
+
+    /// Whether each station opens a per-station PR/MR the human merges (the
+    /// discrete branch-landing path). Only `team` does; `solo`/`dark` land the
+    /// station branch in-process. The branch hierarchy itself is universal
+    /// regardless of mode — only the PR-open-and-await-merge step is team-only.
+    pub fn opens_station_pr(self) -> bool {
+        matches!(self, Mode::Team)
+    }
+
+    /// Whether each station holds its Spec for operator elaboration before it
+    /// advances to Review. `team`/`solo` involve the operator at every station;
+    /// `dark` pre-elaborates once up front and then runs without per-station holds.
+    pub fn holds_each_station(self) -> bool {
+        !matches!(self, Mode::Dark)
+    }
+
+    /// Parse a mode from a label, tolerating the legacy mode strings the engine
+    /// used before the team/solo/dark model. The old sizing strings
+    /// (`quick`/`bugfix`/`refactor`) named a *plan*, not a review posture, so they
+    /// resolve to the default `solo` — the size axis is now separate.
+    pub fn from_label(s: &str) -> Mode {
+        match s.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+            "team" | "discrete" | "discrete_hybrid" => Mode::Team,
+            "dark" | "auto" | "autopilot" => Mode::Dark,
+            // solo / continuous / collaborative / quick / bugfix / refactor /
+            // full / standard / unknown all resolve to the in-the-loop default.
+            _ => Mode::Solo,
+        }
+    }
+}
+
+impl std::str::FromStr for Mode {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Mode::from_label(s))
+    }
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+// Tolerant deserialize: accept the canonical tokens AND the legacy mode strings
+// so existing `run.md` frontmatter keeps loading across the rename.
+impl<'de> Deserialize<'de> for Mode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(Mode::from_label(&s))
+    }
+}
+
 /// The run-level final gate that holds a fully-manufactured run *before* it
 /// seals — the parity for the predecessor's `pending_seal` / `intent_approved` tail.
 ///
@@ -289,9 +410,9 @@ pub struct RunFrontmatter {
     pub title: Option<String>,
     /// The factory (methodology) driving this run.
     pub factory: String,
-    /// Run sizing mode (e.g. "continuous", "right-sized").
+    /// The run's global review mode (team/solo/dark) — the single gate axis.
     #[serde(default)]
-    pub mode: String,
+    pub mode: Mode,
     /// The station the legacy write-cache points at (derived state is authoritative).
     #[serde(default)]
     pub active_station: String,
@@ -758,17 +879,14 @@ pub struct Station {
     pub phase: StationPhase,
     /// Whether the station's Spec has been **elaborated with the operator** — set
     /// by `darkrun_elaborate_seal` once the agent has involved the operator in
-    /// shaping the spec. In collaborative modes the Spec phase holds until this
-    /// is true (collaboration backpressure); autonomous modes skip it.
+    /// shaping the spec. In `team`/`solo` the Spec phase holds at every station
+    /// until this is true (collaboration backpressure); `dark` pre-elaborates once
+    /// up front and skips the per-station holds.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub elaborated: bool,
     /// The checkpoint gating this station.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<Checkpoint>,
-    /// The operator's chosen gate path for a compound checkpoint (set via
-    /// `darkrun_checkpoint_choose`). `None` → the station's declared default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chosen_checkpoint: Option<CheckpointKind>,
     /// The station's working branch (`darkrun/<slug>/<station>`), set when the
     /// station is entered and a worktree is forked off run-main. `None` on
     /// legacy state and outside a git repo. Retained after landing as a record

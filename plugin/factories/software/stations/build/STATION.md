@@ -5,7 +5,6 @@ kills: implementation-defects
 explorers: [reuse, integration_point]
 workers: [test_author, builder, self_reviewer, reconciler]
 reviewers: [correctness, maintainability]
-checkpoint: ask
 locked_artifact: code
 inputs: [frame.md, spec.md, design.md]
 ---

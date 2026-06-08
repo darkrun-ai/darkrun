@@ -19,7 +19,7 @@ use rmcp::schemars::JsonSchema;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use serde::{Deserialize, Serialize};
 
-use darkrun_core::domain::{FeedbackStatus, Status};
+use darkrun_core::domain::{FeedbackStatus, Mode, Status};
 use darkrun_core::StateStore;
 use darkrun_git::GitBackend;
 
@@ -207,20 +207,27 @@ pub struct RunStartInput {
     /// Optional human-readable title.
     #[serde(default)]
     pub title: Option<String>,
-    /// Run sizing + gate mode. Defaults to `continuous`. One of: `full`/
-    /// `continuous` (whole line, factory gates), `quick`/`bugfix`/`refactor`
-    /// (right-sized station subsets), `discrete` (full line, every station's
-    /// Checkpoint resolves on a human PR/MR merge), or `discrete-hybrid`
-    /// (continuous except a per-station PR on external-review stations).
+    /// The run's global review mode — the single gate axis. Defaults to `solo`.
+    /// `team` (each station opens a PR the team reviews and merges), `solo` (each
+    /// station asks for local review before advancing), or `dark` (pre-elaborate
+    /// up front, then run without stopping for review). All modes pre-elaborate.
     #[serde(default = "default_mode")]
     pub mode: String,
+    /// Right-sizing — orthogonal to `mode`. Pick from the problem during
+    /// pre-elaboration. `full`/unknown (every station), `quick` (build+prove),
+    /// `bugfix` (specify+build+prove), or `refactor` (shape+build+prove).
+    #[serde(default = "default_size")]
+    pub size: String,
 }
 
 fn default_factory() -> String {
     "software".to_string()
 }
 fn default_mode() -> String {
-    "continuous".to_string()
+    "solo".to_string()
+}
+fn default_size() -> String {
+    "full".to_string()
 }
 
 /// Input for tools that operate on an existing run.
@@ -343,19 +350,6 @@ pub struct UnitIterateInput {
     /// leaving the assignment unchanged.
     #[serde(default)]
     pub next_worker: Option<String>,
-}
-
-/// Input for `darkrun_checkpoint_choose` — the operator picks a compound gate's path.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[schemars(crate = "rmcp::schemars")]
-pub struct CheckpointChooseInput {
-    /// The run slug.
-    pub slug: String,
-    /// The station whose compound checkpoint is being chosen.
-    pub station: String,
-    /// The chosen gate path: `auto` / `ask` / `external` / `await` — must be one
-    /// the station offers.
-    pub kind: String,
 }
 
 /// Input for `darkrun_elaborate_seal` — record that the operator was involved
@@ -1113,7 +1107,8 @@ impl DarkrunServer {
             &input.slug,
             &input.factory,
             input.title.clone(),
-            &input.mode,
+            Mode::from_label(&input.mode),
+            &input.size,
         ) {
             Ok(run) => ok_json(&run),
             Err(e) => Ok(err_text(e)),
@@ -1244,7 +1239,6 @@ impl DarkrunServer {
                         "name": s.name,
                         "kills": s.kills,
                         "artifact": s.artifact,
-                        "checkpoint": s.checkpoint,
                         "workers": s.workers,
                         "reviewers": s.reviewers,
                     })).collect::<Vec<_>>(),
@@ -1432,35 +1426,11 @@ impl DarkrunServer {
         }
     }
 
-    /// The operator picks which path a station's compound checkpoint takes
-    /// (e.g. choose `external` over the default `ask`).
-    #[tool(
-        name = "darkrun_checkpoint_choose",
-        description = "For a station that offers a choice of gate paths (a compound checkpoint), record the operator's pick (auto|ask|external|await — must be one the station offers). The next tick routes the checkpoint to the chosen path; without a choice the station's declared default applies."
-    )]
-    pub fn darkrun_checkpoint_choose(
-        &self,
-        Parameters(input): Parameters<CheckpointChooseInput>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
-        let kind = match input.kind.trim().to_ascii_lowercase().as_str() {
-            "auto" => darkrun_core::domain::CheckpointKind::Auto,
-            "ask" => darkrun_core::domain::CheckpointKind::Ask,
-            "external" => darkrun_core::domain::CheckpointKind::External,
-            "await" => darkrun_core::domain::CheckpointKind::Await,
-            other => return Ok(err_text(format!("invalid gate kind `{other}`"))),
-        };
-        let store = self.store();
-        match crate::position::choose_checkpoint(&store, &input.slug, &input.station, kind) {
-            Ok(()) => ok_json(&serde_json::json!({ "ok": true, "station": input.station, "kind": input.kind })),
-            Err(e) => Ok(err_text(e)),
-        }
-    }
-
     /// Record that the operator was involved in shaping this station's spec —
-    /// clears the collaborative-mode Spec hold so the run advances to Review.
+    /// clears the per-station Spec hold so the run advances to Review.
     #[tool(
         name = "darkrun_elaborate_seal",
-        description = "Mark a station's spec as elaborated WITH the operator. In collaborative modes the Spec phase holds until you call this — so you involve the operator (darkrun_question / darkrun_direction) in shaping the spec instead of authoring it solo and only surfacing it at the gate. Autonomous modes (autopilot/quick) don't need it."
+        description = "Mark a station's spec as elaborated WITH the operator. In team/solo modes the Spec phase holds at every station until you call this — so you involve the operator (darkrun_question / darkrun_direction) in shaping the spec instead of authoring it solo and only surfacing it at the gate. Dark mode pre-elaborates once up front and doesn't need it per station."
     )]
     pub fn darkrun_elaborate_seal(
         &self,
@@ -2259,7 +2229,6 @@ impl DarkrunServer {
                 "name": s.name,
                 "kills": s.kills,
                 "artifact": s.artifact,
-                "checkpoint": s.checkpoint,
                 "workers": s.workers,
                 "reviewers": s.reviewers,
             })).collect::<Vec<_>>(),
@@ -2444,7 +2413,6 @@ const ESSENTIAL_TOOL_NAMES: &[&str] = &[
     "darkrun_run_show",
     "darkrun_run_list",
     "darkrun_checkpoint_decide",
-    "darkrun_checkpoint_choose",
     "darkrun_unit_create",
     "darkrun_unit_update",
     "darkrun_unit_get",
@@ -2662,8 +2630,8 @@ mod tests {
                 slug: "r".into(),
                 factory: "software".into(),
                 title: Some("t".into()),
-                mode: "continuous".into(),
-            }))
+                mode: "solo".into(),
+                size: "full".into(),            }))
             .unwrap();
         assert_eq!(res.is_error, Some(false));
         assert!(dir.path().join(".darkrun/r/run.md").exists());
@@ -2678,8 +2646,8 @@ mod tests {
                 slug: "r".into(),
                 factory: "software".into(),
                 title: None,
-                mode: "continuous".into(),
-            }))
+                mode: "solo".into(),
+                size: "full".into(),            }))
             .unwrap();
         let res = server
             .darkrun_tick(Parameters(RunRef { slug: "r".into() }))
@@ -2719,8 +2687,8 @@ mod tests {
                 slug: "  ".into(),
                 factory: "software".into(),
                 title: None,
-                mode: "continuous".into(),
-            }))
+                mode: "solo".into(),
+                size: "full".into(),            }))
             .unwrap();
         assert_eq!(res.is_error, Some(true));
     }
@@ -2733,8 +2701,8 @@ mod tests {
                 slug: "r".into(),
                 factory: "software".into(),
                 title: Some("Run".into()),
-                mode: "continuous".into(),
-            }))
+                mode: "solo".into(),
+                size: "full".into(),            }))
             .unwrap();
         (dir, server)
     }
@@ -3140,8 +3108,8 @@ mod handler_smoke {
             slug: "r".into(),
             factory: "software".into(),
             title: Some("Smoke".into()),
-            mode: "continuous".into(),
-        }))
+            mode: "solo".into(),
+            size: "full".into(),        }))
         .unwrap();
         s.darkrun_tick(Parameters(rr("r"))).unwrap();
         s.darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
@@ -3221,12 +3189,6 @@ mod handler_smoke {
         }))
         .unwrap();
         s.darkrun_elaborate_seal(Parameters(ElaborateSealInput { slug: "r".into(), station: "frame".into() })).unwrap();
-        s.darkrun_checkpoint_choose(Parameters(CheckpointChooseInput {
-            slug: "r".into(),
-            station: "frame".into(),
-            kind: "ask".into(),
-        }))
-        .unwrap();
 
         // ── feedback lifecycle ─────────────────────────────────────────────
         let fb = s
@@ -3441,7 +3403,6 @@ mod handler_smoke {
         let _ = s.darkrun_review_stamp(Parameters(ReviewStampInput { slug: g(), station: "frame".into(), role: "r".into(), kind: "review".into() }));
         let _ = s.darkrun_run_review_stamp(Parameters(RunReviewStampInput { slug: g(), role: "r".into() }));
         let _ = s.darkrun_elaborate_seal(Parameters(ElaborateSealInput { slug: g(), station: "frame".into() }));
-        let _ = s.darkrun_checkpoint_choose(Parameters(CheckpointChooseInput { slug: g(), station: "frame".into(), kind: "ask".into() }));
         let _ = s.darkrun_feedback_create(Parameters(FeedbackCreateInput { slug: g(), station: "frame".into(), body: "x".into(), severity: None, origin: None, invalidates: None }));
         let _ = s.darkrun_feedback_reject(Parameters(FeedbackRejectInput { slug: g(), feedback_id: "fb-1".into(), reason: "x".into() }));
         let _ = s.darkrun_feedback_move(Parameters(FeedbackMoveInput { slug: g(), feedback_id: "fb-1".into(), to_station: "specify".into() }));
@@ -3470,7 +3431,7 @@ mod handler_smoke {
         let store = s.store();
         assert_eq!(s.resolve_run_slug(&store, Some(" pinned ")).as_deref(), Some("pinned"));
         assert_eq!(s.resolve_run_slug(&store, None), None);
-        run_start(&store, "only", "software", None, "continuous").unwrap();
+        run_start(&store, "only", "software", None, Mode::Solo, "full").unwrap();
         assert_eq!(s.resolve_run_slug(&store, None).as_deref(), Some("only"));
         // darkrun_run_show with no slug now infers the sole run.
         assert!(s.darkrun_run_show(Parameters(RunShowRef { slug: None })).unwrap().is_error != Some(true));
@@ -3500,12 +3461,11 @@ mod handler_smoke {
     fn invalid_enum_tokens_hit_the_error_arms() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
-        s.darkrun_run_start(Parameters(RunStartInput { slug: "r".into(), factory: "software".into(), title: None, mode: "continuous".into() })).unwrap();
+        s.darkrun_run_start(Parameters(RunStartInput { slug: "r".into(), factory: "software".into(), title: None, mode: "solo".into(), size: "full".into() })).unwrap();
         s.darkrun_unit_create(Parameters(UnitCreateInput { slug: "r".into(), unit: "u1".into(), station: "frame".into(), title: None, depends_on: vec![] })).unwrap();
         let is_err = |r: CallToolResult| r.is_error == Some(true);
         assert!(is_err(s.darkrun_unit_iterate(Parameters(UnitIterateInput { slug: "r".into(), unit: "u1".into(), worker: "w".into(), result: "bogus".into(), note: None, next_worker: None })).unwrap()));
         assert!(is_err(s.darkrun_quality_gate_record(Parameters(GateRecordInput { slug: "r".into(), unit: "u1".into(), gate: "t".into(), status: "bogus".into(), detail: None, nonce: None })).unwrap()));
-        assert!(is_err(s.darkrun_checkpoint_choose(Parameters(CheckpointChooseInput { slug: "r".into(), station: "frame".into(), kind: "bogus".into() })).unwrap()));
         assert!(is_err(s.darkrun_review_stamp(Parameters(ReviewStampInput { slug: "r".into(), station: "frame".into(), role: "x".into(), kind: "bogus".into() })).unwrap()));
     }
 
@@ -3514,8 +3474,8 @@ mod handler_smoke {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
         let store = s.store();
-        run_start(&store, "first", "software", None, "continuous").unwrap();
-        run_start(&store, "second", "software", None, "continuous").unwrap();
+        run_start(&store, "first", "software", None, Mode::Solo, "full").unwrap();
+        run_start(&store, "second", "software", None, Mode::Solo, "full").unwrap();
         // Two runs -> the sole-run shortcut cannot fire; the active pointer wins.
         store.set_active_run("second").unwrap();
         assert_eq!(s.resolve_run_slug(&store, None).as_deref(), Some("second"));
@@ -3531,8 +3491,8 @@ mod handler_smoke {
         // the active-run inference yields None) and the other is archived. With no
         // active pointer and no git branch, resolution falls to step 4 — the sole
         // *non-archived* run wins.
-        run_start(&store, "live", "software", None, "continuous").unwrap();
-        run_start(&store, "old", "software", None, "continuous").unwrap();
+        run_start(&store, "live", "software", None, Mode::Solo, "full").unwrap();
+        run_start(&store, "old", "software", None, Mode::Solo, "full").unwrap();
 
         let mut live = store.read_run("live").unwrap();
         live.frontmatter.status = Status::Completed;
@@ -3552,7 +3512,7 @@ mod handler_smoke {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
         let store = s.store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
 
         // Plant a regular FILE where each collection directory belongs — reading
         // it as a directory fails, so the list handlers must surface a tool error
@@ -3658,7 +3618,7 @@ mod handler_smoke {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
         let store = s.store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         // A unit that witnessed `frame/in.md` as one of its inputs.
         let mut fm = UnitFrontmatter::default();
         fm.station = Some("frame".into());
@@ -3680,19 +3640,7 @@ mod handler_smoke {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
         let store = s.store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
-
-        // checkpoint_choose SUCCESS arm: seed `shape` (which offers [ask, external])
-        // into state, then choose its external gate.
-        let mut state = store.read_state("r").unwrap().unwrap();
-        let mut shape = state.stations.get("frame").unwrap().clone();
-        shape.station = "shape".into();
-        state.stations.insert("shape".into(), shape);
-        store.write_state("r", &state).unwrap();
-        let ok = s.darkrun_checkpoint_choose(Parameters(CheckpointChooseInput {
-            slug: "r".into(), station: "shape".into(), kind: "external".into(),
-        })).unwrap();
-        assert!(ok.is_error != Some(true), "choosing an offered gate succeeds");
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
 
         // annotation_payload: a malformed work_item kind is rejected.
         assert_eq!(
@@ -3749,7 +3697,7 @@ mod handler_smoke {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
         let store = s.store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
 
         // A unit file with unparseable YAML frontmatter → read_units errors, so
         // the unit-list and unit-get handlers return a tool error rather than
@@ -3806,7 +3754,7 @@ mod handler_smoke {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
         let store = s.store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         // Hold a live WS slot → presence reads as Live, so run_show reports the
         // desktop as already connected rather than trying to launch one.
         let _slot = s.sessions().try_acquire_ws_slot(8).expect("ws slot");
@@ -3906,7 +3854,7 @@ mod handler_smoke {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
         s.darkrun_run_start(Parameters(RunStartInput {
-            slug: "r".into(), factory: "software".into(), title: None, mode: "continuous".into(),
+            slug: "r".into(), factory: "software".into(), title: None, mode: "solo".into(), size: "full".into(),
         })).unwrap();
         s.darkrun_unit_create(Parameters(UnitCreateInput {
             slug: "r".into(), unit: "u1".into(), station: "build".into(), title: None, depends_on: vec![],
@@ -3937,7 +3885,7 @@ mod handler_smoke {
 
         let s = DarkrunServer::new(dir.path());
         s.darkrun_run_start(Parameters(RunStartInput {
-            slug: "myrun".into(), factory: "software".into(), title: None, mode: "continuous".into(),
+            slug: "myrun".into(), factory: "software".into(), title: None, mode: "solo".into(), size: "full".into(),
         })).unwrap();
         // No explicit slug, no active pointer → the current branch names the run.
         let store = s.store();
@@ -3993,7 +3941,7 @@ mod handler_smoke {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
         s.darkrun_run_start(Parameters(RunStartInput {
-            slug: "r".into(), factory: "software".into(), title: None, mode: "continuous".into(),
+            slug: "r".into(), factory: "software".into(), title: None, mode: "solo".into(), size: "full".into(),
         })).unwrap();
         let dbg = |op: &str, station: Option<&str>, field: Option<&str>, value: Option<&str>, fid: Option<&str>| {
             s.darkrun_debug(Parameters(DebugInput {

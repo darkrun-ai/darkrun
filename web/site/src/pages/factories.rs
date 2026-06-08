@@ -10,7 +10,6 @@ use crate::ui::theme;
 use crate::content::render_markdown;
 use crate::factory_view::{
     flow_stations, humanize, pipeline_slugs, right_size_tiers, role_view, station_index,
-    ui_checkpoint,
 };
 use crate::route::Route;
 use crate::ui::SectionHead;
@@ -172,7 +171,7 @@ fn FactoryBody(slug: String, factory: ReadSignal<Factory>) -> Element {
         // The interactive pipeline: click a station to open its detail page.
         Panel { label: "the assembly line".to_string(),
             div { style: "overflow-x:auto;",
-                StationFlow { stations: flows.clone(), on_select }
+                StationFlow { stations: flows.clone(), on_select, show_checkpoints: false }
             }
             p {
                 style: format!(
@@ -251,7 +250,6 @@ fn FactoryBody(slug: String, factory: ReadSignal<Factory>) -> Element {
                     factory: slug.clone(),
                     station: station.name().to_string(),
                     description: station.frontmatter.description.clone(),
-                    checkpoint: checkpoint_label(station.checkpoint()),
                     explorers: station.explorers.iter().map(|r| humanize(r.name())).collect(),
                     workers: station.workers.iter().map(|r| humanize(r.name())).collect(),
                     reviewers: station.reviewers.iter().map(|r| humanize(r.name())).collect(),
@@ -261,15 +259,15 @@ fn FactoryBody(slug: String, factory: ReadSignal<Factory>) -> Element {
     }
 }
 
-/// One station summary card on a factory detail page: its phase accent,
-/// checkpoint, and role roster, linking to the deep station page.
+/// One station summary card on a factory detail page: its phase accent and role
+/// roster, linking to the deep station page. The gate is global (the run's mode),
+/// so no per-station checkpoint is shown here.
 #[component]
 fn StationCard(
     index: usize,
     factory: String,
     station: String,
     description: String,
-    checkpoint: String,
     explorers: Vec<String>,
     workers: Vec<String>,
     reviewers: Vec<String>,
@@ -293,7 +291,6 @@ fn StationCard(
                         ),
                         "{index + 1}. {humanize(&station)}"
                     }
-                    Badge { tone: Tone::Accent, filled: true, "checkpoint: {checkpoint}" }
                 }
                 if !description.is_empty() {
                     p {
@@ -350,7 +347,6 @@ fn StationBody(
     let idx = station_index(&factory_data, station.name()).unwrap_or(0);
 
     let fm = &station.frontmatter;
-    let checkpoint = checkpoint_label(station.checkpoint());
     let locked_artifact = fm.locked_artifact.clone();
     let inputs = fm.inputs.clone();
     let body_html = render_markdown(&station.body);
@@ -382,9 +378,8 @@ fn StationBody(
             lead: Some(fm.description.clone()),
         }
 
-        // Header: risk killed, checkpoint, locked artifact, inputs.
+        // Header: risk killed, locked artifact, inputs.
         div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px;",
-            CheckpointBadge { kind: ui_checkpoint(station.checkpoint()), filled: true }
             if let Some(risk) = crate::factory_view::risk_from_body(&station.body) {
                 RiskChip { risk }
             }
@@ -393,7 +388,7 @@ fn StationBody(
             div { style: "margin-bottom:12px;",
                 ArtifactCard {
                     name: locked_artifact.clone(),
-                    description: Some(format!("locked by {} · checkpoint {checkpoint}", humanize(station.name()))),
+                    description: Some(format!("locked by {}", humanize(station.name()))),
                 }
             }
         }
@@ -436,14 +431,19 @@ fn StationBody(
             roles: reviewers,
         }
 
-        // Checkpoint section.
-        Panel { label: "checkpoint".to_string(),
-            div { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
-                CheckpointBadge { kind: ui_checkpoint(station.checkpoint()), filled: true }
-                span {
-                    style: format!("font-family:{};font-size:13px;color:{};", tokens::FONT_SANS, theme::TEXT_MUTED),
-                    {checkpoint_note(checkpoint.as_str())}
-                }
+        // Gate section — the gate is global (the run's mode), not per-station.
+        Panel { label: "gate".to_string(),
+            span {
+                style: format!("font-family:{};font-size:13px;color:{};", tokens::FONT_SANS, theme::TEXT_MUTED),
+                "Every station ends in a checkpoint, but the gate is set by the run's "
+                b { "mode" }
+                ", not the station: "
+                b { "team" }
+                " opens a PR the team reviews and merges, "
+                b { "solo" }
+                " asks for local review, and "
+                b { "dark" }
+                " advances automatically. Pick the mode when you start the run."
             }
         }
 
@@ -590,27 +590,4 @@ fn EmptyState() -> Element {
 /// Map a station's position to the phase hue used for its accent stripe.
 pub fn phase_for_index(index: usize) -> Option<Phase> {
     Phase::ALL.get(index).copied()
-}
-
-/// Human label for a content-layer checkpoint kind.
-pub fn checkpoint_label(kind: darkrun_core::domain::CheckpointKind) -> String {
-    use darkrun_core::domain::CheckpointKind as C;
-    match kind {
-        C::Auto => "auto",
-        C::Ask => "ask",
-        C::External => "external",
-        C::Await => "await",
-    }
-    .to_string()
-}
-
-/// A one-line explainer for what a checkpoint kind means at the gate.
-pub fn checkpoint_note(label: &str) -> &'static str {
-    match label {
-        "auto" => "Advances automatically when the gates pass — no human in the loop.",
-        "ask" => "A human confirms the judgment call before the factory spends the next station.",
-        "external" => "Hands off to an external surface (a PR, a deploy approval) to advance.",
-        "await" => "Blocks until a decision arrives from outside the run.",
-        _ => "The gate that ends this station.",
-    }
 }

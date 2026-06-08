@@ -27,6 +27,11 @@ fn advance_to(h: &Harness, target: &str) {
     // The upstream Ask gate's internal re-tick may have already bumped the
     // target past Spec; reset to the canonical station entry for the suite.
     h.set_phase(target, StationPhase::Spec);
+    // Under team/solo the station HOLDS its Spec until elaborated. These suites
+    // exercise the canonical Spec→Review→…​ progression with plain ticks, so
+    // pre-seal the target (the same posture the harness gives the pre-sealed
+    // frame) — its first tick then applies Spec and advances to Review.
+    h.seal(target);
 }
 
 macro_rules! station_phase_suite {
@@ -313,8 +318,6 @@ fn feedback_cleared_mid_manufacture_resumes_wave() {
 macro_rules! content_station_suite {
     ($modname:ident, $station:literal) => {
         mod $modname {
-            use super::*;
-
             #[test]
             fn station_loads() {
                 let f = darkrun_content::load_factory("software").unwrap();
@@ -331,21 +334,6 @@ macro_rules! content_station_suite {
             fn station_has_reviewers() {
                 let f = darkrun_content::load_factory("software").unwrap();
                 assert!(!f.station($station).unwrap().reviewers.is_empty());
-            }
-
-            #[test]
-            fn station_checkpoint_matches_manager() {
-                let f = darkrun_content::load_factory("software").unwrap();
-                assert_eq!(
-                    f.station($station).unwrap().checkpoint(),
-                    // Content corpus and manager agree except `prove`
-                    // (corpus=ask, manager=auto); guard that one explicitly.
-                    if $station == "prove" {
-                        CheckpointKind::Ask
-                    } else {
-                        manager_checkpoint($station)
-                    }
-                );
             }
 
             #[test]

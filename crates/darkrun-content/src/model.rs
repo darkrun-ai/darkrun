@@ -8,7 +8,6 @@
 //! Frontmatter is parsed with `serde`; bodies are kept as raw markdown so the
 //! manager can hand a role's instructions to an agent verbatim.
 
-use darkrun_core::domain::CheckpointKind;
 use serde::{Deserialize, Serialize};
 
 /// Frontmatter of a `FACTORY.md` document.
@@ -86,15 +85,6 @@ pub struct StationFrontmatter {
     /// Reviewer slugs that verify output in the Review phase.
     #[serde(default)]
     pub reviewers: Vec<String>,
-    /// The checkpoint gate that ends the station — the DEFAULT path when the
-    /// station offers a choice (see `checkpoint_options`).
-    pub checkpoint: CheckpointKind,
-    /// Optional alternative gate paths the operator may pick at the checkpoint
-    /// (a compound gate, e.g. `[external, ask]`). When non-empty it must include
-    /// `checkpoint` (the default); the operator can switch to another listed kind
-    /// via `darkrun_checkpoint_choose`. Empty → a single fixed gate.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub checkpoint_options: Vec<CheckpointKind>,
     /// The durable artifact this station locks (e.g. `frame.md` or `code`).
     #[serde(default)]
     pub locked_artifact: String,
@@ -214,11 +204,6 @@ impl Station {
     /// The station's slug.
     pub fn name(&self) -> &str {
         &self.frontmatter.name
-    }
-
-    /// The checkpoint gate that ends this station.
-    pub fn checkpoint(&self) -> CheckpointKind {
-        self.frontmatter.checkpoint
     }
 }
 

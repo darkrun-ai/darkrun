@@ -5,7 +5,6 @@ kills: escaped-defects
 explorers: [scenario, regression]
 workers: [verifier, breaker, triage]
 reviewers: [evidence, coverage]
-checkpoint: ask
 locked_artifact: proof.md
 inputs: [spec.md, code]
 inputs_waived: [frame.md, design.md]

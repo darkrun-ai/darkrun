@@ -10,6 +10,7 @@ use darkrun_core::domain::{
     CheckpointKind, FeedbackStatus, Status, StationPhase, Unit, UnitFrontmatter,
 };
 use darkrun_core::StateStore;
+use darkrun_core::domain::Mode;
 use darkrun_mcp::position::{checkpoint_decide, derive_position, run_start, run_tick, RunAction};
 use darkrun_mcp::{feedback, Track};
 use tempfile::TempDir;
@@ -55,6 +56,10 @@ fn walk_to_checkpoint(store: &StateStore, run: &str, station: &str) -> RunAction
             RunAction::UserGate { station: s, .. } if s == station => {
                 checkpoint_decide(store, run, true, None).expect("clear gate");
             }
+            // Solo holds the Spec until the elaboration is sealed.
+            RunAction::Spec { station: s, .. } if s == station => {
+                darkrun_mcp::position::elaborate_seal(store, run, station).expect("seal");
+            }
             // The gate — a local Checkpoint or, for an external station, an
             // ExternalReviewRequested.
             RunAction::Checkpoint { station: s, .. }
@@ -63,8 +68,7 @@ fn walk_to_checkpoint(store: &StateStore, run: &str, station: &str) -> RunAction
             {
                 return t.action
             }
-            RunAction::Spec { station: s, .. }
-            | RunAction::Review { station: s, .. }
+            RunAction::Review { station: s, .. }
             | RunAction::Manufacture { station: s, .. }
             | RunAction::Audit { station: s, .. }
             | RunAction::Reflect { station: s, .. }
@@ -78,7 +82,7 @@ fn walk_to_checkpoint(store: &StateStore, run: &str, station: &str) -> RunAction
 #[test]
 fn full_run_walks_all_six_stations_to_sealed() {
     let (_d, store) = store();
-    run_start(&store, "r", "software", Some("Ship".into()), "continuous").expect("start");
+    run_start(&store, "r", "software", Some("Ship".into()), Mode::Solo, "full").expect("start");
 
     // frame: ask → operator approves to advance.
     let cp = walk_to_checkpoint(&store, "r", "frame");
@@ -139,7 +143,9 @@ fn full_run_walks_all_six_stations_to_sealed() {
 #[test]
 fn every_phase_appears_in_order_for_a_station() {
     let (_d, store) = store();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+    // Solo holds the Spec until sealed; seal up front so the phase walk is linear.
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
 
     let phases: Vec<&str> = {
         let mut seen = Vec::new();
@@ -195,7 +201,9 @@ fn action_name(a: &RunAction) -> &'static str {
 #[test]
 fn manufacture_holds_mid_wave_when_units_in_flight() {
     let (_d, store) = store();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+    // Solo holds the Spec until sealed; seal so the walk advances linearly.
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
     run_tick(&store, "r").unwrap(); // spec → review
     run_tick(&store, "r").unwrap(); // review → user_gate
 
@@ -228,7 +236,7 @@ fn manufacture_holds_mid_wave_when_units_in_flight() {
 #[test]
 fn three_track_priority_drift_beats_feedback_beats_run() {
     let (_d, store) = store();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
     // Run-only: the bare position is a run action (spec).
     let pos = derive_position(&store, "r").unwrap();
@@ -245,7 +253,9 @@ fn three_track_priority_drift_beats_feedback_beats_run() {
 #[test]
 fn feedback_preemption_pauses_then_resumes_run() {
     let (_d, store) = store();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+    // Solo holds the Spec until sealed; seal so the walk advances linearly.
+    darkrun_mcp::position::elaborate_seal(&store, "r", "frame").expect("seal");
 
     // Mid-walk: advance into the frame station.
     run_tick(&store, "r").unwrap(); // spec → review
@@ -269,7 +279,7 @@ fn feedback_preemption_pauses_then_resumes_run() {
 #[test]
 fn checkpoint_reject_routes_rework_as_feedback() {
     let (_d, store) = store();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
 
     let res = checkpoint_decide(&store, "r", false, Some("not good enough".into()))
         .expect("reject");
@@ -291,7 +301,7 @@ fn checkpoint_reject_routes_rework_as_feedback() {
 #[test]
 fn checkpoint_approve_completes_and_advances() {
     let (_d, store) = store();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
     let decided = checkpoint_decide(&store, "r", true, None).expect("approve");
     // frame completes; cursor advances to specify's Spec.
     assert!(matches!(&decided.action, RunAction::Spec { station, .. } if station == "specify"));
@@ -303,7 +313,7 @@ fn checkpoint_approve_completes_and_advances() {
 #[test]
 fn sealed_when_all_stations_complete() {
     let (_d, store) = store();
-    run_start(&store, "r", "software", None, "continuous").expect("start");
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
     // Walk every station to its checkpoint; gated stations (ask/external) need
     // an explicit approval, auto stations advance during the walk.
     for station in ["frame", "specify", "shape", "build", "prove", "harden"] {

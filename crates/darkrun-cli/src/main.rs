@@ -126,9 +126,14 @@ enum RunCommand {
         /// Factory (methodology) to drive the run.
         #[arg(long, default_value = "software")]
         factory: String,
-        /// Run sizing mode.
-        #[arg(long, default_value = "continuous")]
+        /// Global review mode: `team` (per-station PR + merge), `solo` (local
+        /// review), or `dark` (pre-elaborate, then run without stops).
+        #[arg(long, default_value = "solo")]
         mode: String,
+        /// Right-sizing (orthogonal to mode): `full`, `quick`, `bugfix`, or
+        /// `refactor`.
+        #[arg(long, default_value = "full")]
+        size: String,
         /// Explicit slug (otherwise derived from the description).
         #[arg(long)]
         slug: Option<String>,
@@ -396,13 +401,21 @@ fn run_command(repo_root: &Path, cmd: RunCommand) -> Result<(), Box<dyn std::err
             description,
             factory,
             mode,
+            size,
             slug,
         } => {
             let slug = slug.unwrap_or_else(|| slugify(&description));
             if slug.is_empty() {
                 return Err("could not derive a slug from the description".into());
             }
-            let run = run_start(&store, &slug, &factory, Some(description), &mode)?;
+            let run = run_start(
+                &store,
+                &slug,
+                &factory,
+                Some(description),
+                darkrun_core::domain::Mode::from_label(&mode),
+                &size,
+            )?;
             store.set_active_run(&run.slug)?;
             println!("started run '{}' ({})", run.slug, run.title);
             println!("  factory:        {}", run.frontmatter.factory);

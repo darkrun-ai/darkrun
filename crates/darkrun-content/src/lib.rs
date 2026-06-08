@@ -38,7 +38,6 @@ pub use validate::validate;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use darkrun_core::domain::CheckpointKind;
 
     #[test]
     fn lists_the_software_factory() {
@@ -72,7 +71,6 @@ mod tests {
         let factory = load_factory("software").expect("load");
         let frame = factory.station("frame").expect("frame station");
 
-        assert_eq!(frame.checkpoint(), CheckpointKind::Ask);
         assert_eq!(frame.frontmatter.locked_artifact, "frame.md");
 
         // Explorers: context + value.
@@ -129,15 +127,6 @@ mod tests {
             .expect("visual_designer present");
         let body = visual.body.to_lowercase();
         assert!(body.contains("darkrun_question") || body.contains("darkrun_direction"));
-    }
-
-    #[test]
-    fn checkpoints_match_the_design() {
-        let factory = load_factory("software").expect("load");
-        let kind = |s: &str| factory.station(s).unwrap().checkpoint();
-        for s in ["frame", "specify", "shape", "build", "prove", "harden"] {
-            assert_eq!(kind(s), CheckpointKind::Ask, "{s}");
-        }
     }
 
     #[test]

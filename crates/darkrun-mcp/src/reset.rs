@@ -98,7 +98,7 @@ pub fn reset(
 mod tests {
     use super::*;
     use crate::position::run_start;
-    use darkrun_core::domain::{Status, Unit, UnitFrontmatter};
+    use darkrun_core::domain::{Mode, Status, Unit, UnitFrontmatter};
 
     fn store() -> (tempfile::TempDir, StateStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn station_dry_run_then_confirmed_wipe() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         seed_unit(&store, "r", "frame", "frame-u");
         seed_unit(&store, "r", "specify", "specify-u");
 
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn run_scope_confirmed_removes_the_run_dir() {
         let (_d, store) = store();
-        run_start(&store, "r", "software", None, "continuous").unwrap();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         seed_unit(&store, "r", "frame", "frame-u");
         assert!(store.run_dir("r").exists());
 

@@ -429,12 +429,11 @@ mod tests {
             .collect();
         assert_eq!(labels, vec!["Intake", "Position", "Structure", "Draft", "Review", "Execute"]);
 
-        // Proof is human-attested: no measured surface, and the final stations
-        // gate external (counsel/client attest).
+        // Proof is human-attested: no measured surface. (Gating is global now —
+        // `team` mode opens an external PR at every station, which is how legal's
+        // counsel/client attestation is expressed, so there is no per-station
+        // checkpoint to assert here.)
         assert!(f.frontmatter.surfaces.is_empty(), "legal declares no software surface");
-        use darkrun_core::domain::CheckpointKind;
-        assert_eq!(f.station("prove").unwrap().checkpoint(), CheckpointKind::External);
-        assert_eq!(f.station("harden").unwrap().checkpoint(), CheckpointKind::External);
 
         // Each station carries a real legal roster (its own role files, not
         // software's) — this is an independent domain corpus.

@@ -125,8 +125,12 @@ fn clean_risk_phrase(raw: &str) -> String {
 }
 
 /// A station rendered as a [`FlowStation`] for the pipeline + walkthrough views.
+///
+/// The gate is no longer per-station — it's the run's global mode (team/solo/
+/// dark) — so the static catalog passes a placeholder kind and renders the strip
+/// with `show_checkpoints: false`. The placeholder is never displayed.
 pub fn flow_station(station: &Station) -> FlowStation {
-    let mut fs = FlowStation::new(station.name().to_string(), ui_checkpoint(station.checkpoint()))
+    let mut fs = FlowStation::new(station.name().to_string(), UiCheckpoint::Auto)
         .with_label(humanize(station.name()));
     if let Some(risk) = risk_from_body(&station.body) {
         fs = fs.with_risk(risk);

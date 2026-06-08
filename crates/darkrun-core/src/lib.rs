@@ -67,7 +67,7 @@ mod tests {
         let fm = RunFrontmatter {
             title: Some("Ship the thing".into()),
             factory: "software".into(),
-            mode: "continuous".into(),
+            mode: crate::domain::Mode::Solo,
             active_station: "frame".into(),
             status: Status::Active,
             ..Default::default()

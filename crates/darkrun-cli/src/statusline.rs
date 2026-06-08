@@ -665,7 +665,7 @@ mod tests {
             station: "build".into(), status: Status::Active, phase: StationPhase::Checkpoint,
             elaborated: true,
             checkpoint: Some(Checkpoint { kind: CheckpointKind::Ask, entered_at: None, outcome: None }),
-            chosen_checkpoint: None, branch: None, pr_ref: None, pr_status: None,
+            branch: None, pr_ref: None, pr_status: None,
             pr_ready_at: None, pr_merged_at: None, verifier_nonce: None,
             started_at: None, completed_at: None,
         });

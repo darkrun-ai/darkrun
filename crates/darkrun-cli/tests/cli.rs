@@ -527,14 +527,14 @@ fn run_start_accepts_mode_flag() {
     let repo = temp_repo();
     let r = Cli::new()
         .repo(repo.path())
-        .args(["run", "start", "Thing", "--mode", "continuous"])
+        .args(["run", "start", "Thing", "--mode", "team"])
         .run();
     assert!(r.ok(), "stderr: {}", r.stderr);
     let md = std::fs::read_to_string(
         repo.path().join(".darkrun").join("thing").join("run.md"),
     )
     .unwrap();
-    assert!(md.contains("mode: continuous"));
+    assert!(md.contains("mode: team"));
 }
 
 #[test]
@@ -726,19 +726,20 @@ fn run_next_includes_position_and_action_consistently() {
 }
 
 #[test]
-fn run_next_ticks_the_phase_forward() {
+fn run_next_holds_the_spec_for_operator_elaboration() {
     let repo = temp_repo();
     start_run(repo.path(), "Add Login");
     // First tick: spec at frame.
     let a = json(&Cli::new().repo(repo.path()).args(["run", "next"]).run().stdout);
     assert_eq!(a["action"]["action"], "spec");
     assert_eq!(a["action"]["station"], "frame");
-    // Second tick advances the frame phase from spec → review (still the same
-    // station, but a distinct action). `next` is a real state advance, not a
-    // pure read.
+    // The default mode is `solo`: every station HOLDS its Spec for operator
+    // elaboration (`darkrun_elaborate_seal`) before advancing. A second `next`
+    // keeps surfacing the spec hold rather than auto-advancing to review — the
+    // collaboration backpressure that distinguishes solo/team from dark.
     let b = json(&Cli::new().repo(repo.path()).args(["run", "next"]).run().stdout);
+    assert_eq!(b["action"]["action"], "spec");
     assert_eq!(b["action"]["station"], "frame");
-    assert_ne!(a["action"]["action"], b["action"]["action"]);
 }
 
 #[test]

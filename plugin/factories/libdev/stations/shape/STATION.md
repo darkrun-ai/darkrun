@@ -5,7 +5,6 @@ kills: expensive-structural-reversal
 explorers: [surface, architecture, risk]
 workers: [designer, spiker, pressure_tester, resolver]
 reviewers: [fit, reversibility, simplicity]
-checkpoint: ask
 locked_artifact: design.md
 inputs: [frame.md, spec.md]
 ---
