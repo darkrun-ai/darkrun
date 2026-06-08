@@ -11,9 +11,11 @@ name: release-please
 #     fixes bump the PATCH. NO automatic majors — 1.0 is a deliberate human call
 #     (cut it with a `Release-As: 1.0.0` commit when the API is stable).
 #
-# Note: PRs opened by the default GITHUB_TOKEN do NOT trigger other workflows, so
-# CI won't run on the release PR unless `token` below is a PAT / App token. Swap
-# secrets.GITHUB_TOKEN for a RELEASE_PLEASE_TOKEN to get CI on the release PR.
+# Uses a PAT (RELEASE_PLEASE_TOKEN) rather than the default GITHUB_TOKEN: a
+# release/PR created by GITHUB_TOKEN does NOT trigger other workflows, so the
+# published GitHub Release would never fire `release.yml` (the npm publish). With
+# a PAT, merging the release PR publishes a Release that triggers release.yml, and
+# CI also runs on the release PR itself.
 
 on:
   push:
@@ -33,4 +35,4 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
