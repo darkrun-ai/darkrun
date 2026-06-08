@@ -9,41 +9,40 @@ each maps to a real `/darkrun:*` command you can run today.
 Describe what you want and let the manager size the line.
 
 ```
-/darkrun:start "add rate limiting to the public API"
+/darkrun:new "add rate limiting to the public API"
 ```
 
 The manager scaffolds a right-sized Run: the software factory's stations, trimmed
 to the work. Then you advance it:
 
 ```
-/darkrun:pickup
+/darkrun:resume
 ```
 
-Each `pickup` returns the next concrete action across stations, workers, and
-checkpoints. Perform it, then pick up again. Check where you are any time with
-`/darkrun:show` — Stations, Units, completion criteria, and Checkpoint status.
+Each `resume` returns the next concrete action across stations, workers, and
+checkpoints. Perform it, then resume again. Check where you are any time with
+`/darkrun:inspect` — Stations, Units, completion criteria, and Checkpoint status.
 
 For a one-off you do not want to ceremony up, two shortcuts:
 
-- `/darkrun:quick "..."` — a Run the manager auto-sizes to a single Station, then
-  walks it through that Station's phases.
-- `/darkrun:zap "..."` — zero-ceremony single-Unit execution: run one task
+- `/darkrun:darkrun-new "..." --size quick` — a Run the manager right-sizes to a
+  minimal Station set, then walks it through those Stations' phases.
+- `/darkrun:darkrun-zap "..."` — zero-ceremony single-Unit execution: run one task
   straight through a Station's Worker loop with nothing written under `.darkrun/`.
 
-## Autopilot: promote ask gates to auto
+## Dark mode: run lights-out
 
-When you trust the line and want it to run unattended, promote the **ask**
-checkpoints to **auto** so the manager advances Station to Station without
-stopping.
+When you trust the line and want it to run unattended, start the Run in **dark**
+mode. Every mode pre-elaborates up front; dark is the one that then advances
+Station to Station without stopping for review.
 
 ```
-/darkrun:autopilot
+/darkrun:darkrun-dark
 ```
 
-It runs the Run's gates autonomously, pausing only on **external** or **await**
-gates — the ones that genuinely need something outside the loop — and on real
-ambiguity. This is lights-out operation: the floor runs dark, you stay in the
-control room.
+It runs autonomously, pausing only on **external** or **await** gates — the ones
+that genuinely need something outside the loop — and on real ambiguity. This is
+lights-out operation: the floor runs dark, you stay in the control room.
 
 ## Pre-checkpoint gate-review
 
@@ -112,12 +111,11 @@ The full `/darkrun:*` command surface, grouped by what it does:
 | Command                  | What it does                                                       |
 | ------------------------ | ----------------------------------------------------------------- |
 | `/darkrun:setup`         | Configure darkrun for this project — detect VCS, CI, default branch |
-| `/darkrun:start`         | Start a new Run; the manager scaffolds a right-sized lifecycle     |
-| `/darkrun:pickup`        | Advance the Run — the manager returns the next concrete action     |
-| `/darkrun:show`          | Show the Run's state: Stations, Units, criteria, Checkpoint status |
-| `/darkrun:quick`         | Quick single-Station Run, auto-sized to one Station                |
+| `/darkrun:new`           | Start a new Run; the manager scaffolds a right-sized lifecycle     |
+| `/darkrun:resume`        | Advance the Run — the manager returns the next concrete action     |
+| `/darkrun:inspect`       | Show the Run's state: Stations, Units, criteria, Checkpoint status |
 | `/darkrun:zap`           | Zero-ceremony single-Unit execution, no state written             |
-| `/darkrun:autopilot`     | Run the gates autonomously by promoting ask to auto               |
+| `/darkrun:dark`          | Run lights-out in dark mode — advance without stopping for review  |
 | `/darkrun:gate-review`   | Pre-Checkpoint multi-agent review with a fix loop                  |
 | `/darkrun:checkpoint`    | Review and decide a Station's Checkpoint                           |
 | `/darkrun:backlog`       | Parking lot for ideas not yet ready to become a Run               |

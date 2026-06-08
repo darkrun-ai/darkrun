@@ -1264,7 +1264,7 @@ fn tickresult_serializes_run_position_action() {
     assert!(j["position"].is_object());
     assert!(j["action"].is_object());
     // The engine-driven, override-resolved instructions ride alongside the
-    // structured action so `darkrun_tick` hands the agent both halves.
+    // structured action so `darkrun_advance` hands the agent both halves.
     assert!(j["prompt"].is_string(), "TickResult must serialize a rendered prompt");
     assert!(
         !j["prompt"].as_str().unwrap().trim().is_empty(),

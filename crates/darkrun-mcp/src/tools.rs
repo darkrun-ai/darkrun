@@ -3,7 +3,7 @@
 //!
 //! The orchestrator + state tool handlers, expressed in the factory
 //! vocabulary and reduced to:
-//! `darkrun_run_start`, `darkrun_tick`, `darkrun_run_show`,
+//! `darkrun_run_new`, `darkrun_advance`, `darkrun_run_inspect`,
 //! `darkrun_unit_list`, `darkrun_factory_list`, `darkrun_checkpoint_decide`.
 //!
 //! Each tool validates its input (via schemars-typed structs) and returns a
@@ -106,7 +106,7 @@ impl DarkrunServer {
         StateStore::new(self.repo_root.as_ref())
     }
 
-    /// Resolve which run a slug-optional command (e.g. `darkrun_run_show`) targets.
+    /// Resolve which run a slug-optional command (e.g. `darkrun_run_inspect`) targets.
     ///
     /// Priority, so a user standing in a run's worktree never has to name it:
     /// 1. an explicit, non-empty `given` slug wins;
@@ -195,7 +195,7 @@ fn err_text(message: impl std::fmt::Display) -> CallToolResult {
 
 // ── Tool input schemas ──────────────────────────────────────────────────
 
-/// Input for `darkrun_run_start`.
+/// Input for `darkrun_run_new`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct RunStartInput {
@@ -238,7 +238,7 @@ pub struct RunRef {
     pub slug: String,
 }
 
-/// Input for `darkrun_run_show`, where the slug is **optional**: omit it and the
+/// Input for `darkrun_run_inspect`, where the slug is **optional**: omit it and the
 /// run is inferred from the current `darkrun/<slug>/…` branch, the active-run
 /// pointer, or the sole run — so a user in a run's worktree need not name it.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
@@ -328,7 +328,7 @@ pub struct UnitUpdateInput {
     pub outputs: Option<Vec<String>>,
 }
 
-/// Input for `darkrun_unit_iterate` — record one Pass beat (Make/Challenge/Resolve).
+/// Input for `darkrun_unit_beat` — record one Pass beat (Make/Challenge/Resolve).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct UnitIterateInput {
@@ -556,7 +556,7 @@ pub struct BriefRecordInput {
     pub body: String,
 }
 
-/// Input for `darkrun_drift_accept` — accept an intentional change to a locked
+/// Input for `darkrun_drift_witness` — accept an intentional change to a locked
 /// artifact (re-witness it so the sweep stops flagging it).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -1091,10 +1091,10 @@ impl DarkrunServer {
     /// Start a new run: seed `.darkrun/<slug>/` state at the factory's first
     /// station and return the run.
     #[tool(
-        name = "darkrun_run_start",
+        name = "darkrun_run_new",
         description = "Start a new darkrun Run on a factory, seeding .darkrun state at the first station."
     )]
-    pub fn darkrun_run_start(
+    pub fn darkrun_run_new(
         &self,
         Parameters(input): Parameters<RunStartInput>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
@@ -1115,13 +1115,22 @@ impl DarkrunServer {
         }
     }
 
+    /// Deprecated alias of `darkrun_run_new` — kept for one release.
+    #[tool(name = "darkrun_run_start", description = "Deprecated alias of darkrun_run_new.")]
+    pub fn darkrun_run_start_alias(
+        &self,
+        params: Parameters<RunStartInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.darkrun_run_new(params)
+    }
+
     /// Drive one workflow tick and return the next action the agent should
     /// perform. Three-track priority: drift -> feedback -> run.
     #[tool(
-        name = "darkrun_tick",
+        name = "darkrun_advance",
         description = "Advance the run one tick; returns the next structured action (drift -> feedback -> run)."
     )]
-    pub fn darkrun_tick(
+    pub fn darkrun_advance(
         &self,
         Parameters(input): Parameters<RunRef>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
@@ -1132,12 +1141,21 @@ impl DarkrunServer {
         }
     }
 
+    /// Deprecated alias of `darkrun_advance` — kept for one release.
+    #[tool(name = "darkrun_tick", description = "Deprecated alias of darkrun_advance.")]
+    pub fn darkrun_tick_alias(
+        &self,
+        params: Parameters<RunRef>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.darkrun_advance(params)
+    }
+
     /// Show a run's frontmatter, derived state, and current position.
     #[tool(
-        name = "darkrun_run_show",
+        name = "darkrun_run_inspect",
         description = "Show a run: frontmatter, derived station state, and the current cursor position. Omit `slug` to infer the run from the current darkrun/<slug>/… branch, the active run, or the sole run."
     )]
-    pub fn darkrun_run_show(
+    pub fn darkrun_run_inspect(
         &self,
         Parameters(input): Parameters<RunShowRef>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
@@ -1184,6 +1202,15 @@ impl DarkrunServer {
                 "desktop": desktop,
             },
         }))
+    }
+
+    /// Deprecated alias of `darkrun_run_inspect` — kept for one release.
+    #[tool(name = "darkrun_run_show", description = "Deprecated alias of darkrun_run_inspect.")]
+    pub fn darkrun_run_show_alias(
+        &self,
+        params: Parameters<RunShowRef>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.darkrun_run_inspect(params)
     }
 
     /// Launch the desktop app pointed at `slug` over the engine's announced
@@ -1340,10 +1367,10 @@ impl DarkrunServer {
     /// Record one Pass beat on a unit: the worker, its advance/reject result,
     /// and the **handoff note** that carries the story to the next worker.
     #[tool(
-        name = "darkrun_unit_iterate",
+        name = "darkrun_unit_beat",
         description = "Record one Pass beat (Make/Challenge/Resolve): worker + result (advance|reject) + a handoff note (required on reject). The note is threaded into the next worker's dispatch and surfaced to the operator and reflection. Pass count is derived from the iteration history."
     )]
-    pub fn darkrun_unit_iterate(
+    pub fn darkrun_unit_beat(
         &self,
         Parameters(input): Parameters<UnitIterateInput>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
@@ -1371,6 +1398,15 @@ impl DarkrunServer {
             Ok(unit) => ok_json(&unit),
             Err(e) => Ok(err_text(e)),
         }
+    }
+
+    /// Deprecated alias of `darkrun_unit_beat` — kept for one release.
+    #[tool(name = "darkrun_unit_iterate", description = "Deprecated alias of darkrun_unit_beat.")]
+    pub fn darkrun_unit_iterate_alias(
+        &self,
+        params: Parameters<UnitIterateInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.darkrun_unit_beat(params)
     }
 
     /// Record a quality-gate result on a unit — the objective check the unit's
@@ -1448,7 +1484,7 @@ impl DarkrunServer {
     /// concurrently and the parent ticks once.
     #[tool(
         name = "darkrun_review_stamp",
-        description = "Record ONE reviewer role's sign-off (review|approval) across a station's units without advancing the run — the parallel-safe close for a fanned-out reviewer subagent. A station with an open finding is skipped (file the finding instead of stamping). The parent calls darkrun_tick once after all reviewers return."
+        description = "Record ONE reviewer role's sign-off (review|approval) across a station's units without advancing the run — the parallel-safe close for a fanned-out reviewer subagent. A station with an open finding is skipped (file the finding instead of stamping). The parent calls darkrun_advance once after all reviewers return."
     )]
     pub fn darkrun_review_stamp(
         &self,
@@ -1722,10 +1758,10 @@ impl DarkrunServer {
 
     /// Accept an intentional change to a locked artifact, clearing its drift.
     #[tool(
-        name = "darkrun_drift_accept",
+        name = "darkrun_drift_witness",
         description = "Accept an intentional change to a drifted locked artifact: re-witness it to its current content so the sweep stops flagging it."
     )]
-    pub fn darkrun_drift_accept(
+    pub fn darkrun_drift_witness(
         &self,
         Parameters(input): Parameters<DriftAcceptInput>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
@@ -1738,6 +1774,15 @@ impl DarkrunServer {
             ))),
             Err(e) => Ok(err_text(e)),
         }
+    }
+
+    /// Deprecated alias of `darkrun_drift_witness` — kept for one release.
+    #[tool(name = "darkrun_drift_accept", description = "Deprecated alias of darkrun_drift_witness.")]
+    pub fn darkrun_drift_accept_alias(
+        &self,
+        params: Parameters<DriftAcceptInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.darkrun_drift_witness(params)
     }
 
     // ── Meta / utility ───────────────────────────────────────────────────
@@ -2408,16 +2453,16 @@ const VISUAL_TOOL_NAMES: &[&str] = &["darkrun_direction", "darkrun_direction_res
 /// Run at all. Everything else (admin, meta, scaffolding, lifecycle extras) is
 /// shed first. Kept conservatively under every harness budget.
 const ESSENTIAL_TOOL_NAMES: &[&str] = &[
-    "darkrun_run_start",
-    "darkrun_tick",
-    "darkrun_run_show",
+    "darkrun_run_new",
+    "darkrun_advance",
+    "darkrun_run_inspect",
     "darkrun_run_list",
     "darkrun_checkpoint_decide",
     "darkrun_unit_create",
     "darkrun_unit_update",
     "darkrun_unit_get",
     "darkrun_unit_list",
-    "darkrun_unit_iterate",
+    "darkrun_unit_beat",
     "darkrun_feedback_create",
     "darkrun_feedback_list",
     "darkrun_feedback_resolve",
@@ -2425,7 +2470,7 @@ const ESSENTIAL_TOOL_NAMES: &[&str] = &[
     "darkrun_quality_gate_record",
     "darkrun_review_stamp",
     "darkrun_run_review_stamp",
-    "darkrun_drift_accept",
+    "darkrun_drift_witness",
     "darkrun_run_surface",
     "darkrun_proof_attach",
     "darkrun_proof_get",
@@ -2442,7 +2487,7 @@ const ESSENTIAL_TOOL_NAMES: &[&str] = &[
 /// The budget cut is **priority-aware**: essential run-driving tools
 /// ([`ESSENTIAL_TOOL_NAMES`]) are kept and the budget is filled with the
 /// remaining tools in registration order, so a growing tool surface can never
-/// silently shed `darkrun_tick` (or any loop driver) on a constrained harness.
+/// silently shed `darkrun_advance` (or any loop driver) on a constrained harness.
 fn adapt_tool_list(
     caps: &darkrun_harness::Capabilities,
     mut tools: Vec<rmcp::model::Tool>,
@@ -2542,8 +2587,8 @@ impl ServerHandler for DarkrunServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         let mut instructions = String::from(
-            "darkrun manager. Call darkrun_run_start to begin a Run, then \
-             darkrun_tick repeatedly to walk its factory stations. Each tick returns \
+            "darkrun manager. Call darkrun_run_new to begin a Run, then \
+             darkrun_advance repeatedly to walk its factory stations. Each tick returns \
              a structured next-action instruction — perform it (write artifacts, \
              decompose units, complete passes), then re-tick. Use \
              darkrun_checkpoint_decide to resolve a station's gate.",
@@ -2626,7 +2671,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let server = DarkrunServer::new(dir.path());
         let res = server
-            .darkrun_run_start(Parameters(RunStartInput {
+            .darkrun_run_new(Parameters(RunStartInput {
                 slug: "r".into(),
                 factory: "software".into(),
                 title: Some("t".into()),
@@ -2642,7 +2687,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let server = DarkrunServer::new(dir.path());
         server
-            .darkrun_run_start(Parameters(RunStartInput {
+            .darkrun_run_new(Parameters(RunStartInput {
                 slug: "r".into(),
                 factory: "software".into(),
                 title: None,
@@ -2650,7 +2695,7 @@ mod tests {
                 size: "full".into(),            }))
             .unwrap();
         let res = server
-            .darkrun_tick(Parameters(RunRef { slug: "r".into() }))
+            .darkrun_advance(Parameters(RunRef { slug: "r".into() }))
             .unwrap();
         assert_eq!(res.is_error, Some(false));
         let v = res.structured_content.unwrap();
@@ -2683,7 +2728,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let server = DarkrunServer::new(dir.path());
         let res = server
-            .darkrun_run_start(Parameters(RunStartInput {
+            .darkrun_run_new(Parameters(RunStartInput {
                 slug: "  ".into(),
                 factory: "software".into(),
                 title: None,
@@ -2697,7 +2742,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let server = DarkrunServer::new(dir.path());
         server
-            .darkrun_run_start(Parameters(RunStartInput {
+            .darkrun_run_new(Parameters(RunStartInput {
                 slug: "r".into(),
                 factory: "software".into(),
                 title: Some("Run".into()),
@@ -3097,22 +3142,22 @@ mod handler_smoke {
         // ── error arms on an absent run ────────────────────────────────────
         let rr = |slug: &str| RunRef { slug: slug.into() };
         assert_eq!(
-            s.darkrun_tick(Parameters(rr("ghost"))).unwrap().is_error,
+            s.darkrun_advance(Parameters(rr("ghost"))).unwrap().is_error,
             Some(true)
         );
-        s.darkrun_run_show(Parameters(RunShowRef { slug: Some("ghost".into()) })).unwrap();
+        s.darkrun_run_inspect(Parameters(RunShowRef { slug: Some("ghost".into()) })).unwrap();
         s.darkrun_unit_list(Parameters(rr("ghost"))).unwrap();
 
         // ── start a real run + drive a little state ────────────────────────
-        s.darkrun_run_start(Parameters(RunStartInput {
+        s.darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: Some("Smoke".into()),
             mode: "solo".into(),
             size: "full".into(),        }))
         .unwrap();
-        s.darkrun_tick(Parameters(rr("r"))).unwrap();
-        s.darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
+        s.darkrun_advance(Parameters(rr("r"))).unwrap();
+        s.darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
         s.darkrun_run_surface(Parameters(RunSurfaceInput {
             slug: "r".into(),
             surface: Some("data".into()),
@@ -3155,7 +3200,7 @@ mod handler_smoke {
             outputs: Some(vec!["src/x.rs".into()]),
         }))
         .unwrap();
-        s.darkrun_unit_iterate(Parameters(UnitIterateInput {
+        s.darkrun_unit_beat(Parameters(UnitIterateInput {
             slug: "r".into(),
             unit: "u1".into(),
             worker: "make".into(),
@@ -3249,7 +3294,7 @@ mod handler_smoke {
         }))
         .unwrap();
         s.darkrun_reflection_list(Parameters(ReflectionListInput { slug: "r".into() })).unwrap();
-        s.darkrun_drift_accept(Parameters(DriftAcceptInput { slug: "r".into(), path: "frame/frame.md".into() })).unwrap();
+        s.darkrun_drift_witness(Parameters(DriftAcceptInput { slug: "r".into(), path: "frame/frame.md".into() })).unwrap();
         s.darkrun_checkpoint_decide(Parameters(CheckpointDecideInput {
             slug: "r".into(),
             approved: false,
@@ -3383,7 +3428,7 @@ mod handler_smoke {
 
         // Reads against a missing run hit the `Err(e) => err_text` tail.
         let is_err = |r: CallToolResult| r.is_error == Some(true);
-        assert!(is_err(s.darkrun_tick(Parameters(RunRef { slug: g() })).unwrap()));
+        assert!(is_err(s.darkrun_advance(Parameters(RunRef { slug: g() })).unwrap()));
         assert!(is_err(s.darkrun_unit_get(Parameters(UnitRef { slug: g(), unit: "u".into() })).unwrap()));
         assert!(is_err(s.darkrun_feedback_resolve(Parameters(FeedbackResolveInput { slug: g(), feedback_id: "fb-1".into(), status: "addressed".into(), reply: None })).unwrap()));
         assert!(is_err(s.darkrun_proof_get(Parameters(ProofGetInput { slug: g(), station: None })).unwrap()));
@@ -3397,7 +3442,7 @@ mod handler_smoke {
         let _ = s.darkrun_checkpoint_decide(Parameters(CheckpointDecideInput { slug: g(), approved: true, feedback: None }));
         let _ = s.darkrun_unit_create(Parameters(UnitCreateInput { slug: g(), unit: "u".into(), station: "frame".into(), title: None, depends_on: vec![] }));
         let _ = s.darkrun_unit_update(Parameters(UnitUpdateInput { slug: g(), unit: "u".into(), status: Some("bogus".into()), depends_on: None, worker: None, inputs: None, outputs: None }));
-        let _ = s.darkrun_unit_iterate(Parameters(UnitIterateInput { slug: g(), unit: "u".into(), worker: "w".into(), result: "advance".into(), note: None, next_worker: None }));
+        let _ = s.darkrun_unit_beat(Parameters(UnitIterateInput { slug: g(), unit: "u".into(), worker: "w".into(), result: "advance".into(), note: None, next_worker: None }));
         let _ = s.darkrun_unit_reset(Parameters(UnitResetInput { slug: g(), unit: "u".into(), confirm: true }));
         let _ = s.darkrun_quality_gate_record(Parameters(GateRecordInput { slug: g(), unit: "u".into(), gate: "t".into(), status: "pass".into(), detail: None, nonce: None }));
         let _ = s.darkrun_review_stamp(Parameters(ReviewStampInput { slug: g(), station: "frame".into(), role: "r".into(), kind: "review".into() }));
@@ -3407,7 +3452,7 @@ mod handler_smoke {
         let _ = s.darkrun_feedback_reject(Parameters(FeedbackRejectInput { slug: g(), feedback_id: "fb-1".into(), reason: "x".into() }));
         let _ = s.darkrun_feedback_move(Parameters(FeedbackMoveInput { slug: g(), feedback_id: "fb-1".into(), to_station: "specify".into() }));
         let _ = s.darkrun_feedback_set_targets(Parameters(FeedbackSetTargetsInput { slug: g(), feedback_id: "fb-1".into(), invalidates: vec![] }));
-        let _ = s.darkrun_drift_accept(Parameters(DriftAcceptInput { slug: g(), path: "x".into() }));
+        let _ = s.darkrun_drift_witness(Parameters(DriftAcceptInput { slug: g(), path: "x".into() }));
         let _ = s.darkrun_reflection_record(Parameters(ReflectionRecordInput { slug: g(), body: "x".into(), station: None }));
         let _ = s.darkrun_run_surface(Parameters(RunSurfaceInput { slug: g(), surface: Some("data".into()) }));
         let _ = s.darkrun_proof_attach(Parameters(ProofAttachInput { slug: g(), proof: serde_json::json!({}), station: None }));
@@ -3433,8 +3478,8 @@ mod handler_smoke {
         assert_eq!(s.resolve_run_slug(&store, None), None);
         run_start(&store, "only", "software", None, Mode::Solo, "full").unwrap();
         assert_eq!(s.resolve_run_slug(&store, None).as_deref(), Some("only"));
-        // darkrun_run_show with no slug now infers the sole run.
-        assert!(s.darkrun_run_show(Parameters(RunShowRef { slug: None })).unwrap().is_error != Some(true));
+        // darkrun_run_inspect with no slug now infers the sole run.
+        assert!(s.darkrun_run_inspect(Parameters(RunShowRef { slug: None })).unwrap().is_error != Some(true));
 
         // slug_from_branch.
         assert_eq!(slug_from_branch("darkrun/abc/main").as_deref(), Some("abc"));
@@ -3461,10 +3506,10 @@ mod handler_smoke {
     fn invalid_enum_tokens_hit_the_error_arms() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
-        s.darkrun_run_start(Parameters(RunStartInput { slug: "r".into(), factory: "software".into(), title: None, mode: "solo".into(), size: "full".into() })).unwrap();
+        s.darkrun_run_new(Parameters(RunStartInput { slug: "r".into(), factory: "software".into(), title: None, mode: "solo".into(), size: "full".into() })).unwrap();
         s.darkrun_unit_create(Parameters(UnitCreateInput { slug: "r".into(), unit: "u1".into(), station: "frame".into(), title: None, depends_on: vec![] })).unwrap();
         let is_err = |r: CallToolResult| r.is_error == Some(true);
-        assert!(is_err(s.darkrun_unit_iterate(Parameters(UnitIterateInput { slug: "r".into(), unit: "u1".into(), worker: "w".into(), result: "bogus".into(), note: None, next_worker: None })).unwrap()));
+        assert!(is_err(s.darkrun_unit_beat(Parameters(UnitIterateInput { slug: "r".into(), unit: "u1".into(), worker: "w".into(), result: "bogus".into(), note: None, next_worker: None })).unwrap()));
         assert!(is_err(s.darkrun_quality_gate_record(Parameters(GateRecordInput { slug: "r".into(), unit: "u1".into(), gate: "t".into(), status: "bogus".into(), detail: None, nonce: None })).unwrap()));
         assert!(is_err(s.darkrun_review_stamp(Parameters(ReviewStampInput { slug: "r".into(), station: "frame".into(), role: "x".into(), kind: "bogus".into() })).unwrap()));
     }
@@ -3628,7 +3673,7 @@ mod handler_smoke {
         std::fs::create_dir_all(dir.path().join("frame")).unwrap();
         std::fs::write(dir.path().join("frame/in.md"), b"new content").unwrap();
 
-        let out = s.darkrun_drift_accept(Parameters(DriftAcceptInput {
+        let out = s.darkrun_drift_witness(Parameters(DriftAcceptInput {
             slug: "r".into(), path: "frame/in.md".into(),
         })).unwrap();
         assert!(out.is_error != Some(true), "accepting a witnessed input succeeds");
@@ -3654,7 +3699,7 @@ mod handler_smoke {
 
         // drift_accept: a path with no recorded witness → a tool error.
         assert_eq!(
-            s.darkrun_drift_accept(Parameters(DriftAcceptInput { slug: "r".into(), path: "nope.md".into() }))
+            s.darkrun_drift_witness(Parameters(DriftAcceptInput { slug: "r".into(), path: "nope.md".into() }))
                 .unwrap().is_error,
             Some(true)
         );
@@ -3735,7 +3780,7 @@ mod handler_smoke {
 
         // drift_accept reads units to find the witness → the corrupt unit errors.
         assert_eq!(
-            s.darkrun_drift_accept(Parameters(DriftAcceptInput { slug: "r".into(), path: "x.md".into() }))
+            s.darkrun_drift_witness(Parameters(DriftAcceptInput { slug: "r".into(), path: "x.md".into() }))
                 .unwrap().is_error,
             Some(true)
         );
@@ -3744,7 +3789,7 @@ mod handler_smoke {
         // an explicit slug surfaces it.
         std::fs::write(store.run_dir("r").join("run.md"), "---\nfactory: \"oops\n---\n").unwrap();
         assert_eq!(
-            s.darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap().is_error,
+            s.darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap().is_error,
             Some(true)
         );
     }
@@ -3759,7 +3804,7 @@ mod handler_smoke {
         // desktop as already connected rather than trying to launch one.
         let _slot = s.sessions().try_acquire_ws_slot(8).expect("ws slot");
         assert!(s.sessions().presence().is_present());
-        let out = s.darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
+        let out = s.darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
         assert!(out.is_error != Some(true));
         let body = out.structured_content.expect("structured");
         assert_eq!(body["showing"]["desktop"]["status"], "connected");
@@ -3853,14 +3898,14 @@ mod handler_smoke {
     fn unit_iterate_requires_a_note_on_reject() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
-        s.darkrun_run_start(Parameters(RunStartInput {
+        s.darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(), factory: "software".into(), title: None, mode: "solo".into(), size: "full".into(),
         })).unwrap();
         s.darkrun_unit_create(Parameters(UnitCreateInput {
             slug: "r".into(), unit: "u1".into(), station: "build".into(), title: None, depends_on: vec![],
         })).unwrap();
         // A reject with no note is exactly the story-loss this guards against.
-        let res = s.darkrun_unit_iterate(Parameters(UnitIterateInput {
+        let res = s.darkrun_unit_beat(Parameters(UnitIterateInput {
             slug: "r".into(), unit: "u1".into(), worker: "w".into(),
             result: "reject".into(), note: None, next_worker: None,
         })).unwrap();
@@ -3884,7 +3929,7 @@ mod handler_smoke {
         g(&["checkout", "-q", "-b", "darkrun/myrun/main"]);
 
         let s = DarkrunServer::new(dir.path());
-        s.darkrun_run_start(Parameters(RunStartInput {
+        s.darkrun_run_new(Parameters(RunStartInput {
             slug: "myrun".into(), factory: "software".into(), title: None, mode: "solo".into(), size: "full".into(),
         })).unwrap();
         // No explicit slug, no active pointer → the current branch names the run.
@@ -3900,7 +3945,7 @@ mod handler_smoke {
 
         // Each of these resolves a run that doesn't exist → its Err arm.
         let _ = (s.darkrun_unit_list(Parameters(RunRef { slug: "ghost".into() })).unwrap());
-        let _ = (s.darkrun_unit_iterate(Parameters(UnitIterateInput {
+        let _ = (s.darkrun_unit_beat(Parameters(UnitIterateInput {
             slug: "ghost".into(), unit: "u1".into(), worker: "make".into(),
             result: "advance".into(), note: None, next_worker: None,
         })).unwrap());
@@ -3925,7 +3970,7 @@ mod handler_smoke {
             slug: "ghost".into(), body: "x".into(), station: None,
         })).unwrap());
         let _ = (s.darkrun_reflection_list(Parameters(ReflectionListInput { slug: "ghost".into() })).unwrap());
-        let _ = (s.darkrun_drift_accept(Parameters(DriftAcceptInput {
+        let _ = (s.darkrun_drift_witness(Parameters(DriftAcceptInput {
             slug: "ghost".into(), path: "frame/frame.md".into(),
         })).unwrap());
         let _ = (s.darkrun_feedback_list(Parameters(FeedbackListInput {
@@ -3940,7 +3985,7 @@ mod handler_smoke {
     fn debug_dispatcher_covers_every_op_and_missing_args() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
-        s.darkrun_run_start(Parameters(RunStartInput {
+        s.darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(), factory: "software".into(), title: None, mode: "solo".into(), size: "full".into(),
         })).unwrap();
         let dbg = |op: &str, station: Option<&str>, field: Option<&str>, value: Option<&str>, fid: Option<&str>| {

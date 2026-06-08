@@ -56,7 +56,7 @@ pub fn reset(
                 }
             }
             let note = if confirm {
-                format!("Wiped station `{station}` ({} unit(s)). Call darkrun_tick — the next tick re-enters it at Spec.", units.len())
+                format!("Wiped station `{station}` ({} unit(s)). Call darkrun_advance — the next tick re-enters it at Spec.", units.len())
             } else {
                 format!("Dry run: would wipe station `{station}` and {} unit(s). Re-call with confirm:true to apply.", units.len())
             };

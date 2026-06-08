@@ -85,7 +85,7 @@ fn err_message(res: &CallToolResult) -> String {
 
 fn start(server: &DarkrunServer, slug: &str) -> CallToolResult {
     server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: slug.into(),
             factory: "software".into(),
             title: Some("Run".into()),
@@ -109,7 +109,7 @@ fn started(slug: &str) -> (TempDir, DarkrunServer) {
 
 fn next(server: &DarkrunServer, slug: &str) -> CallToolResult {
     server
-        .darkrun_tick(Parameters(RunRef { slug: slug.into() }))
+        .darkrun_advance(Parameters(RunRef { slug: slug.into() }))
         .unwrap()
 }
 
@@ -143,7 +143,7 @@ fn create_feedback(
         .unwrap()
 }
 
-// ── darkrun_run_start ──────────────────────────────────────────────────────
+// ── darkrun_run_new ──────────────────────────────────────────────────────
 
 #[test]
 fn run_start_creates_state_on_disk() {
@@ -180,7 +180,7 @@ fn run_start_status_is_active() {
 fn run_start_honors_explicit_title() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: Some("Ship the thing".into()),
@@ -196,7 +196,7 @@ fn run_start_honors_explicit_title() {
 fn run_start_title_defaults_to_slug_when_absent() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "my-slug".into(),
             factory: "software".into(),
             title: None,
@@ -211,7 +211,7 @@ fn run_start_title_defaults_to_slug_when_absent() {
 fn run_start_records_mode() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: None,
@@ -239,7 +239,7 @@ fn run_start_sets_started_at_timestamp() {
 fn run_start_body_contains_title_heading() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: Some("Hello".into()),
@@ -253,7 +253,7 @@ fn run_start_body_contains_title_heading() {
 fn run_start_rejects_empty_slug() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "".into(),
             factory: "software".into(),
             title: None,
@@ -267,7 +267,7 @@ fn run_start_rejects_empty_slug() {
 fn run_start_rejects_whitespace_slug() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "   ".into(),
             factory: "software".into(),
             title: None,
@@ -282,7 +282,7 @@ fn run_start_rejects_whitespace_slug() {
 fn run_start_rejects_unknown_factory() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "nonexistent".into(),
             title: None,
@@ -297,7 +297,7 @@ fn run_start_rejects_unknown_factory() {
 fn run_start_unknown_factory_does_not_create_state() {
     let (dir, server) = server();
     server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "nope".into(),
             title: None,
@@ -329,7 +329,7 @@ fn run_start_re_start_same_slug_overwrites_title() {
     let (_d, server) = server();
     start(&server, "r");
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: Some("Second".into()),
@@ -340,7 +340,7 @@ fn run_start_re_start_same_slug_overwrites_title() {
     assert_eq!(body(&res)["title"], "Second");
 }
 
-// ── darkrun_tick ───────────────────────────────────────────────────────
+// ── darkrun_advance ───────────────────────────────────────────────────────
 
 #[test]
 fn run_next_first_tick_is_spec_on_frame() {
@@ -514,13 +514,13 @@ fn run_next_is_idempotent_at_spec_when_no_state_change() {
     assert_eq!(v1["action"]["station"], v2["action"]["station"]);
 }
 
-// ── darkrun_run_show ───────────────────────────────────────────────────────
+// ── darkrun_run_inspect ───────────────────────────────────────────────────────
 
 #[test]
 fn run_show_returns_run_state_and_position() {
     let (_d, server) = started("r");
     let res = server
-        .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+        .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
         .unwrap();
     assert!(is_ok(&res));
     let v = body(&res);
@@ -534,7 +534,7 @@ fn run_show_run_has_correct_slug() {
     let (_d, server) = started("r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["run"]["slug"], "r");
@@ -546,7 +546,7 @@ fn run_show_without_slug_infers_the_sole_run() {
     // so the user need not name it.
     let (_d, server) = started("r");
     let res = server
-        .darkrun_run_show(Parameters(RunShowRef { slug: None }))
+        .darkrun_run_inspect(Parameters(RunShowRef { slug: None }))
         .unwrap();
     assert!(is_ok(&res));
     assert_eq!(body(&res)["run"]["slug"], "r");
@@ -557,7 +557,7 @@ fn run_show_without_slug_errors_when_nothing_to_infer() {
     // No runs at all → nothing to disambiguate to → a clear error, not a panic.
     let (_d, server) = server();
     let res = server
-        .darkrun_run_show(Parameters(RunShowRef { slug: None }))
+        .darkrun_run_inspect(Parameters(RunShowRef { slug: None }))
         .unwrap();
     assert!(is_err(&res));
 }
@@ -567,7 +567,7 @@ fn run_show_position_reflects_spec_for_fresh_run() {
     let (_d, server) = started("r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["position"]["action"]["action"], "spec");
@@ -579,7 +579,7 @@ fn run_show_state_has_active_station() {
     let (_d, server) = started("r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["state"]["active_station"], "frame");
@@ -591,7 +591,7 @@ fn run_show_position_advances_after_ticks() {
     next(&server, "r"); // spec -> review
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["position"]["action"]["action"], "review");
@@ -601,7 +601,7 @@ fn run_show_position_advances_after_ticks() {
 fn run_show_errors_on_missing_run() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_show(Parameters(RunShowRef { slug: Some("ghost".into()) }))
+        .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("ghost".into()) }))
         .unwrap();
     assert!(is_err(&res));
 }
@@ -610,10 +610,10 @@ fn run_show_errors_on_missing_run() {
 fn run_show_is_a_pure_read_does_not_advance() {
     let (_d, server) = started("r");
     server
-        .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+        .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
         .unwrap();
     server
-        .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+        .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
         .unwrap();
     // Still at spec — show never advances the phase machine.
     let v = body(&next(&server, "r"));
@@ -1474,7 +1474,7 @@ fn checkpoint_decide_approve_marks_station_completed_in_show() {
         .unwrap();
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["state"]["stations"]["frame"]["status"], "completed");
@@ -1493,7 +1493,7 @@ fn checkpoint_decide_reject_blocks_station_in_show() {
         .unwrap();
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["state"]["stations"]["frame"]["status"], "blocked");
@@ -1532,7 +1532,7 @@ fn checkpoint_decide_then_resolve_feedback_resumes_run() {
     // The run track resumes (no longer on the feedback track).
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_ne!(v["position"]["track"], "feedback");
@@ -2023,7 +2023,7 @@ fn structured_content_present_on_every_success() {
     let (_d, server) = started("r");
     assert!(next(&server, "r").structured_content.is_some());
     assert!(server
-        .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+        .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
         .unwrap()
         .structured_content
         .is_some());
@@ -2205,7 +2205,7 @@ fn build_station_ask_checkpoint_holds() {
     // Holds for the operator decision — not auto-advanced.
     let show = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(show["state"]["stations"]["build"]["status"], "in_progress");
@@ -2224,7 +2224,7 @@ fn prove_station_ask_checkpoint_advances_to_harden_on_approve() {
     approve(&server, "r");
     let show = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(show["state"]["active_station"], "harden");
@@ -2242,7 +2242,7 @@ fn harden_station_ask_checkpoint_holds() {
     assert_eq!(cp["action"]["kind"], "ask");
     let show = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(show["state"]["stations"]["harden"]["status"], "in_progress");
@@ -2272,7 +2272,7 @@ fn sealed_run_show_position_is_sealed() {
     sign_run_reviews(&server, "r", approve(&server, "r"));
     let show = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(show["position"]["action"]["action"], "sealed");
@@ -2556,12 +2556,12 @@ fn run_show_position_is_deterministic_without_ticks() {
     let (_d, server) = started("r");
     let a = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     let b = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(a["position"], b["position"]);
@@ -2736,7 +2736,7 @@ fn archived_run_is_still_showable() {
         }))
         .unwrap();
     let res = server
-        .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+        .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
         .unwrap();
     assert!(is_ok(&res));
     assert_eq!(body(&res)["run"]["frontmatter"]["archived"], true);
@@ -2888,7 +2888,7 @@ fn run_show_run_frontmatter_factory_field() {
     let (_d, server) = started("r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["run"]["frontmatter"]["factory"], "software");
@@ -2899,7 +2899,7 @@ fn run_show_state_stations_seeded_for_frame() {
     let (_d, server) = started("r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert!(v["state"]["stations"].get("frame").is_some());
@@ -2910,7 +2910,7 @@ fn run_show_position_track_is_run_for_fresh() {
     let (_d, server) = started("r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["position"]["track"], "run");
@@ -3227,7 +3227,7 @@ fn feedback_create_on_arbitrary_station_string() {
 fn run_start_mode_right_sized_persists_in_show() {
     let (_d, server) = server();
     server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: None,
@@ -3236,7 +3236,7 @@ fn run_start_mode_right_sized_persists_in_show() {
         .unwrap();
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["run"]["frontmatter"]["mode"], "dark");
@@ -3246,7 +3246,7 @@ fn run_start_mode_right_sized_persists_in_show() {
 fn run_start_unknown_mode_normalizes_to_solo() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: None,
@@ -3471,12 +3471,12 @@ fn two_runs_advance_independently() {
     next(&server, "b");
     let a = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("a".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("a".into()) }))
             .unwrap(),
     );
     let b = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("b".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("b".into()) }))
             .unwrap(),
     );
     // a's frame station advanced through Review to the pre-execution user gate;
@@ -3810,7 +3810,7 @@ fn checkpoint_decide_approve_idempotent_via_distinct_stations() {
 fn run_show_body_preserves_title_heading() {
     let (_d, server) = server();
     server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: Some("My Run".into()),
@@ -3819,7 +3819,7 @@ fn run_show_body_preserves_title_heading() {
         .unwrap();
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert!(v["run"]["body"].as_str().unwrap().contains("# My Run"));
@@ -3829,7 +3829,7 @@ fn run_show_body_preserves_title_heading() {
 fn run_show_title_resolves_from_frontmatter() {
     let (_d, server) = server();
     server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: Some("Titled".into()),
@@ -3838,7 +3838,7 @@ fn run_show_title_resolves_from_frontmatter() {
         .unwrap();
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["run"]["title"], "Titled");
@@ -3915,7 +3915,7 @@ fn state_persists_across_server_reinstantiation() {
     // Fresh server over the same on-disk state.
     let s2 = DarkrunServer::new(dir.path());
     let v = body(
-        &s2.darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+        &s2.darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["state"]["stations"]["frame"]["phase"], "review");
@@ -4283,7 +4283,7 @@ fn checkpoint_reject_on_build_auto_station_blocks() {
     assert_eq!(body(&res)["position"]["track"], "feedback");
     let show = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(show["state"]["stations"]["build"]["status"], "blocked");
@@ -4320,7 +4320,7 @@ fn checkpoint_reject_then_approve_advances_past_build() {
 fn run_start_whitespace_title_is_used_verbatim() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: Some("  spaced  ".into()),
@@ -4548,7 +4548,7 @@ fn run_show_reflects_unit_count_indirectly_via_position() {
         .unwrap();
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     // Manufacture phase + all units complete → derived action is audit.
@@ -4625,7 +4625,7 @@ fn manufacture_first_unit(server: &DarkrunServer, slug: &str, station: &str, uni
     // the phase still advances).
     let phase = |s: &DarkrunServer| -> String {
         body(
-            &s.darkrun_run_show(Parameters(RunShowRef { slug: Some(slug.into()) }))
+            &s.darkrun_run_inspect(Parameters(RunShowRef { slug: Some(slug.into()) }))
                 .unwrap(),
         )["state"]["stations"][station]["phase"]
             .as_str()
@@ -4711,7 +4711,7 @@ fn run_show_position_track_feedback_when_open() {
     create_feedback(&server, "r", "frame", "x");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["position"]["track"], "feedback");
@@ -4732,7 +4732,7 @@ fn run_show_position_track_returns_to_run_after_resolve() {
         .unwrap();
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["position"]["track"], "run");
@@ -4759,7 +4759,7 @@ fn noop_position_action_is_null_in_show() {
     approve(&server, "r"); // clear the pre-execution operator gate
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     // Mid-wave noop → position.action is null (no action this tick).
@@ -4801,7 +4801,7 @@ fn feedback_track_does_not_advance_phase() {
     next(&server, "r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["state"]["stations"]["frame"]["phase"], "review");
@@ -5011,7 +5011,7 @@ fn run_next_error_message_nonempty_for_missing_run() {
 fn run_show_error_message_nonempty_for_missing_run() {
     let (_d, server) = server();
     let res = server
-        .darkrun_run_show(Parameters(RunShowRef { slug: Some("ghost".into()) }))
+        .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("ghost".into()) }))
         .unwrap();
     assert!(is_err(&res));
     assert!(!err_message(&res).is_empty());
@@ -5174,7 +5174,7 @@ fn run_start_default_factory_via_explicit_software() {
     let (_d, server) = started("r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(v["state"]["factory"], "software");
@@ -5187,7 +5187,7 @@ fn run_show_state_checkpoint_seeded_with_kind() {
     let (_d, server) = started("r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     // frame's seeded checkpoint carries its ask kind.
@@ -5200,7 +5200,7 @@ fn checkpoint_decide_records_outcome_advanced_on_approve() {
     approve(&server, "r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(
@@ -5221,7 +5221,7 @@ fn checkpoint_decide_records_outcome_blocked_on_reject() {
         .unwrap();
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert_eq!(
@@ -5236,7 +5236,7 @@ fn completed_station_has_completed_at_timestamp() {
     approve(&server, "r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert!(v["state"]["stations"]["frame"]["completed_at"].is_string());
@@ -5248,7 +5248,7 @@ fn in_progress_station_has_started_at_timestamp() {
     next(&server, "r"); // spec marks frame in_progress + started_at
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     assert!(v["state"]["stations"]["frame"]["started_at"].is_string());
@@ -5261,7 +5261,7 @@ fn next_station_seeded_pending_after_advance() {
     approve(&server, "r");
     let v = body(
         &server
-            .darkrun_run_show(Parameters(RunShowRef { slug: Some("r".into()) }))
+            .darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) }))
             .unwrap(),
     );
     // specify is now the active station. Solo holds the freshly-entered
@@ -5356,7 +5356,7 @@ fn run_summary_includes_archived_field_false() {
 fn run_summary_title_field_present() {
     let (_d, server) = server();
     server
-        .darkrun_run_start(Parameters(RunStartInput {
+        .darkrun_run_new(Parameters(RunStartInput {
             slug: "r".into(),
             factory: "software".into(),
             title: Some("Named".into()),

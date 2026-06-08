@@ -46,7 +46,8 @@ runbook. This is the production sign-off record.
 
 ## Checkpoint
 
-**ask.** Shipping to production is a human decision: the operator reviews the
-release record — hardening done, residual risk named, rollout/runbook ready —
-and gives the go/no-go. A discrete run promotes this gate to an **external**
-handoff (a release approval, a PR merge, a deploy sign-off) instead.
+Shipping to production is a human decision: the operator reviews the release
+record — hardening done, residual risk named, rollout/runbook ready — and gives
+the go/no-go. The gate is set by the Run's **mode**: `solo` asks locally, `team`
+resolves it as an **external** handoff (a release approval, a PR merge, a deploy
+sign-off), and `dark` advances automatically.

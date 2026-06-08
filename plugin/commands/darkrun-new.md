@@ -5,4 +5,4 @@ argument-hint: [what you want to accomplish]
 
 Start a darkrun Run for: $ARGUMENTS
 
-Call `darkrun_run_start`, then follow `/darkrun:darkrun-pickup`. See the `darkrun-start` skill for prelaboration, factory selection, and the full arg shape.
+Call `darkrun_run_new`, then follow `/darkrun:darkrun-resume`. See the `darkrun-new` skill for prelaboration, factory selection, right-sizing (`--size full|quick|bugfix|refactor`), and the full arg shape.

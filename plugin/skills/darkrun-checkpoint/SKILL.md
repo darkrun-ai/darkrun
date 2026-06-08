@@ -8,4 +8,4 @@ The Run is holding at a Station Checkpoint. Surface the Station's result and the
 - `approved: true` — the Checkpoint passes, the artifact locks, the manager advances.
 - `approved: false` with `feedback` — the manager holds the Station and routes the rework back through the feedback track.
 
-Then `/darkrun:darkrun-pickup` to continue.
+Then `/darkrun:darkrun-resume` to continue.
