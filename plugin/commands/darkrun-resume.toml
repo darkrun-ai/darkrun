@@ -1,0 +1,7 @@
+# Generated from darkrun-resume.md by `darkrun plugin sync` — do not edit by hand.
+description = "Advance a darkrun Run — the factory manager returns the next concrete action"
+prompt = """
+Advance the active darkrun Run.
+
+Call `darkrun_advance` (omit the arg to resume the active Run, or pass `$ARGUMENTS`), do exactly what it returns, and loop until the manager reports completion. See the `darkrun-resume` skill.
+"""

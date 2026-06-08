@@ -1,0 +1,7 @@
+# Generated from darkrun-new.md by `darkrun plugin sync` — do not edit by hand.
+description = "Start a new darkrun Run — describe what you want to accomplish and the factory manager scaffolds a right-sized lifecycle"
+prompt = """
+Start a darkrun Run for: $ARGUMENTS
+
+Call `darkrun_run_new`, then follow `/darkrun:darkrun-resume`. See the `darkrun-new` skill for prelaboration, factory selection, right-sizing (`--size full|quick|bugfix|refactor`), and the full arg shape.
+"""

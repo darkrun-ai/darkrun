@@ -4,4 +4,4 @@ description: Configure darkrun for this project — auto-detect VCS, hosting, CI
 
 Configure darkrun for this project.
 
-Detect VCS, hosting, CI/CD, and default branch; confirm via `AskUserQuestion`; configure providers and defaults; write `.darkrun/settings.yml` and commit; then suggest `/darkrun:darkrun-start`. See the `darkrun-setup` skill.
+Detect VCS, hosting, CI/CD, and default branch; confirm via `AskUserQuestion`; configure providers and defaults; write `.darkrun/settings.yml` and commit; then suggest `/darkrun:darkrun-new`. See the `darkrun-setup` skill.

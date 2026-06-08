@@ -67,7 +67,7 @@ the manager waits on). You set the dial; darkrun honors it.
   > Pass, the run loop, the phase machine, and the gate types.
 - **[Docs](/docs)** — install details, the station reference, the review surface,
   and running darkrun in other harnesses.
-- **[Workflows](/workflows)** — the practical catalog: autopilot, gate-review,
+- **[Workflows](/workflows)** — the practical catalog: dark mode, gate-review,
   the annotate-and-rework loop, and the full `/darkrun:*` command surface.
 - **[The big picture](/big-picture)** — why a dark factory, and where this is
   heading.

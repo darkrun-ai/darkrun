@@ -83,8 +83,9 @@ attention a station earns:
 | **external** | A sign-off that happens elsewhere — a PR review, a release approval. |
 | **await**    | A long-running task the manager waits on before it can advance.   |
 
-You set the dial per station. Promote ask gates to auto when you trust the line
-and want it to run unattended; that is autopilot.
+You set the **mode** once for the whole Run — `team`, `solo`, or `dark`. In
+`dark` mode the line runs unattended (gates resolve `auto`); in `team`/`solo` it
+holds for review at every station.
 
 ## The three-track priority
 

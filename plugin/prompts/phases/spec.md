@@ -61,7 +61,7 @@ This run is in a **collaborative mode**, and the station will not advance to Rev
 - Surface the open framing questions and the consequential choices to the operator with `darkrun_question` (a decision) or `darkrun_direction` (a direction to steer), and fold their answers into the spec.
 - When the spec genuinely reflects that collaboration, call **`darkrun_elaborate_seal`** for this station — that clears the hold and the next tick advances to Review.
 
-If you tick without involving the operator, the station stays in Spec; a stalled, non-collaborative Spec escalates to the operator rather than slipping past them. (Autonomous modes — autopilot / quick — don't gate here.)
+If you advance without involving the operator, the station stays in Spec; a stalled, non-collaborative Spec escalates to the operator rather than slipping past them. (`dark` mode pre-elaborates once up front and doesn't gate here.)
 {% endif %}
 
 ## Done when

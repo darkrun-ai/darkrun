@@ -5,4 +5,4 @@ argument-hint: [list | add | review | promote] [description]
 
 Work the darkrun backlog.
 
-Call `darkrun_backlog` with an optional `action` (`list`, `add`, `review`, `promote`) and `description`, then follow the returned instructions. Promote hands off to `/darkrun:darkrun-start`. See the `darkrun-backlog` skill.
+Call `darkrun_backlog` with an optional `action` (`list`, `add`, `review`, `promote`) and `description`, then follow the returned instructions. Promote hands off to `/darkrun:darkrun-new`. See the `darkrun-backlog` skill.

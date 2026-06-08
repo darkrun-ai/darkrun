@@ -24,7 +24,7 @@
 //! [`tools::DarkrunServer`] exposes the tool surface over the official Rust
 //! MCP SDK (`rmcp`):
 //!
-//! - **Run:** `darkrun_run_start`, `darkrun_tick`, `darkrun_run_show`,
+//! - **Run:** `darkrun_run_new`, `darkrun_advance`, `darkrun_run_inspect`,
 //!   `darkrun_run_list`, `darkrun_run_archive`.
 //! - **Units:** `darkrun_unit_list`, `darkrun_unit_get`, `darkrun_unit_create`,
 //!   `darkrun_unit_update`.
