@@ -59,6 +59,12 @@ variable "manage_www" {
   default     = true
 }
 
+variable "manage_domain_mapping" {
+  description = "Let Terraform create the Cloud Run domain mappings. Default false — the mappings need a verified domain owner, which the TFC service account can't be, so they're created out-of-band by a verified human and Terraform leaves them alone (DNS records stay in Terraform)."
+  type        = bool
+  default     = false
+}
+
 variable "max_instances" {
   description = "Cloud Run maximum instances."
   type        = number

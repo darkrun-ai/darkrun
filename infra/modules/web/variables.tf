@@ -30,6 +30,12 @@ variable "manage_www" {
   default     = true
 }
 
+variable "manage_domain_mapping" {
+  description = "Let Terraform create the Cloud Run domain mappings. Default false: a domain mapping requires the CALLER to be a verified owner of the domain, and the TFC/CI service account can't be added as a Search Console owner — so the apex/www mappings are created out-of-band by a verified human (`gcloud run domain-mappings create`) and Terraform leaves them alone. DNS records + everything else stay in Terraform."
+  type        = bool
+  default     = false
+}
+
 variable "min_instances" {
   description = "Cloud Run minimum instances (0 = scale to zero)."
   type        = number

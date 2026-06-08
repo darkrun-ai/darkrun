@@ -60,6 +60,8 @@ module "web" {
   external_secret_ids = local.oauth_secret_ids
   manage_www          = var.manage_www
 
+  manage_domain_mapping = var.manage_domain_mapping
+
   depends_on = [google_project_service.services]
 }
 
