@@ -1,0 +1,8 @@
+# Video assets (screencasts, demo recordings) live in Git LFS, never in straight
+# git — keeps the repo small and clones fast. Screenshots (PNG/JPG/SVG) stay in
+# regular git: they're small and diff/preview better on GitHub.
+*.mp4  filter=lfs diff=lfs merge=lfs -text
+*.mov  filter=lfs diff=lfs merge=lfs -text
+*.webm filter=lfs diff=lfs merge=lfs -text
+*.m4v  filter=lfs diff=lfs merge=lfs -text
+*.gif  filter=lfs diff=lfs merge=lfs -text
