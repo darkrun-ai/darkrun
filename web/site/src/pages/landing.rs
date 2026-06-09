@@ -187,26 +187,15 @@ fn DesktopSlideshow() -> Element {
                 }
                 div { style: "display:flex;align-items:center;gap:7px;",
                     for i in 0..n {
-                        {
-                            // The active surface is a wide accent pill; the rest are
-                            // muted dots — so the position in the sequence reads at a
-                            // glance (the earlier faint same-size dots did not).
-                            let active = i == cur;
-                            let dot = format!(
-                                "height:8px;border-radius:999px;border:0;cursor:pointer;padding:0;\
-                                 transition:width .2s ease,background-color .2s ease;\
-                                 width:{w};background:{bg};",
-                                w = if active { "24px" } else { "8px" },
-                                bg = if active { theme::ACCENT } else { theme::TEXT_MUTED },
-                            );
-                            rsx! {
-                                button {
-                                    key: "{i}", style: "{dot}",
-                                    "aria-label": "go to surface {i + 1}",
-                                    "aria-current": if active { "true" } else { "false" },
-                                    onclick: move |_| idx.set(i),
-                                }
-                            }
+                        // Active state via a toggled CLASS (.dr-dot / .is-active in
+                        // GLOBAL_CSS). NO `key` here: the list order is fixed, and a
+                        // keyed reuse left the rendered width stale (the pill stuck on
+                        // the first dot) even though the class attribute updated.
+                        button {
+                            class: if i == cur { "dr-dot is-active" } else { "dr-dot" },
+                            "aria-label": "go to surface {i + 1}",
+                            "aria-current": if i == cur { "true" } else { "false" },
+                            onclick: move |_| idx.set(i),
                         }
                     }
                 }
