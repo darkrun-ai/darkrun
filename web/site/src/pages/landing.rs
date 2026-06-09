@@ -392,14 +392,11 @@ fn Quickstart() -> Element {
         mono = tokens::FONT_MONO,
         text = theme::TEXT,
     );
-    let select_style = format!(
-        "appearance:none;cursor:pointer;font-family:{mono};font-size:13px;\
-         background:{raised};color:{text};border:1px solid {border};border-radius:8px;\
-         padding:6px 12px;",
-        mono = tokens::FONT_MONO,
-        raised = theme::SURFACE_RAISED,
-        text = theme::TEXT,
+    let seg_wrap = format!(
+        "display:inline-flex;flex-wrap:wrap;gap:3px;border:1px solid {border};\
+         border-radius:999px;padding:3px;background:{raised};",
         border = theme::BORDER,
+        raised = theme::SURFACE_RAISED,
     );
     let row_label = format!(
         "font-family:{mono};font-size:11px;text-transform:uppercase;letter-spacing:0.06em;\
@@ -417,15 +414,19 @@ fn Quickstart() -> Element {
         div {
             style: "display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;",
             span { style: "{row_label}", "harness" }
-            select {
-                style: "{select_style}",
-                onchange: move |e| {
-                    if let Ok(v) = e.value().parse::<usize>() {
-                        sel.set(v);
-                    }
-                },
+            // Radio-style segmented control. `.dr-theme-seg` + aria-pressed reuses
+            // the theme-picker pill styling and updates reliably (no inline-style
+            // diffing quirk); no `key` so positions update in place.
+            div { role: "radiogroup", "aria-label": "harness", style: "{seg_wrap}",
                 for (j , h) in list.iter().enumerate() {
-                    option { value: "{j}", selected: j == sel(), "{h.0}" }
+                    button {
+                        class: "dr-theme-seg",
+                        role: "radio",
+                        "aria-checked": if j == sel() { "true" } else { "false" },
+                        "aria-pressed": if j == sel() { "true" } else { "false" },
+                        onclick: move |_| sel.set(j),
+                        "{h.0}"
+                    }
                 }
             }
         }
