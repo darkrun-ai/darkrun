@@ -107,27 +107,33 @@ pub fn Landing() -> Element {
 /// through it, which also keeps the SSG pre-render deterministic.
 #[component]
 fn DesktopSlideshow() -> Element {
-    // (feature label, caption, image). `asset!` needs a literal path.
+    // (feature label, caption, dark image, light image). `asset!` needs literal
+    // paths. Both variants render; CSS (`.dr-shot-*`, see GLOBAL_CSS) shows the
+    // one matching the site theme — same mechanism the wordmark uses.
     let slides = [
         (
             "The run review",
             "The main surface. The station line shows where the run is; the tabs hold the work under review; and this is where you approve, request changes, or leave feedback.",
             asset!("/assets/desktop-run-review.png"),
+            asset!("/assets/desktop-run-review-light.png"),
         ),
         (
             "Decisions",
             "When a call is yours to make, the agent draws each option — you pick from a diagram, not a wall of prose.",
             asset!("/assets/desktop-review.png"),
+            asset!("/assets/desktop-review-light.png"),
         ),
         (
             "Design directions",
             "Choose a design archetype from real mockups, then annotate what to change.",
             asset!("/assets/desktop-direction.png"),
+            asset!("/assets/desktop-direction-light.png"),
         ),
         (
             "Projects & runs",
             "Every repo's runs in one place — open a review or add a project.",
             asset!("/assets/desktop-browser.png"),
+            asset!("/assets/desktop-browser-light.png"),
         ),
     ];
     let n = slides.len();
@@ -135,10 +141,13 @@ fn DesktopSlideshow() -> Element {
     let cur = idx();
     let label = slides[cur].0;
     let caption = slides[cur].1;
-    let src = &slides[cur].2;
+    let dark = &slides[cur].2;
+    let light = &slides[cur].3;
 
+    // No `display` here — the `.dr-shot-*` CSS classes toggle which variant shows
+    // per the active theme, and an inline `display` would outrank them.
     let frame = format!(
-        "width:100%;height:auto;display:block;border:1px solid {border};\
+        "width:100%;height:auto;border:1px solid {border};\
          border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.45);",
         border = theme::BORDER,
     );
@@ -163,7 +172,8 @@ fn DesktopSlideshow() -> Element {
 
     rsx! {
         figure { style: "margin:0;",
-            img { src: "{src}", alt: "darkrun desktop app — {label}", loading: "lazy", style: "{frame}" }
+            img { class: "dr-shot dr-shot-dark", src: "{dark}", alt: "darkrun desktop app — {label}", loading: "lazy", style: "{frame}" }
+            img { class: "dr-shot dr-shot-light", src: "{light}", alt: "darkrun desktop app — {label}", loading: "lazy", style: "{frame}" }
             div {
                 style: "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;",
                 button {
