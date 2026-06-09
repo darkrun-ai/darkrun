@@ -354,17 +354,20 @@ fn ValueCard(title: String, body: String) -> Element {
 enum Hkind {
     /// Claude Code: the `/plugin` marketplace commands.
     Plugin,
-    /// An MCP config file (path + a `npx -y darkrun mcp --harness <id>` server).
+    /// A one-line `<cli> mcp add` command (the `detail` is the CLI binary).
+    Cli,
+    /// An MCP config file (the `detail` is the config path).
     Mcp,
 }
 
-/// The harness catalog: (label, harness id, install kind, config path).
+/// The harness catalog: (label, harness id, install kind, detail). `detail` is
+/// the CLI binary for `Cli` and the config-file path for `Mcp`.
 fn harnesses() -> [(&'static str, &'static str, Hkind, &'static str); 7] {
     [
         ("Claude Code", "claude-code", Hkind::Plugin, ""),
+        ("Codex", "codex", Hkind::Cli, "codex"),
+        ("Gemini CLI", "gemini-cli", Hkind::Cli, "gemini"),
         ("Cursor", "cursor", Hkind::Mcp, ".cursor/mcp.json"),
-        ("Codex", "codex", Hkind::Mcp, "~/.codex/config.toml"),
-        ("Gemini CLI", "gemini-cli", Hkind::Mcp, "~/.gemini/settings.json"),
         ("Windsurf", "windsurf", Hkind::Mcp, "~/.codeium/windsurf/mcp_config.json"),
         ("OpenCode", "opencode", Hkind::Mcp, "opencode.json"),
         ("Kiro", "kiro", Hkind::Mcp, ".kiro/agents/darkrun.yaml"),
@@ -386,6 +389,12 @@ fn Quickstart() -> Element {
              /plugin install darkrun\n\n\
              # then describe the work\n\
              /darkrun:darkrun-new \"add rate limiting to the public API\""
+        ),
+        Hkind::Cli => format!(
+            "# in {label}: register the MCP server\n\
+             {path} mcp add darkrun -- npx -y darkrun mcp --harness {id}\n\n\
+             # then ask your agent to start a darkrun run\n\
+             \"start a darkrun run: add rate limiting to the public API\""
         ),
         Hkind::Mcp => format!(
             "# add darkrun as an MCP server in {path}\n\
