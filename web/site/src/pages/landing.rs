@@ -54,33 +54,12 @@ pub fn Landing() -> Element {
                 lead: Some(
                     "The desktop app is the visual interface between you and the agent — the \
                      control room for the line. The agent surfaces every checkpoint, review, \
-                     and design direction as something you can see and act on: diagrams of each \
-                     option, mockups, the run's live state, the station map. You decide, \
-                     annotate, and steer; the agent does the work. The shot below is one moment \
-                     of that loop — a design decision drawn as a picture book — not the whole of \
-                     what the app does."
+                     and design direction as something you can see and act on; you decide, \
+                     annotate, and steer. A few of its surfaces:"
                         .to_string(),
                 ),
             }
-            figure { style: "margin:0;",
-                img {
-                    src: asset!("/assets/desktop-review.png"),
-                    alt: "darkrun desktop review app showing a rate-limit design decision, each option drawn as a diagram",
-                    loading: "lazy",
-                    style: format!(
-                        "width:100%;height:auto;display:block;border:1px solid {border};\
-                         border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.45);",
-                        border = theme::BORDER,
-                    ),
-                }
-                figcaption {
-                    style: format!(
-                        "font-family:{mono};font-size:12px;color:{faint};margin-top:10px;text-align:center;",
-                        mono = tokens::FONT_MONO, faint = theme::TEXT_FAINT,
-                    ),
-                    "One moment of the loop: the agent surfaces a design decision; you pick from a diagram of each option."
-                }
-            }
+            DesktopSlideshow {}
         }
 
         // The software factory's line: its own declared stations, in pipeline
@@ -119,6 +98,98 @@ pub fn Landing() -> Element {
                 ),
             }
             PhaseLegend {}
+        }
+    }
+}
+
+/// A manual carousel of the desktop app's surfaces — one feature per slide,
+/// driven by prev/next + dots. No auto-advance (no timer): the visitor steps
+/// through it, which also keeps the SSG pre-render deterministic.
+#[component]
+fn DesktopSlideshow() -> Element {
+    // (feature label, caption, image). `asset!` needs a literal path.
+    let slides = [
+        (
+            "Decisions",
+            "The agent surfaces a checkpoint — you pick from a diagram of each option.",
+            asset!("/assets/desktop-review.png"),
+        ),
+        (
+            "Design directions",
+            "Choose a design archetype from real mockups, then annotate what to change.",
+            asset!("/assets/desktop-direction.png"),
+        ),
+        (
+            "Projects & runs",
+            "Every repo's runs in one place — open a review or add a project.",
+            asset!("/assets/desktop-browser.png"),
+        ),
+    ];
+    let n = slides.len();
+    let mut idx = use_signal(|| 0usize);
+    let cur = idx();
+    let label = slides[cur].0;
+    let caption = slides[cur].1;
+    let src = &slides[cur].2;
+
+    let frame = format!(
+        "width:100%;height:auto;display:block;border:1px solid {border};\
+         border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.45);",
+        border = theme::BORDER,
+    );
+    let navbtn = format!(
+        "appearance:none;cursor:pointer;background:{raised};border:1px solid {border};\
+         color:{text};border-radius:999px;width:30px;height:30px;line-height:1;font-size:16px;",
+        raised = theme::SURFACE_RAISED,
+        border = theme::BORDER,
+        text = theme::TEXT,
+    );
+    let cap = format!(
+        "margin-top:10px;text-align:center;font-family:{sans};font-size:14px;color:{muted};",
+        sans = tokens::FONT_SANS,
+        muted = theme::TEXT_MUTED,
+    );
+    let chip = format!(
+        "font-family:{mono};font-size:11px;text-transform:uppercase;letter-spacing:0.06em;\
+         color:{accent};margin-right:8px;",
+        mono = tokens::FONT_MONO,
+        accent = theme::ACCENT,
+    );
+
+    rsx! {
+        figure { style: "margin:0;",
+            img { src: "{src}", alt: "darkrun desktop app — {label}", loading: "lazy", style: "{frame}" }
+            div {
+                style: "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;",
+                button {
+                    style: "{navbtn}", "aria-label": "previous surface",
+                    onclick: move |_| idx.set((cur + n - 1) % n),
+                    "\u{2039}"
+                }
+                div { style: "display:flex;align-items:center;gap:8px;",
+                    for i in 0..n {
+                        {
+                            let dot = format!(
+                                "width:9px;height:9px;border-radius:50%;border:0;cursor:pointer;padding:0;background:{};",
+                                if i == cur { theme::ACCENT } else { theme::BORDER_STRONG },
+                            );
+                            rsx! {
+                                button { key: "{i}", style: "{dot}", "aria-label": "go to surface {i + 1}",
+                                    onclick: move |_| idx.set(i) }
+                            }
+                        }
+                    }
+                }
+                button {
+                    style: "{navbtn}", "aria-label": "next surface",
+                    onclick: move |_| idx.set((cur + 1) % n),
+                    "\u{203a}"
+                }
+            }
+            figcaption { style: "{cap}",
+                span { style: "{chip}", "{label}" }
+                "{caption}"
+            }
         }
     }
 }
