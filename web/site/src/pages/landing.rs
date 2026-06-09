@@ -49,19 +49,22 @@ pub fn Landing() -> Element {
         // shows a real design decision rendered as a picture per option.
         section { style: "margin:8px 0 48px;",
             SectionHead {
-                kicker: "the review app".to_string(),
-                title: "Decisions as a picture book".to_string(),
+                kicker: "the desktop app".to_string(),
+                title: "Where you and the agent collaborate".to_string(),
                 lead: Some(
-                    "When a station needs a call, the native desktop app surfaces it as a \
-                     review — each option drawn as a diagram, not a wall of prose. Anyone on \
-                     the team can see the decision and make it, not just the engineer who \
-                     framed it."
+                    "The desktop app is the visual interface between you and the agent — the \
+                     control room for the line. The agent surfaces every checkpoint, review, \
+                     and design direction as something you can see and act on: diagrams of each \
+                     option, mockups, the run's live state, the station map. You decide, \
+                     annotate, and steer; the agent does the work. The shot below is one moment \
+                     of that loop — a design decision drawn as a picture book — not the whole of \
+                     what the app does."
                         .to_string(),
                 ),
             }
             figure { style: "margin:0;",
                 img {
-                    src: "/assets/desktop-review.png",
+                    src: asset!("/assets/desktop-review.png"),
                     alt: "darkrun desktop review app showing a rate-limit design decision, each option drawn as a diagram",
                     loading: "lazy",
                     style: format!(
@@ -75,7 +78,7 @@ pub fn Landing() -> Element {
                         "font-family:{mono};font-size:12px;color:{faint};margin-top:10px;text-align:center;",
                         mono = tokens::FONT_MONO, faint = theme::TEXT_FAINT,
                     ),
-                    "A live review: pick the rate-limiting strategy from a diagram of each option."
+                    "One moment of the loop: the agent surfaces a design decision; you pick from a diagram of each option."
                 }
             }
         }
