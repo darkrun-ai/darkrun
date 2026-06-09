@@ -55,14 +55,18 @@ fn main() {
             .with_fullsize_content_view(true)
             .with_transparent(true)
     };
-    dioxus::LaunchBuilder::desktop()
-        .with_cfg(
-            Config::new()
-                .with_window(window)
-                // Clear backing so nothing shows behind the theme-painted body.
-                .with_background_color((0, 0, 0, 0)),
-        )
-        .launch(app);
+    // Persist the webview's storage (localStorage, where the theme override is
+    // saved) under a stable per-user data directory. Without this the webview
+    // gets an ephemeral store that's wiped each launch, so a pinned Light/Dark
+    // theme would reset to System on every relaunch.
+    let mut cfg = Config::new()
+        .with_window(window)
+        // Clear backing so nothing shows behind the theme-painted body.
+        .with_background_color((0, 0, 0, 0));
+    if let Some(data_dir) = dirs::data_dir() {
+        cfg = cfg.with_data_directory(data_dir.join("darkrun").join("webview"));
+    }
+    dioxus::LaunchBuilder::desktop().with_cfg(cfg).launch(app);
 }
 
 /// Top-level app: reads the launch config from the environment and opens the
