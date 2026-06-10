@@ -473,7 +473,21 @@ pub fn update(store: &StateStore, run: &str, slug: &str, upd: UnitUpdate) -> Res
                 // up with a true output record. Violations block the completion
                 // with concrete revert instructions. No-op outside a git run.
                 if !matches!(unit.frontmatter.status, Status::Completed) {
-                    enforce_unit_scope(store, run, &mut unit)?;
+                    if let Err(e) = enforce_unit_scope(store, run, &mut unit) {
+                        crate::events::emit(
+                            store,
+                            run,
+                            "darkrun.unit.scope_violation",
+                            serde_json::json!({ "unit": slug }),
+                        );
+                        return Err(e);
+                    }
+                    crate::events::emit(
+                        store,
+                        run,
+                        "darkrun.unit.completed",
+                        serde_json::json!({ "unit": slug, "station": unit.station() }),
+                    );
                 }
                 if unit.frontmatter.started_at.is_none() {
                     unit.frontmatter.started_at = Some(now.clone());
