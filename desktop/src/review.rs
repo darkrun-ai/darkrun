@@ -432,9 +432,9 @@ fn ReviewHeader(
                 StationStrip { stations }
             }
             // The phase subheader, scoped to the current station: the label on
-            // its own row, the phase pipeline centered beneath the line.
+            // its own row, centered like the pipeline beneath it.
             if let Some(st) = station.clone() {
-                div { style: "{sub_style}", span { "station: {st}" } }
+                div { style: "{sub_style}justify-content:center;", span { "station: {st}" } }
             }
             div { style: "display:flex;justify-content:center;margin-top:6px;",
                 StationPipeline { dots: strip_for(phase), labels: true }
