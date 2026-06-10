@@ -1,6 +1,7 @@
 {
   "factory": "software",
   "active_station": "frame",
+  "mode": "solo",
   "base_branch": "main",
   "stations": {
     "frame": {
