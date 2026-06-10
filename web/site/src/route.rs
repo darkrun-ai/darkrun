@@ -67,6 +67,8 @@ pub enum Route {
 
         #[route("/browse")]
         Browse {},
+        #[route("/browse/:..rest")]
+        BrowseTarget { rest: Vec<String> },
         #[route("/review")]
         Review {},
         #[route("/preview")]
@@ -83,7 +85,7 @@ pub enum Route {
 
 // Re-export the page components under the names the route attributes expect.
 pub use pages::blog::{Blog, Post};
-pub use pages::browse::Browse;
+pub use pages::browse::{Browse, BrowseTarget};
 pub use pages::changelog::Changelog;
 pub use pages::concepts::{Glossary, Lifecycles, Methodology, PhaseDetail};
 pub use pages::docs::{DocPage, Docs};

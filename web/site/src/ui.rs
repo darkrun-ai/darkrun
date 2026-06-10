@@ -143,9 +143,16 @@ a { color: inherit; }
 .dr-dot.is-active { width: 24px; background: var(--dr-accent); }
 "#;
 
-/// A page section header: an eyebrow kicker, a title, and an optional lead.
+/// A page section header: an eyebrow kicker, a title, an optional lead, and an
+/// optional `trailing` element rendered to the right of the title (e.g. a host
+/// icon on the browse run list).
 #[component]
-pub fn SectionHead(kicker: String, title: String, lead: Option<String>) -> Element {
+pub fn SectionHead(
+    kicker: String,
+    title: String,
+    lead: Option<String>,
+    #[props(default)] trailing: Option<Element>,
+) -> Element {
     let kicker_style = format!(
         "font-family:{mono};font-size:12px;letter-spacing:0.08em;text-transform:uppercase;\
          color:{accent};margin-bottom:8px;",
@@ -166,7 +173,12 @@ pub fn SectionHead(kicker: String, title: String, lead: Option<String>) -> Eleme
     rsx! {
         div { style: "margin-bottom:24px;",
             div { style: "{kicker_style}", "{kicker}" }
-            h1 { style: "{title_style}", "{title}" }
+            div { style: "display:flex;align-items:center;gap:10px;",
+                h1 { style: "{title_style}", "{title}" }
+                if let Some(trailing) = trailing {
+                    span { style: "display:inline-flex;align-items:center;", {trailing} }
+                }
+            }
             if let Some(lead) = lead {
                 p { style: "{lead_style}", "{lead}" }
             }

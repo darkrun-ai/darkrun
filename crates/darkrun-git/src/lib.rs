@@ -28,6 +28,7 @@ mod diff;
 mod error;
 mod gix_backend;
 pub mod merge;
+pub mod net;
 mod push;
 
 use std::path::{Path, PathBuf};
@@ -40,6 +41,27 @@ pub use clone::{clone_repo, default_clone_dest, repo_name_from_url};
 pub use error::{GitError, Result};
 pub use gix_backend::GixBackend;
 pub use merge::{engine_protected_merge, is_engine_owned_state_path, ENGINE_STATE_PREFIX};
+pub use net::{ensure_noninteractive, network_deadline, with_deadline};
+
+/// Resolve a checkout dir to its PROJECT root: a linked worktree maps to the
+/// main repository's working dir (the shared `.git`'s parent); a main checkout
+/// maps to itself; a non-git dir passes through. The identity the discovery
+/// registry keys projects on — every worktree of a repo is ONE project.
+pub fn project_root_of(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(repo) = gix::open(path) {
+        let git_dir = repo.git_dir().to_path_buf();
+        let common = repo.common_dir().to_path_buf();
+        if git_dir != common {
+            if let Some(main) = common.parent() {
+                return main.to_path_buf();
+            }
+        }
+        if let Some(wd) = repo.workdir() {
+            return wd.to_path_buf();
+        }
+    }
+    path.to_path_buf()
+}
 // `has_no_merge_debt` + `is_merge_in_progress` are defined below in this module.
 
 /// The recommended entry point: a [`GitBackend`] facade over a repository.
@@ -129,6 +151,18 @@ impl GitBackend for Git {
 
     fn add_paths(&self, worktree_path: &Path, paths: &[String]) -> Result<()> {
         self.inner.add_paths(worktree_path, paths)
+    }
+
+    fn add_all_under(&self, worktree_path: &Path, prefix: &str) -> Result<()> {
+        self.inner.add_all_under(worktree_path, prefix)
+    }
+
+    fn status_dirty_under(&self, worktree_path: &Path, prefix: &str) -> Result<bool> {
+        self.inner.status_dirty_under(worktree_path, prefix)
+    }
+
+    fn checkout_branch(&self, branch: &str) -> Result<()> {
+        self.inner.checkout_branch(branch)
     }
 
     fn commit(&self, worktree_path: &Path, message: &str) -> Result<()> {

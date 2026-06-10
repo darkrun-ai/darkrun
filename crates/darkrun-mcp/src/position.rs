@@ -272,6 +272,30 @@ pub struct Handoff {
     pub note: String,
 }
 
+/// One wave unit's full SPEC, threaded into the Manufacture dispatch. The
+/// executing subagent has NO other context — the unit body written at
+/// decompose time only steers the work if the dispatch carries it. (The
+/// predecessor threaded the whole unit document into every beat; a slug-only
+/// dispatch was exactly how thin units slipped through.)
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct UnitSpecCard {
+    /// The unit slug.
+    pub unit: String,
+    /// The display title.
+    pub title: String,
+    /// The full markdown spec body — goal, completion criteria, scope.
+    pub body: String,
+    /// Declared input paths.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
+    /// Declared output paths.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<String>,
+    /// Declared quality gates, rendered `name — command`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<String>,
+}
+
 /// A project knowledge prior surfaced into the Spec prompt.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct KnowledgePrior {
@@ -415,6 +439,11 @@ pub struct PromptContext {
     /// The wave-ready / on-record unit slugs for this action.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub units: Vec<String>,
+    /// Each wave unit's full spec (title, body, paths, gates) — the Manufacture
+    /// dispatch carries the definition, not just the slug, because the worker
+    /// subagent has no other context.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unit_specs: Vec<UnitSpecCard>,
     /// The run's classified SURFACE token (`web_ui`, `library`, …), absent
     /// until the Shape station records one. Drives surface-routed verification
     /// in the Prove/Audit prompts.
@@ -812,6 +841,7 @@ pub fn elaborate_seal(store: &StateStore, slug: &str, station: &str) -> Result<(
         }
     }
     store.write_state(slug, &state)?;
+    let _ = crate::commit::commit_state(store, &format!("darkrun: elaborate seal {station}"));
     Ok(())
 }
 
@@ -831,6 +861,7 @@ pub fn run_review_stamp(store: &StateStore, slug: &str, role: &str) -> Result<()
         Some(darkrun_core::domain::Stamp { at: Utc::now().to_rfc3339() }),
     );
     store.write_state(slug, &state)?;
+    let _ = crate::commit::commit_state(store, &format!("darkrun: run review stamp {role}"));
     Ok(())
 }
 
@@ -1726,6 +1757,26 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
             // Thread each wave unit's most-recent handoff note into the dispatch
             // so the next worker reads what the last beat did, or why it bounced.
             let wave_units = store.read_units(slug).unwrap_or_default();
+            // …and each wave unit's FULL SPEC. The worker subagent has no other
+            // context: the body written at decompose time only steers the beat
+            // if the dispatch carries it (slug-only dispatch = thin work).
+            ctx.unit_specs = wave_units
+                .iter()
+                .filter(|u| wave.contains(&u.slug))
+                .map(|u| UnitSpecCard {
+                    unit: u.slug.clone(),
+                    title: u.title.clone(),
+                    body: u.body.trim().to_string(),
+                    inputs: u.frontmatter.inputs.clone(),
+                    outputs: u.frontmatter.outputs.clone(),
+                    gates: u
+                        .frontmatter
+                        .quality_gates
+                        .iter()
+                        .map(|g| format!("{} — `{}`", g.name, g.command))
+                        .collect(),
+                })
+                .collect();
             ctx.handoffs = wave_units
                 .iter()
                 .filter(|u| wave.contains(&u.slug))
@@ -2131,6 +2182,13 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
     // ordered trail the reflection pass and the operator read. Best-effort:
     // a journal write never fails a tick.
     append_action_log(store, slug, &position.track, &action);
+
+    // Commit early, commit often: every tick's state writes (phase advances,
+    // gate stamps, the audit journal) commit on the engine's branch and push —
+    // so origin always reflects the run's live position. Dirty-gated +
+    // best-effort: a no-op tick mints nothing; a push failure never fails
+    // the tick.
+    let _ = crate::commit::commit_state(store, &format!("darkrun: tick {slug}"));
 
     Ok(TickResult {
         run: slug.to_string(),
@@ -2629,8 +2687,47 @@ pub fn run_start(
         .cloned()
         .unwrap_or_else(|| factory_first.name.clone());
 
+    // ── Branch hierarchy FIRST (mirrors the predecessor's intent-create) ──
+    // Fork `darkrun/<slug>/main` off the base and CHECK IT OUT in the main
+    // working tree BEFORE any state is written, so every state write from here
+    // on lands on the run's own branch — committed and pushed as the run
+    // progresses, never on whatever branch the operator happened to be on.
+    // Non-git projects no-op cleanly (filesystem mode).
+    crate::lifecycle::ensure_run_main(store, slug);
+    {
+        let root = cascade_repo_root(store);
+        if let Ok(git) = Git::open(&root) {
+            let run_main = crate::lifecycle::run_main_branch(slug);
+            if git.branch_exists(&run_main).unwrap_or(false)
+                && git.current_branch().ok().flatten().as_deref() != Some(run_main.as_str())
+            {
+                // A dirty tree refuses the switch with a clear, actionable
+                // error — never silently carries uncommitted work across.
+                if !git.is_clean().unwrap_or(false) {
+                    return Err(McpError::InvalidInput(format!(
+                        "cannot start run '{slug}': the working tree has uncommitted or \
+                         untracked changes, and starting a run switches it to '{run_main}'. \
+                         Commit or stash them, then retry."
+                    )));
+                }
+                git.checkout_branch(&run_main).map_err(|e| {
+                    McpError::InvalidInput(format!(
+                        "cannot start run '{slug}': switching to '{run_main}' failed: {e}"
+                    ))
+                })?;
+            }
+        }
+        // The worktree pool must be ignored before the first worktree exists.
+        crate::commit::ensure_worktrees_gitignored(&root);
+    }
+
     let now = Utc::now().to_rfc3339();
     let resolved_title = title.clone().unwrap_or_else(|| slug.to_string());
+    // Stamp the creator's git identity so the run is "mine" from birth — the
+    // branch-authorship walk needs commits, which a brand-new run lacks.
+    let created_by = darkrun_git::current_identity_email(cascade_repo_root(store))
+        .ok()
+        .flatten();
     let frontmatter = RunFrontmatter {
         title: title.clone(),
         factory: factory_name.to_string(),
@@ -2638,6 +2735,7 @@ pub fn run_start(
         active_station: first_name.clone(),
         status: Status::Active,
         started_at: Some(now.clone()),
+        created_by,
         ..Default::default()
     };
     let body = format!("# {resolved_title}\n");
@@ -2669,11 +2767,18 @@ pub fn run_start(
     ensure_station(&mut state, &factory, &first_name)?;
     store.write_state(slug, &state)?;
 
-    // Branch hierarchy (universal across modes): fork the run's stable base
-    // branch, then enter the first station. Best-effort + non-fatal — a non-git
-    // project no-ops cleanly, so run_start still succeeds.
-    crate::lifecycle::ensure_run_main(store, slug);
+    // Commit + push the freshly-seeded run state on run-main BEFORE forking the
+    // first station, so the station branch carries the run document from birth
+    // and origin sees the run the moment it exists (commit early, commit often).
+    let _ = crate::commit::commit_state(store, &format!("darkrun: create run {slug}"));
+
+    // Enter the first station (fork its branch + worktree off run-main).
     enter_station_and_record(store, slug, &first_name)?;
+    // The station-entry stamp (`Station.branch`) is state too — publish it.
+    let _ = crate::commit::commit_state_if_dirty(
+        store,
+        &format!("darkrun: enter station {first_name}"),
+    );
 
     Ok(run)
 }
@@ -4432,7 +4537,7 @@ mod tests {
         let (_d, store) = store();
         run_start(&store, "d", "software", None, Mode::Solo, "quick").expect("start");
         // A wedged InProgress unit the operator flagged for reset in the UI.
-        let mut u = crate::units::create(&store, "d", "u1", "build", None, vec![]).unwrap();
+        let mut u = crate::units::create(&store, "d", "u1", "build", crate::units::UnitSpec::default()).unwrap();
         u.frontmatter.status = Status::InProgress;
         u.frontmatter.reset_requested = true;
         u.frontmatter.iterations = vec![
@@ -4916,14 +5021,12 @@ mod tests {
         let git_root = |args: &[&str]| {
             std::process::Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success()
         };
-        // Advance run-main with a conflicting line via a temp worktree.
-        let rmwt = root.join(".darkrun/rm");
-        assert!(git_root(&["worktree", "add", "-q", rmwt.to_str().unwrap(), "darkrun/r/main"]));
-        std::fs::write(rmwt.join("conflict.txt"), "RUN-MAIN SIDE\n").unwrap();
-        let git_rm = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&rmwt).args(a).status().unwrap().success();
-        assert!(git_rm(&["add", "-A"]));
-        assert!(git_rm(&["commit", "-q", "-m", "run-main line"]));
-        assert!(git_root(&["worktree", "remove", "--force", rmwt.to_str().unwrap()]));
+        // Advance run-main with a conflicting line. run_start checked the run's
+        // main branch out at the ROOT tree (the commit-and-push spine), so the
+        // root commit IS the run-main side — no temp worktree needed.
+        std::fs::write(root.join("conflict.txt"), "RUN-MAIN SIDE\n").unwrap();
+        assert!(git_root(&["add", "-A"]));
+        assert!(git_root(&["commit", "-q", "-m", "run-main line"]));
         // The active station (frame) edits the same file differently → conflict.
         let wt = crate::lifecycle::station_worktree_path(&root, "r", "frame");
         std::fs::write(wt.join("conflict.txt"), "STATION SIDE\n").unwrap();
@@ -5139,7 +5242,7 @@ mod tests {
     fn derive_emits_revise_for_a_flagged_unit() {
         let (_d, store) = store();
         run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
-        let mut u = crate::units::create(&store, "r", "u1", "frame", None, vec![]).unwrap();
+        let mut u = crate::units::create(&store, "r", "u1", "frame", crate::units::UnitSpec::default()).unwrap();
         u.frontmatter.revise = true;
         store.write_unit("r", &u).unwrap();
         let pos = derive_position(&store, "r").unwrap();
@@ -5150,7 +5253,7 @@ mod tests {
     fn derive_emits_safe_repair_for_an_undefined_station_unit() {
         let (_d, store) = store();
         run_start(&store, "r2", "software", None, Mode::Solo, "full").unwrap();
-        let bad = crate::units::create(&store, "r2", "ub", "ghost-station", None, vec![]).unwrap();
+        let bad = crate::units::create(&store, "r2", "ub", "ghost-station", crate::units::UnitSpec::default()).unwrap();
         store.write_unit("r2", &bad).unwrap();
         let pos = derive_position(&store, "r2").unwrap();
         assert!(matches!(pos.action, Some(RunAction::SafeRepair { .. })), "safe_repair: {:?}", pos.action);

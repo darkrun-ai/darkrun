@@ -91,8 +91,10 @@ pub fn ReviewApp(cfg: ConnConfig) -> Element {
     // Fill the main pane (the shell already provides the chrome + gutters); a
     // generous max-width keeps long lines readable without leaving a centered
     // moat of padding on a wide window.
+    // Full-bleed: the review fills the window's width (the shell's gutters are
+    // the only margin) — no centered moat on wide displays.
     let shell = "padding:14px 18px;display:flex;flex-direction:column;gap:12px;\
-                 max-width:1000px;";
+                 width:100%;box-sizing:border-box;";
 
     rsx! {
         div { style: "{shell}",
@@ -150,6 +152,23 @@ struct AnnotateTarget {
     visual: bool,
     /// Screenshot / image URL for a visual surface.
     screenshot_url: Option<String>,
+    /// The artifact's TEXT content for a text surface (the real body the
+    /// reviewer selects spans of). `None` falls back to a placeholder.
+    text: Option<String>,
+}
+
+/// One mark painted over the text surface: a persisted anchor from earlier
+/// feedback, or an in-flight selection — numbered in display order.
+#[derive(Debug, Clone, PartialEq)]
+struct TextMark {
+    /// The anchored span.
+    selected_text: String,
+    /// Zero-based paragraph index.
+    paragraph: u32,
+    /// The tool that made it (`None` for a persisted anchor → highlight style).
+    tool: Option<AnnotateTool>,
+    /// Content drifted since save (persisted anchors only).
+    stale: bool,
 }
 
 /// The fully-rendered review surface — the assembly-line IA.
@@ -269,7 +288,31 @@ fn review_body(
 
         // ── The annotate surface, when an artifact is under review ──────────
         if let Some(target) = annotate_target.read().clone() {
-            {annotate_panel(cfg.clone(), run_slug.clone(), station.clone(), target, annotate_target)}
+            {
+                // Earlier feedback anchored to THIS artifact re-renders as
+                // visible marks, stale-flagged when the text has drifted since
+                // the anchor was saved (content-hash mismatch).
+                let current_sha = target
+                    .text
+                    .as_deref()
+                    .map(|t| darkrun_core::hash_bytes(t.as_bytes()));
+                let persisted: Vec<TextMark> = feedback
+                    .read()
+                    .iter()
+                    .filter_map(|item| item.inline_anchor.as_ref())
+                    .filter(|a| a.file_path.as_deref() == Some(target.path.as_str()))
+                    .map(|a| TextMark {
+                        selected_text: a.selected_text.clone(),
+                        paragraph: a.paragraph,
+                        tool: None,
+                        stale: match (&a.content_sha, &current_sha) {
+                            (Some(saved), Some(now)) => saved != now,
+                            _ => false,
+                        },
+                    })
+                    .collect();
+                annotate_panel(cfg.clone(), run_slug.clone(), station.clone(), target, persisted, annotate_target)
+            }
         }
 
         // ── The tabbed station body ─────────────────────────────────────────
@@ -280,7 +323,21 @@ fn review_body(
                 on_select: move |id| tab_sig.set(id),
             }
             div { style: "margin-top:14px;",
-                {tab_body(&active, &units, &outputs, &knowledge, &unit_outputs, &feedback_entries, &review, annotate_target, inbox_open)}
+                {
+                    // The SAME jump/resolve/dismiss handler the inbox uses —
+                    // the Feedback tab's chips act identically.
+                    let fb_action = EventHandler::new(feedback_action_handler(
+                        cfg.clone(),
+                        run_slug.clone(),
+                        station.clone(),
+                        feedback,
+                        outputs.clone(),
+                        active_tab,
+                        annotate_target,
+                        inbox_open,
+                    ));
+                    tab_body(&active, &units, &outputs, &knowledge, &unit_outputs, &feedback_entries, &review, annotate_target, inbox_open, fb_action)
+                }
             }
         }
 
@@ -374,11 +431,12 @@ fn ReviewHeader(
             div { style: "margin-top:14px;",
                 StationStrip { stations }
             }
-            // The phase subheader, scoped to the current station.
-            div { style: "{sub_style}",
-                if let Some(st) = station.clone() {
-                    span { "station: {st}" }
-                }
+            // The phase subheader, scoped to the current station: the label on
+            // its own row, centered like the pipeline beneath it.
+            if let Some(st) = station.clone() {
+                div { style: "{sub_style}justify-content:center;", span { "station: {st}" } }
+            }
+            div { style: "display:flex;justify-content:center;margin-top:6px;",
                 StationPipeline { dots: strip_for(phase), labels: true }
             }
         }
@@ -397,14 +455,15 @@ fn tab_body(
     review: &ReviewSessionPayload,
     annotate_target: Signal<Option<AnnotateTarget>>,
     inbox_open: Signal<bool>,
+    fb_action: EventHandler<(String, FeedbackAction)>,
 ) -> Element {
     match active {
         "outputs" => output_tab(outputs, feedback, annotate_target),
         "knowledge" => knowledge_tab(knowledge),
-        "feedback" => feedback_tab(feedback, inbox_open),
+        "feedback" => feedback_tab(feedback, inbox_open, fb_action),
         "overview" => overview_tab(review),
         // Default to the units tab.
-        _ => unit_tab(units, unit_outputs, feedback, annotate_target),
+        _ => unit_tab(units, &review.units, unit_outputs, feedback, annotate_target),
     }
 }
 
@@ -421,6 +480,7 @@ fn feedback_count_for(feedback: &[FeedbackEntry], needle: &str) -> usize {
 /// affordance and a feedback count.
 fn unit_tab(
     units: &[map::UnitView],
+    raw_units: &[serde_json::Value],
     unit_outputs: &std::collections::BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>>,
     feedback: &[FeedbackEntry],
     annotate_target: Signal<Option<AnnotateTarget>>,
@@ -430,8 +490,47 @@ fn unit_tab(
             p { style: "color:var(--dr-text-muted);", "No units in this review." }
         };
     }
+    // The dependency DAG leads the tab (per the approved mockup): the existing
+    // darkrun-ui UnitGraph over the station's units, status-toned, full-width.
+    // A single-unit station skips the graph (no topology to show).
+    let (graph_nodes, graph_edges) = map::unit_graph(raw_units);
+    let show_graph = graph_nodes.len() >= 2;
+    let legend = [
+        ("completed", "var(--dr-status-ok)"),
+        ("in progress", "var(--dr-status-info)"),
+        ("pending", "var(--dr-text-faint)"),
+        ("blocked", "var(--dr-status-danger)"),
+    ];
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:10px;",
+            if show_graph {
+                div { style: "display:flex;flex-direction:column;gap:8px;margin-bottom:4px;",
+                    div { style: "display:flex;align-items:center;justify-content:space-between;",
+                        span {
+                            style: "font-family:var(--dr-font-mono,monospace);font-size:11px;\
+                                    letter-spacing:0.08em;text-transform:uppercase;color:var(--dr-accent);",
+                            "dependency graph"
+                        }
+                        span { style: "display:inline-flex;gap:14px;",
+                            for (name, color) in legend.iter() {
+                                span {
+                                    style: "font-family:var(--dr-font-mono,monospace);font-size:11px;\
+                                            color:var(--dr-text-muted);display:inline-flex;\
+                                            align-items:center;gap:5px;",
+                                    span {
+                                        style: format!(
+                                            "width:9px;height:9px;border-radius:2px;border:1.5px solid {color};\
+                                             background:var(--dr-surface-overlay);"
+                                        ),
+                                    }
+                                    "{name}"
+                                }
+                            }
+                        }
+                    }
+                    UnitGraph { units: graph_nodes.clone(), edges: graph_edges.clone() }
+                }
+            }
             for unit in units.iter() {
                 {
                     let unit = unit.clone();
@@ -440,6 +539,17 @@ fn unit_tab(
                     let label = unit.title.clone();
                     let work_id = unit.title.clone();
                     let fb_n = feedback_count_for(feedback, &unit.title);
+                    // The unit's real markdown body — the text the reviewer
+                    // selects spans of (matched by the same title resolution
+                    // `unit_view` uses, so the row and its text agree).
+                    let body_text = raw_units
+                        .iter()
+                        .find(|u| {
+                            map::first_str(u, &["title", "name", "slug", "id"]).as_deref()
+                                == Some(unit.title.as_str())
+                        })
+                        .and_then(|u| u.get("body").and_then(|b| b.as_str()))
+                        .map(str::to_string);
                     rsx! {
                         div { style: "display:flex;flex-direction:column;gap:6px;",
                             div { style: "display:flex;align-items:center;gap:8px;",
@@ -462,6 +572,7 @@ fn unit_tab(
                                         work_id: work_id.clone(),
                                         visual: false,
                                         screenshot_url: None,
+                                        text: body_text.clone(),
                                     }));
                                 })}
                             }
@@ -540,6 +651,7 @@ fn output_tab(
                                     work_id: label.clone(),
                                     visual,
                                     screenshot_url: url.clone(),
+                                    text: None,
                                 }));
                             })}
                         }
@@ -600,7 +712,11 @@ fn knowledge_tab(knowledge: &[darkrun_api::session::KnowledgeFile]) -> Element {
 
 /// The Feedback tab: the consolidated, severity-grouped inbox of every station
 /// annotation. A persistent header button mirrors this; both render the same data.
-fn feedback_tab(feedback: &[FeedbackEntry], inbox_open: Signal<bool>) -> Element {
+fn feedback_tab(
+    feedback: &[FeedbackEntry],
+    inbox_open: Signal<bool>,
+    fb_action: EventHandler<(String, FeedbackAction)>,
+) -> Element {
     let mut inbox = inbox_open;
     if feedback.is_empty() {
         return rsx! {
@@ -609,7 +725,7 @@ fn feedback_tab(feedback: &[FeedbackEntry], inbox_open: Signal<bool>) -> Element
     }
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:8px;",
-            {feedback_inbox(feedback.to_vec(), None::<EventHandler<(String, FeedbackAction)>>)}
+            {feedback_inbox(feedback.to_vec(), Some(fb_action))}
             div { style: "margin-top:4px;",
                 Button {
                     variant: ButtonVariant::Ghost,
@@ -661,6 +777,69 @@ fn overview_tab(review: &ReviewSessionPayload) -> Element {
     }
 }
 
+/// Build the jump / resolve / dismiss handler shared by the inbox panel AND
+/// the Feedback tab — both surfaces act on the same records identically.
+/// Feedback items are read FRESH from the signal per action, so a row acted on
+/// after a refetch still resolves.
+#[allow(clippy::too_many_arguments)]
+fn feedback_action_handler(
+    cfg: ConnConfig,
+    run: Option<String>,
+    station: Option<String>,
+    feedback: Signal<Vec<FeedbackItem>>,
+    outputs: Vec<OutputArtifact>,
+    active_tab: Signal<String>,
+    annotate_target: Signal<Option<AnnotateTarget>>,
+    inbox_open: Signal<bool>,
+) -> impl FnMut((String, FeedbackAction)) + 'static {
+    let mut active_tab = active_tab;
+    let mut annotate_target = annotate_target;
+    let mut inbox_open = inbox_open;
+    move |(id, action): (String, FeedbackAction)| {
+        let items = feedback.read().clone();
+        // Jump is a surface action: focus the anchored artifact instead of
+        // mutating the record.
+        if action == FeedbackAction::Jump {
+            if let Some(target) = jump_target(&items, &id, &outputs) {
+                // Switch to the owning tab, open the annotate surface on the
+                // anchored artifact, and close the inbox so it's in view.
+                active_tab.set(if target.visual {
+                    "outputs".to_string()
+                } else {
+                    "units".to_string()
+                });
+                annotate_target.set(Some(target));
+                inbox_open.set(false);
+            }
+            return;
+        }
+        // Resolve / dismiss mutate the record's status.
+        let new_status = match action {
+            FeedbackAction::Resolve => Some(FeedbackStatus::Addressed),
+            FeedbackAction::Dismiss => Some(FeedbackStatus::NonActionable),
+            FeedbackAction::Jump => None,
+        };
+        let (Some(status), Some(run), Some(station)) =
+            (new_status, run.clone(), station.clone())
+        else {
+            return;
+        };
+        let cfg = cfg.clone();
+        let mut feedback = feedback;
+        spawn(async move {
+            let req = darkrun_api::FeedbackUpdateRequest {
+                status: Some(status),
+                ..Default::default()
+            };
+            if wire::update_feedback(&cfg, &run, &station, &id, &req).await.is_ok() {
+                if let Ok(resp) = wire::fetch_feedback(&cfg, &run, &station).await {
+                    feedback.set(resp.items);
+                }
+            }
+        });
+    }
+}
+
 /// The feedback inbox panel, surfaced under the header when the operator opens
 /// it. Resolve / dismiss chips PUT the feedback status back over the wire; a
 /// successful write re-fetches the list so the count updates. The jump chip
@@ -681,59 +860,16 @@ fn feedback_inbox_panel(
     // Snapshot the outputs so the Jump resolver can match a feedback locator to
     // a declared output (and reuse its visual/path/url) without borrowing.
     let outputs = outputs.to_vec();
-    let on_action = {
-        let cfg = cfg.clone();
-        let run = run.clone();
-        let station = station.clone();
-        let items = feedback.read().clone();
-        let mut active_tab = active_tab;
-        let mut annotate_target = annotate_target;
-        let mut inbox_open = inbox_open;
-        move |(id, action): (String, FeedbackAction)| {
-            // Jump is a surface action: focus the anchored artifact instead of
-            // mutating the record.
-            if action == FeedbackAction::Jump {
-                if let Some(target) =
-                    jump_target(&items, &id, &outputs)
-                {
-                    // Switch to the owning tab, open the annotate surface on the
-                    // anchored artifact, and close the inbox so it's in view.
-                    active_tab.set(if target.visual {
-                        "outputs".to_string()
-                    } else {
-                        "units".to_string()
-                    });
-                    annotate_target.set(Some(target));
-                    inbox_open.set(false);
-                }
-                return;
-            }
-            // Resolve / dismiss mutate the record's status.
-            let new_status = match action {
-                FeedbackAction::Resolve => Some(FeedbackStatus::Addressed),
-                FeedbackAction::Dismiss => Some(FeedbackStatus::NonActionable),
-                FeedbackAction::Jump => None,
-            };
-            let (Some(status), Some(run), Some(station)) =
-                (new_status, run.clone(), station.clone())
-            else {
-                return;
-            };
-            let cfg = cfg.clone();
-            let mut feedback = feedback;
-            spawn(async move {
-                let req = darkrun_api::FeedbackUpdateRequest {
-                    status: Some(status),
-                    ..Default::default()
-                };
-                if wire::update_feedback(&cfg, &run, &station, &id, &req).await.is_ok() {
-                    if let Ok(resp) = wire::fetch_feedback(&cfg, &run, &station).await {
-                        feedback.set(resp.items);
-                    }
-                }
-            });
-        }
-    };
+    let on_action = feedback_action_handler(
+        cfg.clone(),
+        run.clone(),
+        station.clone(),
+        feedback,
+        outputs,
+        active_tab,
+        annotate_target,
+        inbox_open,
+    );
     rsx! {
         Card {
             div { style: "display:flex;align-items:center;gap:8px;margin-bottom:10px;",
@@ -782,6 +918,7 @@ fn jump_target(
             work_id: out.name.clone(),
             visual,
             screenshot_url: out.relative_path.clone(),
+            text: None,
         });
     }
 
@@ -792,6 +929,7 @@ fn jump_target(
         work_id: locator,
         visual: false,
         screenshot_url: None,
+        text: None,
     })
 }
 
@@ -804,6 +942,7 @@ fn annotate_panel(
     run: Option<String>,
     station: Option<String>,
     target: AnnotateTarget,
+    persisted: Vec<TextMark>,
     mut annotate_target: Signal<Option<AnnotateTarget>>,
 ) -> Element {
     rsx! {
@@ -816,6 +955,8 @@ fn annotate_panel(
             work_id: target.work_id.clone(),
             visual: target.visual,
             screenshot_url: target.screenshot_url.clone(),
+            text: target.text.clone(),
+            persisted,
             on_close: move |_| annotate_target.set(None),
         }
     }
@@ -833,6 +974,8 @@ fn AnnotateSurface(
     work_id: String,
     visual: bool,
     screenshot_url: Option<String>,
+    text: Option<String>,
+    persisted: Vec<TextMark>,
     on_close: EventHandler<MouseEvent>,
 ) -> Element {
     let kind = if visual { SurfaceKind::Visual } else { SurfaceKind::Text };
@@ -842,6 +985,33 @@ fn AnnotateSurface(
     let mut marks = use_signal(Vec::<VisualMark>::new);
     let mut comments = use_signal(Vec::<String>::new);
     let submit = use_signal(|| Submit::Idle);
+    // The reviewer's in-flight TEXT selections (this session). Persisted anchors
+    // from earlier feedback render alongside, numbered first.
+    let mut text_marks = use_signal(Vec::<TextMark>::new);
+    // Capture the webview's real text selection when a text tool is active —
+    // the span is located in the artifact's paragraphs and painted immediately,
+    // so the selection is REPRESENTED, not implied.
+    let sel_text = text.clone();
+    let on_select = use_callback(move |selected: String| {
+        let selected = selected.trim().to_string();
+        if selected.is_empty() {
+            return;
+        }
+        let active = *tool.read();
+        if active == AnnotateTool::Cursor {
+            return;
+        }
+        let paragraph = sel_text
+            .as_deref()
+            .map(|t| paragraph_of(t, &selected))
+            .unwrap_or(0);
+        text_marks.write().push(TextMark {
+            selected_text: selected,
+            paragraph,
+            tool: Some(active),
+            stale: false,
+        });
+    });
 
     // Capture a completed gesture for the active tool. The stage forwards the
     // gesture as normalized `0..1` geometry (start point, end point, and a
@@ -899,7 +1069,9 @@ fn AnnotateSurface(
         let station = station.clone();
         let label = label.clone();
         let path = path.clone();
+        let text_for_submit_outer = text.clone();
         move |draft: CommentDraft| {
+            let text_for_submit = text_for_submit_outer.clone();
             let cfg = cfg.clone();
             let run = run.clone();
             let station = station.clone();
@@ -926,6 +1098,17 @@ fn AnnotateSurface(
             };
             let mark_list = marks.read().clone();
             let comment_list = comments.read().clone();
+            // The newest user-made text mark anchors this feedback; the hash of
+            // the artifact at save time drives later stale detection.
+            let anchor_mark = text_marks
+                .read()
+                .iter()
+                .rev()
+                .find(|m| m.tool.is_some())
+                .cloned();
+            let content_sha = text_for_submit
+                .as_deref()
+                .map(|t| darkrun_core::hash_bytes(t.as_bytes()));
             spawn(async move {
                 submit.set(Submit::Sending);
                 let result = if visual {
@@ -969,6 +1152,19 @@ fn AnnotateSurface(
                         }
                         None => None,
                     };
+                    // Persist the span the reviewer marked: the anchor carries
+                    // the exact selected text, its paragraph, and a content hash
+                    // so the mark re-renders (and stales) on later views.
+                    let inline_anchor = anchor_mark.map(|m| {
+                        darkrun_api::feedback::FeedbackInlineAnchor {
+                            selected_text: m.selected_text.clone(),
+                            paragraph: m.paragraph,
+                            location: format!("paragraph {}", m.paragraph + 1),
+                            comment_id: None,
+                            file_path: Some(path.clone()),
+                            content_sha: content_sha.clone(),
+                        }
+                    });
                     let req = FeedbackCreateRequest {
                         title: format!("review: {label}"),
                         body,
@@ -976,7 +1172,7 @@ fn AnnotateSurface(
                         author: None,
                         source_ref: Some(path.clone()),
                         anchor: None,
-                        inline_anchor: None,
+                        inline_anchor,
                         resolution,
                         attachment_data_url: None,
                     };
@@ -1026,7 +1222,22 @@ fn AnnotateSurface(
             div { style: "display:flex;gap:16px;align-items:flex-start;",
                 // The artifact stage — the active tool's gesture lands the
                 // matching shape (pin/box/arrow/pen/highlight).
-                {annotate_stage(visual, active_tool, screenshot_url.clone(), placed, place)}
+                {
+                    // Persisted anchors (earlier feedback) lead the numbering;
+                    // this session's selections follow.
+                    let mut display_marks = persisted.clone();
+                    display_marks.extend(text_marks.read().iter().cloned());
+                    annotate_stage(
+                        visual,
+                        active_tool,
+                        screenshot_url.clone(),
+                        placed,
+                        text.clone(),
+                        display_marks,
+                        on_select,
+                        place,
+                    )
+                }
                 div { style: "flex:1;min-width:0;",
                     CommentPanel {
                         comments: thread,
@@ -1083,11 +1294,15 @@ fn norm_xy(px: f64, py: f64) -> (f64, f64) {
 /// or a text placeholder. Captures the active tool's gesture (a click for `pin`,
 /// a drag for `box`/`highlight`/`arrow`, a tracked stroke for `pen`) and forwards
 /// it normalized; renders the matching overlay for every placed mark.
+#[allow(clippy::too_many_arguments)]
 fn annotate_stage(
     visual: bool,
     active: AnnotateTool,
     screenshot_url: Option<String>,
     marks: Vec<VisualMark>,
+    text: Option<String>,
+    text_marks: Vec<TextMark>,
+    on_select: Callback<String>,
     mut on_place: impl FnMut(Gesture) + 'static,
 ) -> Element {
     // The in-flight gesture: the press origin and (for the pen) the accumulating
@@ -1128,6 +1343,24 @@ fn annotate_stage(
             },
             onmouseup: move |evt| {
                 if !visual {
+                    // TEXT surface: read the webview's real selection and hand
+                    // it up — the span becomes a visible, numbered mark.
+                    spawn(async move {
+                        let sel = dioxus::document::eval(
+                            "return (window.getSelection() ? window.getSelection().toString() : '');",
+                        )
+                        .join::<String>()
+                        .await
+                        .unwrap_or_default();
+                        if !sel.trim().is_empty() {
+                            on_select.call(sel);
+                            // Collapse the native selection — the painted mark
+                            // is now the representation.
+                            let _ = dioxus::document::eval(
+                                "window.getSelection() && window.getSelection().removeAllRanges();",
+                            );
+                        }
+                    });
                     return;
                 }
                 let Some(start) = *origin.read() else { return };
@@ -1156,12 +1389,130 @@ fn annotate_stage(
                 for (i, mark) in marks.iter().enumerate() {
                     {render_mark(mark, i + 1)}
                 }
+            } else if let Some(body) = text.as_deref() {
+                {render_text_with_marks(body, &text_marks)}
             } else {
                 div {
                     style: "padding:14px;color:var(--dr-text-muted);font-size:12px;\
                             font-family:var(--dr-font-mono);",
                     "Text artifact — select a span and leave a comment. The annotation \
                      anchors to this artifact and ships to the agent as feedback."
+                }
+            }
+        }
+    }
+}
+
+/// The zero-based paragraph (blank-line-separated) containing `needle`'s first
+/// occurrence, falling back to a whole-text scan (paragraph 0) when the span
+/// crosses a boundary or isn't found.
+fn paragraph_of(text: &str, needle: &str) -> u32 {
+    let mut offset = 0usize;
+    for (i, para) in text.split("\n\n").enumerate() {
+        if para.contains(needle) {
+            return i as u32;
+        }
+        offset += para.len() + 2;
+        let _ = offset;
+    }
+    0
+}
+
+/// The inline style for a painted text mark, by tool + staleness. Every mark is
+/// accent-tinted; the tool varies the decoration; a stale (content-drifted)
+/// anchor goes amber with a dashed underline.
+fn mark_span_style(tool: Option<AnnotateTool>, stale: bool) -> String {
+    if stale {
+        return "background:color-mix(in srgb, var(--dr-status-warn) 22%, transparent);\
+                border-bottom:2px dashed var(--dr-status-warn);border-radius:3px;\
+                padding:0 2px;".to_string();
+    }
+    let base = "background:color-mix(in srgb, var(--dr-accent) 24%, transparent);\
+                border-radius:3px;padding:0 2px;";
+    let deco = match tool {
+        Some(AnnotateTool::Strike) => "text-decoration:line-through;",
+        Some(AnnotateTool::Suggest) => "border-bottom:2px dotted var(--dr-accent);",
+        Some(AnnotateTool::Select) => "border-bottom:2px solid var(--dr-accent);",
+        // Highlight, persisted anchors, and anything else: the tinted span.
+        _ => "",
+    };
+    format!("{base}{deco}")
+}
+
+/// Render the artifact's text with every [`TextMark`] painted in place: each
+/// paragraph splits at its marks' spans, wrapping them in numbered, tinted
+/// spans (the predecessor's inline-comments rendering, in Dioxus). Marks whose
+/// span no longer appears in their paragraph (drifted text) are listed under
+/// the body as stale chips, so an anchored comment is never silently invisible.
+fn render_text_with_marks(body: &str, marks: &[TextMark]) -> Element {
+    let paragraphs: Vec<&str> = body.split("\n\n").collect();
+    let mut unmatched: Vec<(usize, &TextMark)> = Vec::new();
+
+    let para_block = paragraphs.iter().enumerate().map(|(pi, para)| {
+        // The marks anchored to this paragraph, in mark order.
+        let mut segments: Vec<(String, Option<(usize, &TextMark)>)> = Vec::new();
+        let mut rest: &str = para;
+        let mut consumed = 0usize;
+        let mut local: Vec<(usize, &TextMark)> = marks
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.paragraph as usize == pi)
+            .collect();
+        // Paint in textual order so splits never overlap.
+        local.sort_by_key(|(_, m)| para.find(m.selected_text.as_str()).unwrap_or(usize::MAX));
+        for (n, mark) in local {
+            match rest.find(mark.selected_text.as_str()) {
+                Some(at) => {
+                    segments.push((rest[..at].to_string(), None));
+                    segments.push((mark.selected_text.clone(), Some((n, mark))));
+                    rest = &rest[at + mark.selected_text.len()..];
+                    consumed += at + mark.selected_text.len();
+                    let _ = consumed;
+                }
+                None => unmatched.push((n, mark)),
+            }
+        }
+        segments.push((rest.to_string(), None));
+        rsx! {
+            p { style: "margin:0 0 10px;",
+                for (seg, mark) in segments.into_iter() {
+                    if let Some((n, m)) = mark {
+                        span { style: mark_span_style(m.tool, m.stale),
+                            "{seg}"
+                            sup {
+                                style: "font-size:9px;font-weight:700;color:var(--dr-on-accent);\
+                                        background:var(--dr-accent);border-radius:3px;\
+                                        padding:0 3px;margin-left:2px;",
+                                "{n + 1}"
+                            }
+                        }
+                    } else {
+                        span { "{seg}" }
+                    }
+                }
+            }
+        }
+    }).collect::<Vec<_>>();
+
+    rsx! {
+        div {
+            class: "dr-annotate-text",
+            style: "padding:14px;color:var(--dr-text);font-size:12px;line-height:1.7;\
+                    font-family:var(--dr-font-mono);white-space:pre-wrap;overflow:auto;\
+                    max-height:420px;user-select:text;cursor:text;",
+            for block in para_block.into_iter() {
+                {block}
+            }
+            if !unmatched.is_empty() {
+                div { style: "margin-top:10px;display:flex;flex-direction:column;gap:5px;",
+                    for (n, m) in unmatched.into_iter() {
+                        span {
+                            style: "font-family:var(--dr-font-mono);font-size:11px;\
+                                    color:var(--dr-status-warn);",
+                            "#{n + 1} \u{201c}{m.selected_text}\u{201d} — the anchored text \
+                             has changed since this was annotated"
+                        }
+                    }
                 }
             }
         }
@@ -2313,6 +2664,8 @@ mod subcomponent_render_tests {
                     work_id: "a2".to_string(),
                     visual: true,
                     screenshot_url: Some("/shot.png".to_string()),
+                    text: None,
+                    persisted: vec![],
                     on_close: move |_| {},
                 }
             }
@@ -2388,7 +2741,7 @@ mod tab_render_tests {
         let io = use_signal(|| false);
         let review = ReviewSessionPayload::default();
         let unit_outputs: BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>> = BTreeMap::new();
-        tab_body(active, &[], &[], &[], &unit_outputs, &[], &review, at, io)
+        tab_body(active, &[], &[], &[], &unit_outputs, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
     }
 
     #[test]
@@ -2421,7 +2774,7 @@ mod tab_render_tests {
                 crate::map::unit_view(&serde_json::json!({"slug":"u1","title":"Burst limiter","status":"completed","unit_type":"code"})),
                 crate::map::unit_view(&serde_json::json!({"slug":"u2","title":"Tests","status":"in_progress"})),
             ];
-            tab_body("units", &units, &[], &[], &uo, &[], &review, at, io)
+            tab_body("units", &units, &[], &[], &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         let mut dom = VirtualDom::new(UnitsPop); dom.rebuild_in_place(); let _ = dioxus_ssr::render(&dom);
         fn KnowPop() -> Element {
@@ -2430,7 +2783,7 @@ mod tab_render_tests {
             let review = ReviewSessionPayload::default();
             let uo: BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>> = BTreeMap::new();
             let know = vec![KnowledgeFile { name: "notes.md".into(), content: "# notes\nbody".into() }];
-            tab_body("knowledge", &[], &[], &know, &uo, &[], &review, at, io)
+            tab_body("knowledge", &[], &[], &know, &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         let mut dom2 = VirtualDom::new(KnowPop); dom2.rebuild_in_place(); let _ = dioxus_ssr::render(&dom2);
     }
@@ -2451,7 +2804,7 @@ mod tab_render_tests {
                 OutputArtifact { station: "build".into(), name: "page.html".into(), artifact_type: OutputArtifactType::Html, language: None, directory: None, content: Some("<h1>hi</h1>".into()), relative_path: Some("build/page.html".into()), run_relative_path: None },
                 OutputArtifact { station: "build".into(), name: "shot.png".into(), artifact_type: OutputArtifactType::Image, language: None, directory: None, content: None, relative_path: None, run_relative_path: Some("build/shot.png".into()) },
             ];
-            tab_body("outputs", &[], &outputs, &[], &uo, &[], &review, at, io)
+            tab_body("outputs", &[], &outputs, &[], &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         let mut dom = VirtualDom::new(OutPop); dom.rebuild_in_place(); let _ = dioxus_ssr::render(&dom);
     }
@@ -2639,6 +2992,7 @@ mod panel_render_tests {
         fn App() -> Element {
             let annotate_target = use_signal(|| None::<AnnotateTarget>);
             let target = AnnotateTarget {
+                text: None,
                 label: "home.png".into(),
                 path: "build/home.png".into(),
                 work_id: "home.png".into(),
@@ -2650,6 +3004,7 @@ mod panel_render_tests {
                 Some("run-1".into()),
                 Some("build".into()),
                 target,
+                vec![],
                 annotate_target,
             )
         }
@@ -2671,17 +3026,29 @@ mod panel_render_tests {
                     points: vec![PinPoint::new(0.1, 0.1, ""), PinPoint::new(0.2, 0.2, "")],
                 },
             ];
-            annotate_stage(true, AnnotateTool::Pin, Some("/s.png".into()), marks, |_| {})
+            annotate_stage(true, AnnotateTool::Pin, Some("/s.png".into()), marks, None, vec![], Callback::new(|_: String| {}), |_| {})
         }
         fn VisualNoShot() -> Element {
-            annotate_stage(true, AnnotateTool::Pen, None, vec![], |_| {})
+            annotate_stage(true, AnnotateTool::Pen, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
         }
         fn Text() -> Element {
-            annotate_stage(false, AnnotateTool::Select, None, vec![], |_| {})
+            annotate_stage(false, AnnotateTool::Select, None, vec![], Some("Alpha beta.\n\nGamma delta.".into()), vec![TextMark { selected_text: "beta".into(), paragraph: 0, tool: Some(AnnotateTool::Select), stale: false }], Callback::new(|_: String| {}), |_| {})
+        }
+        fn TextNoBody() -> Element {
+            annotate_stage(false, AnnotateTool::Select, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
         }
         let _ = render(Visual);
         assert!(render(VisualNoShot).contains("draw on the surface"));
-        assert!(render(Text).contains("Text artifact"));
+        // A REAL text body renders with its mark painted in place (numbered),
+        // not the placeholder…
+        let text = render(Text);
+        assert!(text.contains("Alpha"), "body renders: {text}");
+        assert!(text.contains("beta"), "the marked span renders: {text}");
+        assert!(text.contains("<sup"), "the mark number badge renders: {text}");
+        assert!(text.contains("Gamma delta"), "later paragraphs render: {text}");
+        assert!(!text.contains("Text artifact —"), "no placeholder when body present");
+        // …and the placeholder only appears when there is no body to show.
+        assert!(render(TextNoBody).contains("Text artifact"));
     }
 
     #[test]
@@ -2721,14 +3088,14 @@ mod panel_render_tests {
                 st("build", Some("manufacture"), true),
                 st("prove", None, false),
             ];
-            tab_body("overview", &[], &[], &[], &Default::default(), &[], &review, at, io)
+            tab_body("overview", &[], &[], &[], &Default::default(), &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         fn Feedback() -> Element {
             let at = use_signal(|| None::<AnnotateTarget>);
             let io = use_signal(|| false);
             let review = ReviewSessionPayload::default();
             let entries = map::feedback_entries(&[fb_item("FB-1", Some("home.png"), "review: home")]);
-            tab_body("feedback", &[], &[], &[], &Default::default(), &entries, &review, at, io)
+            tab_body("feedback", &[], &[], &[], &Default::default(), &entries, &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         assert!(render(Overview).contains("Reflection"));
         assert!(render(Feedback).contains("open inbox panel"));
@@ -2745,7 +3112,7 @@ mod panel_render_tests {
                 })),
             ];
             let entries = map::feedback_entries(&[fb_item("FB-1", Some("Burst limiter"), "x")]);
-            unit_tab(&units, &Default::default(), &entries, at)
+            unit_tab(&units, &[], &Default::default(), &entries, at)
         }
         fn Outputs() -> Element {
             let at = use_signal(|| None::<AnnotateTarget>);

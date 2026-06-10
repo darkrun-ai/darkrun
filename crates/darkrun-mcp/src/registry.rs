@@ -169,14 +169,38 @@ fn home_dir_env() -> Option<PathBuf> {
 /// hash of the FULL path is appended. The result is a filesystem-safe,
 /// collision-resistant directory name.
 pub fn slug_for(repo_root: &Path) -> String {
-    let base = repo_root
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
+    // A project IS its git repository, not whatever directory the engine
+    // happened to boot in: a linked WORKTREE resolves to the main checkout
+    // (so every worktree of a repo groups under ONE project), and the display
+    // base prefers the origin remote's repo name over a local dir name.
+    let canonical = resolve_project_root(repo_root);
+    let base = origin_repo_name(&canonical)
+        .or_else(|| {
+            canonical
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "root".to_string());
     let sanitized = sanitize(&base);
-    let hash = short_hash(repo_root);
+    let hash = short_hash(&canonical);
     format!("{sanitized}-{hash}")
+}
+
+/// Resolve a checkout dir to its project root (worktree → main checkout).
+fn resolve_project_root(repo_root: &Path) -> PathBuf {
+    darkrun_git::project_root_of(repo_root)
+}
+
+/// The repository name from the `origin` remote (`acme/store.git` → `store`),
+/// when the project has one.
+fn origin_repo_name(root: &Path) -> Option<String> {
+    use darkrun_git::GitBackend;
+    let url = darkrun_git::Git::open(root).ok()?.remote_url("origin").ok()??;
+    let trimmed = url.trim().trim_end_matches('/');
+    let stem = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let name = stem.rsplit(['/', ':']).next()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// Replace any character that isn't `[A-Za-z0-9._-]` with `-`, collapsing the

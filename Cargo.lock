@@ -1540,7 +1540,11 @@ dependencies = [
  "darkrun-core",
  "darkrun-ui",
  "dioxus",
+ "futures",
+ "gloo-net",
  "pulldown-cmark",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

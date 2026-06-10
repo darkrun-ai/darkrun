@@ -237,6 +237,7 @@ pub fn accept(store: &StateStore, run: &str, path: &str) -> Result<bool> {
             crate::annotation::reanchor_artifact_version(store, &root, run, path, &bytes)?;
         }
         close_open_drift_feedback_for(store, run, path, "premise change accepted")?;
+        let _ = crate::commit::commit_state(store, &format!("darkrun: drift accept {path}"));
     }
     Ok(found)
 }
@@ -535,7 +536,7 @@ mod tests {
         );
     }
 
-    /// Predecessor drift INFINITE LOOP regression (haiku 5.0.2/5.0.3): a
+    /// Predecessor drift INFINITE LOOP regression (its 5.0.2/5.0.3): a
     /// witnessed artifact changed by a sanctioned fix, re-baselined and the drift
     /// FB closed, yet `run_next` re-fired the same `drift_detected` forever —
     /// because (A) it diffed via `git log` on a worktree-prefixed path that found
