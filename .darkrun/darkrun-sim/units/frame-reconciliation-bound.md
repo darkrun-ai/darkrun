@@ -1,13 +1,14 @@
 ---
 name: Bound the dead-TS-to-darkrun reconciliation so later stations don't port the brief literally
 unit_type: ''
-status: in_progress
+status: completed
 depends_on:
 - frame-protocol-problem
 worker: distiller
 station: frame
 branch: darkrun/darkrun-sim/units/frame/frame-reconciliation-bound
 started_at: 2026-06-10T06:39:35.599643+00:00
+completed_at: 2026-06-10T06:40:37.058336+00:00
 iterations:
 - worker: framer
   started_at: 2026-06-10T06:39:35.599643+00:00
