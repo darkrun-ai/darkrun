@@ -523,6 +523,8 @@ mod tests {
         fn add_paths(&self, _: &Path, _: &[String]) -> darkrun_git::Result<()> { unimplemented!() }
         fn add_all_under(&self, _: &Path, _: &str) -> darkrun_git::Result<()> { unimplemented!() }
         fn status_dirty_under(&self, _: &Path, _: &str) -> darkrun_git::Result<bool> { unimplemented!() }
+        fn dirty_paths_excluding(&self, _: &Path, _: &[&str]) -> darkrun_git::Result<Vec<String>> { unimplemented!() }
+        fn changed_paths_between(&self, _: &str, _: &str) -> darkrun_git::Result<Vec<String>> { unimplemented!() }
         fn checkout_branch(&self, _: &str) -> darkrun_git::Result<()> { unimplemented!() }
         fn commit(&self, _: &Path, _: &str) -> darkrun_git::Result<()> { unimplemented!() }
         fn ls_tree(&self, _: &Path, _: &str, _: &str) -> darkrun_git::Result<Vec<String>> { unimplemented!() }

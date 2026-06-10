@@ -213,6 +213,18 @@ pub enum RunAction {
         /// The unresolved (agent-content) conflict paths.
         conflict_paths: Vec<String>,
     },
+    /// The agent has uncommitted work in the project tree (outside the
+    /// engine's own `.darkrun/` bookkeeping). The engine never authors the
+    /// agent's commits — a generic engine "wip" dump can't tell the story of
+    /// the work — so the tick blocks and hands the file list back: commit,
+    /// then retick. Purely mechanical; no human intervention needed.
+    SaveWip {
+        run: String,
+        /// The branch the uncommitted work sits on.
+        branch: String,
+        /// The agent's uncommitted paths (engine bookkeeping excluded).
+        dirty_files: Vec<String>,
+    },
     /// Nothing to do this tick (mid-wave; outstanding subagents still working).
     Noop { run: String, message: String },
 }
@@ -391,6 +403,9 @@ pub struct PromptContext {
     /// The unresolved conflict paths, for `MergeConflict`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conflict_paths: Vec<String>,
+    /// The agent's uncommitted paths, for `SaveWip`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dirty_files: Vec<String>,
     /// A human-readable reason, for `Escalate` / `SafeRepair`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -1631,6 +1646,7 @@ pub fn action_tag(action: &RunAction) -> &'static str {
         RunAction::PendingSeal { .. } => "pending_seal",
         RunAction::Sealed { .. } => "sealed",
         RunAction::MergeConflict { .. } => "merge_conflict",
+        RunAction::SaveWip { .. } => "save_wip",
         RunAction::Noop { .. } => "noop",
     }
 }
@@ -1665,6 +1681,7 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         RunAction::RunReview { .. }
         | RunAction::PendingSeal { .. }
         | RunAction::Sealed { .. }
+        | RunAction::SaveWip { .. }
         | RunAction::Noop { .. } => None,
     };
 
@@ -1879,6 +1896,10 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         RunAction::MergeConflict { branch, conflict_paths, .. } => {
             ctx.branch = Some(branch.clone());
             ctx.conflict_paths = conflict_paths.clone();
+        }
+        RunAction::SaveWip { branch, dirty_files, .. } => {
+            ctx.branch = Some(branch.clone());
+            ctx.dirty_files = dirty_files.clone();
         }
         RunAction::PendingSeal { kind, .. } => {
             ctx.seal = Some(kind.as_str().to_string());
@@ -2144,6 +2165,52 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
     // sync conflict is left in-tree; the derive below catches it as a
     // MergeConflict action via `merge_conflict_action`.
     sync_downstream_before_land(store, slug);
+
+    // Pre-derive clean-tree gate (the predecessor's `save_wip`): when the
+    // AGENT has uncommitted work in the project tree — paths outside the
+    // engine's own `.darkrun/` bookkeeping — block the tick and hand the list
+    // back. The engine never authors the agent's commits: the agent knows what
+    // it just did and can write commits that tell the story; a generic engine
+    // "wip" dump never could. Runs AFTER the sync (so a mid-merge conflict
+    // routes to MergeConflict via derive, not here) and only in a git repo.
+    {
+        let repo_root = cascade_repo_root(store);
+        if !darkrun_git::is_merge_in_progress(&repo_root) {
+            if let Ok(git) = Git::open(&repo_root) {
+                let dirty = git
+                    .dirty_paths_excluding(&repo_root, &[".darkrun", ".gitignore"])
+                    .unwrap_or_default();
+                if !dirty.is_empty() {
+                    let branch = git.current_branch().ok().flatten().unwrap_or_default();
+                    let action = RunAction::SaveWip {
+                        run: slug.to_string(),
+                        branch,
+                        dirty_files: dirty,
+                    };
+                    let prompt = render_prompt(store, slug, &action)?;
+                    if let Some(body) = &prompt {
+                        let _ = store.write_prompt(slug, "_run", action_tag(&action), body);
+                    }
+                    let position = Position {
+                        track: Track::Run,
+                        action: Some(action.clone()),
+                    };
+                    append_action_log(store, slug, &position.track, &action);
+                    // The engine's own state writes (drift sweep, journal) still
+                    // commit — commit_state stages ONLY `.darkrun`, never the
+                    // agent's work.
+                    let _ = crate::commit::commit_state(store, &format!("darkrun: tick {slug}"));
+                    return Ok(TickResult {
+                        run: slug.to_string(),
+                        position,
+                        action,
+                        prompt,
+                    });
+                }
+            }
+        }
+    }
+
     let position = derive_position(store, slug)?;
 
     let derived = match &position.action {
@@ -2221,6 +2288,7 @@ fn station_of(action: &RunAction) -> Option<&str> {
         RunAction::RunReview { .. }
         | RunAction::PendingSeal { .. }
         | RunAction::Sealed { .. }
+        | RunAction::SaveWip { .. }
         | RunAction::Noop { .. } => None,
     }
 }
@@ -4908,6 +4976,69 @@ mod tests {
         git(&["commit", "-q", "-m", "init"]);
         let store = StateStore::new(&root);
         (dir, root, store)
+    }
+
+
+    // ── Pre-derive clean-tree gate (save_wip) ───────────────────────────────
+
+    /// Uncommitted AGENT work (outside `.darkrun/`) blocks the tick with a
+    /// `save_wip` action listing the loose paths; committing clears the gate.
+    /// The engine never authors the agent's commits.
+    #[test]
+    fn tick_blocks_on_uncommitted_agent_work_with_save_wip() {
+        let (_d, root, store) = git_store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+
+        // The agent leaves loose source work in the project tree.
+        std::fs::write(root.join("scratch.rs"), "fn main() {}\n").unwrap();
+        let t = run_tick(&store, "r").expect("tick");
+        match &t.action {
+            RunAction::SaveWip { dirty_files, branch, .. } => {
+                assert!(
+                    dirty_files.iter().any(|p| p == "scratch.rs"),
+                    "the loose path is listed: {dirty_files:?}"
+                );
+                assert!(!branch.is_empty(), "the holding branch is named");
+            }
+            other => panic!("expected SaveWip, got {other:?}"),
+        }
+        let prompt = t.prompt.expect("save_wip renders a prompt");
+        assert!(prompt.contains("scratch.rs"), "prompt lists the file:\n{prompt}");
+        assert!(prompt.contains("Save Work in Progress"), "{prompt}");
+
+        // Committing the work clears the gate — the next tick proceeds.
+        for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "scratch"]] {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let t2 = run_tick(&store, "r").expect("tick 2");
+        assert!(
+            !matches!(t2.action, RunAction::SaveWip { .. }),
+            "clean tree ticks past the gate: {:?}",
+            t2.action
+        );
+    }
+
+    /// Engine bookkeeping (`.darkrun/`, `.gitignore`) never trips the gate —
+    /// only the agent's own work does.
+    #[test]
+    fn engine_state_writes_do_not_trip_the_save_wip_gate() {
+        let (_d, _root, store) = git_store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        // The run's state dir is busy with engine writes (run.md, state.json…)
+        // — and `.darkrun/` is gitignored in this repo besides. A plain tick
+        // must derive a real action, not SaveWip.
+        let t = run_tick(&store, "r").expect("tick");
+        assert!(
+            !matches!(t.action, RunAction::SaveWip { .. }),
+            "engine state alone never blocks: {:?}",
+            t.action
+        );
     }
 
     /// #4: a station branch identical to run-main carries no merge debt, so the
