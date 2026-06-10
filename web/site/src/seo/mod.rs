@@ -57,7 +57,7 @@ pub fn feed_rss() -> String {
     let mut items = String::new();
     for post in POSTS {
         let link = format!("{SITE_URL}/blog/{}", post.slug);
-        let pub_date = post.date.to_rfc2822();
+        let pub_date = rfc2822_date(post.date);
         items.push_str(&format!(
             "    <item>\n      <title>{title}</title>\n      <link>{link}</link>\n      <guid>{link}</guid>\n      <pubDate>{pub_date}</pubDate>\n      <description>{summary}</description>\n    </item>\n",
             title = xml_escape(post.title),
@@ -80,7 +80,8 @@ pub fn feed_atom() -> String {
         .iter()
         .map(|post| post.date)
         .max()
-        .map(xml_escape)
+        .map(rfc3339_date)
+        .map(|d| xml_escape(&d))
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
 
     let mut entries = String::new();
@@ -90,7 +91,7 @@ pub fn feed_atom() -> String {
             "  <entry>\n    <title>{title}</title>\n    <id>{link}</id>\n    <link href=\"{link}\"/>\n    <updated>{updated}</updated>\n    <summary>{summary}</summary>\n  </entry>\n",
             title = xml_escape(post.title),
             link = xml_escape(&link),
-            updated = xml_escape(post.date),
+            updated = xml_escape(&rfc3339_date(post.date)),
             summary = xml_escape(post.summary),
         ));
     }
@@ -126,6 +127,45 @@ pub fn feed_json() -> String {
         feed = json_string(&format!("{SITE_URL}/feed.json")),
         desc = json_string(SITE_DESCRIPTION),
         items = items.join(","),
+    )
+}
+
+/// Render a `YYYY-MM-DD` post date as RFC 3339 (midnight UTC) — the format
+/// Atom's `<updated>` requires. Non-conforming input passes through unchanged.
+fn rfc3339_date(date: &str) -> String {
+    if date.len() == 10 && date.as_bytes()[4] == b'-' && date.as_bytes()[7] == b'-' {
+        format!("{date}T00:00:00Z")
+    } else {
+        date.to_string()
+    }
+}
+
+/// Render a `YYYY-MM-DD` post date as RFC 2822 (midnight UTC) — the format
+/// RSS's `<pubDate>` requires. Non-conforming input passes through unchanged.
+fn rfc2822_date(date: &str) -> String {
+    let parts: Vec<&str> = date.splitn(3, '-').collect();
+    let [y, m, d] = parts[..] else {
+        return date.to_string();
+    };
+    let (Ok(year), Ok(month), Ok(day)) = (y.parse::<i64>(), m.parse::<u32>(), d.parse::<u32>())
+    else {
+        return date.to_string();
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return date.to_string();
+    }
+    // Day of week via Zeller's congruence (Gregorian).
+    let (zy, zm) = if month < 3 { (year - 1, month + 12) } else { (year, month) };
+    let k = zy % 100;
+    let j = zy / 100;
+    let h = (day as i64 + (13 * (zm as i64 + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;
+    const DOW: [&str; 7] = ["Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"];
+    const MON: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{}, {:02} {} {} 00:00:00 +0000",
+        DOW[h as usize], day, MON[(month - 1) as usize], year
     )
 }
 
@@ -328,6 +368,22 @@ mod tests {
         assert_eq!(v["@type"], "TechArticle");
         assert!(v.get("datePublished").is_none());
         assert_eq!(v["url"], format!("{SITE_URL}/docs/x"));
+    }
+
+
+    #[test]
+    fn feed_dates_render_in_the_required_formats() {
+        assert_eq!(rfc3339_date("2026-06-01"), "2026-06-01T00:00:00Z");
+        assert_eq!(rfc2822_date("2026-06-01"), "Mon, 01 Jun 2026 00:00:00 +0000");
+        assert_eq!(rfc2822_date("2024-02-29"), "Thu, 29 Feb 2024 00:00:00 +0000");
+        // Non-conforming input passes through rather than panicking.
+        assert_eq!(rfc3339_date("soon"), "soon");
+        assert_eq!(rfc2822_date("soon"), "soon");
+        // The feeds carry the fields.
+        assert!(feed_rss().contains("<pubDate>"));
+        let atom = feed_atom();
+        assert!(atom.contains("<updated>"));
+        assert!(atom.contains("T00:00:00Z"));
     }
 
 }
