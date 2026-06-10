@@ -1178,6 +1178,7 @@ dependencies = [
  "cookie",
  "document-features",
  "idna",
+ "indexmap",
  "log",
  "publicsuffix",
  "serde",
@@ -1390,7 +1391,7 @@ dependencies = [
 name = "darkrun-api"
 version = "0.2.1"
 dependencies = [
- "schemars 0.8.22",
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -1437,7 +1438,7 @@ dependencies = [
  "darkrun-api",
  "filetime",
  "nix",
- "schemars 0.8.22",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1544,7 +1545,7 @@ dependencies = [
  "nix",
  "rmcp",
  "rust-embed",
- "schemars 0.8.22",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1552,7 +1553,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "ureq 2.12.1",
+ "ureq",
 ]
 
 [[package]]
@@ -4446,7 +4447,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.7",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -6863,7 +6864,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.7",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -6965,7 +6966,7 @@ dependencies = [
  "pastey 0.2.3",
  "pin-project-lite",
  "rmcp-macros",
- "schemars 1.2.1",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -7171,18 +7172,6 @@ dependencies = [
 
 [[package]]
 name = "schemars"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
-dependencies = [
- "dyn-clone",
- "schemars_derive 0.8.22",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "schemars"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
@@ -7190,21 +7179,9 @@ dependencies = [
  "chrono",
  "dyn-clone",
  "ref-cast",
- "schemars_derive 1.2.1",
+ "schemars_derive",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "schemars_derive"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_derive_internals",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -7298,7 +7275,7 @@ dependencies = [
  "sentry-panic",
  "sentry-tracing",
  "tokio",
- "ureq 3.3.0",
+ "ureq",
 ]
 
 [[package]]
@@ -8554,35 +8531,21 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ureq"
-version = "2.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
-dependencies = [
- "base64",
- "log",
- "once_cell",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "url",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "ureq"
 version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
 dependencies = [
  "base64",
+ "cookie_store",
  "log",
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots 1.0.7",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -8956,15 +8919,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.7",
 ]
 
 [[package]]

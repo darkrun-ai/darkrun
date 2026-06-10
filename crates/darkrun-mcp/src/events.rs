@@ -108,14 +108,16 @@ fn otlp_export(event: &str, entry: &serde_json::Value) {
     std::thread::Builder::new()
         .name("darkrun-otlp".into())
         .spawn(move || {
-            let agent = ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(5))
+            let config = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(5)))
+                .http_status_as_error(false)
                 .build();
-            let mut req = agent.post(&url).set("Content-Type", "application/json");
+            let agent: ureq::Agent = config.into();
+            let mut req = agent.post(&url).header("Content-Type", "application/json");
             for (k, v) in &headers {
-                req = req.set(k, v);
+                req = req.header(k, v);
             }
-            let _ = req.send_string(&body.to_string());
+            let _ = req.send(body.to_string().as_bytes());
         })
         .ok();
 }

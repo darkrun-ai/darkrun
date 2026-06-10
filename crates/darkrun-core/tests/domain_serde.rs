@@ -188,7 +188,7 @@ fn status_schema_lists_all_five_tokens() {
     let variants = s["oneOf"].as_array().expect("oneOf array");
     let tokens: Vec<&str> = variants
         .iter()
-        .map(|v| v["enum"][0].as_str().expect("enum token"))
+        .map(|v| v["const"].as_str().expect("const token"))
         .collect();
     assert_eq!(
         tokens,
@@ -205,8 +205,9 @@ fn status_schema_has_title_and_description() {
 
 #[test]
 fn status_schema_is_draft07() {
+    // draft 2020-12 since schemars 1.x.
     let s = schema_value!(Status);
-    assert_eq!(s["$schema"], "http://json-schema.org/draft-07/schema#");
+    assert_eq!(s["$schema"], "https://json-schema.org/draft/2020-12/schema");
 }
 
 #[test]
@@ -298,7 +299,7 @@ fn station_phase_schema_lists_six_in_order() {
         .as_array()
         .expect("oneOf")
         .iter()
-        .map(|v| v["enum"][0].as_str().expect("token"))
+        .map(|v| v["const"].as_str().expect("token"))
         .collect();
     assert_eq!(
         tokens,
@@ -378,7 +379,7 @@ fn checkpoint_kind_schema_tokens() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v["enum"][0].as_str().unwrap())
+        .map(|v| v["const"].as_str().unwrap())
         .collect();
     assert_eq!(tokens, vec!["auto", "ask", "external", "await"]);
 }
@@ -446,7 +447,7 @@ fn checkpoint_outcome_schema_tokens() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v["enum"][0].as_str().unwrap())
+        .map(|v| v["const"].as_str().unwrap())
         .collect();
     assert_eq!(tokens, vec!["advanced", "paused", "blocked", "awaiting"]);
 }
@@ -551,7 +552,7 @@ fn feedback_severity_schema_tokens() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v["enum"][0].as_str().unwrap())
+        .map(|v| v["const"].as_str().unwrap())
         .collect();
     assert_eq!(tokens, vec!["blocker", "high", "medium", "low"]);
 }
@@ -644,7 +645,7 @@ fn feedback_status_schema_lists_eight() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v["enum"][0].as_str().unwrap())
+        .map(|v| v["const"].as_str().unwrap())
         .collect();
     assert_eq!(tokens.len(), 8);
     assert!(tokens.contains(&"non_actionable"));
@@ -1125,7 +1126,7 @@ fn run_nested_frontmatter_status_roundtrips() {
 #[test]
 fn run_schema_references_run_frontmatter_definition() {
     let s = schema_value!(Run);
-    assert!(s["definitions"].get("RunFrontmatter").is_some());
+    assert!(s["$defs"].get("RunFrontmatter").is_some());
 }
 
 // ===========================================================================
@@ -1911,7 +1912,7 @@ fn checkpoint_every_kind_outcome_pair_roundtrips() {
 #[test]
 fn checkpoint_schema_references_kind_and_outcome_definitions() {
     let s = schema_value!(Checkpoint);
-    let defs = s["definitions"].as_object().expect("definitions");
+    let defs = s["$defs"].as_object().expect("definitions");
     assert!(defs.contains_key("CheckpointKind"));
     assert!(defs.contains_key("CheckpointOutcome"));
 }
@@ -2075,7 +2076,7 @@ fn station_missing_station_is_an_error() {
 #[test]
 fn station_schema_references_definitions() {
     let s = schema_value!(Station);
-    let defs = s["definitions"].as_object().unwrap();
+    let defs = s["$defs"].as_object().unwrap();
     assert!(defs.contains_key("Status"));
     assert!(defs.contains_key("StationPhase"));
     assert!(defs.contains_key("Checkpoint"));
@@ -2244,7 +2245,7 @@ fn feedback_body_defaults_when_omitted() {
 #[test]
 fn feedback_schema_references_status_and_severity() {
     let s = schema_value!(Feedback);
-    let defs = s["definitions"].as_object().unwrap();
+    let defs = s["$defs"].as_object().unwrap();
     assert!(defs.contains_key("FeedbackStatus"));
     assert!(defs.contains_key("FeedbackSeverity"));
 }
@@ -2356,8 +2357,9 @@ fn json_to_yaml_to_json_preserves_run() {
 
 #[test]
 fn every_enum_schema_is_valid_draft07() {
-    // Each enum schema must declare the draft-07 meta-schema.
-    let draft = "http://json-schema.org/draft-07/schema#";
+    // Each enum schema must declare its meta-schema (draft 2020-12 since
+    // schemars 1.x).
+    let draft = "https://json-schema.org/draft/2020-12/schema";
     assert_eq!(schema_value!(Status)["$schema"], draft);
     assert_eq!(schema_value!(StationPhase)["$schema"], draft);
     assert_eq!(schema_value!(CheckpointKind)["$schema"], draft);
@@ -2443,8 +2445,8 @@ fn every_enum_schema_variant_carries_a_description() {
                 variant["description"].is_string(),
                 "each variant must carry a description"
             );
-            // Exactly one token per variant.
-            assert_eq!(variant["enum"].as_array().unwrap().len(), 1);
+            // Exactly one token per variant (draft 2020-12 emits `const`).
+            assert!(variant["const"].is_string(), "one const token per variant");
             assert_eq!(variant["type"], "string");
         }
     }
@@ -2718,7 +2720,7 @@ fn station_with_each_checkpoint_kind_roundtrips() {
 fn nested_struct_schemas_reference_inner_definitions() {
     // RunFrontmatter embeds RunGit and Status.
     let s = schema_value!(RunFrontmatter);
-    let defs = s["definitions"].as_object().expect("definitions");
+    let defs = s["$defs"].as_object().expect("definitions");
     assert!(defs.contains_key("RunGit"));
     assert!(defs.contains_key("Status"));
 }
@@ -2726,7 +2728,7 @@ fn nested_struct_schemas_reference_inner_definitions() {
 #[test]
 fn unit_frontmatter_schema_references_status_definition() {
     let s = schema_value!(UnitFrontmatter);
-    assert!(s["definitions"]
+    assert!(s["$defs"]
         .as_object()
         .unwrap()
         .contains_key("Status"));
@@ -2735,7 +2737,7 @@ fn unit_frontmatter_schema_references_status_definition() {
 #[test]
 fn unit_schema_references_unit_frontmatter_definition() {
     let s = schema_value!(Unit);
-    assert!(s["definitions"]
+    assert!(s["$defs"]
         .as_object()
         .unwrap()
         .contains_key("UnitFrontmatter"));
@@ -2744,7 +2746,7 @@ fn unit_schema_references_unit_frontmatter_definition() {
 #[test]
 fn pass_schema_references_pass_beat_definition() {
     let s = schema_value!(Pass);
-    assert!(s["definitions"]
+    assert!(s["$defs"]
         .as_object()
         .unwrap()
         .contains_key("PassBeat"));
@@ -2971,7 +2973,7 @@ fn status_token_set_matches_const_table() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v["enum"][0].as_str().unwrap().to_string())
+        .map(|v| v["const"].as_str().unwrap().to_string())
         .collect();
     let table: BTreeSet<String> = ["pending", "active", "in_progress", "completed", "blocked"]
         .iter()
@@ -2987,7 +2989,7 @@ fn feedback_status_token_set_matches_const_table() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v["enum"][0].as_str().unwrap().to_string())
+        .map(|v| v["const"].as_str().unwrap().to_string())
         .collect();
     let table: BTreeSet<String> = ALL_FEEDBACK_STATUSES
         .iter()
