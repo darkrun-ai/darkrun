@@ -1,13 +1,14 @@
 ---
 name: Lock full-brief scope and non-goals; separate protocol-green from build-green
 unit_type: ''
-status: in_progress
+status: completed
 depends_on:
 - frame-protocol-problem
 worker: distiller
 station: frame
 branch: darkrun/darkrun-sim/units/frame/frame-scope-nongoals
 started_at: 2026-06-10T06:39:41.048462+00:00
+completed_at: 2026-06-10T06:40:40.785606+00:00
 iterations:
 - worker: framer
   started_at: 2026-06-10T06:39:41.048462+00:00
