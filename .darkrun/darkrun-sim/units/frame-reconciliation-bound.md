@@ -6,6 +6,7 @@ depends_on:
 - frame-protocol-problem
 worker: ''
 station: frame
+branch: darkrun/darkrun-sim/units/frame/frame-reconciliation-bound
 reviews:
   feasibility:
     at: 2026-06-09T23:10:04.256406+00:00

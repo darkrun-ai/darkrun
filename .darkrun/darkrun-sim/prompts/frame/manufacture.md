@@ -33,7 +33,9 @@ This is the build floor. You run the **Pass loop** — _Plan → Make → Challe
 
 Dispatch the **framer** beat in parallel across these wave-ready Units:
 
-- `frame-protocol-problem`
+- `frame-reconciliation-bound`
+
+- `frame-scope-nongoals`
 
 
 
@@ -42,7 +44,9 @@ Dispatch the **framer** beat in parallel across these wave-ready Units:
 
 Every wave Unit is isolated on its own branch + worktree, forked off the station branch. Run that Unit's beat **inside its worktree** so its diff never tangles with another Unit's in-flight work; the manager lands each Unit back onto the station branch when it locks. Do **not** commit a Unit's work to the station branch yourself.
 
-- `frame-protocol-problem` → `/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/.claude/worktrees/floofy-sauteeing-coral/.darkrun/worktrees/darkrun-sim/units/frame/frame-protocol-problem` (branch `darkrun/darkrun-sim/units/frame/frame-protocol-problem`)
+- `frame-reconciliation-bound` → `/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/.claude/worktrees/floofy-sauteeing-coral/.darkrun/worktrees/darkrun-sim/units/frame/frame-reconciliation-bound` (branch `darkrun/darkrun-sim/units/frame/frame-reconciliation-bound`)
+
+- `frame-scope-nongoals` → `/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/.claude/worktrees/floofy-sauteeing-coral/.darkrun/worktrees/darkrun-sim/units/frame/frame-scope-nongoals` (branch `darkrun/darkrun-sim/units/frame/frame-scope-nongoals`)
 
 
 
