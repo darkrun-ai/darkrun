@@ -28,6 +28,7 @@ mod diff;
 mod error;
 mod gix_backend;
 pub mod merge;
+pub mod net;
 mod push;
 
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ pub use clone::{clone_repo, default_clone_dest, repo_name_from_url};
 pub use error::{GitError, Result};
 pub use gix_backend::GixBackend;
 pub use merge::{engine_protected_merge, is_engine_owned_state_path, ENGINE_STATE_PREFIX};
+pub use net::{ensure_noninteractive, network_deadline, with_deadline};
 // `has_no_merge_debt` + `is_merge_in_progress` are defined below in this module.
 
 /// The recommended entry point: a [`GitBackend`] facade over a repository.

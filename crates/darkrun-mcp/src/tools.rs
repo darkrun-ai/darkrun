@@ -68,6 +68,10 @@ impl DarkrunServer {
     /// Build a server rooted at `repo_root` sharing the given in-memory session
     /// registry with the in-process HTTP/WS server.
     pub fn with_sessions(repo_root: impl Into<PathBuf>, sessions: SessionRegistry) -> Self {
+        // Every credential path goes non-interactive ONCE per process, so a git
+        // push/fetch with a missing credential fails fast (bounded by the
+        // network deadline) instead of hanging a tick on a prompt.
+        darkrun_git::ensure_noninteractive();
         Self {
             repo_root: Arc::new(repo_root.into()),
             sessions,

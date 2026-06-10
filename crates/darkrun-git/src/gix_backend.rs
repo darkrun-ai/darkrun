@@ -946,39 +946,50 @@ impl GitBackend for GixBackend {
         // then drive the receive-pack exchange in `push::send_pack`. HTTPS auth
         // (a token) is read from the environment the engine already exports for
         // its shell pushes, so both backends authenticate the same way.
-        let repo = gix::open(worktree_path).map_err(gix_err)?;
-        let new_oid = repo.head_commit().map_err(gix_err)?.id;
-        let url = repo
-            .find_remote("origin")
-            .map_err(gix_err)?
-            .url(gix::remote::Direction::Push)
-            .ok_or_else(|| GitError::Gix("origin has no push URL".into()))?
-            .to_owned();
-        let account = crate::push::credentials_for(&url);
-        crate::push::send_pack(&repo, url, account, branch, new_oid)
+        // Bounded: the whole exchange runs under the network deadline so an
+        // unresponsive remote can never wedge a tick (the predecessor's #333).
+        let wt = worktree_path.to_path_buf();
+        let branch = branch.to_string();
+        crate::net::with_deadline("push", move || {
+            let repo = gix::open(&wt).map_err(gix_err)?;
+            let new_oid = repo.head_commit().map_err(gix_err)?.id;
+            let url = repo
+                .find_remote("origin")
+                .map_err(gix_err)?
+                .url(gix::remote::Direction::Push)
+                .ok_or_else(|| GitError::Gix("origin has no push URL".into()))?
+                .to_owned();
+            let account = crate::push::credentials_for(&url);
+            crate::push::send_pack(&repo, url, account, &branch, new_oid)
+        })
     }
 
     fn fetch(&self, worktree_path: &Path, branch: &str) -> Result<()> {
         // `git fetch origin <branch>` — pure-Rust transport (local/file + rustls
         // HTTPS). Under `blocking-network-client`, gix's async fetch fns are
         // maybe_async-stripped to blocking, so there's no `.await`.
-        let repo = gix::open(worktree_path).map_err(gix_err)?;
-        let remote = repo
-            .find_remote("origin")
-            .map_err(gix_err)?
-            .with_refspecs(
-                Some(format!("+refs/heads/{branch}:refs/remotes/origin/{branch}").as_str()),
-                gix::remote::Direction::Fetch,
-            )
-            .map_err(gix_err)?;
-        remote
-            .connect(gix::remote::Direction::Fetch)
-            .map_err(gix_err)?
-            .prepare_fetch(gix::progress::Discard, Default::default())
-            .map_err(gix_err)?
-            .receive(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
-            .map_err(gix_err)?;
-        Ok(())
+        // Bounded under the network deadline, same as push.
+        let wt = worktree_path.to_path_buf();
+        let branch = branch.to_string();
+        crate::net::with_deadline("fetch", move || {
+            let repo = gix::open(&wt).map_err(gix_err)?;
+            let remote = repo
+                .find_remote("origin")
+                .map_err(gix_err)?
+                .with_refspecs(
+                    Some(format!("+refs/heads/{branch}:refs/remotes/origin/{branch}").as_str()),
+                    gix::remote::Direction::Fetch,
+                )
+                .map_err(gix_err)?;
+            remote
+                .connect(gix::remote::Direction::Fetch)
+                .map_err(gix_err)?
+                .prepare_fetch(gix::progress::Discard, Default::default())
+                .map_err(gix_err)?
+                .receive(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+                .map_err(gix_err)?;
+            Ok(())
+        })
     }
 
     fn rebase_onto(&self, worktree_path: &Path, upstream: &str) -> Result<()> {
