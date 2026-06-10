@@ -28,6 +28,7 @@ const RUN_REVIEWERS: &[&str] = &[
     "regression-auditor",
     "security-auditor",
     "accessibility-auditor",
+    "runtime-verifier",
 ];
 const REFLECTIONS: &[&str] = &["architecture", "process", "quality", "velocity"];
 

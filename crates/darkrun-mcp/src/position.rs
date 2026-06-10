@@ -406,6 +406,12 @@ pub struct PromptContext {
     /// The agent's uncommitted paths, for `SaveWip`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dirty_files: Vec<String>,
+    /// The provider compare URL (pre-filled create-PR form) — the manual
+    /// fallback surfaced when no hosting client could open the PR itself.
+    /// For `ExternalReviewRequested` (station branch -> run-main) and
+    /// `PendingSeal` (run-main -> base).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compare_url: Option<String>,
     /// A human-readable reason, for `Escalate` / `SafeRepair`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -1889,9 +1895,19 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         RunAction::Escalate { reason, .. } | RunAction::SafeRepair { reason, .. } => {
             ctx.reason = Some(reason.clone());
         }
-        RunAction::ExternalReviewRequested { target, .. } => {
+        RunAction::ExternalReviewRequested { station, target, .. } => {
             ctx.target = Some(target.clone());
             ctx.kind = Some(CheckpointKind::External);
+            // No PR was opened programmatically -> hand the operator the
+            // provider's pre-filled create-PR form for this station's branch.
+            if target.is_empty() {
+                let repo_root = cascade_repo_root(store);
+                ctx.compare_url = crate::hosting::compare_url(
+                    &repo_root,
+                    &crate::lifecycle::run_main_branch(slug),
+                    &crate::lifecycle::station_branch(slug, station),
+                );
+            }
         }
         RunAction::MergeConflict { branch, conflict_paths, .. } => {
             ctx.branch = Some(branch.clone());
@@ -1904,6 +1920,27 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
         RunAction::PendingSeal { kind, .. } => {
             ctx.seal = Some(kind.as_str().to_string());
             ctx.branch_status = branch_status_token(store, slug);
+            // The seal merge is run-main -> base; when no delivery PR exists,
+            // surface the provider's pre-filled form for the manual open.
+            let has_pr = store
+                .read_run(slug)
+                .ok()
+                .and_then(|r| r.frontmatter.external_refs.pr_url)
+                .is_some();
+            if !has_pr {
+                let repo_root = cascade_repo_root(store);
+                let base = store
+                    .read_state(slug)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.base_branch)
+                    .unwrap_or_else(|| crate::lifecycle::resolve_base_branch(store));
+                ctx.compare_url = crate::hosting::compare_url(
+                    &repo_root,
+                    &base,
+                    &crate::lifecycle::run_main_branch(slug),
+                );
+            }
         }
         RunAction::Sealed { .. } => {
             // Surface where run-main stands vs the default branch so the operator
@@ -2244,6 +2281,16 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
 
     // Advance the phase write-cache based on the derived action.
     advance_state(store, slug, &action)?;
+
+    // The run is done (sealed, or holding for its seal merge): flip the
+    // run-level delivery draft PR to ready-for-review — the human's next move
+    // is the merge, and a draft can't be merged. Once-guarded; best-effort.
+    if matches!(
+        action,
+        RunAction::Sealed { .. } | RunAction::PendingSeal { .. }
+    ) {
+        flip_run_pr_ready(store, slug, hosting);
+    }
 
     // Append the resolved action to the run's append-only audit journal — the
     // ordered trail the reflection pass and the operator read. Best-effort:
@@ -2848,7 +2895,101 @@ pub fn run_start(
         &format!("darkrun: enter station {first_name}"),
     );
 
+    // Open the run's DELIVERY draft PR (run-main -> base) the moment the run
+    // exists — the predecessor's intent-create draft. It stays draft for the
+    // whole run (reviewers see work-in-progress, nobody merges it early) and
+    // the engine flips it ready at seal, just before the operator's merge.
+    // Best-effort: no hosting client → no PR; the seal's compare-URL fallback
+    // covers the manual path.
+    open_run_draft_pr(store, slug);
+
     Ok(run)
+}
+
+/// Open the run-level draft PR (`darkrun/<slug>/main` -> base) and stamp its
+/// url + draft status on the run's `external_refs`. Best-effort and idempotent:
+/// hosting unavailable, an open failure, or an already-recorded PR all no-op.
+fn open_run_draft_pr(store: &StateStore, slug: &str) {
+    let repo_root = cascade_repo_root(store);
+    let hosting = crate::hosting::ApiHosting::resolve(&repo_root);
+    open_run_draft_pr_with(store, slug, &hosting);
+}
+
+/// [`open_run_draft_pr`] with an injected hosting client (the test seam).
+pub fn open_run_draft_pr_with<H: crate::hosting::Hosting>(
+    store: &StateStore,
+    slug: &str,
+    hosting: &H,
+) {
+    let Ok(mut run) = store.read_run(slug) else {
+        return;
+    };
+    if run.frontmatter.external_refs.pr_url.is_some() || !hosting.available() {
+        return;
+    }
+    let head = crate::lifecycle::run_main_branch(slug);
+    let base = store
+        .read_state(slug)
+        .ok()
+        .flatten()
+        .and_then(|s| s.base_branch)
+        .unwrap_or_else(|| crate::lifecycle::resolve_base_branch(store));
+    let req = crate::hosting::OpenRequest {
+        head,
+        base,
+        title: run.title.clone(),
+        body: format!(
+            "darkrun run `{slug}` — opened as a draft at run start; the engine \
+             marks it ready for review when the run seals. Merging it lands the \
+             run's work."
+        ),
+    };
+    if let Some(url) = hosting.open_draft(&req) {
+        run.frontmatter.external_refs.pr_url = Some(url);
+        run.frontmatter
+            .external_refs
+            .other
+            .insert("pr_status".into(), "draft".into());
+        let _ = store.write_run(&run);
+        let _ = crate::commit::commit_state_if_dirty(
+            store,
+            &format!("darkrun: open run draft PR for {slug}"),
+        );
+    }
+}
+
+/// Flip the run's delivery draft PR to **ready for review** — called when the
+/// run seals, just before the operator's merge. Guarded by the recorded
+/// `pr_status` so it flips exactly once; a failed flip is stamped `failed`
+/// (the operator readies it by hand — their merge is the close signal either
+/// way, so a flip failure never blocks the seal).
+fn flip_run_pr_ready<H: crate::hosting::Hosting>(store: &StateStore, slug: &str, hosting: &H) {
+    let Ok(mut run) = store.read_run(slug) else {
+        return;
+    };
+    let Some(url) = run.frontmatter.external_refs.pr_url.clone() else {
+        return;
+    };
+    let status = run
+        .frontmatter
+        .external_refs
+        .other
+        .get("pr_status")
+        .cloned()
+        .unwrap_or_default();
+    if status != "draft" {
+        return;
+    }
+    let new_status = if hosting.mark_ready(&url) { "ready" } else { "failed" };
+    run.frontmatter
+        .external_refs
+        .other
+        .insert("pr_status".into(), new_status.into());
+    let _ = store.write_run(&run);
+    let _ = crate::commit::commit_state_if_dirty(
+        store,
+        &format!("darkrun: run PR marked {new_status} for {slug}"),
+    );
 }
 
 /// Enter a station's branch + worktree (universal per-station fork) and record
@@ -4978,6 +5119,130 @@ mod tests {
         (dir, root, store)
     }
 
+
+
+    // ── Run-level delivery PR: draft at start, ready at seal ───────────────
+
+    /// A recording mock: opens drafts, flips ready, remembers both.
+    struct DeliveryMock {
+        open_url: Option<&'static str>,
+        ready_ok: bool,
+        flipped: std::cell::RefCell<Vec<String>>,
+    }
+    impl crate::hosting::Hosting for DeliveryMock {
+        fn available(&self) -> bool {
+            self.open_url.is_some()
+        }
+        fn open_draft(&self, _req: &crate::hosting::OpenRequest) -> Option<String> {
+            self.open_url.map(str::to_string)
+        }
+        fn merge_state(&self, _pr_ref: &str) -> crate::hosting::MergeState {
+            crate::hosting::MergeState::Open
+        }
+        fn mark_ready(&self, pr_ref: &str) -> bool {
+            self.flipped.borrow_mut().push(pr_ref.to_string());
+            self.ready_ok
+        }
+    }
+
+    #[test]
+    fn run_draft_pr_opens_once_and_stamps_external_refs() {
+        let (_d, _root, store) = git_store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        let mock = DeliveryMock {
+            open_url: Some("https://example.test/pull/7"),
+            ready_ok: true,
+            flipped: Default::default(),
+        };
+        open_run_draft_pr_with(&store, "r", &mock);
+        let run = store.read_run("r").unwrap();
+        assert_eq!(
+            run.frontmatter.external_refs.pr_url.as_deref(),
+            Some("https://example.test/pull/7")
+        );
+        assert_eq!(
+            run.frontmatter.external_refs.other.get("pr_status").map(String::as_str),
+            Some("draft")
+        );
+        // Idempotent: a second call never re-opens.
+        open_run_draft_pr_with(&store, "r", &mock);
+        let run2 = store.read_run("r").unwrap();
+        assert_eq!(run2.frontmatter.external_refs.pr_url, run.frontmatter.external_refs.pr_url);
+    }
+
+    #[test]
+    fn run_pr_flips_ready_exactly_once_at_seal() {
+        let (_d, _root, store) = git_store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        let mock = DeliveryMock {
+            open_url: Some("https://example.test/pull/7"),
+            ready_ok: true,
+            flipped: Default::default(),
+        };
+        open_run_draft_pr_with(&store, "r", &mock);
+
+        flip_run_pr_ready(&store, "r", &mock);
+        assert_eq!(mock.flipped.borrow().len(), 1, "one flip");
+        let run = store.read_run("r").unwrap();
+        assert_eq!(
+            run.frontmatter.external_refs.other.get("pr_status").map(String::as_str),
+            Some("ready")
+        );
+        // Guarded: already-ready never re-flips.
+        flip_run_pr_ready(&store, "r", &mock);
+        assert_eq!(mock.flipped.borrow().len(), 1, "no second flip");
+    }
+
+    #[test]
+    fn run_pr_flip_failure_is_stamped_not_fatal() {
+        let (_d, _root, store) = git_store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        let mock = DeliveryMock {
+            open_url: Some("https://example.test/pull/7"),
+            ready_ok: false,
+            flipped: Default::default(),
+        };
+        open_run_draft_pr_with(&store, "r", &mock);
+        flip_run_pr_ready(&store, "r", &mock);
+        let run = store.read_run("r").unwrap();
+        assert_eq!(
+            run.frontmatter.external_refs.other.get("pr_status").map(String::as_str),
+            Some("failed"),
+            "a failed flip is recorded for the operator, never fatal"
+        );
+    }
+
+    // ── Compare-URL fallback ────────────────────────────────────────────────
+
+    #[test]
+    fn compare_url_builds_provider_create_forms() {
+        let (_d, root, _store) = git_store();
+        let set_origin = |url: &str| {
+            let _ = std::process::Command::new("git")
+                .arg("-C").arg(&root)
+                .args(["remote", "remove", "origin"]).status();
+            assert!(std::process::Command::new("git")
+                .arg("-C").arg(&root)
+                .args(["remote", "add", "origin", url])
+                .status().unwrap().success());
+        };
+        set_origin("git@github.com:acme/widgets.git");
+        assert_eq!(
+            crate::hosting::compare_url(&root, "main", "darkrun/r/frame").as_deref(),
+            Some("https://github.com/acme/widgets/compare/main...darkrun/r/frame?expand=1")
+        );
+        set_origin("https://gitlab.com/acme/widgets.git");
+        let gl = crate::hosting::compare_url(&root, "main", "darkrun/r/frame").unwrap();
+        assert!(gl.starts_with("https://gitlab.com/acme/widgets/-/merge_requests/new?"), "{gl}");
+        assert!(gl.contains("source_branch%5D=darkrun%2Fr%2Fframe"), "{gl}");
+        assert!(gl.contains("target_branch%5D=main"), "{gl}");
+    }
+
+    #[test]
+    fn compare_url_is_none_without_a_recognized_origin() {
+        let (_d, root, _store) = git_store();
+        assert!(crate::hosting::compare_url(&root, "main", "x").is_none(), "no origin");
+    }
 
     // ── Pre-derive clean-tree gate (save_wip) ───────────────────────────────
 
