@@ -35,8 +35,10 @@ darkrun-api = { workspace = true }
 # Embedded factory corpus — the source for /factories.
 darkrun-content = { workspace = true }
 
-# Domain enums (CheckpointKind) used when rendering station detail. Pulled in for
-# types only; the lock engine is unix-gated so this stays wasm-clean.
+# Domain model + engine derivation. Station-detail rendering uses CheckpointKind;
+# /browse reuses the engine's own `frontmatter`, `RunState`, and `derive` to parse
+# a remote repo's `.darkrun/` workspace client-side. The lock engine is unix-gated
+# so this stays wasm-clean.
 darkrun-core = { workspace = true }
 
 # Dioxus with the web renderer and the router. `default-features = false` keeps
@@ -50,6 +52,17 @@ dioxus = { version = "0.7", default-features = false, features = ["lib", "web", 
 
 # Markdown rendering for /docs and the concept pages.
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
+# Serialization for the GitHub Trees API responses and state.json.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# CORS-enabled browser fetch for /browse (GitHub Trees API + raw.githubusercontent).
+# `http` is the only feature we use; default features pull in websocket/eventsource.
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json"] }
+
+# Concurrency for the per-run fan-out fetches in /browse (join_all). `std` only.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 
 [features]
 default = []

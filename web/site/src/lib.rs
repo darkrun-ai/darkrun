@@ -17,10 +17,13 @@
 //! The crate compiles to `wasm32-unknown-unknown` (the shipped target) and the
 //! native host (for the static-site generator).
 
+pub mod auth;
 pub mod content;
 pub mod factory_view;
+pub mod history;
 pub mod layout;
 pub mod pages;
+pub mod remote;
 pub mod route;
 pub mod seo;
 pub mod theme_toggle;
