@@ -2674,6 +2674,11 @@ pub fn run_start(
 
     let now = Utc::now().to_rfc3339();
     let resolved_title = title.clone().unwrap_or_else(|| slug.to_string());
+    // Stamp the creator's git identity so the run is "mine" from birth — the
+    // branch-authorship walk needs commits, which a brand-new run lacks.
+    let created_by = darkrun_git::current_identity_email(cascade_repo_root(store))
+        .ok()
+        .flatten();
     let frontmatter = RunFrontmatter {
         title: title.clone(),
         factory: factory_name.to_string(),
@@ -2681,6 +2686,7 @@ pub fn run_start(
         active_station: first_name.clone(),
         status: Status::Active,
         started_at: Some(now.clone()),
+        created_by,
         ..Default::default()
     };
     let body = format!("# {resolved_title}\n");

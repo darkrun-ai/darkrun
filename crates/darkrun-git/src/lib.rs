@@ -42,6 +42,26 @@ pub use error::{GitError, Result};
 pub use gix_backend::GixBackend;
 pub use merge::{engine_protected_merge, is_engine_owned_state_path, ENGINE_STATE_PREFIX};
 pub use net::{ensure_noninteractive, network_deadline, with_deadline};
+
+/// Resolve a checkout dir to its PROJECT root: a linked worktree maps to the
+/// main repository's working dir (the shared `.git`'s parent); a main checkout
+/// maps to itself; a non-git dir passes through. The identity the discovery
+/// registry keys projects on — every worktree of a repo is ONE project.
+pub fn project_root_of(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(repo) = gix::open(path) {
+        let git_dir = repo.git_dir().to_path_buf();
+        let common = repo.common_dir().to_path_buf();
+        if git_dir != common {
+            if let Some(main) = common.parent() {
+                return main.to_path_buf();
+            }
+        }
+        if let Some(wd) = repo.workdir() {
+            return wd.to_path_buf();
+        }
+    }
+    path.to_path_buf()
+}
 // `has_no_merge_debt` + `is_merge_in_progress` are defined below in this module.
 
 /// The recommended entry point: a [`GitBackend`] facade over a repository.

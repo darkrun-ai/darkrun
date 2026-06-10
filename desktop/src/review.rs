@@ -323,7 +323,21 @@ fn review_body(
                 on_select: move |id| tab_sig.set(id),
             }
             div { style: "margin-top:14px;",
-                {tab_body(&active, &units, &outputs, &knowledge, &unit_outputs, &feedback_entries, &review, annotate_target, inbox_open)}
+                {
+                    // The SAME jump/resolve/dismiss handler the inbox uses —
+                    // the Feedback tab's chips act identically.
+                    let fb_action = EventHandler::new(feedback_action_handler(
+                        cfg.clone(),
+                        run_slug.clone(),
+                        station.clone(),
+                        feedback,
+                        outputs.clone(),
+                        active_tab,
+                        annotate_target,
+                        inbox_open,
+                    ));
+                    tab_body(&active, &units, &outputs, &knowledge, &unit_outputs, &feedback_entries, &review, annotate_target, inbox_open, fb_action)
+                }
             }
         }
 
@@ -417,11 +431,12 @@ fn ReviewHeader(
             div { style: "margin-top:14px;",
                 StationStrip { stations }
             }
-            // The phase subheader, scoped to the current station.
-            div { style: "{sub_style}",
-                if let Some(st) = station.clone() {
-                    span { "station: {st}" }
-                }
+            // The phase subheader, scoped to the current station: the label on
+            // its own row, the phase pipeline centered beneath the line.
+            if let Some(st) = station.clone() {
+                div { style: "{sub_style}", span { "station: {st}" } }
+            }
+            div { style: "display:flex;justify-content:center;margin-top:6px;",
                 StationPipeline { dots: strip_for(phase), labels: true }
             }
         }
@@ -440,11 +455,12 @@ fn tab_body(
     review: &ReviewSessionPayload,
     annotate_target: Signal<Option<AnnotateTarget>>,
     inbox_open: Signal<bool>,
+    fb_action: EventHandler<(String, FeedbackAction)>,
 ) -> Element {
     match active {
         "outputs" => output_tab(outputs, feedback, annotate_target),
         "knowledge" => knowledge_tab(knowledge),
-        "feedback" => feedback_tab(feedback, inbox_open),
+        "feedback" => feedback_tab(feedback, inbox_open, fb_action),
         "overview" => overview_tab(review),
         // Default to the units tab.
         _ => unit_tab(units, &review.units, unit_outputs, feedback, annotate_target),
@@ -696,7 +712,11 @@ fn knowledge_tab(knowledge: &[darkrun_api::session::KnowledgeFile]) -> Element {
 
 /// The Feedback tab: the consolidated, severity-grouped inbox of every station
 /// annotation. A persistent header button mirrors this; both render the same data.
-fn feedback_tab(feedback: &[FeedbackEntry], inbox_open: Signal<bool>) -> Element {
+fn feedback_tab(
+    feedback: &[FeedbackEntry],
+    inbox_open: Signal<bool>,
+    fb_action: EventHandler<(String, FeedbackAction)>,
+) -> Element {
     let mut inbox = inbox_open;
     if feedback.is_empty() {
         return rsx! {
@@ -705,7 +725,7 @@ fn feedback_tab(feedback: &[FeedbackEntry], inbox_open: Signal<bool>) -> Element
     }
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:8px;",
-            {feedback_inbox(feedback.to_vec(), None::<EventHandler<(String, FeedbackAction)>>)}
+            {feedback_inbox(feedback.to_vec(), Some(fb_action))}
             div { style: "margin-top:4px;",
                 Button {
                     variant: ButtonVariant::Ghost,
@@ -757,6 +777,69 @@ fn overview_tab(review: &ReviewSessionPayload) -> Element {
     }
 }
 
+/// Build the jump / resolve / dismiss handler shared by the inbox panel AND
+/// the Feedback tab — both surfaces act on the same records identically.
+/// Feedback items are read FRESH from the signal per action, so a row acted on
+/// after a refetch still resolves.
+#[allow(clippy::too_many_arguments)]
+fn feedback_action_handler(
+    cfg: ConnConfig,
+    run: Option<String>,
+    station: Option<String>,
+    feedback: Signal<Vec<FeedbackItem>>,
+    outputs: Vec<OutputArtifact>,
+    active_tab: Signal<String>,
+    annotate_target: Signal<Option<AnnotateTarget>>,
+    inbox_open: Signal<bool>,
+) -> impl FnMut((String, FeedbackAction)) + 'static {
+    let mut active_tab = active_tab;
+    let mut annotate_target = annotate_target;
+    let mut inbox_open = inbox_open;
+    move |(id, action): (String, FeedbackAction)| {
+        let items = feedback.read().clone();
+        // Jump is a surface action: focus the anchored artifact instead of
+        // mutating the record.
+        if action == FeedbackAction::Jump {
+            if let Some(target) = jump_target(&items, &id, &outputs) {
+                // Switch to the owning tab, open the annotate surface on the
+                // anchored artifact, and close the inbox so it's in view.
+                active_tab.set(if target.visual {
+                    "outputs".to_string()
+                } else {
+                    "units".to_string()
+                });
+                annotate_target.set(Some(target));
+                inbox_open.set(false);
+            }
+            return;
+        }
+        // Resolve / dismiss mutate the record's status.
+        let new_status = match action {
+            FeedbackAction::Resolve => Some(FeedbackStatus::Addressed),
+            FeedbackAction::Dismiss => Some(FeedbackStatus::NonActionable),
+            FeedbackAction::Jump => None,
+        };
+        let (Some(status), Some(run), Some(station)) =
+            (new_status, run.clone(), station.clone())
+        else {
+            return;
+        };
+        let cfg = cfg.clone();
+        let mut feedback = feedback;
+        spawn(async move {
+            let req = darkrun_api::FeedbackUpdateRequest {
+                status: Some(status),
+                ..Default::default()
+            };
+            if wire::update_feedback(&cfg, &run, &station, &id, &req).await.is_ok() {
+                if let Ok(resp) = wire::fetch_feedback(&cfg, &run, &station).await {
+                    feedback.set(resp.items);
+                }
+            }
+        });
+    }
+}
+
 /// The feedback inbox panel, surfaced under the header when the operator opens
 /// it. Resolve / dismiss chips PUT the feedback status back over the wire; a
 /// successful write re-fetches the list so the count updates. The jump chip
@@ -777,59 +860,16 @@ fn feedback_inbox_panel(
     // Snapshot the outputs so the Jump resolver can match a feedback locator to
     // a declared output (and reuse its visual/path/url) without borrowing.
     let outputs = outputs.to_vec();
-    let on_action = {
-        let cfg = cfg.clone();
-        let run = run.clone();
-        let station = station.clone();
-        let items = feedback.read().clone();
-        let mut active_tab = active_tab;
-        let mut annotate_target = annotate_target;
-        let mut inbox_open = inbox_open;
-        move |(id, action): (String, FeedbackAction)| {
-            // Jump is a surface action: focus the anchored artifact instead of
-            // mutating the record.
-            if action == FeedbackAction::Jump {
-                if let Some(target) =
-                    jump_target(&items, &id, &outputs)
-                {
-                    // Switch to the owning tab, open the annotate surface on the
-                    // anchored artifact, and close the inbox so it's in view.
-                    active_tab.set(if target.visual {
-                        "outputs".to_string()
-                    } else {
-                        "units".to_string()
-                    });
-                    annotate_target.set(Some(target));
-                    inbox_open.set(false);
-                }
-                return;
-            }
-            // Resolve / dismiss mutate the record's status.
-            let new_status = match action {
-                FeedbackAction::Resolve => Some(FeedbackStatus::Addressed),
-                FeedbackAction::Dismiss => Some(FeedbackStatus::NonActionable),
-                FeedbackAction::Jump => None,
-            };
-            let (Some(status), Some(run), Some(station)) =
-                (new_status, run.clone(), station.clone())
-            else {
-                return;
-            };
-            let cfg = cfg.clone();
-            let mut feedback = feedback;
-            spawn(async move {
-                let req = darkrun_api::FeedbackUpdateRequest {
-                    status: Some(status),
-                    ..Default::default()
-                };
-                if wire::update_feedback(&cfg, &run, &station, &id, &req).await.is_ok() {
-                    if let Ok(resp) = wire::fetch_feedback(&cfg, &run, &station).await {
-                        feedback.set(resp.items);
-                    }
-                }
-            });
-        }
-    };
+    let on_action = feedback_action_handler(
+        cfg.clone(),
+        run.clone(),
+        station.clone(),
+        feedback,
+        outputs,
+        active_tab,
+        annotate_target,
+        inbox_open,
+    );
     rsx! {
         Card {
             div { style: "display:flex;align-items:center;gap:8px;margin-bottom:10px;",
@@ -2701,7 +2741,7 @@ mod tab_render_tests {
         let io = use_signal(|| false);
         let review = ReviewSessionPayload::default();
         let unit_outputs: BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>> = BTreeMap::new();
-        tab_body(active, &[], &[], &[], &unit_outputs, &[], &review, at, io)
+        tab_body(active, &[], &[], &[], &unit_outputs, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
     }
 
     #[test]
@@ -2734,7 +2774,7 @@ mod tab_render_tests {
                 crate::map::unit_view(&serde_json::json!({"slug":"u1","title":"Burst limiter","status":"completed","unit_type":"code"})),
                 crate::map::unit_view(&serde_json::json!({"slug":"u2","title":"Tests","status":"in_progress"})),
             ];
-            tab_body("units", &units, &[], &[], &uo, &[], &review, at, io)
+            tab_body("units", &units, &[], &[], &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         let mut dom = VirtualDom::new(UnitsPop); dom.rebuild_in_place(); let _ = dioxus_ssr::render(&dom);
         fn KnowPop() -> Element {
@@ -2743,7 +2783,7 @@ mod tab_render_tests {
             let review = ReviewSessionPayload::default();
             let uo: BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>> = BTreeMap::new();
             let know = vec![KnowledgeFile { name: "notes.md".into(), content: "# notes\nbody".into() }];
-            tab_body("knowledge", &[], &[], &know, &uo, &[], &review, at, io)
+            tab_body("knowledge", &[], &[], &know, &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         let mut dom2 = VirtualDom::new(KnowPop); dom2.rebuild_in_place(); let _ = dioxus_ssr::render(&dom2);
     }
@@ -2764,7 +2804,7 @@ mod tab_render_tests {
                 OutputArtifact { station: "build".into(), name: "page.html".into(), artifact_type: OutputArtifactType::Html, language: None, directory: None, content: Some("<h1>hi</h1>".into()), relative_path: Some("build/page.html".into()), run_relative_path: None },
                 OutputArtifact { station: "build".into(), name: "shot.png".into(), artifact_type: OutputArtifactType::Image, language: None, directory: None, content: None, relative_path: None, run_relative_path: Some("build/shot.png".into()) },
             ];
-            tab_body("outputs", &[], &outputs, &[], &uo, &[], &review, at, io)
+            tab_body("outputs", &[], &outputs, &[], &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         let mut dom = VirtualDom::new(OutPop); dom.rebuild_in_place(); let _ = dioxus_ssr::render(&dom);
     }
@@ -3048,14 +3088,14 @@ mod panel_render_tests {
                 st("build", Some("manufacture"), true),
                 st("prove", None, false),
             ];
-            tab_body("overview", &[], &[], &[], &Default::default(), &[], &review, at, io)
+            tab_body("overview", &[], &[], &[], &Default::default(), &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         fn Feedback() -> Element {
             let at = use_signal(|| None::<AnnotateTarget>);
             let io = use_signal(|| false);
             let review = ReviewSessionPayload::default();
             let entries = map::feedback_entries(&[fb_item("FB-1", Some("home.png"), "review: home")]);
-            tab_body("feedback", &[], &[], &[], &Default::default(), &entries, &review, at, io)
+            tab_body("feedback", &[], &[], &[], &Default::default(), &entries, &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         assert!(render(Overview).contains("Reflection"));
         assert!(render(Feedback).contains("open inbox panel"));

@@ -75,10 +75,36 @@ pub fn list(
         if archived && !include_archived {
             continue;
         }
-        let authored_by_me = email.as_deref().is_some_and(|email| {
-            darkrun_git::branch_authored_by(repo_root, &base, &run_branch(&run.slug), email)
-                .unwrap_or(false)
-        });
+        // Authorship: when the run's branch carries REAL work (unique commits
+        // past the base), branch authorship is authoritative — shared history
+        // outranks any stamp. When the branch is silent (a fresh run, or a
+        // pre-spine run that never committed), fall back to the `created_by`
+        // stamp; with neither, default to MINE — every run in this local
+        // workspace was created from this checkout.
+        let branch = run_branch(&run.slug);
+        let branch_has_work = darkrun_git::Git::open(repo_root)
+            .ok()
+            .map(|g| {
+                use darkrun_git::GitBackend;
+                g.branch_exists(&branch).unwrap_or(false)
+                    && !g.is_ancestor(&branch, &base).unwrap_or(true)
+            })
+            .unwrap_or(false);
+        let authored_by_me = if branch_has_work {
+            email.as_deref().is_some_and(|email| {
+                darkrun_git::branch_authored_by(repo_root, &base, &branch, email)
+                    .unwrap_or(false)
+            })
+        } else {
+            match (
+                run.frontmatter.created_by.as_deref().map(str::to_ascii_lowercase),
+                &email,
+            ) {
+                (Some(s), Some(e)) => &s == e,
+                (None, _) => true, // unknowable → local default: mine
+                _ => false,
+            }
+        };
         out.push(RunSummary {
             slug: run.slug,
             title: run.title,
@@ -171,7 +197,9 @@ mod tests {
         assert_eq!(runs[0].active_station, "frame");
         // A bare tempdir is not a git repo, so nothing is attributable: "Mine"
         // degrades to false rather than erroring.
-        assert!(!runs[0].authored_by_me);
+        // No branch work + no stamp → the LOCAL default is mine (the reported
+        // 'Mine shows nothing for my own runs' bug, fixed).
+        assert!(runs[0].authored_by_me);
     }
 
     #[test]

@@ -433,6 +433,11 @@ pub struct RunFrontmatter {
     /// RFC3339 completion timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    /// The git identity (email) that CREATED this run — stamped once at run
+    /// start so authorship is knowable even before any commit lands on the
+    /// run's branches (the Mine filter's fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
     /// Git integration policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<RunGit>,
