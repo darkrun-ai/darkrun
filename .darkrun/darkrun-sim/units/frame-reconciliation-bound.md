@@ -19,6 +19,11 @@ iterations:
   completed_at: 2026-06-10T06:40:01.928930+00:00
   result: advance
   note: 'Challenge pass attacked the reconciliation table. Each mapping is correct and seam-cited; the load-bearing one (no <subagent>/next_subagent_dispatch_block relay) was verified in Rust by both an explorer and the feasibility reviewer. Probed for unlisted dead assumptions that could let a later station port the brief literally: checked the brief''s other TS-isms — the record/replay split (decision #6) is preserved not dead (operator kept it: record locally, replay deployed), and the six-panel player is mapped to Dioxus, not dropped. No missing row that would mislead Shape. One nit, non-blocking: the table doesn''t explicitly call out that the brief''s "harness runs an agent tool-loop / spawns <subagent> blocks the instruction contains" is the SAME dead mechanism as the relay row — but the relay row already covers it, so Shape can''t be misled. No defect filed; advancing to distiller.'
+- worker: distiller
+  started_at: 2026-06-10T06:40:20.861034+00:00
+  completed_at: 2026-06-10T06:40:20.861034+00:00
+  result: advance
+  note: 'Resolve pass reconciled make + challenge. The reconciliation table maps every dead brief assumption to its darkrun replacement with a cited seam; challenge confirmed no mapping is wrong and no dead assumption is unlisted that could mislead a later station. The one nit (the dead "harness spawns <subagent> blocks" mechanism) is already subsumed by the relay row, so no rewrite needed — and the locked artifact passed value+feasibility review unchanged. Unit frame-reconciliation-bound satisfies its criterion: the dead-TS→darkrun reconciliation is bounded so later stations don''t port the brief literally. Done.'
 reviews:
   feasibility:
     at: 2026-06-09T23:10:04.256406+00:00
