@@ -64,7 +64,7 @@ impl Project {
     /// Project a discovered live engine into a [`Project`].
     fn from_engine(e: &DiscoveredEngine) -> Self {
         Project {
-            name: e.slug.clone(),
+            name: basename(&e.project_path).unwrap_or_else(|| e.slug.clone()),
             path: e.project_path.clone(),
             port: Some(e.port),
             harness: Some(e.harness.clone()),
@@ -1106,7 +1106,13 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
         .into_iter()
         .map(|rec| {
             let project = Project {
-                name: rec.name.clone().unwrap_or_else(|| rec.slug.clone()),
+                // The display name is the repo's name — record name first,
+                // else the path basename; never the hash-suffixed slug.
+                name: rec
+                    .name
+                    .clone()
+                    .or_else(|| basename(&rec.path))
+                    .unwrap_or_else(|| rec.slug.clone()),
                 path: rec.path,
                 port: None,
                 harness: None,
@@ -1138,6 +1144,7 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
 fn AddProjectForm(refresh: Signal<u32>) -> Element {
     let mut mode = use_signal(|| AddMode::Git);
     let mut value = use_signal(String::new);
+    let mut dest = use_signal(String::new);
     let mut status = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
 
@@ -1186,8 +1193,11 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
             AddMode::Git => "Cloning\u{2026}".to_string(),
             AddMode::Local => "Registering\u{2026}".to_string(),
         }));
+        let dest_raw = dest.read().trim().to_string();
         spawn(async move {
-            let result = tokio::task::spawn_blocking(move || add_project(current, &raw))
+            let result = tokio::task::spawn_blocking(move || {
+                add_project(current, &raw, Some(&dest_raw))
+            })
                 .await
                 .unwrap_or_else(|e| Err(format!("internal error: {e}")));
             match result {
@@ -1228,10 +1238,20 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
                     if busy_now { "Working\u{2026}" } else { "{action_label}" }
                 }
             }
+            if current == AddMode::Git {
+                div { style: "display:flex;gap:8px;margin-top:8px;align-items:center;",
+                    input {
+                        style: "{input_style}",
+                        placeholder: "clone into\u{2026} (default ~/darkrun/<repo>)",
+                        value: "{dest}",
+                        oninput: move |evt| dest.set(evt.value()),
+                    }
+                }
+            }
             p { style: "{note_style}",
-                "Git URL \u{2192} darkrun clones it, then registers it. Local repo \u{2192} pick a path \
-                 to an existing git checkout. Either way it must be a git repo; the project slug + \
-                 .darkrun/ live in the working tree."
+                "Git URL \u{2192} darkrun clones it (into the path you choose), then registers it. \
+                 Local repo \u{2192} pick a path to an existing git checkout. Either way it must be \
+                 a git repo; the project slug + .darkrun/ live in the working tree."
             }
             if let Some(msg) = status.read().clone() {
                 p {
@@ -1310,14 +1330,33 @@ fn validate_add_input(mode: AddMode, raw: &str) -> Result<(), String> {
 /// - **Local repo**: validate it's a git checkout, then register it.
 ///
 /// Registration is idempotent.
-fn add_project(mode: AddMode, raw: &str) -> Result<String, String> {
+fn add_project(mode: AddMode, raw: &str, dest_override: Option<&str>) -> Result<String, String> {
     validate_add_input(mode, raw)?;
     match mode {
         AddMode::Git => {
-            let base = dirs::home_dir()
-                .map(|h| h.join("darkrun"))
-                .unwrap_or_else(|| PathBuf::from("darkrun"));
-            let dest = darkrun_git::default_clone_dest(&base, raw);
+            // The operator chooses where the clone lands; empty falls back to
+            // `~/darkrun/<repo-name>`.
+            let dest = match dest_override.map(str::trim).filter(|d| !d.is_empty()) {
+                Some(d) => {
+                    let p = PathBuf::from(d);
+                    if !p.is_absolute() {
+                        return Err("Use an absolute clone path.".to_string());
+                    }
+                    // A bare directory gets the repo name appended; a full
+                    // target (nonexistent leaf) is used as-is.
+                    if p.is_dir() {
+                        darkrun_git::default_clone_dest(&p, raw)
+                    } else {
+                        p
+                    }
+                }
+                None => {
+                    let base = dirs::home_dir()
+                        .map(|h| h.join("darkrun"))
+                        .unwrap_or_else(|| PathBuf::from("darkrun"));
+                    darkrun_git::default_clone_dest(&base, raw)
+                }
+            };
             if dest.exists() {
                 return Err(format!(
                     "{} already exists — remove it or register it as a local repo.",
@@ -1563,6 +1602,13 @@ fn harness_binary(h: Harness) -> Option<&'static str> {
     }
 }
 
+/// The final path component as a display name, when there is one.
+fn basename(path: &std::path::Path) -> Option<String> {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+}
+
 /// Single-quote a path for a POSIX shell so the copied `cd` survives spaces.
 fn sh_quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', "'\\''"))
@@ -1574,10 +1620,26 @@ fn sh_quote(path: &str) -> String {
 /// `<flag> darkrun-<run>` is appended. GUI harnesses get an open-the-editor note.
 fn launch_command(h: Harness, path: &str, autonomous: bool, run: Option<&str>) -> String {
     let caps = h.capabilities();
+    // When the project dir IS one of the harness's own managed worktrees
+    // (`<repo>/.claude/worktrees/<name>` for Claude Code), hand the cd back to
+    // the harness: launch from the repo root with `<worktree_flag> <name>` and
+    // let it enter its own worktree.
+    let own_worktree = caps.worktree_flag.zip(caps.worktree_dir).and_then(|(flag, wt_dir)| {
+        let marker = format!("/{wt_dir}/");
+        let at = path.find(&marker)?;
+        let root = &path[..at];
+        let name = path[at + marker.len()..].split('/').next()?;
+        (!root.is_empty() && !name.is_empty()).then(|| (flag, root.to_string(), name.to_string()))
+    });
     let dir = sh_quote(path);
     match harness_binary(h) {
         Some(bin) => {
-            let mut cmd = format!("cd {dir} && {bin}");
+            let mut cmd = match &own_worktree {
+                Some((flag, root, name)) => {
+                    format!("cd {} && {bin} {flag} {name}", sh_quote(root))
+                }
+                None => format!("cd {dir} && {bin}"),
+            };
             if autonomous {
                 let flag = caps.autonomous_launch_args();
                 if !flag.is_empty() {
@@ -1585,8 +1647,10 @@ fn launch_command(h: Harness, path: &str, autonomous: bool, run: Option<&str>) -
                     cmd.push_str(flag);
                 }
             }
-            if let (Some(wt), Some(run)) = (caps.worktree_flag, run) {
-                cmd.push_str(&format!(" {wt} darkrun-{run}"));
+            if own_worktree.is_none() {
+                if let (Some(wt), Some(run)) = (caps.worktree_flag, run) {
+                    cmd.push_str(&format!(" {wt} darkrun-{run}"));
+                }
             }
             cmd
         }
@@ -1979,11 +2043,11 @@ mod helper_tests {
     #[test]
     fn add_project_returns_the_error_arms() {
         // Validation propagates (empty + bad url).
-        assert!(add_project(AddMode::Git, "").is_err());
-        assert!(add_project(AddMode::Git, "bad").is_err());
+        assert!(add_project(AddMode::Git, "", None).is_err());
+        assert!(add_project(AddMode::Git, "bad", None).is_err());
         // An absolute, existing, non-git dir hits the "No .git found" arm.
         let tmp = std::env::temp_dir();
-        let err = add_project(AddMode::Local, tmp.to_str().unwrap()).unwrap_err();
+        let err = add_project(AddMode::Local, tmp.to_str().unwrap(), None).unwrap_err();
         assert!(err.contains(".git") || err.contains("git repo"));
     }
 
@@ -1999,6 +2063,33 @@ mod helper_tests {
         assert_eq!(harness_binary(Harness::Kiro), None);
         assert_eq!(sh_quote("/a b"), "'/a b'");
         assert!(sh_quote("it's").contains("'\\''"));
+    }
+
+
+    #[test]
+    fn launch_command_hands_cd_back_for_a_managed_worktree() {
+        // A project dir inside the harness's own worktree parent launches from
+        // the repo root with `--worktree <name>` — the harness does the cd.
+        let cmd = launch_command(
+            Harness::ClaudeCode,
+            "/u/dev/darkrun/.claude/worktrees/floofy-sauteeing-coral",
+            true,
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "cd '/u/dev/darkrun' && claude --worktree floofy-sauteeing-coral \
+             --dangerously-skip-permissions"
+                .replace("\\\n             ", " "),
+        );
+        // Harnesses with no worktree convention keep the plain cd.
+        let plain = launch_command(
+            Harness::Codex,
+            "/u/dev/darkrun/.claude/worktrees/floofy-sauteeing-coral",
+            false,
+            None,
+        );
+        assert!(plain.starts_with("cd '/u/dev/darkrun/.claude/worktrees/"), "{plain}");
     }
 
     #[test]

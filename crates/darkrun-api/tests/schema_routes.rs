@@ -60,6 +60,12 @@ fn one_of_enum_values(schema: &Value) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(arms) = schema.get("oneOf").and_then(|v| v.as_array()) {
         for arm in arms {
+            // Documented enum variants: `const` per arm (draft 2020-12), with
+            // single-element `enum` arrays accepted for older emissions.
+            if let Some(c) = arm.get("const").and_then(|v| v.as_str()) {
+                out.push(c.to_string());
+                continue;
+            }
             if let Some(vals) = arm.get("enum").and_then(|v| v.as_array()) {
                 for v in vals {
                     if let Some(s) = v.as_str() {
@@ -2177,7 +2183,8 @@ fn session_payload_schema_arms_require_session_type() {
 #[test]
 fn session_payload_schema_carries_definitions() {
     let s = schema_value!(SessionPayload);
-    let defs = s["definitions"].as_object().expect("definitions present");
+    // draft 2020-12 names the shared-definitions bucket $defs.
+    let defs = s["$defs"].as_object().expect("$defs present");
     // The variant payload structs are inlined into the oneOf arms; the leaf
     // types they reference are pulled out as shared definitions.
     assert!(defs.contains_key("RunCurrentState"));

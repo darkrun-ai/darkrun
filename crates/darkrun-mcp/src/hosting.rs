@@ -176,43 +176,52 @@ impl Default for UreqTransport {
 
 impl UreqTransport {
     /// Build a transport with a hard per-request wall-clock ceiling so an
-    /// unresponsive host can't wedge a tick.
+    /// unresponsive host can't wedge a tick. Non-2xx statuses come back as
+    /// plain responses (not errors) so the caller can read the provider's
+    /// error body — the same contract the [`HttpTransport`] mock honors.
     pub fn new() -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(30))
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .http_status_as_error(false)
             .build();
-        Self { agent }
+        Self { agent: config.into() }
     }
 }
 
 impl HttpTransport for UreqTransport {
     #[cfg(not(tarpaulin_include))] // real network I/O
     fn execute(&self, request: HttpRequest) -> darkrun_vcs::Result<HttpResponse> {
-        use std::io::Read;
-        let mut req = match request.method {
-            Method::Get => self.agent.get(&request.url),
-            Method::Post => self.agent.post(&request.url),
-            Method::Put => self.agent.put(&request.url),
+        // ureq 3's request builders are type-stated (with/without body), so
+        // each method arm drives its request to completion.
+        let body = request.body.unwrap_or_default();
+        let send = match request.method {
+            Method::Get => {
+                let mut req = self.agent.get(&request.url);
+                for (k, v) in &request.headers {
+                    req = req.header(k, v);
+                }
+                req.call()
+            }
+            Method::Post => {
+                let mut req = self.agent.post(&request.url);
+                for (k, v) in &request.headers {
+                    req = req.header(k, v);
+                }
+                req.send(&body[..])
+            }
+            Method::Put => {
+                let mut req = self.agent.put(&request.url);
+                for (k, v) in &request.headers {
+                    req = req.header(k, v);
+                }
+                req.send(&body[..])
+            }
         };
-        for (k, v) in &request.headers {
-            req = req.set(k, v);
-        }
-        let send = match request.body {
-            Some(body) => req.send_bytes(&body),
-            None => req.call(),
-        };
-        // ureq surfaces a non-2xx as `Error::Status(code, response)`; capture the
-        // status + body for BOTH paths so the caller's error handling works.
-        let response = match send {
-            Ok(r) => r,
-            Err(ureq::Error::Status(_, r)) => r,
-            Err(e) => return Err(darkrun_vcs::VcsError::Transport(e.to_string())),
-        };
-        let status = response.status();
-        let mut body = Vec::new();
-        response
-            .into_reader()
-            .read_to_end(&mut body)
+        let mut response = send.map_err(|e| darkrun_vcs::VcsError::Transport(e.to_string()))?;
+        let status = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .read_to_vec()
             .map_err(|e| darkrun_vcs::VcsError::Transport(e.to_string()))?;
         Ok(HttpResponse::new(status, body))
     }

@@ -20,7 +20,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-schemars = "0.8"
+schemars = "1"
 chrono = { version = "0.4", features = ["serde"] }
 nix = { version = "0.31", features = ["signal", "process"] }
 sha2 = "0.11"
@@ -48,4 +48,4 @@ darkrun-vcs = { path = "crates/darkrun-vcs" }
 darkrun-telemetry = { path = "crates/darkrun-telemetry" }
 # Pure-Rust sync HTTP (rustls, no C) — the engine tick calls hosting APIs from a
 # synchronous context inside the tokio runtime, where reqwest::blocking panics.
-ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }

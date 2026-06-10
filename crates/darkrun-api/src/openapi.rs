@@ -25,7 +25,11 @@ pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 macro_rules! collect_schema {
     ($schemas:expr, $name:literal, $ty:ty) => {{
         let schema = schema_for!($ty);
-        let value = serde_json::to_value(schema.schema).expect("schema serializes");
+        let mut value = serde_json::to_value(schema).expect("schema serializes");
+        // Component schemas don't re-declare the dialect; the document does.
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("$schema");
+        }
         $schemas.insert($name.to_string(), value);
     }};
 }

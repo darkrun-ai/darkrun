@@ -114,6 +114,7 @@ impl Harness {
                 autonomous_launch_args: Some("--dangerously-skip-permissions"),
                 // NOTE: per the product spec; re-verify Claude Code exposes this flag.
                 worktree_flag: Some("--worktree"),
+                worktree_dir: Some(".claude/worktrees"),
             },
             Harness::Cursor => Capabilities {
                 harness: self,
@@ -141,6 +142,7 @@ impl Harness {
                 // GUI-driven — autonomous mode lives in Cursor's settings, no CLI flag.
                 autonomous_launch_args: None,
                 worktree_flag: None,
+                worktree_dir: None,
             },
             Harness::Windsurf => Capabilities {
                 harness: self,
@@ -168,6 +170,7 @@ impl Harness {
                 // GUI-driven — autonomous mode lives in Windsurf's settings, no CLI flag.
                 autonomous_launch_args: None,
                 worktree_flag: None,
+                worktree_dir: None,
             },
             Harness::GeminiCli => Capabilities {
                 harness: self,
@@ -194,6 +197,7 @@ impl Harness {
                 },
                 autonomous_launch_args: Some("--yolo"),
                 worktree_flag: None,
+                worktree_dir: None,
             },
             Harness::Opencode => Capabilities {
                 harness: self,
@@ -221,6 +225,7 @@ impl Harness {
                 // No known autonomous-mode CLI flag — update to Some(...) if one lands.
                 autonomous_launch_args: None,
                 worktree_flag: None,
+                worktree_dir: None,
             },
             Harness::Kiro => Capabilities {
                 harness: self,
@@ -248,6 +253,7 @@ impl Harness {
                 // GUI-driven — autonomous mode lives in Kiro's settings, no CLI flag.
                 autonomous_launch_args: None,
                 worktree_flag: None,
+                worktree_dir: None,
             },
             // Conservative profile. Codex reads the MCP `instructions` field and
             // serves STDIO/HTTP MCP servers, but its docs don't confirm MCP
@@ -281,6 +287,7 @@ impl Harness {
                 },
                 autonomous_launch_args: Some("--full-auto"),
                 worktree_flag: None,
+                worktree_dir: None,
             },
         }
     }
@@ -358,6 +365,11 @@ pub struct Capabilities {
     /// such flag; the start command then just `cd`s into the project dir. When
     /// set, the command appends `<flag> darkrun-<run>` so a Run gets its own tree.
     pub worktree_flag: Option<&'static str>,
+    /// The directory (repo-relative) under which the harness keeps its managed
+    /// worktrees (`.claude/worktrees` for Claude Code). A project path under
+    /// this dir is one of the harness's own worktrees — launchers can hand the
+    /// `cd` back to the harness via `worktree_flag`. `None` = no convention.
+    pub worktree_dir: Option<&'static str>,
 }
 
 impl Capabilities {
