@@ -71,47 +71,264 @@ fn phase_chrome(phase: StationPhase) -> (&'static str, &'static str) {
     }
 }
 
-/// The sub-agent role slugs the active `phase` dispatches at `station` — the
-/// cast that is actually working in this phase. These render as chips beside the
-/// phase so the operator can see *who* is on the line right now.
-///
-/// The mapping mirrors the engine's phase machine: Spec runs the Explorers,
-/// Review (and the pre-execution UserGate) the Reviewers, Manufacture the
-/// Workers, and Audit the post-execution Reviewers. Reflect and Checkpoint are
-/// retrospective / operator-decision steps with no dispatched cast.
-fn phase_roles(station: &darkrun_content::Station, phase: StationPhase) -> Vec<&str> {
-    let roles: &[darkrun_content::Role] = match phase {
-        StationPhase::Spec => &station.explorers,
-        StationPhase::Review | StationPhase::UserGate => &station.reviewers,
-        StationPhase::Manufacture => &station.workers,
-        StationPhase::Audit => &station.reviewers,
-        StationPhase::Reflect | StationPhase::Checkpoint => &[],
-    };
-    roles.iter().map(|r| r.name()).collect()
+// ── The second (live pool) line — the predecessor's chip system, ported ─────
+//
+// Line 1 is position; line 2 is the LIVE POOL, led by a dim `↳`:
+//   - Manufacture: one CHIP per current-station unit — a pastel near-white box
+//     (dark bold label) + one `▰`/`▱` pip per worker beat: green done, YELLOW
+//     in-progress (uniform "working" hue), soft-red rejected, grey pending.
+//   - Open feedback: one chip per item, the BOX tinted by severity (light red /
+//     orange / gold / near-white, lavender unclassified) with a NO_COLOR-legible
+//     mark (`!^~.?`).
+//   - Review/Audit awaits: AGENT chips — solid pastel status boxes per
+//     reviewer role: pastel-green ✓ stamped, near-white ▸ being awaited,
+//     grey queued.
+// Mutually exclusive, first match wins; none → single line.
+
+/// Filled / empty progress pips.
+const PIP_DONE: &str = "\u{25b0}";
+const PIP_PENDING: &str = "\u{25b1}";
+/// Leader for the second line.
+const ITEM_LEADER: &str = "\u{21b3}";
+
+/// In-progress beats are ALWAYS this yellow (truecolor, bold) — one color for
+/// "working" on every box tint.
+const PIP_ACTIVE: &str = "1;38;2;255;255;0";
+
+/// One worker-beat's visual state on a unit chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seg {
+    Done,
+    Active,
+    Rejected,
+    Pending,
 }
 
-/// The most chips to print before collapsing the rest into a `+N` overflow, so a
-/// station with a deep cast never blows out the one-line budget.
-const MAX_CHIPS: usize = 4;
+/// Per-worker segments over a unit's recorded beats — the predecessor's
+/// `hatSegments`, on darkrun's `iterations`. Each worker's base state comes
+/// from its MOST RECENT beat (advance → done, reject → rejected, none →
+/// pending); the single ACTIVE worker is derived after: next-after-advance,
+/// the rejecting worker keeps its red, first when nothing ran yet. An
+/// unstarted unit shows empty progress.
+fn worker_segments(
+    iters: &[darkrun_core::domain::UnitIteration],
+    workers: &[String],
+    started: bool,
+) -> Vec<Seg> {
+    use darkrun_core::domain::IterationResult as R;
+    let mut recent: std::collections::HashMap<&str, Option<R>> = Default::default();
+    for it in iters {
+        recent.insert(it.worker.as_str(), it.result);
+    }
+    let mut segs: Vec<Seg> = workers
+        .iter()
+        .map(|w| match recent.get(w.as_str()) {
+            Some(Some(R::Advance)) => Seg::Done,
+            Some(Some(R::Reject)) => Seg::Rejected,
+            _ => Seg::Pending,
+        })
+        .collect();
+    if workers.is_empty() || !started {
+        return segs;
+    }
+    if iters.is_empty() {
+        segs[0] = Seg::Active;
+        return segs;
+    }
+    let last = &iters[iters.len() - 1];
+    let last_idx = workers.iter().position(|w| *w == last.worker);
+    match (last.result, last_idx) {
+        (None, Some(i)) => segs[i] = Seg::Active,
+        (Some(R::Advance), Some(i)) => {
+            let next = i + 1;
+            if next < workers.len() && segs[next] == Seg::Pending {
+                segs[next] = Seg::Active;
+            }
+        }
+        _ => {} // reject keeps its red; no separate active slot
+    }
+    segs
+}
 
-/// Render the active phase's role cast as chips: a phase-hued `◦` marker plus the
-/// dim role slug, one per role, capped at [`MAX_CHIPS`] with a `+N` overflow.
-/// Empty when there is no cast (an empty string adds nothing to the line).
-fn render_chips(roles: &[&str], phase_code: &str) -> String {
-    if roles.is_empty() {
-        return String::new();
+/// A unit chip: pastel near-white box, dark bold id, per-worker pips. The
+/// whole chip is the OSC 8 click target when a browse URL resolves.
+fn unit_chip(id: &str, segs: &[Seg], url: Option<&str>) -> String {
+    let pips: String = segs
+        .iter()
+        .map(|s| match s {
+            Seg::Done => format!("\x1b[38;5;71m{PIP_DONE}"),
+            Seg::Active => format!("\x1b[{PIP_ACTIVE}m{PIP_DONE}"),
+            Seg::Rejected => format!("\x1b[1;38;5;167m{PIP_DONE}"),
+            Seg::Pending => format!("\x1b[38;5;250m{PIP_PENDING}"),
+        })
+        .collect();
+    let chip = format!(
+        "\x1b[48;5;254m \x1b[1;38;5;238m{id} {pips} {RESET}"
+    );
+    match url {
+        Some(u) => osc8(u, &chip),
+        None => chip,
     }
-    let mut out = String::new();
-    for name in roles.iter().take(MAX_CHIPS) {
-        out.push(' ');
-        out.push_str(&paint(phase_code, "\u{25e6}")); // ◦ — the chip marker
-        out.push_str(&paint(C_PENDING, name));
+}
+
+/// A feedback chip: the BOX is the severity (predecessor palette), the mark
+/// keeps it legible without color. darkrun feedback carries no per-beat
+/// iterations, so the chip is the tinted id alone.
+fn feedback_chip(id: &str, severity: Option<darkrun_core::domain::FeedbackSeverity>) -> String {
+    use darkrun_core::domain::FeedbackSeverity as S;
+    let (bg, mark) = match severity {
+        Some(S::Blocker) => ("\x1b[48;5;210m", "!"),
+        Some(S::High) => ("\x1b[48;5;216m", "^"),
+        Some(S::Medium) => ("\x1b[48;5;223m", "~"),
+        Some(S::Low) => ("\x1b[48;5;254m", "."),
+        None => ("\x1b[48;5;189m", "?"), // unclassified → cool lavender
+    };
+    format!("{bg} \x1b[1;38;5;238m{mark}{id} {RESET}")
+}
+
+/// An agent (reviewer-role) chip for the await phases: the box color IS the
+/// status — pastel green stamped, near-white being awaited, grey queued.
+fn agent_chip(role: &str, done: bool, awaited: bool) -> String {
+    let (bg, fg, mark) = if done {
+        ("\x1b[48;5;151m", "\x1b[1;38;5;22m", " \u{2713}")
+    } else if awaited {
+        ("\x1b[48;5;254m", "\x1b[1;38;5;238m", " \u{25b8}")
+    } else {
+        ("\x1b[48;5;248m", "\x1b[38;5;240m", "")
+    };
+    format!("{bg}{fg} {role}{mark} {RESET}")
+}
+
+/// The most chips on the pool line before a `+N` overflow.
+const MAX_POOL_CHIPS: usize = 6;
+
+/// Build the second (live pool) line for the active station, or `None` when
+/// there is nothing in flight to show.
+fn pool_line(
+    store: &darkrun_core::StateStore,
+    slug: &str,
+    factory: &darkrun_content::Factory,
+    active_station: &str,
+    phase: Option<StationPhase>,
+    run_url: Option<&str>,
+) -> Option<String> {
+    let station_def = factory.station(active_station);
+    let units: Vec<darkrun_core::domain::Unit> = store
+        .read_units(slug)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|u| u.station() == active_station)
+        .collect();
+
+    // Open feedback preempts (Track B preempts the run walk, so the pool
+    // shows what the engine is actually working).
+    let feedback: Vec<FbMin> = store
+        .read_feedback_raw(slug)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|(id, doc)| parse_feedback_min(id, doc))
+        .filter(|f| f.open)
+        .collect();
+    if !feedback.is_empty() {
+        let mut chips: Vec<String> = feedback
+            .iter()
+            .take(MAX_POOL_CHIPS)
+            .map(|f| feedback_chip(&f.id, f.severity))
+            .collect();
+        if feedback.len() > MAX_POOL_CHIPS {
+            chips.push(paint(C_DIM, &format!("+{}", feedback.len() - MAX_POOL_CHIPS)));
+        }
+        return Some(chips.join(" "));
     }
-    if roles.len() > MAX_CHIPS {
-        out.push(' ');
-        out.push_str(&paint(C_DIM, &format!("+{}", roles.len() - MAX_CHIPS)));
+
+    match phase {
+        Some(StationPhase::Manufacture) => {
+            let workers: Vec<String> = station_def
+                .map(|s| s.workers.iter().map(|w| w.name().to_string()).collect())
+                .unwrap_or_default();
+            if units.is_empty() {
+                return None;
+            }
+            let mut chips: Vec<String> = units
+                .iter()
+                .take(MAX_POOL_CHIPS)
+                .map(|u| {
+                    let started = u.frontmatter.started_at.is_some()
+                        || !u.frontmatter.iterations.is_empty();
+                    let segs =
+                        worker_segments(&u.frontmatter.iterations, &workers, started);
+                    unit_chip(&u.slug, &segs, run_url)
+                })
+                .collect();
+            if units.len() > MAX_POOL_CHIPS {
+                chips.push(paint(C_DIM, &format!("+{}", units.len() - MAX_POOL_CHIPS)));
+            }
+            Some(chips.join(" "))
+        }
+        Some(StationPhase::Review) | Some(StationPhase::Audit) => {
+            let reviewers: Vec<String> = station_def
+                .map(|s| s.reviewers.iter().map(|r| r.name().to_string()).collect())
+                .unwrap_or_default();
+            if reviewers.is_empty() || units.is_empty() {
+                return None;
+            }
+            let is_review = matches!(phase, Some(StationPhase::Review));
+            // A role is DONE when every unit carries its stamp; the first
+            // unstamped role is the one being awaited.
+            let mut chips = Vec::new();
+            let mut awaited_seen = false;
+            for role in &reviewers {
+                let done = units.iter().all(|u| {
+                    let map = if is_review {
+                        &u.frontmatter.reviews
+                    } else {
+                        &u.frontmatter.approvals
+                    };
+                    matches!(map.get(role), Some(Some(_)))
+                });
+                let awaited = !done && !awaited_seen;
+                if awaited {
+                    awaited_seen = true;
+                }
+                chips.push(agent_chip(role, done, awaited));
+            }
+            Some(chips.join(" "))
+        }
+        _ => None,
     }
-    out
+}
+
+/// The minimum of a feedback doc the pool line needs: id, open?, severity.
+struct FbMin {
+    id: String,
+    open: bool,
+    severity: Option<darkrun_core::domain::FeedbackSeverity>,
+}
+
+/// Parse just enough of a feedback document's frontmatter (status + severity)
+/// for a chip. Tolerant: unparseable docs are skipped.
+fn parse_feedback_min(id: &str, doc: &str) -> Option<FbMin> {
+    use darkrun_core::domain::FeedbackSeverity as S;
+    let rest = doc.strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    let fm = &rest[..end];
+    let field = |key: &str| -> Option<String> {
+        fm.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix(key)
+                .map(|v| v.trim().trim_matches('"').to_string())
+        })
+    };
+    let status = field("status:").unwrap_or_default();
+    let open = matches!(status.as_str(), "pending" | "fixing" | "escalated" | "");
+    let severity = field("severity:").and_then(|s| match s.as_str() {
+        "blocker" => Some(S::Blocker),
+        "high" => Some(S::High),
+        "medium" => Some(S::Medium),
+        "low" => Some(S::Low),
+        _ => None,
+    });
+    Some(FbMin { id: id.to_string(), open, severity })
 }
 
 /// Wrap `text` in an OSC 8 terminal hyperlink to `url`, so the chip is
@@ -259,34 +476,47 @@ pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
         ),
         &paint(phase_code, &active_station),
     );
+    // The flow mark: `❯` running, `Π` (a doorway) gated — magenta, the
+    // "your turn" hue. The predecessor abandoned `⊘` because it reads as a
+    // failure; a gate is a doorway you pass through, not an error.
     let flow = if gated {
-        paint(C_REVIEW, "⊘")
+        paint(C_CHECKPOINT, "Π")
     } else {
         paint(C_DIM, "❯")
     };
-    let phase_disp = paint(phase_code, phase_label);
+    let phase_disp = if gated {
+        paint(C_CHECKPOINT, phase_label)
+    } else {
+        paint(phase_code, phase_label)
+    };
     let sep = paint(C_DIM, "·");
 
-    // Sub-agent chips: the cast the active phase dispatches, shown only while the
-    // phase is being WORKED. A held gate (`⊘`) shows none — its agents are done
-    // and the line is waiting on a human, so chips there would mislead.
-    let chips = if gated {
-        String::new()
-    } else {
-        let roles = active_phase
-            .and_then(|p| factory.station(&active_station).map(|st| phase_roles(st, p)))
-            .unwrap_or_default();
-        render_chips(&roles, phase_code)
-    };
-
     let mut line = format!(
-        "{brand} {sep} {slug_disp} {sep} {factory_disp} {pipeline} {station_disp} {flow} {phase_disp}{chips}"
+        "{brand} {sep} {slug_disp} {sep} {factory_disp} {pipeline} {station_disp} {flow} {phase_disp}"
     );
     if total > 0 {
         line.push_str(&format!(
             " {sep} {}",
             paint(C_DIM, &format!("{done}/{total} units"))
         ));
+    }
+
+    // The SECOND line — the live pool (the predecessor's chip system): unit
+    // beat-progress bars during Manufacture, severity-tinted feedback chips
+    // while the fix track preempts, reviewer-role status chips during the
+    // Review/Audit awaits. Led by a dim `↳`; absent when nothing is in flight.
+    let run_url = coords.as_ref().map(|(h, o, r)| {
+        format!("{base}/browse/{h}/{o}/{r}/run/{slug}/")
+    });
+    if let Some(pool) = pool_line(
+        &store,
+        &slug,
+        &factory,
+        &active_station,
+        active_phase,
+        run_url.as_deref(),
+    ) {
+        line.push_str(&format!("\n{} {pool}", paint(C_DIM, ITEM_LEADER)));
     }
     Some(line)
 }
@@ -400,6 +630,7 @@ mod tests {
     use super::{
         fallback_path, install, osc8, paint, parse_git_url, phase_chrome, read_json,
         render, settings_path, uninstall, web_base, write_json,
+        ITEM_LEADER, PIP_DONE, PIP_PENDING,
     };
     use darkrun_core::domain::StationPhase;
 
@@ -734,8 +965,10 @@ mod tests {
         });
         store.write_state("r", &state).unwrap();
         let line = render(Some(dir.path().to_path_buf())).expect("renders an active run");
-        // The gated-hold flow mark appears for a non-auto checkpoint.
-        assert!(line.contains('⊘'), "a gated checkpoint shows the hold mark: {line}");
+        // The gated-hold flow mark (Π — a doorway, not a failure) appears for a
+        // non-auto checkpoint, in the your-turn magenta.
+        assert!(line.contains('Π'), "a gated checkpoint shows the doorway mark: {line}");
+        assert!(!line.contains('⊘'), "the failure-reading glyph is gone: {line}");
     }
 
     /// Build a one-station run sitting at `phase` and render its status line.
@@ -793,18 +1026,140 @@ mod tests {
         let line = render_at_phase("frame", StationPhase::UserGate);
         assert!(line.contains("review"), "user gate folds into review: {line}");
         assert!(!line.contains("gate"), "no `gate` phase label: {line}");
-        assert!(line.contains('⊘'), "the hold is shown by the flow mark: {line}");
-        // A held gate shows NO sub-agent chips — its cast is done.
-        assert!(!line.contains('\u{25e6}'), "a held gate shows no chips: {line}");
+        assert!(line.contains('Π'), "the hold is shown by the doorway mark: {line}");
+        // A held gate with nothing in flight shows no pool line.
+        assert!(!line.contains(ITEM_LEADER), "no pool line at an idle gate: {line}");
     }
 
     #[test]
-    fn a_worked_phase_shows_its_sub_agent_chips() {
-        // Manufacture is being worked (not gated) → the station's worker cast
-        // rides the line as chips, each with the `◦` marker.
-        let line = render_at_phase("build", StationPhase::Manufacture);
-        assert!(line.contains("manufacture"), "the worked phase label: {line}");
-        assert!(line.contains('❯'), "a worked phase shows the running mark: {line}");
-        assert!(line.contains('\u{25e6}'), "the worker cast renders as chips: {line}");
+    fn manufacture_pool_renders_unit_beat_chips_on_a_second_line() {
+        use darkrun_core::domain::{IterationResult, Status, Unit, UnitFrontmatter, UnitIteration};
+        use darkrun_core::StateStore;
+        // Build a Manufacture station with one in-flight unit whose first
+        // worker advanced — the pool line carries its chip: filled pip(s) +
+        // empties, on the second line behind the ↳ leader.
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        seed_run_at_phase(&store, "build", StationPhase::Manufacture);
+        store
+            .write_unit("r", &Unit {
+                slug: "u1".into(),
+                frontmatter: UnitFrontmatter {
+                    status: Status::InProgress,
+                    station: Some("build".into()),
+                    started_at: Some("2026-06-01T00:00:00Z".into()),
+                    iterations: vec![UnitIteration {
+                        worker: "test_author".into(),
+                        started_at: None,
+                        completed_at: None,
+                        result: Some(IterationResult::Advance),
+                        note: None,
+                    }],
+                    ..Default::default()
+                },
+                title: "u1".into(),
+                body: String::new(),
+            })
+            .unwrap();
+        let line = render(Some(dir.path().to_path_buf())).expect("renders");
+        let (first, second) = line.split_once('\n').expect("two lines");
+        assert!(first.contains("manufacture"), "line 1 keeps position: {first}");
+        assert!(second.contains(ITEM_LEADER), "pool leader: {second}");
+        assert!(second.contains("u1"), "the unit chip labels its slug: {second}");
+        assert!(second.contains(PIP_DONE), "a filled pip for the advanced beat: {second}");
+        assert!(second.contains(PIP_PENDING), "empty pips for unreached beats: {second}");
+    }
+
+    #[test]
+    fn open_feedback_preempts_the_pool_with_severity_chips() {
+        use darkrun_core::StateStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        seed_run_at_phase(&store, "build", StationPhase::Manufacture);
+        store
+            .write_feedback_raw(
+                "r",
+                "fb-01",
+                "---\nstatus: pending\nseverity: blocker\n---\nbroken\n",
+            )
+            .unwrap();
+        let line = render(Some(dir.path().to_path_buf())).expect("renders");
+        let (_, second) = line.split_once('\n').expect("two lines");
+        assert!(second.contains("fb-01"), "the feedback chip labels its id: {second}");
+        assert!(second.contains('!'), "blocker mark survives NO_COLOR strips: {second}");
+        assert!(second.contains("48;5;210"), "the blocker box tint: {second}");
+    }
+
+    #[test]
+    fn review_await_renders_agent_status_chips() {
+        use darkrun_core::domain::{Stamp, Status, Unit, UnitFrontmatter};
+        use darkrun_core::StateStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        seed_run_at_phase(&store, "build", StationPhase::Review);
+        // One unit with the FIRST build reviewer stamped → its chip reads done
+        // (✓); the next reviewer is the awaited one (▸).
+        let mut reviews = std::collections::BTreeMap::new();
+        reviews.insert(
+            "correctness".to_string(),
+            Some(Stamp { at: "2026-06-01T00:00:00Z".into() }),
+        );
+        store
+            .write_unit("r", &Unit {
+                slug: "u1".into(),
+                frontmatter: UnitFrontmatter {
+                    status: Status::InProgress,
+                    station: Some("build".into()),
+                    reviews,
+                    ..Default::default()
+                },
+                title: "u1".into(),
+                body: String::new(),
+            })
+            .unwrap();
+        let line = render(Some(dir.path().to_path_buf())).expect("renders");
+        let (_, second) = line.split_once('\n').expect("two lines");
+        assert!(second.contains('\u{2713}'), "a stamped role shows ✓: {second}");
+        assert!(second.contains('\u{25b8}'), "the awaited role shows ▸: {second}");
+    }
+
+    /// Seed a run whose active station sits at `phase` (no units/feedback).
+    fn seed_run_at_phase(store: &darkrun_core::StateStore, station: &str, phase: StationPhase) {
+        use darkrun_core::domain::{Run, RunFrontmatter, Station, Status};
+        use darkrun_core::state::RunState;
+        store
+            .write_run(&Run {
+                slug: "r".into(),
+                title: "T".into(),
+                body: String::new(),
+                frontmatter: RunFrontmatter {
+                    factory: "software".into(),
+                    active_station: station.into(),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        store.set_active_run("r").unwrap();
+        let mut state = RunState {
+            factory: "software".into(),
+            active_station: station.into(),
+            ..Default::default()
+        };
+        state.stations.insert(station.into(), Station {
+            station: station.into(),
+            status: Status::InProgress,
+            phase,
+            elaborated: true,
+            checkpoint: None,
+            branch: None,
+            pr_ref: None,
+            pr_status: None,
+            pr_ready_at: None,
+            pr_merged_at: None,
+            verifier_nonce: None,
+            started_at: None,
+            completed_at: None,
+        });
+        store.write_state("r", &state).unwrap();
     }
 }
