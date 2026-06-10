@@ -406,6 +406,10 @@ pub struct PromptContext {
     /// The agent's uncommitted paths, for `SaveWip`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dirty_files: Vec<String>,
+    /// Whether the active station is OPTIONAL for this run — the Spec prompt
+    /// surfaces the keep-or-drop offer from this (`darkrun_station_drop`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub station_optional: bool,
     /// The provider compare URL (pre-filled create-PR form) — the manual
     /// fallback surfaced when no hosting client could open the PR itself.
     /// For `ExternalReviewRequested` (station branch -> run-main) and
@@ -845,6 +849,118 @@ fn next_in_plan(factory: &FactoryDef, state: &RunState, station: &str) -> Option
     let plan = run_plan(factory, state);
     let idx = plan.iter().position(|s| s == station)?;
     plan.get(idx + 1).cloned()
+}
+
+/// What a station drop changed: the dropped station and where the cursor
+/// re-derives to.
+#[derive(Debug, Clone, Serialize)]
+pub struct StationDropOutcome {
+    /// The run slug.
+    pub run: String,
+    /// The station removed from the plan.
+    pub dropped: String,
+    /// The station the cursor advances to (None = the run is at its end).
+    pub next_station: Option<String>,
+}
+
+/// Drop an OPTIONAL station from a live run's plan — the keep-or-drop decision
+/// offered at ARRIVAL (the predecessor's `drop_stage`). Only the ACTIVE,
+/// not-yet-started station can drop:
+///
+/// - `not_active` — the decision is made at arrival; a past or future station
+///   can't be dropped from afar.
+/// - `not_optional` — core stations never drop; only station classes the
+///   factory consciously marked `optional: true` may.
+/// - `already_started` — elaboration, a moved phase, or on-record units mean
+///   work exists; that's a reset, not a drop.
+///
+/// Dropping materializes the plan (a full-traversal run has an empty
+/// `state.plan`), removes the station, retires its (workless) branch +
+/// worktree, and re-derives the cursor. Cross-station references auto-ignore:
+/// a dropped station produces nothing, so its artifact is simply absent
+/// downstream (`inputs_waived` semantics).
+pub fn station_drop(store: &StateStore, slug: &str, station: &str) -> Result<StationDropOutcome> {
+    let mut run = store.read_run(slug)?;
+    let factory = resolve_factory_for(store, &run.frontmatter.factory)
+        .ok_or_else(|| McpError::UnknownFactory(run.frontmatter.factory.clone()))?;
+    let def = factory.station(station).ok_or_else(|| {
+        McpError::InvalidInput(format!("unknown station '{station}'"))
+    })?;
+    let mut state = store
+        .read_state(slug)?
+        .ok_or_else(|| McpError::InvalidInput(format!("run '{slug}' has no state")))?;
+
+    let active = current_station(&factory, &state);
+    if active.as_deref() != Some(station) {
+        return Err(McpError::InvalidInput(format!(
+            "drop_station_not_active: '{station}' is not the run's active station              ({active:?}) — the keep-or-drop decision is made at arrival, not from afar"
+        )));
+    }
+    if !def.optional {
+        return Err(McpError::InvalidInput(format!(
+            "drop_station_not_optional: '{station}' is a core station — only stations              the factory marks `optional: true` can be dropped"
+        )));
+    }
+    let started = state
+        .stations
+        .get(station)
+        .map(|st| {
+            // The checkpoint slot is pre-seeded at ensure-time; only an
+            // ENTERED or DECIDED gate means the station actually ran.
+            let gate_touched = st
+                .checkpoint
+                .as_ref()
+                .map(|c| c.entered_at.is_some() || c.outcome.is_some())
+                .unwrap_or(false);
+            st.elaborated || !matches!(st.phase, StationPhase::Spec) || gate_touched
+        })
+        .unwrap_or(false)
+        || store
+            .read_units(slug)
+            .unwrap_or_default()
+            .iter()
+            .any(|u| u.station() == station);
+    if started {
+        return Err(McpError::InvalidInput(format!(
+            "drop_station_already_started: '{station}' has elaboration or units on              record — reset it (or finish it); a started station is never dropped"
+        )));
+    }
+
+    // Materialize the plan (an empty plan means full traversal), then remove.
+    let mut plan = run_plan(&factory, &state);
+    plan.retain(|s| s != station);
+    if plan.is_empty() {
+        return Err(McpError::InvalidInput(
+            "cannot drop the run's only remaining station".into(),
+        ));
+    }
+    state.plan = plan;
+    state.stations.remove(station);
+    let next = current_station(&factory, &state);
+    if let Some(n) = &next {
+        ensure_station(&mut state, &factory, n)?;
+        state.active_station = n.clone();
+        run.frontmatter.active_station = n.clone();
+    }
+    store.write_state(slug, &state)?;
+    store.write_run(&run)?;
+    // Retire the dropped station's (workless) branch + worktree, then publish.
+    crate::lifecycle::drop_station_branch(store, slug, station);
+    crate::events::emit(
+        store,
+        slug,
+        "darkrun.station.dropped",
+        serde_json::json!({ "station": station, "next": next }),
+    );
+    let _ = crate::commit::commit_state(
+        store,
+        &format!("darkrun: drop station '{station}' from {slug}"),
+    );
+    Ok(StationDropOutcome {
+        run: slug.to_string(),
+        dropped: station.to_string(),
+        next_station: next,
+    })
 }
 
 /// Mark a station's Spec as elaborated-with-the-operator, clearing the
@@ -1720,6 +1836,7 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
                 ctx.locked_artifact = Some(def.artifact.clone());
                 // The gate is global: every station resolves the run mode's kind.
                 ctx.kind = Some(run.frontmatter.mode.gate());
+                ctx.station_optional = def.optional;
                 ctx.explorers = def.explorers.clone();
                 ctx.workers = def.workers.clone();
                 ctx.reviewers = def.reviewers.clone();
@@ -2218,6 +2335,7 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
                     .dirty_paths_excluding(&repo_root, &[".darkrun", ".gitignore"])
                     .unwrap_or_default();
                 if !dirty.is_empty() {
+                    let dirty_count = dirty.len();
                     let branch = git.current_branch().ok().flatten().unwrap_or_default();
                     let action = RunAction::SaveWip {
                         run: slug.to_string(),
@@ -2233,6 +2351,12 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
                         action: Some(action.clone()),
                     };
                     append_action_log(store, slug, &position.track, &action);
+                    crate::events::emit(
+                        store,
+                        slug,
+                        "darkrun.save_wip.blocked",
+                        serde_json::json!({ "files": dirty_count }),
+                    );
                     // The engine's own state writes (drift sweep, journal) still
                     // commit — commit_state stages ONLY `.darkrun`, never the
                     // agent's work.
@@ -2296,6 +2420,12 @@ pub fn run_tick_with_hosting<H: crate::hosting::Hosting>(
     // ordered trail the reflection pass and the operator read. Best-effort:
     // a journal write never fails a tick.
     append_action_log(store, slug, &position.track, &action);
+    crate::events::emit(
+        store,
+        slug,
+        "darkrun.manager.action",
+        serde_json::json!({ "action": action_tag(&action), "station": station_of(&action) }),
+    );
 
     // Commit early, commit often: every tick's state writes (phase advances,
     // gate stamps, the audit journal) commit on the engine's branch and push —
@@ -2893,6 +3023,13 @@ pub fn run_start(
     let _ = crate::commit::commit_state_if_dirty(
         store,
         &format!("darkrun: enter station {first_name}"),
+    );
+
+    crate::events::emit(
+        store,
+        slug,
+        "darkrun.run.created",
+        serde_json::json!({ "factory": factory_name, "mode": format!("{mode:?}").to_lowercase() }),
     );
 
     // Open the run's DELIVERY draft PR (run-main -> base) the moment the run
@@ -3614,7 +3751,7 @@ mod tests {
         // keeps [build, prove], which filters to nothing, so right-sizing degrades
         // to the full plan rather than stranding the run with zero stations.
         let only = StationDef {
-            name: "frame".into(), label: None, kills: "wrong-thing".into(), artifact: "o.md".into(),
+            name: "frame".into(), label: None, optional: false, kills: "wrong-thing".into(), artifact: "o.md".into(),
             explorers: vec![],
             workers: vec![], fix_workers: vec![], reviewers: vec![], role_models: Default::default(),
             role_interpretations: Default::default(), worker_roles: Default::default(),
@@ -5120,6 +5257,108 @@ mod tests {
     }
 
 
+
+
+    // ── Station drop (the keep-or-drop offer) ───────────────────────────────
+
+    /// Walk the cursor to `station`'s arrival (Spec, unelaborated) by
+    /// completing every prior station in the plan.
+    fn arrive_at(store: &StateStore, run: &str, station: &str) {
+        let mut state = store.read_state(run).unwrap().unwrap();
+        let factory = resolve_factory_for(store, &store.read_run(run).unwrap().frontmatter.factory)
+            .unwrap();
+        let plan = if state.plan.is_empty() {
+            factory.stations.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+        } else {
+            state.plan.clone()
+        };
+        for name in &plan {
+            if name == station {
+                break;
+            }
+            ensure_station(&mut state, &factory, name).unwrap();
+            let st = state.stations.get_mut(name).unwrap();
+            st.status = Status::Completed;
+        }
+        ensure_station(&mut state, &factory, station).unwrap();
+        state.active_station = station.to_string();
+        store.write_state(run, &state).unwrap();
+    }
+
+    #[test]
+    fn station_drop_removes_the_optional_station_and_advances() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        arrive_at(&store, "r", "shape");
+        let out = station_drop(&store, "r", "shape").expect("drop");
+        assert_eq!(out.dropped, "shape");
+        assert_eq!(out.next_station.as_deref(), Some("build"));
+        let state = store.read_state("r").unwrap().unwrap();
+        assert!(!state.plan.is_empty(), "the plan materialized on drop");
+        assert!(!state.plan.iter().any(|s| s == "shape"));
+        assert!(!state.stations.contains_key("shape"));
+        assert_eq!(state.active_station, "build");
+        // The run doc tracks the new active station too.
+        assert_eq!(store.read_run("r").unwrap().frontmatter.active_station, "build");
+    }
+
+    #[test]
+    fn station_drop_refuses_core_inactive_and_started_stations() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+
+        // Not active: the run sits at frame; shape can't drop from afar.
+        let err = station_drop(&store, "r", "shape").unwrap_err();
+        assert!(format!("{err}").contains("drop_station_not_active"), "{err}");
+
+        // Not optional: frame is core.
+        let err = station_drop(&store, "r", "frame").unwrap_err();
+        assert!(format!("{err}").contains("drop_station_not_optional"), "{err}");
+
+        // Already started: shape with an elaborated spec refuses.
+        arrive_at(&store, "r", "shape");
+        {
+            let mut state = store.read_state("r").unwrap().unwrap();
+            state.stations.get_mut("shape").unwrap().elaborated = true;
+            store.write_state("r", &state).unwrap();
+        }
+        let err = station_drop(&store, "r", "shape").unwrap_err();
+        assert!(format!("{err}").contains("drop_station_already_started"), "{err}");
+    }
+
+    #[test]
+    fn station_drop_retires_the_workless_station_branch() {
+        let (_d, root, store) = git_store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        arrive_at(&store, "r", "shape");
+        // Enter the station so its branch + worktree exist (workless fork).
+        crate::lifecycle::enter_station(&store, "r", "shape");
+        let branch_exists = |b: &str| {
+            std::process::Command::new("git")
+                .arg("-C").arg(&root)
+                .args(["rev-parse", "--verify", "-q", &format!("refs/heads/{b}")])
+                .status().unwrap().success()
+        };
+        assert!(branch_exists("darkrun/r/shape"), "fork exists before drop");
+        station_drop(&store, "r", "shape").expect("drop");
+        assert!(!branch_exists("darkrun/r/shape"), "fork retired after drop");
+    }
+
+    #[test]
+    fn spec_prompt_offers_keep_or_drop_only_on_optional_stations() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        // frame (core): no offer.
+        let t = run_tick(&store, "r").expect("tick");
+        let prompt = t.prompt.expect("prompt");
+        assert!(!prompt.contains("Keep or drop"), "core station carries no offer");
+        // shape (optional): the offer renders.
+        arrive_at(&store, "r", "shape");
+        let t2 = run_tick(&store, "r").expect("tick");
+        let prompt2 = t2.prompt.expect("prompt");
+        assert!(prompt2.contains("Keep or drop"), "optional station offers the drop:\n{prompt2}");
+        assert!(prompt2.contains("darkrun_station_drop"), "{prompt2}");
+    }
 
     // ── Run-level delivery PR: draft at start, ready at seal ───────────────
 
