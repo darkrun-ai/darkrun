@@ -365,15 +365,31 @@ pub fn register_project_in(
     repo_root: &Path,
     name: Option<String>,
 ) -> io::Result<ProjectRecord> {
-    let slug = slug_for(repo_root);
+    // A project IS its git repository: register the CANONICAL root (a linked
+    // worktree resolves to the main checkout) under the canonical slug, and
+    // default the display name to the repository's name — never a worktree
+    // directory's.
+    let canonical = resolve_project_root(repo_root);
+    let slug = slug_for(&canonical);
     let record = ProjectRecord {
         slug: slug.clone(),
-        path: repo_root.to_path_buf(),
-        name,
+        name: name.or_else(|| display_name_for(&canonical)),
+        path: canonical,
         added_at: Some(now_rfc3339()),
     };
     write_project_record_in(root, &slug, &record)?;
     Ok(record)
+}
+
+/// The human display name for a project root: the origin remote's repo name,
+/// else the directory basename.
+fn display_name_for(canonical: &Path) -> Option<String> {
+    origin_repo_name(canonical).or_else(|| {
+        canonical
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+    })
 }
 
 /// Write `record` to `<root>/<slug>/project.json`, creating the slug directory
@@ -448,7 +464,68 @@ pub fn list_projects_in(root: &Path) -> io::Result<Vec<ProjectRecord>> {
         let Ok(record) = serde_json::from_slice::<ProjectRecord>(&bytes) else {
             continue;
         };
-        projects.push(record);
+        // SELF-HEAL stale identities: records written before project identity
+        // was canonicalized may be keyed by a worktree directory (its name as
+        // the slug, its path as the root). Re-derive the canonical identity;
+        // when it differs, migrate the record (and any engine descriptors)
+        // under the canonical slug and retire the stale dir — so a worktree
+        // never surfaces as its own project.
+        let canonical = resolve_project_root(&record.path);
+        let expected = slug_for(&canonical);
+        let dir_name = slug_path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if dir_name != expected || record.path != canonical {
+            let healed = ProjectRecord {
+                slug: expected.clone(),
+                name: record
+                    .name
+                    .clone()
+                    .filter(|n| !dir_name.starts_with(n.as_str()))
+                    .or_else(|| display_name_for(&canonical)),
+                path: canonical,
+                added_at: record.added_at.clone(),
+            };
+            // Write the canonical record only when one doesn't already exist
+            // (an existing canonical registration wins).
+            let dest_dir = root.join(&expected);
+            let dest_record = dest_dir.join(PROJECT_RECORD_FILE);
+            let _ = fs::create_dir_all(&dest_dir);
+            if !dest_record.exists() {
+                if let Ok(json) = serde_json::to_vec_pretty(&healed) {
+                    let _ = fs::write(&dest_record, json);
+                }
+            }
+            // Carry engine descriptors across, then retire the stale dir.
+            if let Ok(rd) = fs::read_dir(&slug_path) {
+                for f in rd.flatten() {
+                    let from = f.path();
+                    if from.file_name() != Some(PROJECT_RECORD_FILE.as_ref()) {
+                        if let Some(fname) = from.file_name() {
+                            let _ = fs::rename(&from, dest_dir.join(fname));
+                        }
+                    }
+                }
+            }
+            let _ = fs::remove_file(&record_path);
+            let _ = fs::remove_dir(&slug_path);
+            // Surface the healed record unless the canonical dir already
+            // carried its own (avoid duplicates in one pass).
+            if !projects.iter().any(|p: &ProjectRecord| p.slug == expected) {
+                if let Ok(b) = fs::read(&dest_record) {
+                    if let Ok(rec) = serde_json::from_slice::<ProjectRecord>(&b) {
+                        projects.push(rec);
+                        continue;
+                    }
+                }
+                projects.push(healed);
+            }
+            continue;
+        }
+        if !projects.iter().any(|p: &ProjectRecord| p.slug == record.slug) {
+            projects.push(record);
+        }
     }
     Ok(projects)
 }
@@ -740,4 +817,82 @@ mod tests {
         // And Ok(None) when truly absent.
         assert!(read_project_record_in(dir.path(), "ghost").unwrap().is_none());
     }
+
+    #[test]
+    fn list_projects_heals_a_stale_worktree_keyed_record() {
+        use std::process::Command;
+        // A real repo with a linked worktree under .claude/worktrees/.
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(repo.path()).args(args)
+                .status().unwrap().success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@darkrun.ai"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.path().join("README.md"), "x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let wt = repo.path().join(".claude/worktrees/floofy");
+        git(&["worktree", "add", "-q", wt.to_str().unwrap()]);
+
+        // A STALE registration: keyed by the worktree dir, pointing at it.
+        let reg = tempfile::tempdir().unwrap();
+        let stale_slug = format!("floofy-{}", short_hash(&wt));
+        let stale = ProjectRecord {
+            slug: stale_slug.clone(),
+            path: wt.clone(),
+            name: Some("floofy".into()),
+            added_at: Some("2026-06-09T00:00:00Z".into()),
+        };
+        write_project_record_in(reg.path(), &stale_slug, &stale).unwrap();
+        // ...with an engine descriptor file beside it.
+        std::fs::write(reg.path().join(&stale_slug).join("engine-1.json"), "{}").unwrap();
+
+        let projects = list_projects_in(reg.path()).unwrap();
+        assert_eq!(projects.len(), 1, "{projects:?}");
+        let healed = &projects[0];
+        let canonical = resolve_project_root(&wt);
+        assert_eq!(healed.path, canonical, "record points at the MAIN checkout");
+        assert_eq!(healed.slug, slug_for(&canonical), "keyed by the canonical slug");
+        assert_ne!(healed.slug, stale_slug);
+        assert!(
+            healed.name.as_deref() != Some("floofy"),
+            "a worktree-directory display name does not survive: {:?}",
+            healed.name
+        );
+        // The stale dir is retired; the descriptor moved with the project.
+        assert!(!reg.path().join(&stale_slug).exists());
+        assert!(reg.path().join(&healed.slug).join("engine-1.json").exists());
+        // A second list is stable (idempotent heal).
+        let again = list_projects_in(reg.path()).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].slug, healed.slug);
+    }
+
+    #[test]
+    fn register_project_canonicalizes_worktrees_and_names_by_repo() {
+        use std::process::Command;
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(repo.path()).args(args)
+                .status().unwrap().success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@darkrun.ai"]);
+        git(&["config", "user.name", "t"]);
+        git(&["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+        std::fs::write(repo.path().join("a"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let wt = repo.path().join(".claude/worktrees/scratch");
+        git(&["worktree", "add", "-q", wt.to_str().unwrap()]);
+
+        let reg = tempfile::tempdir().unwrap();
+        let rec = register_project_in(reg.path(), &wt, None).unwrap();
+        assert_eq!(rec.path, resolve_project_root(&wt), "registers the repo, not the worktree");
+        assert_eq!(rec.name.as_deref(), Some("widgets"), "named by the origin repo");
+        assert!(rec.slug.starts_with("widgets-"), "{}", rec.slug);
+    }
+
 }
