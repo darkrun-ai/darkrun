@@ -57,18 +57,23 @@ pub fn UnitGraph(
     };
 
     let view_box = format!("0 0 {} {}", result.width, result.height);
-    // Crisp 1:1 rendering: the drawing never UPSCALES (billboarded text), only
-    // shrinks when wider than its container. The graph panel itself spans the
-    // full pane width; a small graph simply sits left within it.
-    let svg_style = format!(
-        "background:{surface};border:1px solid {border};border-radius:8px;\
-         display:block;max-width:100%;height:auto;font-family:{mono};",
+    // The WELL spans the full pane width and owns the surface chrome; the
+    // drawing renders crisp at 1:1, CENTERED inside it (shrink-only when wider
+    // than the well — never billboarded by upscaling).
+    let well_style = format!(
+        "width:100%;box-sizing:border-box;background:{surface};\
+         border:1px solid {border};border-radius:8px;padding:14px 12px;\
+         display:flex;justify-content:center;overflow:hidden;",
         surface = tokens::var::SURFACE_RAISED,
         border = tokens::var::BORDER,
+    );
+    let svg_style = format!(
+        "display:block;max-width:100%;height:auto;font-family:{mono};",
         mono = tokens::FONT_MONO,
     );
 
     rsx! {
+        div { class: "dr-unit-graph-well", style: "{well_style}",
         svg {
             class: "dr-unit-graph",
             width: "{result.width}",
@@ -150,6 +155,7 @@ pub fn UnitGraph(
                     }
                 }
             }
+        }
         }
     }
 }

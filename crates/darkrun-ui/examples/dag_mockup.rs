@@ -56,7 +56,7 @@ fn main() {
     // ── The SVG, mirroring graph/view.rs exactly ─────────────────────────
     let mut svg = String::new();
     svg.push_str(&format!(
-        r#"<svg class="dr-unit-graph" width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="unit dependency graph" preserveAspectRatio="xMinYMid meet" style="background:var(--dr-surface-raised);border:1px solid var(--dr-border);border-radius:8px;display:block;max-width:100%;height:auto;font-family:'JetBrains Mono','SF Mono',Menlo,monospace;">
+        r#"<svg class="dr-unit-graph" width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="unit dependency graph" style="display:block;max-width:100%;height:auto;font-family:'JetBrains Mono','SF Mono',Menlo,monospace;">
 <defs><marker id="dr-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--dr-border-strong)"/></marker></defs>
 "#,
         w = result.width,
@@ -80,6 +80,9 @@ fn main() {
         ));
     }
     svg.push_str("</svg>\n");
+    let svg = format!(
+        r#"<div style="width:100%;box-sizing:border-box;background:var(--dr-surface-raised);border:1px solid var(--dr-border);border-radius:8px;padding:14px 12px;display:flex;justify-content:center;overflow:hidden;">{svg}</div>"#
+    );
 
     // ── Unit rows beneath the graph (the existing UnitRow look) ─────────
     let mut rows = String::new();
