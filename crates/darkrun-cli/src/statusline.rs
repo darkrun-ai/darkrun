@@ -298,6 +298,22 @@ fn pool_line(
             }
             Some(chips.join(" "))
         }
+        Some(StationPhase::Spec) => {
+            // Discovery runs the explorers in parallel — show them as agent
+            // chips, all in the awaited treatment (the engine records no
+            // per-explorer completion; what matters is WHO is exploring).
+            let explorers: Vec<String> = station_def
+                .map(|s| s.explorers.iter().map(|e| e.name().to_string()).collect())
+                .unwrap_or_default();
+            if explorers.is_empty() {
+                return None;
+            }
+            let chips: Vec<String> = explorers
+                .iter()
+                .map(|e| agent_chip(e, false, true))
+                .collect();
+            Some(chips.join(" "))
+        }
         _ => None,
     }
 }
@@ -1460,6 +1476,28 @@ mod tests {
         let first2 = line2.split('\n').next().unwrap();
         assert_eq!(first2.matches(PIP_DONE).count(), 6, "all six filled at the gate: {first2}");
         assert_eq!(first2.matches(PIP_PENDING).count(), 0, "{first2}");
+    }
+
+    #[test]
+    fn spec_phase_pools_the_explorers_as_agent_chips() {
+        use darkrun_core::StateStore;
+        // Frame declares the context + value explorers; at Spec they ride the
+        // pool line as awaited agent chips — the same chip language as every
+        // other phase, not bare names.
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        seed_run_at_phase(&store, "frame", StationPhase::Spec);
+        let line = render(Some(dir.path().to_path_buf())).expect("renders");
+        let (first, second) = line.split_once('\n').expect("two lines at spec");
+        assert!(first.contains("spec"), "{first}");
+        assert!(
+            second.contains("context") && second.contains("value"),
+            "explorer chips on the pool line: {second}"
+        );
+        assert!(
+            second.contains('\u{25b8}'),
+            "explorers carry the awaited treatment: {second}"
+        );
     }
 
 }
