@@ -16,6 +16,15 @@ set "C4=%PKG%\..\target\debug\darkrun.exe"
 
 if exist "%C1%" ( "%C1%" %* & exit /b %errorlevel% )
 if exist "%C2%" ( "%C2%" %* & exit /b %errorlevel% )
+
+rem Dev fallback: of the two cargo profiles, run whichever was built last, so
+rem a fresh `cargo build` is never shadowed by a stale --release binary.
+if exist "%C3%" if exist "%C4%" (
+	for /f %%N in ('powershell -NoProfile -Command "if ((Get-Item '%C4%').LastWriteTime -gt (Get-Item '%C3%').LastWriteTime) { 'debug' } else { 'release' }"') do (
+		if "%%N"=="debug" ( "%C4%" %* & exit /b %errorlevel% )
+		"%C3%" %* & exit /b %errorlevel%
+	)
+)
 if exist "%C3%" ( "%C3%" %* & exit /b %errorlevel% )
 if exist "%C4%" ( "%C4%" %* & exit /b %errorlevel% )
 
