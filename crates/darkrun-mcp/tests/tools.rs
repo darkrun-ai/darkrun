@@ -4206,6 +4206,35 @@ fn every_tick_refreshes_the_live_session_payload() {
     let _ = first;
 }
 
+
+/// A tick that LANDS on an operator gate pushes the gate to the connected
+/// desktop in the same frame — the Approve / Request-changes bar appears the
+/// moment the gate opens, no poll. (When no desktop is connected, the engine
+/// additionally raises one pointed at the run — the existing G-fix path.)
+#[test]
+fn a_gate_tick_pushes_the_open_gate_to_subscribers() {
+    let (_d, server) = started("g2"); // seals frame's elaboration
+    let reg = server.sessions();
+    next(&server, "g2"); // spec
+    next(&server, "g2"); // review
+    let mut rx = reg.subscribe("g2").expect("session channel exists after a tick");
+    while rx.try_recv().is_ok() {}
+    // The next tick holds at the pre-execution user gate…
+    let v = body(&next(&server, "g2"));
+    assert_eq!(v["action"]["action"], "user_gate");
+    // …and the SAME tick pushed the gate to subscribers: the frame's
+    // gate_type is populated (solo -> "ask"), not null.
+    let mut gated_frame = None;
+    while let Ok(f) = rx.try_recv() {
+        if f.contains("\"gate_type\":\"") {
+            gated_frame = Some(f);
+        }
+    }
+    let frame = gated_frame.expect("the gate tick pushed a frame carrying the open gate");
+    assert!(frame.contains("\"ask\""), "solo gates surface as ask: {frame}");
+}
+
+
 // ── Batch 6: feedback create with empty station string ─────────────────────
 
 #[test]

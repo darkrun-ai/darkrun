@@ -464,6 +464,13 @@ pub fn list_projects_in(root: &Path) -> io::Result<Vec<ProjectRecord>> {
         let Ok(record) = serde_json::from_slice::<ProjectRecord>(&bytes) else {
             continue;
         };
+        // PRUNE dead projects: a record whose repo path no longer exists on
+        // disk (a deleted clone, a /tmp demo, a retired worktree) is gone for
+        // good — retire its dir rather than surfacing a ghost in the sidebar.
+        if !record.path.exists() {
+            let _ = fs::remove_dir_all(&slug_path);
+            continue;
+        }
         // SELF-HEAL stale identities: records written before project identity
         // was canonicalized may be keyed by a worktree directory (its name as
         // the slug, its path as the root). Re-derive the canonical identity;
@@ -666,8 +673,10 @@ mod tests {
     #[test]
     fn test_list_projects_scans_all_and_skips_non_records() {
         let tmp = tempfile::tempdir().unwrap();
-        register_project_in(tmp.path(), Path::new("/Users/dev/alpha"), None).unwrap();
-        register_project_in(tmp.path(), Path::new("/Users/dev/beta"), None).unwrap();
+        let alpha = tempfile::tempdir().unwrap();
+        let beta = tempfile::tempdir().unwrap();
+        register_project_in(tmp.path(), alpha.path(), None).unwrap();
+        register_project_in(tmp.path(), beta.path(), None).unwrap();
 
         // A legacy slug dir with only an engine descriptor (no project.json) and
         // a slug dir with a malformed record must both be skipped, not crash.
@@ -678,11 +687,11 @@ mod tests {
         fs::create_dir_all(&bad_dir).unwrap();
         fs::write(bad_dir.join(PROJECT_RECORD_FILE), b"not json").unwrap();
 
-        let mut projects = list_projects_in(tmp.path()).unwrap();
-        projects.sort_by(|a, b| a.path.cmp(&b.path));
+        let projects = list_projects_in(tmp.path()).unwrap();
         assert_eq!(projects.len(), 2, "only valid records: {projects:?}");
-        assert_eq!(projects[0].path, PathBuf::from("/Users/dev/alpha"));
-        assert_eq!(projects[1].path, PathBuf::from("/Users/dev/beta"));
+        let paths: Vec<&PathBuf> = projects.iter().map(|p| &p.path).collect();
+        assert!(paths.contains(&&alpha.path().to_path_buf()));
+        assert!(paths.contains(&&beta.path().to_path_buf()));
     }
 
     #[test]
@@ -699,8 +708,9 @@ mod tests {
         // shares a slug — proving the desktop can overlay live status on the
         // project record by slug match.
         let tmp = tempfile::tempdir().unwrap();
-        let repo = "/Users/dev/served";
-        let record = register_project_in(tmp.path(), Path::new(repo), None).unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path().to_str().unwrap();
+        let record = register_project_in(tmp.path(), repo_dir.path(), None).unwrap();
 
         let engine = EngineRegistry::with_root(tmp.path(), repo);
         engine.announce(sample_addr(), "claude").unwrap();
@@ -761,11 +771,13 @@ mod tests {
         let root = default_root().expect("home resolves");
         assert!(root.ends_with(".darkrun"));
 
-        let reg = EngineRegistry::new("/Users/dev/widget").expect("registry under home");
+        let widget = tempfile::tempdir().unwrap();
+        let reg = EngineRegistry::new(widget.path().to_str().unwrap())
+            .expect("registry under home");
         reg.announce(sample_addr(), "claude").unwrap();
         assert!(!list_live_engines().unwrap().is_empty());
 
-        let rec = register_project(Path::new("/Users/dev/widget"), Some("Widget".into())).unwrap();
+        let rec = register_project(widget.path(), Some("Widget".into())).unwrap();
         assert_eq!(rec.name.as_deref(), Some("Widget"));
         assert!(list_projects().unwrap().iter().any(|p| p.slug == rec.slug));
 

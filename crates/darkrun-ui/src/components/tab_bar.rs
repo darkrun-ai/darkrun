@@ -99,7 +99,8 @@ pub fn TabBar(
                             if let Some(n) = count {
                                 {
                                     let pill = if alert {
-                                        "background:#f8514922;color:#f5a3a3;".to_string()
+                                        "background:var(--dr-alert-chip-bg);color:var(--dr-alert-chip-fg);"
+                                            .to_string()
                                     } else {
                                         format!(
                                             "background:{surface};color:{faint};",

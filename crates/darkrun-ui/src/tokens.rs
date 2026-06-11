@@ -199,6 +199,8 @@ pub const THEME_CSS: &str = r#":root{
   --dr-status-ok:#3fb950;
   --dr-status-warn:#f0b429;
   --dr-status-danger:#f85149;
+  --dr-alert-chip-bg:#f8514922;
+  --dr-alert-chip-fg:#f5a3a3;
   --dr-status-info:#5fd7ff;
   --dr-font-sans:"Inter","Segoe UI",system-ui,-apple-system,sans-serif;
   --dr-font-mono:"JetBrains Mono","SF Mono","Cascadia Code",ui-monospace,monospace;
@@ -243,6 +245,8 @@ pub const THEME_CSS: &str = r#":root{
     --dr-status-ok:#2e9e43;
     --dr-status-warn:#b9791a;
     --dr-status-danger:#d83c33;
+    --dr-alert-chip-bg:#f9dedc;
+    --dr-alert-chip-fg:#a8201a;
     --dr-status-info:#0e9fd6;
     /* Wordmark, light theme: "dark" SOLID BLACK (--dr-text) with no stroke,
        "run" the teal accent. */
@@ -281,6 +285,8 @@ pub const THEME_CSS: &str = r#":root{
   --dr-status-ok:#3fb950;
   --dr-status-warn:#f0b429;
   --dr-status-danger:#f85149;
+  --dr-alert-chip-bg:#f8514922;
+  --dr-alert-chip-fg:#f5a3a3;
   --dr-status-info:#5fd7ff;
   --dr-wm-dark-fill:var(--dr-surface-base);
   --dr-wm-dark-stroke:var(--dr-accent);
@@ -315,6 +321,8 @@ pub const THEME_CSS: &str = r#":root{
   --dr-status-ok:#2e9e43;
   --dr-status-warn:#b9791a;
   --dr-status-danger:#d83c33;
+  --dr-alert-chip-bg:#f9dedc;
+  --dr-alert-chip-fg:#a8201a;
   --dr-status-info:#0e9fd6;
   --dr-wm-dark-fill:var(--dr-text);
   --dr-wm-dark-stroke:transparent;
