@@ -548,6 +548,12 @@ fn StatuslineDemo() -> Element {
     );
     let line = "margin:0;font:13px/1.7 'JetBrains Mono','SF Mono',Menlo,monospace;\
                 color:#c9d1d9;white-space:pre;";
+    // Claude Code chrome: the rounded input box the status line lives under,
+    // so the line reads in situ rather than floating in a bare terminal.
+    let promptbox = "display:flex;align-items:baseline;gap:9px;\
+                     border:1px solid #2f3742;border-radius:8px;\
+                     padding:8px 12px;margin-bottom:7px;\
+                     font:13px/1.5 'JetBrains Mono','SF Mono',Menlo,monospace;";
     let head = format!(
         "display:flex;align-items:center;gap:7px;margin-bottom:10px;",
     );
@@ -576,6 +582,12 @@ fn StatuslineDemo() -> Element {
                     span { style: dot("#ff5f57") }
                     span { style: dot("#febc2e") }
                     span { style: dot("#28c840") }
+                }
+                div { style: "{promptbox}",
+                    span { style: "color:#8b949e;", ">" }
+                    span { style: "color:#58606a;font-style:italic;",
+                        "Try \"darkrun resume\""
+                    }
                 }
                 pre { style: "{line}", dangerous_inner_html: "{html}" }
             }

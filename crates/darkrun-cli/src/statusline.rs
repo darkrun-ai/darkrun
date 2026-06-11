@@ -1163,11 +1163,20 @@ mod tests {
 
     /// Seed a run whose active station sits at `phase` (no units/feedback).
     fn seed_run_at_phase(store: &darkrun_core::StateStore, station: &str, phase: StationPhase) {
+        seed_slugged_run_at_phase(store, "r", station, phase);
+    }
+
+    fn seed_slugged_run_at_phase(
+        store: &darkrun_core::StateStore,
+        slug: &str,
+        station: &str,
+        phase: StationPhase,
+    ) {
         use darkrun_core::domain::{Run, RunFrontmatter, Station, Status};
         use darkrun_core::state::RunState;
         store
             .write_run(&Run {
-                slug: "r".into(),
+                slug: slug.into(),
                 title: "T".into(),
                 body: String::new(),
                 frontmatter: RunFrontmatter {
@@ -1177,7 +1186,7 @@ mod tests {
                 },
             })
             .unwrap();
-        store.set_active_run("r").unwrap();
+        store.set_active_run(slug).unwrap();
         let mut state = RunState {
             factory: "software".into(),
             active_station: station.into(),
@@ -1198,7 +1207,7 @@ mod tests {
             started_at: None,
             completed_at: None,
         });
-        store.write_state("r", &state).unwrap();
+        store.write_state(slug, &state).unwrap();
     }
 
     /// GENERATOR (run on demand, not in CI): renders the real statusline for
@@ -1236,15 +1245,18 @@ mod tests {
             body: String::new(),
         };
 
+        // The slug the website visitor sees — a believable run, not a fixture.
+        const DEMO_SLUG: &str = "checkout-flow";
+
         // 1: Manufacture pool — two units mid-pass (one bounced).
         let d1 = tempfile::tempdir().unwrap();
         let s1 = StateStore::new(d1.path());
-        seed_run_at_phase(&s1, "build", StationPhase::Manufacture);
-        s1.write_unit("r", &mk_unit("u-03", vec![
+        seed_slugged_run_at_phase(&s1, DEMO_SLUG, "build", StationPhase::Manufacture);
+        s1.write_unit(DEMO_SLUG, &mk_unit("u-03", vec![
             ("test_author", Some(IterationResult::Advance)),
             ("builder", Some(IterationResult::Advance)),
         ])).unwrap();
-        s1.write_unit("r", &mk_unit("u-07", vec![
+        s1.write_unit(DEMO_SLUG, &mk_unit("u-07", vec![
             ("test_author", Some(IterationResult::Advance)),
             ("builder", Some(IterationResult::Reject)),
         ])).unwrap();
@@ -1253,27 +1265,27 @@ mod tests {
         // 2: Open feedback preempts the pool — severity chips.
         let d2 = tempfile::tempdir().unwrap();
         let s2 = StateStore::new(d2.path());
-        seed_run_at_phase(&s2, "build", StationPhase::Manufacture);
-        s2.write_feedback_raw("r", "fb-01",
+        seed_slugged_run_at_phase(&s2, DEMO_SLUG, "build", StationPhase::Manufacture);
+        s2.write_feedback_raw(DEMO_SLUG, "fb-01",
             "---\nstatus: pending\nseverity: blocker\n---\nbroken\n").unwrap();
-        s2.write_feedback_raw("r", "fb-02",
+        s2.write_feedback_raw(DEMO_SLUG, "fb-02",
             "---\nstatus: pending\nseverity: medium\n---\nnit\n").unwrap();
         let line2 = render(Some(d2.path().to_path_buf())).unwrap();
 
         // 3: Parked at the operator gate — the Π doorway.
         let d3 = tempfile::tempdir().unwrap();
         let s3 = StateStore::new(d3.path());
-        seed_run_at_phase(&s3, "build", StationPhase::Checkpoint);
+        seed_slugged_run_at_phase(&s3, DEMO_SLUG, "build", StationPhase::Checkpoint);
         {
             use darkrun_core::domain::{Checkpoint, CheckpointKind};
-            let mut state = s3.read_state("r").unwrap().unwrap();
+            let mut state = s3.read_state(DEMO_SLUG).unwrap().unwrap();
             let st = state.stations.get_mut("build").unwrap();
             st.checkpoint = Some(Checkpoint {
                 kind: CheckpointKind::Ask,
                 entered_at: Some("t".into()),
                 outcome: None,
             });
-            s3.write_state("r", &state).unwrap();
+            s3.write_state(DEMO_SLUG, &state).unwrap();
         }
         let line3 = render(Some(d3.path().to_path_buf())).unwrap();
 
