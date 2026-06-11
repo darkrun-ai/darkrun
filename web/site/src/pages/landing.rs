@@ -147,7 +147,7 @@ fn DesktopSlideshow() -> Element {
     let slides = [
         (
             "The run review",
-            "The main surface. The station line shows where the run is; the tabs hold the work under review — units, outputs, knowledge, and feedback.",
+            "The main surface, live as the engine ticks. The station line shows where the run is; the unit dependency graph shows the wave the factory is building; the tabs hold outputs, knowledge, and feedback.",
             asset!("/assets/desktop-run-review.png"),
             asset!("/assets/desktop-run-review-light.png"),
         ),
@@ -156,12 +156,6 @@ fn DesktopSlideshow() -> Element {
             "At a checkpoint the run stops and hands you the decision: complete the station to advance, or request changes — which route back as drift, no restart.",
             asset!("/assets/desktop-approval.png"),
             asset!("/assets/desktop-approval-light.png"),
-        ),
-        (
-            "Decisions",
-            "When a call is yours to make, the agent draws each option — you pick from a diagram, not a wall of prose.",
-            asset!("/assets/desktop-review.png"),
-            asset!("/assets/desktop-review-light.png"),
         ),
         (
             "Design directions",

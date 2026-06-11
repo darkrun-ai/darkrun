@@ -224,6 +224,12 @@ pub fn HomeApp(
     // survives a relaunch without the user opening Settings first.
     use_effect(move || {
         spawn(async move {
+            // `DARKRUN_THEME` (light|dark|system) wins over the stored choice —
+            // the deterministic hook the screenshot harness uses.
+            if let Ok(forced) = std::env::var("DARKRUN_THEME") {
+                let _ = document::eval(&apply_script(ThemeChoice::from_label(&forced)));
+                return;
+            }
             if let Ok(label) = document::eval(&format!(
                 "return (localStorage.getItem('{THEME_STORAGE_KEY}') || 'system');"
             ))

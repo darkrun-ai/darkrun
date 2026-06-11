@@ -539,8 +539,20 @@ impl DiscoveredEngine {
 #[cfg(not(tarpaulin_include))] // reads the real ~/.darkrun registry; list_live_engines_in is tested
 pub async fn discover_live_engines() -> io::Result<Vec<DiscoveredEngine>> {
     let descriptors = darkrun_mcp::registry::list_live_engines()?;
+    // The registry's pid check is necessary but not sufficient: a dead
+    // engine's pid can be REUSED by an unrelated process, leaving a ghost
+    // descriptor that looks alive for days. The engine's loopback port is the
+    // strong signal — probe it (local, ~ms) and drop descriptors nothing
+    // answers on.
     Ok(descriptors
         .into_iter()
+        .filter(|d| {
+            std::net::TcpStream::connect_timeout(
+                &d.addr,
+                std::time::Duration::from_millis(250),
+            )
+            .is_ok()
+        })
         .map(DiscoveredEngine::from_descriptor)
         .collect())
 }

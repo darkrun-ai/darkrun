@@ -63,6 +63,23 @@ enum Decision {
 }
 
 /// The root review component: owns the feed and renders the active payload.
+
+/// The feedback button's color rules — theme-keyed, literal colors, no custom
+/// properties. Dark keeps the soft pink-on-red-tint pair the design settled
+/// on; light pairs a deep red with a rose tint (WCAG AA in both: 7.5:1 / 5.7:1).
+const FB_BTN_CSS: &str = r#"
+.dr-feedback-open{ background:var(--dr-surface-overlay); color:var(--dr-text-muted); }
+.dr-feedback-open>span{ background:var(--dr-surface-base); }
+.dr-feedback-open[data-alert="true"]{ background:#f8514922; color:#f5a3a3; }
+.dr-feedback-open[data-alert="true"]>span{ background:#f8514933; }
+:root[data-theme="light"] .dr-feedback-open[data-alert="true"]{ background:#f9dedc; color:#a8201a; }
+:root[data-theme="light"] .dr-feedback-open[data-alert="true"]>span{ background:#f3c8c5; }
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]) .dr-feedback-open[data-alert="true"]{ background:#f9dedc; color:#a8201a; }
+  :root:not([data-theme="dark"]) .dr-feedback-open[data-alert="true"]>span{ background:#f3c8c5; }
+}
+"#;
+
 #[component]
 pub fn ReviewApp(cfg: ConnConfig) -> Element {
     let mut payload = use_signal(|| None::<SessionPayload>);
@@ -390,13 +407,11 @@ fn ReviewHeader(
         mono = tokens::FONT_MONO,
         muted = tokens::var::TEXT_MUTED,
     );
-    let (fb_bg, fb_fg) = if feedback_alert {
-        ("#f8514922", "#f5a3a3")
-    } else {
-        (tokens::var::SURFACE_OVERLAY, tokens::var::TEXT_MUTED)
-    };
+    // The button's COLORS live in `FB_BTN_CSS` (keyed on `data-alert` + the
+    // theme), not inline — dark keeps the soft pink-on-red-tint pair; light
+    // gets a deep red on a rose tint. Both clear WCAG AA. Inline = layout only.
     let fb_btn = format!(
-        "background:{fb_bg};color:{fb_fg};border:1px solid {border};\
+        "appearance:none;-webkit-appearance:none;border:1px solid {border};\
          font-family:{sans};font-size:12px;border-radius:6px;padding:5px 11px;\
          cursor:pointer;display:flex;align-items:center;gap:6px;",
         border = tokens::var::BORDER_STRONG,
@@ -408,18 +423,17 @@ fn ReviewHeader(
                 style: "display:flex;align-items:center;justify-content:space-between;gap:12px;",
                 span { style: "{title_style}", "{title}" }
                 div { style: "display:flex;align-items:center;gap:8px;",
+                    style { "{FB_BTN_CSS}" }
                     button {
                         class: "dr-feedback-open",
+                        "data-alert": if feedback_alert { "true" } else { "false" },
                         style: "{fb_btn}",
                         onclick: move |evt| on_open_feedback.call(evt),
                         "Feedback"
                         span {
                             style: format!(
-                                "font-family:{};border-radius:999px;padding:0 6px;\
-                                 background:{};color:{};",
+                                "font-family:{};border-radius:999px;padding:0 6px;",
                                 tokens::FONT_MONO,
-                                if feedback_alert { "#f8514933" } else { tokens::var::SURFACE_BASE },
-                                fb_fg,
                             ),
                             "{feedback_count}"
                         }
