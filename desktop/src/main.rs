@@ -23,7 +23,62 @@ mod review;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use wire::ConnConfig;
 
+/// When running as the inner executable of the dev-checkout launch bundle
+/// (`<ws>/target/<profile>/darkrun-desktop.app/Contents/MacOS/darkrun-desktop`)
+/// and the freshly-built sibling (`<ws>/target/<profile>/darkrun-desktop`) is
+/// strictly newer, replace ourselves with it. The sibling runs OUTSIDE the
+/// bundle, so it can never re-enter this branch — no exec loop. Distributed
+/// bundles don't sit in a `target/<profile>/` dir and pass straight through.
+fn exec_fresher_dev_build_if_stale() {
+    #[cfg(unix)]
+    {
+        let Ok(me) = std::env::current_exe() else { return };
+        let Some(sibling) = dev_bundle_sibling(&me) else { return };
+        let newer = match (sibling.metadata(), me.metadata()) {
+            (Ok(s), Ok(m)) => {
+                matches!((s.modified(), m.modified()), (Ok(sm), Ok(mm)) if sm > mm)
+            }
+            _ => false,
+        };
+        if newer {
+            use std::os::unix::process::CommandExt;
+            // exec only returns on failure; fall through and run as-is then.
+            let _ = std::process::Command::new(&sibling).args(std::env::args_os().skip(1)).exec();
+        }
+    }
+}
+
+/// The raw `target/<profile>/darkrun-desktop` sibling of a dev-checkout BUNDLE
+/// executable — `None` for any other layout (incl. distributed bundles, which
+/// don't live in a `target/<profile>/` dir). Pure over the path, so testable.
+fn dev_bundle_sibling(me: &std::path::Path) -> Option<std::path::PathBuf> {
+    // me = <ws>/target/<profile>/darkrun-desktop.app/Contents/MacOS/darkrun-desktop
+    let macos_dir = me.parent()?;
+    if !macos_dir.ends_with("Contents/MacOS") {
+        return None;
+    }
+    let app = macos_dir.parent()?.parent()?;
+    if app.extension().and_then(|e| e.to_str()) != Some("app") {
+        return None;
+    }
+    let profile_dir = app.parent()?;
+    let profile = profile_dir.file_name()?.to_str()?;
+    if profile != "debug" && profile != "release" {
+        return None;
+    }
+    if profile_dir.parent()?.file_name()? != "target" {
+        return None;
+    }
+    Some(profile_dir.join("darkrun-desktop"))
+}
+
 fn main() {
+    // Dev-checkout freshness: Spotlight/Dock launch the cached `.app` WRAPPER
+    // in `target/<profile>/darkrun-desktop.app`, whose inner executable is only
+    // re-synced when the ENGINE spawns the app — a direct launch can run a
+    // days-old copy while a fresh `cargo build` sits right next to it. If we're
+    // that stale copy, exec the newer sibling instead.
+    exec_fresher_dev_build_if_stale();
     // Sentry for the desktop surface — the guard lives for the whole process.
     // The DSN is compiled into the distributed app; a no-DSN build is a no-op.
     let _sentry = darkrun_telemetry::init("desktop");
@@ -67,6 +122,36 @@ fn main() {
         cfg = cfg.with_data_directory(data_dir.join("darkrun").join("webview"));
     }
     dioxus::LaunchBuilder::desktop().with_cfg(cfg).launch(app);
+}
+
+#[cfg(test)]
+mod stale_bundle_tests {
+    use super::dev_bundle_sibling;
+    use std::path::Path;
+
+    #[test]
+    fn dev_bundle_sibling_matches_only_the_dev_wrapper_layout() {
+        let dev = Path::new(
+            "/ws/target/debug/darkrun-desktop.app/Contents/MacOS/darkrun-desktop",
+        );
+        assert_eq!(
+            dev_bundle_sibling(dev),
+            Some("/ws/target/debug/darkrun-desktop".into())
+        );
+        let rel = Path::new(
+            "/ws/target/release/darkrun-desktop.app/Contents/MacOS/darkrun-desktop",
+        );
+        assert_eq!(
+            dev_bundle_sibling(rel),
+            Some("/ws/target/release/darkrun-desktop".into())
+        );
+        // Distributed bundle (no target/<profile>/) and a bare dev binary both
+        // pass through.
+        let dist =
+            Path::new("/Applications/darkrun-desktop.app/Contents/MacOS/darkrun-desktop");
+        assert_eq!(dev_bundle_sibling(dist), None);
+        assert_eq!(dev_bundle_sibling(Path::new("/ws/target/debug/darkrun-desktop")), None);
+    }
 }
 
 /// Top-level app: reads the launch config from the environment and opens the
