@@ -53,6 +53,19 @@ pub const CURRENT_SESSION: &str = "current";
 /// focus pointer the home screen watches so it navigates to this run). Returns
 /// the run slug — the session id the desktop renders.
 pub fn create_show(registry: &SessionRegistry, store: &StateStore, slug: &str) -> Result<String> {
+    create_show_with_focus(registry, store, slug, true)
+}
+
+/// [`create_show`] minus the focus side-effect when `focus` is false: upserts
+/// the run-slug session WITHOUT repointing [`CURRENT_SESSION`]. The lazy HTTP
+/// materializer uses this — a desktop *asking* for a session is navigation the
+/// operator already made; it must not steal every other window's focus.
+pub fn create_show_with_focus(
+    registry: &SessionRegistry,
+    store: &StateStore,
+    slug: &str,
+    focus: bool,
+) -> Result<String> {
     let run = store.read_run(slug)?;
     let units = store.read_units(slug)?;
     let run_json = serde_json::to_value(&run).ok();
@@ -214,7 +227,9 @@ pub fn create_show(registry: &SessionRegistry, store: &StateStore, slug: &str) -
         })
     };
     registry.upsert(build(slug));
-    registry.upsert(build(CURRENT_SESSION));
+    if focus {
+        registry.upsert(build(CURRENT_SESSION));
+    }
     Ok(slug.to_string())
 }
 

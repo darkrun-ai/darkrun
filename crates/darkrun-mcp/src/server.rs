@@ -93,6 +93,17 @@ pub async fn serve_stdio_on(
     // proofs without any disk round-trip.
     let store = StateStore::new(&repo_root);
     let state = AppState::new(store, Limits::default());
+    // On-demand show sessions: a desktop asking for a session id that names a
+    // RUN materializes its review payload from state, so clicking a run in the
+    // sidebar works before the engine has ticked. Unfocused — a passive read
+    // must not repoint the `current` focus channel other windows watch.
+    let state = {
+        let sessions = state.sessions.clone();
+        let mat_store = state.store.clone();
+        state.with_session_materializer(move |id| {
+            crate::sessions::create_show_with_focus(&sessions, &mat_store, id, false).is_ok()
+        })
+    };
 
     // Bind the listener up front so we can read the REAL port back (the
     // requested addr may carry port 0 for an ephemeral bind) before advertising
@@ -127,8 +138,11 @@ pub async fn serve_stdio_on(
         .with_harness(harness);
     // A session opening onto a project with an ACTIVE run brings the desktop up
     // immediately — the operator watches the run live from the first moment,
-    // instead of waiting for a gate (or even a first tick) to raise it.
+    // instead of waiting for a gate (or even a first tick) to raise it. The
+    // show session is PUSHED here too (focused), so the app has a payload to
+    // render the instant it connects.
     if let Ok(Some(active)) = state.store.active_run() {
+        let _ = crate::sessions::create_show(&state.sessions, &state.store, &active);
         server.surface_desktop_once(&active);
     }
     let running = server

@@ -30,6 +30,9 @@ pub async fn ws_session(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let max = state.limits.max_ws_sessions;
+    // Materialize a missing-but-real session (run slug) before subscribing, so
+    // a desktop that connects straight to the socket gets an initial payload.
+    state.ensure_session(&id);
     upgrade.on_upgrade(move |socket| handle_socket(socket, state, id, max))
 }
 
