@@ -756,3 +756,34 @@ async fn ws_pushes_picker_select_update() {
     socket.send(WsMessage::Close(None)).await.ok();
     handle.abort();
 }
+
+// ── On-demand session materialization ────────────────────────────────────────
+
+#[tokio::test]
+async fn a_session_miss_materializes_on_demand() {
+    // The engine installs a materializer that builds a session when the id
+    // names something real (a run slug). A GET for a not-yet-pushed session
+    // builds it instead of 404ing — clicking a run in the desktop sidebar
+    // works before the engine's first tick.
+    let state = test_state();
+    let sessions = state.sessions.clone();
+    let state = state.with_session_materializer(move |id| {
+        if id == "lazy-run" {
+            sessions.upsert(review("lazy-run"));
+            true
+        } else {
+            false
+        }
+    });
+
+    let resp = send(build_router(state.clone()), get("/api/session/lazy-run")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["session_id"], "lazy-run");
+
+    // Heartbeat materializes too; an id the materializer rejects still 404s.
+    let hb = Request::head("/api/session/lazy-run/heartbeat").body(Body::empty()).unwrap();
+    assert_eq!(send(build_router(state.clone()), hb).await.status(), StatusCode::OK);
+    let resp = send(build_router(state), get("/api/session/nope")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

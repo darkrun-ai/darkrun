@@ -305,6 +305,11 @@ pub struct AppState {
     pub store: Arc<StateStore>,
     /// Resource limits in effect.
     pub limits: Limits,
+    /// Optional on-demand session builder the embedding engine installs: given
+    /// a session id that MISSES the registry, build it when it names something
+    /// real (e.g. a run slug → its show session). Lets a desktop open a run's
+    /// review without waiting for the engine to tick first.
+    pub materialize_session: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
 }
 
 impl AppState {
@@ -315,6 +320,28 @@ impl AppState {
             proofs: ProofRegistry::new(),
             store: Arc::new(store),
             limits,
+            materialize_session: None,
+        }
+    }
+
+    /// Install the on-demand session builder (see `materialize_session`).
+    pub fn with_session_materializer(
+        mut self,
+        f: impl Fn(&str) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.materialize_session = Some(Arc::new(f));
+        self
+    }
+
+    /// Ensure `id` exists in the session registry, building it on demand via
+    /// the installed materializer when absent. Returns whether it now exists.
+    pub fn ensure_session(&self, id: &str) -> bool {
+        if self.sessions.contains(id) {
+            return true;
+        }
+        match &self.materialize_session {
+            Some(build) => build(id) && self.sessions.contains(id),
+            None => false,
         }
     }
 }

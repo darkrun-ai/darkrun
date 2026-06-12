@@ -46,6 +46,10 @@ pub async fn health() -> Response {
 /// `GET /api/session/:id` — return the interactive session payload as JSON for
 /// the desktop app to render. `404` when no such session is registered.
 pub async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    // A miss may still name something real (a run slug whose show session
+    // hasn't been pushed yet) — materialize on demand so the desktop can open
+    // a run without waiting for the engine to tick first.
+    state.ensure_session(&id);
     match state.sessions.get(&id) {
         Some(payload) => (StatusCode::OK, Json(payload)).into_response(),
         None => not_found("session", &id),
@@ -55,7 +59,7 @@ pub async fn get_session(State(state): State<AppState>, Path(id): Path<String>) 
 /// `HEAD /api/session/:id/heartbeat` — client presence ping. `200` if the
 /// session exists, `404` otherwise. No body either way (it is a HEAD route).
 pub async fn session_heartbeat(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    if state.sessions.contains(&id) {
+    if state.ensure_session(&id) {
         StatusCode::OK.into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()

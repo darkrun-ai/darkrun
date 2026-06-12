@@ -312,6 +312,13 @@ const SHELL_CSS: &str = r#"
    through the rounded corners as a dark crescent in light theme. */
 html,body{ margin:0; padding:0; height:100%; background:var(--dr-surface-base); }
 *{ box-sizing:border-box; }
+/* Interface chrome is not selectable text — this is an app, not a document.
+   Real CONTENT opts back in: pre/code blocks (artifacts, knowledge, specs),
+   form fields, and the annotate body (.dr-annotate-text), whose span selection
+   is a feature. */
+body{ -webkit-user-select:none; user-select:none; }
+pre, code, textarea, input, .dr-annotate-text,
+[data-selectable="true"]{ -webkit-user-select:text; user-select:text; }
 .dr-shell{ display:flex; flex-direction:column; height:100vh; overflow:hidden;
   background:var(--dr-surface-base); color:var(--dr-text);
   font-family:var(--dr-font-sans); }
