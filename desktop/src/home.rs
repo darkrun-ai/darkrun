@@ -49,8 +49,11 @@ use crate::wire::{self, ConnConfig, DiscoveredEngine};
 /// contribute the `port`/`harness` and flip a project to "live").
 #[derive(Clone, PartialEq)]
 struct Project {
-    /// Display name — the registry slug (the working-tree dir name carries the
-    /// hash suffix; the slug is the closest stable human label we have).
+    /// Registry slug — the project's stable identity (repo-name + path-hash).
+    /// The run fetcher keys per-project run lists by THIS, never the display
+    /// name: every engine of a repo (main checkout or worktree) shares it.
+    slug: String,
+    /// Display name — the repo's name (record name or path basename).
     name: String,
     /// Absolute repo root the project lives in.
     path: PathBuf,
@@ -64,6 +67,7 @@ impl Project {
     /// Project a discovered live engine into a [`Project`].
     fn from_engine(e: &DiscoveredEngine) -> Self {
         Project {
+            slug: e.slug.clone(),
             name: basename(&e.project_path).unwrap_or_else(|| e.slug.clone()),
             path: e.project_path.clone(),
             port: Some(e.port),
@@ -122,9 +126,13 @@ pub fn HomeApp(
     // re-polled. The sidebar projects render from this merged with the registry.
     let mut engines = use_signal(Vec::<DiscoveredEngine>::new);
 
-    // The per-project run lists, keyed by project name, refreshed by the run
-    // fetcher. The sidebar nests these under each live project.
-    let runs_by_project = use_signal(BTreeMap::<String, Vec<RunSummary>>::new);
+    // The per-project run lists — project SLUG -> run slug -> (engine port,
+    // run) — refreshed by the run fetcher. Keyed by the registry slug (the
+    // identity every engine of a repo shares), so a worktree engine's runs
+    // nest under the repo's project; each run keeps ITS engine's port so
+    // opening it talks to the engine that serves it.
+    let runs_by_project =
+        use_signal(BTreeMap::<String, BTreeMap<String, (u16, RunSummary)>>::new);
 
     // What the main pane shows. A pinned launch opens straight to that run (the
     // project label is filled in by the focus poller's first tick); otherwise the
@@ -179,13 +187,19 @@ pub fn HomeApp(
                         engines.set(found.clone());
                     }
 
-                    // 2. Per-project run lists.
-                    let mut map = BTreeMap::<String, Vec<RunSummary>>::new();
+                    // 2. Per-project run lists, merged across every engine
+                    //    serving the project (main checkout + worktrees) and
+                    //    deduped by run slug.
+                    let mut map =
+                        BTreeMap::<String, BTreeMap<String, (u16, RunSummary)>>::new();
                     for e in &found {
                         let mut c = base.clone();
                         c.port = e.port;
                         if let Ok(payload) = wire::fetch_runs(&c).await {
-                            map.insert(engine_display_name(e), payload.runs);
+                            let proj = map.entry(e.slug.clone()).or_default();
+                            for r in payload.runs {
+                                proj.entry(r.slug.clone()).or_insert((e.port, r));
+                            }
                         }
                     }
                     if map != *runs_by_project.peek() {
@@ -470,7 +484,7 @@ fn ThemeControl() -> Element {
 #[component]
 fn Sidebar(
     projects: Vec<Project>,
-    runs_map: BTreeMap<String, Vec<RunSummary>>,
+    runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
     selection: Signal<Selection>,
     mine_only: Signal<bool>,
     search: Signal<String>,
@@ -525,7 +539,10 @@ fn Sidebar(
                     for proj in visible.iter() {
                         ProjectSection {
                             proj: proj.clone(),
-                            runs: runs_map.get(&proj.name).cloned().unwrap_or_default(),
+                            runs: runs_map
+                                .get(&proj.slug)
+                                .map(|m| m.values().cloned().collect())
+                                .unwrap_or_default(),
                             selection,
                             mine_only,
                             search,
@@ -548,7 +565,7 @@ fn Sidebar(
 /// filter isn't excluding it for lack of authored runs.
 fn visible_projects(
     projects: &[Project],
-    runs_map: &BTreeMap<String, Vec<RunSummary>>,
+    runs_map: &BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
     mine_only: bool,
     query: &str,
 ) -> Vec<Project> {
@@ -556,8 +573,9 @@ fn visible_projects(
     projects
         .iter()
         .filter(|p| {
-            let runs = runs_map.get(&p.name).map(Vec::as_slice).unwrap_or(&[]);
-            let any_run = runs.iter().any(|r| run_matches(r, mine_only, &q));
+            let empty = BTreeMap::new();
+            let runs = runs_map.get(&p.slug).unwrap_or(&empty);
+            let any_run = runs.values().any(|(_, r)| run_matches(r, mine_only, &q));
             // Keep a project with matching runs; also keep an engine-less /
             // run-less project whose name matches the search (or no search), so
             // the add/idle projects stay reachable. Under Mine with a non-empty
@@ -694,7 +712,7 @@ fn SidebarEmpty(mine_only: Signal<bool>, has_projects: bool) -> Element {
 #[component]
 fn ProjectSection(
     proj: Project,
-    runs: Vec<RunSummary>,
+    runs: Vec<(u16, RunSummary)>,
     selection: Signal<Selection>,
     mine_only: Signal<bool>,
     search: Signal<String>,
@@ -706,9 +724,9 @@ fn ProjectSection(
 
     let q = search.read().trim().to_ascii_lowercase();
     let mine = *mine_only.read();
-    let shown: Vec<RunSummary> = runs
+    let shown: Vec<(u16, RunSummary)> = runs
         .iter()
-        .filter(|r| run_matches(r, mine, &q))
+        .filter(|(_, r)| run_matches(r, mine, &q))
         .cloned()
         .collect();
 
@@ -772,11 +790,13 @@ fn ProjectSection(
             }
             if live && is_open {
                 div { style: "{runs_wrap}",
-                    for run in shown.iter() {
+                    for (port, run) in shown.iter() {
                         RunRow {
                             run: run.clone(),
                             project: proj.name.clone(),
-                            port: proj.port.unwrap_or(0),
+                            // The port of the ENGINE this run came from — a
+                            // worktree run opens against the worktree engine.
+                            port: *port,
                             selection,
                             drawer_open,
                         }
@@ -1112,6 +1132,7 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
         .into_iter()
         .map(|rec| {
             let project = Project {
+                slug: rec.slug.clone(),
                 // The display name is the repo's name — record name first,
                 // else the path basename; never the hash-suffixed slug.
                 name: rec
@@ -1749,6 +1770,7 @@ mod data_render_tests {
 
     fn proj() -> Project {
         Project {
+            slug: "store-ab12cd34".into(),
             name: "store".into(),
             path: "/tmp/store".into(),
             port: Some(58616),
@@ -1777,15 +1799,19 @@ mod data_render_tests {
             let mine = use_signal(|| false);
             let search = use_signal(String::new);
             let drawer = use_signal(|| true);
+            // Keyed by the project SLUG (not the display name) — the join
+            // the run fetcher uses; each run carries its engine's port.
+            let mut by_run = BTreeMap::new();
+            by_run.insert("r".to_string(), (58616u16, run()));
             let mut runs_map = BTreeMap::new();
-            runs_map.insert("store".to_string(), vec![run()]);
+            runs_map.insert("store-ab12cd34".to_string(), by_run);
             rsx! {
                 Sidebar {
                     projects: vec![proj()], runs_map, selection,
                     mine_only: mine, search, drawer_open: drawer, live_count: 1,
                 }
                 ProjectSection {
-                    proj: proj(), runs: vec![run()], selection,
+                    proj: proj(), runs: vec![(58616u16, run())], selection,
                     mine_only: mine, search, drawer_open: drawer,
                 }
                 RunRow { run: run(), project: "store".to_string(), port: 58616, selection, drawer_open: drawer }
@@ -1808,7 +1834,7 @@ mod main_pane_render_tests {
     }
 
     fn proj() -> Project {
-        Project { name: "store".into(), path: "/tmp/store".into(), port: Some(58616), harness: Some("claude-code".into()) }
+        Project { slug: "store-ab12cd34".into(), name: "store".into(), path: "/tmp/store".into(), port: Some(58616), harness: Some("claude-code".into()) }
     }
 
     #[test]
@@ -1874,6 +1900,7 @@ mod component_render_tests {
 
     fn proj(name: &str, live: bool) -> Project {
         Project {
+            slug: format!("{name}-ab12cd34"),
             name: name.into(),
             path: format!("/tmp/{name}").into(),
             port: if live { Some(58616) } else { None },
@@ -1969,7 +1996,13 @@ mod helper_tests {
         }
     }
     fn proj(name: &str) -> Project {
-        Project { name: name.into(), path: format!("/tmp/{name}").into(), port: None, harness: None }
+        Project {
+            slug: format!("{name}-ab12cd34"),
+            name: name.into(),
+            path: format!("/tmp/{name}").into(),
+            port: None,
+            harness: None,
+        }
     }
 
     #[test]
@@ -1987,8 +2020,11 @@ mod helper_tests {
     #[test]
     fn visible_projects_keeps_matches_and_runless_projects() {
         let projects = vec![proj("store"), proj("docs")];
-        let mut runs_map: BTreeMap<String, Vec<RunSummary>> = BTreeMap::new();
-        runs_map.insert("store".into(), vec![run_with("active", true, "me")]);
+        let by_run = |r: RunSummary| BTreeMap::from([(r.slug.clone(), (58616u16, r))]);
+        let mut runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>> =
+            BTreeMap::new();
+        // Keyed by the project SLUG — the display name never joins run lists.
+        runs_map.insert("store-ab12cd34".into(), by_run(run_with("active", true, "me")));
         // No query, all: a project with a matching run + a run-less project both show.
         let all = visible_projects(&projects, &runs_map, false, "");
         assert_eq!(all.len(), 2);
@@ -2000,8 +2036,9 @@ mod helper_tests {
         assert_eq!(by_name.len(), 1);
         assert_eq!(by_name[0].name, "docs");
         // Mine-only with a non-authored run and no name match hides the project.
-        let mut others: BTreeMap<String, Vec<RunSummary>> = BTreeMap::new();
-        others.insert("store".into(), vec![run_with("active", false, "x")]);
+        let mut others: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>> =
+            BTreeMap::new();
+        others.insert("store-ab12cd34".into(), by_run(run_with("active", false, "x")));
         let hidden = visible_projects(&[proj("store")], &others, true, "");
         assert!(hidden.is_empty());
     }
