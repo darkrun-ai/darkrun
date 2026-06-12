@@ -51,6 +51,10 @@ pub struct DarkrunServer {
     /// instruction adaptation, and which MCP prompts are bridged. Defaults to
     /// Claude Code (the maximal reference) until [`DarkrunServer::with_harness`].
     caps: Arc<darkrun_harness::Capabilities>,
+    /// Set once the desktop has been surfaced this engine process (boot with an
+    /// active run, first tick, or a raised gate) — so routine ticks don't keep
+    /// re-opening an app the operator deliberately closed.
+    desktop_surfaced: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DarkrunServer {
@@ -77,6 +81,7 @@ impl DarkrunServer {
             sessions,
             announced_addr: None,
             caps: Arc::new(darkrun_harness::Harness::ClaudeCode.capabilities()),
+            desktop_surfaced: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -1313,7 +1318,13 @@ impl DarkrunServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
         match run_tick(&store, &input.slug) {
-            Ok(tick) => ok_json(&self.adapt_tick(tick)),
+            Ok(tick) => {
+                // The desktop comes up with the work, not at the first gate:
+                // the first tick of this engine process surfaces it (live
+                // mirror from here on), and later ticks leave it alone.
+                self.surface_desktop_once(&input.slug);
+                ok_json(&self.adapt_tick(tick))
+            }
             Err(e) => Ok(err_text(e)),
         }
     }
@@ -1384,6 +1395,9 @@ impl DarkrunServer {
     /// pointed at the run. F5: presence carries a grace window, so a
     /// backgrounded window or a network blip doesn't respawn the desktop.
     fn surface_desktop(&self, slug: &str) -> serde_json::Value {
+        // Any surfacing counts toward the once-per-process tick launch.
+        self.desktop_surfaced
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if self.sessions.presence().is_present() {
             // A desktop is connected (or within the grace window); the live
             // mirror pushes the raised session to it.
@@ -1393,6 +1407,26 @@ impl DarkrunServer {
         } else {
             serde_json::json!({ "status": "no_engine_port" })
         }
+    }
+
+    /// Surface the desktop at most ONCE per engine process outside an explicit
+    /// gate: the engine brings the app up as soon as work is live (boot with an
+    /// active run, or the first tick), but routine ticks never re-open an app
+    /// the operator closed. Gates keep their unconditional surfacing.
+    pub fn surface_desktop_once(&self, slug: &str) {
+        if !self
+            .desktop_surfaced
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let _ = self.surface_desktop(slug);
+        }
+    }
+
+    /// Whether the desktop has been surfaced this engine process (boot, first
+    /// tick, or a gate). Observability for embedders + tests.
+    pub fn desktop_surfaced(&self) -> bool {
+        self.desktop_surfaced
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Return an awaiting-session handle with the desktop surface status

@@ -6269,3 +6269,33 @@ fn proof_get_errors_when_none_attached() {
         .unwrap();
     assert!(is_err(&res));
 }
+
+// ── desktop surfacing on tick ────────────────────────────────────────────────
+
+#[test]
+fn first_tick_surfaces_the_desktop_once() {
+    let (_d, server) = started("r");
+    // Fresh engine process: nothing surfaced yet.
+    assert!(!server.desktop_surfaced(), "fresh process starts unsurfaced");
+    // The FIRST tick surfaces the desktop (no engine port announced in tests,
+    // so no app spawns — the once-flag is the observable contract).
+    let _ = next(&server, "r");
+    assert!(server.desktop_surfaced(), "the first tick surfaces the desktop");
+}
+
+#[test]
+fn a_raised_gate_counts_as_the_surfacing() {
+    let (_d, server) = started("r");
+    let _ = server
+        .darkrun_question(Parameters(QuestionInput {
+            slug: "r".into(),
+            title: None,
+            prompt: "pick".into(),
+            context: None,
+            options: vec![q_opt("a", "A"), q_opt("b", "B")],
+            multi_select: false,
+            image_urls: vec![],
+        }))
+        .unwrap();
+    assert!(server.desktop_surfaced(), "a gate surfaces the desktop too");
+}
