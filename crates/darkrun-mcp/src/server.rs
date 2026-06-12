@@ -125,6 +125,12 @@ pub async fn serve_stdio_on(
     let server = DarkrunServer::with_sessions(repo_root, state.sessions.clone())
         .with_announced_addr(bound)
         .with_harness(harness);
+    // A session opening onto a project with an ACTIVE run brings the desktop up
+    // immediately — the operator watches the run live from the first moment,
+    // instead of waiting for a gate (or even a first tick) to raise it.
+    if let Ok(Some(active)) = state.store.active_run() {
+        server.surface_desktop_once(&active);
+    }
     let running = server
         .serve(stdio())
         .await
