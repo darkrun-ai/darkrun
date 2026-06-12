@@ -225,9 +225,39 @@ async fn runs_list_resolves_authorship_in_a_git_repo() {
     let resp = send(build_router(app), get("/api/runs")).await;
     let json = body_json(resp).await;
     assert_eq!(json["count"], 1);
-    // No darkrun/alpha branch exists, so authorship resolves to not-mine — but the
-    // git-backed authorship path ran rather than the no-identity short-circuit.
+    // No darkrun/alpha/main branch exists yet, so authorship resolves to
+    // not-mine — but the git-backed authorship path ran rather than the
+    // no-identity short-circuit.
     assert_eq!(json["runs"][0]["authored_by_me"], false);
+}
+
+#[tokio::test]
+async fn runs_list_marks_a_run_mine_via_its_stable_branch() {
+    use std::process::Command;
+    let (app, store) = state_with_store();
+    let repo = store.root().parent().unwrap().to_path_buf();
+    let git = |args: &[&str]| { Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap(); };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "me@darkrun.ai"]);
+    git(&["config", "user.name", "Me"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("README.md"), "x\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
+    // The ENGINE's branch scheme: run work merges into `darkrun/<slug>/main`
+    // (lifecycle::run_main_branch) — the Mine predicate must check THAT branch,
+    // not the never-created `darkrun/<slug>`.
+    git(&["checkout", "-q", "-b", "darkrun/alpha/main"]);
+    std::fs::write(repo.join("work.txt"), "run work\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "darkrun: tick alpha"]);
+    git(&["checkout", "-q", "main"]);
+
+    seed_run(&store, "alpha", Some("Alpha"), "software", "frame", Status::Active, None, false);
+    let resp = send(build_router(app), get("/api/runs")).await;
+    let json = body_json(resp).await;
+    assert_eq!(json["runs"][0]["authored_by_me"], true, "{json}");
+    assert_eq!(json["runs"][0]["author"], "Me", "{json}");
 }
 
 #[tokio::test]

@@ -31,10 +31,13 @@ use std::path::Path as FsPath;
 
 use crate::state::AppState;
 
-/// The conventional run-work branch for a slug (`darkrun/<slug>`), mirroring the
-/// engine's worktree/branch naming.
+/// The run's stable branch (`darkrun/<slug>/main`) — MUST mirror the engine's
+/// `lifecycle::run_main_branch` naming (station work lands on
+/// `darkrun/<slug>/<station>` and merges into this). Checking a branch that
+/// doesn't exist made `authored_by_me` false for every run, so the desktop's
+/// default "Mine" filter hid them all.
 fn run_branch(slug: &str) -> String {
-    format!("darkrun/{slug}")
+    format!("darkrun/{slug}/main")
 }
 
 /// The base branch a run forks from — `default_branch` out of
