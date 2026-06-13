@@ -1,0 +1,96 @@
+<!--
+  The darkrun social card (Open Graph / Twitter summary_large_image) — source
+  for web/site/assets/og.png, the factory-line hero. 1200x630 (the index.html
+  og:image:width/height pin those dimensions).
+
+  Regenerate after editing, from the repo root:
+    node /dev/stdin <<'JS'
+    import { chromium } from '/opt/homebrew/lib/node_modules/playwright/index.mjs';
+    const b = await chromium.launch();
+    const p = await b.newPage({ viewport:{width:1200,height:630}, deviceScaleFactor:2 });
+    await p.goto('file://' + process.cwd() + '/web/site/og-card.html', { waitUntil:'networkidle' });
+    await p.waitForTimeout(800); // let the webfonts settle
+    await p.screenshot({ path:'web/site/assets/og.png', clip:{x:0,y:0,width:1200,height:630} });
+    await b.close();
+    JS
+-->
+<!doctype html><html><head><meta charset="utf-8"><style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&family=Inter:wght@400;600;700;800&display=swap');
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:1200px;height:630px;overflow:hidden;}
+  .card{
+    width:1200px;height:630px;position:relative;
+    background:
+      radial-gradient(1200px 700px at 78% -8%, rgba(95,215,255,0.10), transparent 60%),
+      radial-gradient(900px 600px at 10% 120%, rgba(95,215,255,0.05), transparent 55%),
+      #07090c;
+    color:#e6edf3;font-family:'Inter',ui-sans-serif,system-ui,sans-serif;
+    padding:72px 80px;display:flex;flex-direction:column;justify-content:space-between;
+  }
+  /* faint engineering grid */
+  .grid{position:absolute;inset:0;background-image:
+    linear-gradient(rgba(255,255,255,0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.022) 1px, transparent 1px);
+    background-size:48px 48px;mask-image:linear-gradient(to bottom, black, transparent 78%);}
+  .top{position:relative;z-index:1;}
+  /* The darkrun wordmark, faithful to the OutlinedSolidRun hero variant:
+     Inter, -0.02em; "dark" is bold (800) cyan-OUTLINED over the base fill,
+     "run" is medium (500) solid white. No caret — darkrun's mark is the
+     wordmark itself. Stroke bumped to 2.5px + a soft glow so the outline
+     reads at social-thumbnail scale. */
+  .wm{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;font-size:116px;
+    letter-spacing:-0.02em;line-height:1;display:inline-flex;align-items:baseline;}
+  .wm .d{font-weight:800;color:#07090c;paint-order:stroke;
+    -webkit-text-stroke:2.5px #5fd7ff;
+    filter:drop-shadow(0 0 16px rgba(95,215,255,0.45));}
+  .wm .r{font-weight:500;color:#e6edf3;}
+  .tag{margin-top:26px;font-size:40px;font-weight:700;letter-spacing:-0.015em;color:#e6edf3;}
+  .tag .accent{color:#5fd7ff;}
+  .sub{margin-top:16px;font-size:23px;color:#9aa7b4;font-weight:500;max-width:760px;}
+  /* assembly line — each station label sits directly over its pip */
+  .line{position:relative;z-index:1;}
+  .pipeline{display:grid;grid-template-columns:repeat(6,1fr);}
+  .col{display:flex;flex-direction:column;align-items:center;gap:18px;}
+  .label{font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:700;
+    letter-spacing:0.01em;color:#aeb9c4;white-space:nowrap;}
+  .dotline{position:relative;display:flex;justify-content:center;align-items:center;
+    width:100%;height:22px;}
+  .dot{width:22px;height:22px;border-radius:50%;z-index:2;position:relative;}
+  /* the connector runs from this dot's center to the next dot's center */
+  .col:not(:last-child) .dotline::after{content:"";position:absolute;left:50%;top:50%;
+    transform:translateY(-50%);width:100%;height:3px;z-index:1;}
+  .done .label{color:#cdd7e0;} .done .dot{background:#46b96a;}
+  .active .label{color:#5fd7ff;}
+  .active .dot{background:#5fd7ff;box-shadow:0 0 20px rgba(95,215,255,0.85);}
+  .todo .dot{background:#222a33;border:2px solid #2f3a45;box-sizing:border-box;}
+  /* connector colors by the transition they bridge */
+  .c-done .dotline::after{background:#46b96a;}
+  .c-into-active .dotline::after{background:linear-gradient(90deg,#46b96a,#5fd7ff);}
+  .c-out-active .dotline::after{background:linear-gradient(90deg,#5fd7ff,#2b3742);}
+  .c-todo .dotline::after{background:#222a33;}
+  .foot{position:relative;z-index:1;display:flex;justify-content:space-between;align-items:flex-end;}
+  .foot .meta{font-family:'JetBrains Mono',monospace;font-size:20px;color:#66727e;letter-spacing:0.02em;}
+  .foot .url{font-family:'JetBrains Mono',monospace;font-size:22px;color:#5fd7ff;font-weight:700;}
+</style></head>
+<body><div class="card">
+  <div class="grid"></div>
+  <div class="top">
+    <div class="wm"><span class="d">dark</span><span class="r">run</span></div>
+    <div class="tag">The dark factory <span class="accent">for your agents.</span></div>
+    <div class="sub">An ordered line of stations that takes work from raw intent to a shipped, hardened outcome. You drive the line. The manager keeps every station honest.</div>
+  </div>
+  <div class="line">
+    <div class="pipeline">
+      <div class="col done c-done"><span class="label">Frame</span><span class="dotline"><span class="dot"></span></span></div>
+      <div class="col done c-done"><span class="label">Specify</span><span class="dotline"><span class="dot"></span></span></div>
+      <div class="col done c-into-active"><span class="label">Shape</span><span class="dotline"><span class="dot"></span></span></div>
+      <div class="col active c-out-active"><span class="label">Build</span><span class="dotline"><span class="dot"></span></span></div>
+      <div class="col todo c-todo"><span class="label">Prove</span><span class="dotline"><span class="dot"></span></span></div>
+      <div class="col todo"><span class="label">Harden</span><span class="dotline"><span class="dot"></span></span></div>
+    </div>
+  </div>
+  <div class="foot">
+    <span class="meta">a software factory for Claude Code &amp; every agent harness</span>
+    <span class="url">darkrun.ai</span>
+  </div>
+</div></body></html>
