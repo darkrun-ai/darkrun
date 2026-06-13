@@ -2563,3 +2563,29 @@ fn project_root_of_maps_a_linked_worktree_to_the_main_checkout() {
     let plain = root.join(".claude");
     assert_eq!(darkrun_git::project_root_of(&plain), plain);
 }
+
+#[test]
+fn checkout_branch_at_same_commit_succeeds() {
+    // Regression: switching to a branch that points at the SAME commit as HEAD
+    // must NOT fail with EEXIST — the working tree already matches, so it's a
+    // pure HEAD flip. (This blocked run creation: darkrun forks
+    // darkrun/<slug>/main off the current commit, then checks it out.)
+    let (_d, root) = init_repo();
+    for (label, open) in backends() {
+        let g = open(&root).unwrap();
+        // A branch off HEAD points at the same commit as the current branch.
+        let same = format!("same-{label}");
+        g.create_branch(&same, "HEAD").unwrap();
+        g.checkout_branch(&same)
+            .unwrap_or_else(|e| panic!("[{label}] same-commit checkout failed: {e}"));
+        assert_eq!(
+            g.current_branch().unwrap().as_deref(),
+            Some(same.as_str()),
+            "[{label}] HEAD flipped to the same-commit branch"
+        );
+        // The README from init is still present (tree intact, nothing clobbered).
+        assert!(root.join("README.md").is_file(), "[{label}] tree intact");
+        // Flip back so the next backend starts from main.
+        g.checkout_branch("main").unwrap();
+    }
+}
