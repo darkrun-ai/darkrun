@@ -212,11 +212,13 @@ fn validate_spec(
     // Model tier: a known tier or nothing (the predecessor sanitized untrusted
     // frontmatter the same way — a typo'd tier silently became "no override").
     if let Some(m) = spec.model.as_deref() {
-        if !matches!(m, "fable" | "opus" | "sonnet" | "haiku") {
+        // `fable`/`mythos` is accepted but no longer advertised — it's pulled
+        // (Anthropic removed support) and degrades to opus at dispatch.
+        if !matches!(m, "opus" | "sonnet" | "haiku" | "fable" | "mythos") {
             errors.push(format!(
-                "model '{m}' is not a tier — use fable (frontier: novel \
-                 architecture / deepest reasoning), opus (architectural risk), \
-                 sonnet (default), or haiku (purely mechanical)"
+                "model '{m}' is not a tier — use opus (architectural or \
+                 cascading-failure risk), sonnet (default), or haiku (purely \
+                 mechanical)"
             ));
         }
     }

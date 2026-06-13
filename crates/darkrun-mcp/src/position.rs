@@ -1930,7 +1930,7 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
             // can span units, so the role/factory resolution is the dispatch
             // hint.) Then ESCALATE one tier per recorded rejection in the wave
             // — a beat that bounced re-runs with more model, not more retries —
-            // capping at the top of the ladder (haiku → sonnet → opus → fable).
+            // capping at the top of the ladder (haiku -> sonnet -> opus).
             if let Ok(run) = store.read_run(slug) {
                 if let Some(factory) = resolve_factory_for(store, &run.frontmatter.factory) {
                     let by_role = factory
@@ -2143,7 +2143,8 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
 /// unknown base passes through unchanged (a provider-specific name the
 /// factory pinned deliberately is not second-guessed).
 fn escalate_tier(base: &str, steps: usize) -> String {
-    const LADDER: [&str; 4] = ["haiku", "sonnet", "opus", "fable"];
+    // `fable` (frontier) is pulled — the ladder now caps at opus.
+    const LADDER: [&str; 3] = ["haiku", "sonnet", "opus"];
     if steps == 0 {
         return base.to_string();
     }
@@ -5369,10 +5370,11 @@ mod tests {
     fn escalate_tier_climbs_and_caps() {
         assert_eq!(escalate_tier("sonnet", 0), "sonnet");
         assert_eq!(escalate_tier("sonnet", 1), "opus");
-        assert_eq!(escalate_tier("sonnet", 2), "fable");
-        assert_eq!(escalate_tier("sonnet", 9), "fable", "caps at the top");
+        // fable is pulled — the ladder caps at opus now.
+        assert_eq!(escalate_tier("sonnet", 2), "opus");
+        assert_eq!(escalate_tier("sonnet", 9), "opus", "caps at the top");
         assert_eq!(escalate_tier("haiku", 1), "sonnet");
-        assert_eq!(escalate_tier("fable", 1), "fable");
+        assert_eq!(escalate_tier("opus", 1), "opus", "already at the cap");
         // A deliberate provider-specific pin passes through unchanged.
         assert_eq!(escalate_tier("gemini-2.5-pro", 3), "gemini-2.5-pro");
     }
@@ -5421,7 +5423,7 @@ mod tests {
             .unwrap();
         let ctx2 = build_prompt_context(&store, "r", &action).expect("context");
         assert_eq!(ctx2.model.as_deref(), Some("opus"), "one bounce climbs a tier");
-        // Two rejects: the climb continues to fable (and caps there).
+        // Two rejects: the climb caps at opus (fable is pulled).
         store
             .write_unit("r", &mk("u1", vec![
                 IterationResult::Reject,
@@ -5429,7 +5431,7 @@ mod tests {
             ]))
             .unwrap();
         let ctx3 = build_prompt_context(&store, "r", &action).expect("context");
-        assert_eq!(ctx3.model.as_deref(), Some("fable"), "two bounces = two tiers");
+        assert_eq!(ctx3.model.as_deref(), Some("opus"), "two bounces still caps at opus");
     }
 
 
