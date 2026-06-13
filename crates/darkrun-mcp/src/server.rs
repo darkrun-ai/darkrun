@@ -112,15 +112,33 @@ pub async fn serve_stdio_on(
         let sessions = state.sessions.clone();
         let res_store = state.store.clone();
         state.with_surface_resolver(move |run| {
-            // A run still in SETUP: answering a factory/mode/size picker should
-            // promptly surface the NEXT selection. (Once all are chosen, the
-            // desktop stays on the last pick until the agent's next advance
-            // materializes the run.)
+            // A run still in SETUP: answering a factory/mode/size picker drives
+            // the chain forward WITHOUT the agent — raise the next selection's
+            // picker, or, on the LAST pick, START the run so the picker closes
+            // and the review surfaces immediately (the agent's resume loop then
+            // just walks the line).
             if let Some(setup) = res_store.read_run_setup(run) {
-                if let Some(kind) = setup.first_unset() {
-                    let title =
-                        res_store.read_run(run).ok().and_then(|r| r.frontmatter.title);
-                    crate::sessions::raise_setup_picker(&sessions, run, title.as_deref(), kind);
+                match setup.first_unset() {
+                    Some(kind) => {
+                        let title =
+                            res_store.read_run(run).ok().and_then(|r| r.frontmatter.title);
+                        crate::sessions::raise_setup_picker(&sessions, run, title.as_deref(), kind);
+                    }
+                    None => {
+                        // All three chosen — materialize the run, then surface it.
+                        let title =
+                            res_store.read_run(run).ok().and_then(|r| r.frontmatter.title);
+                        let factory = setup.factory.clone().unwrap_or_default();
+                        let mode = darkrun_core::domain::Mode::from_label(
+                            &setup.mode.clone().unwrap_or_default(),
+                        );
+                        let size = setup.size.clone().unwrap_or_default();
+                        if crate::position::run_start(&res_store, run, &factory, title, mode, &size)
+                            .is_ok()
+                        {
+                            let _ = crate::sessions::create_show(&sessions, &res_store, run);
+                        }
+                    }
                 }
                 return;
             }

@@ -1832,8 +1832,10 @@ fn question_session(cfg: ConnConfig, q: QuestionSessionPayload) -> Element {
         o.image_url_light = o.image_url_light.as_deref().map(|u| cfg.asset_url(&run, u));
     }
     let image_urls: Vec<String> = q.image_urls.iter().map(|u| cfg.asset_url(&run, u)).collect();
+    let key = q.session_id.clone();
     rsx! {
         QuestionSession {
+            key: "{key}",
             cfg,
             prompt: q.prompt.clone(),
             context: q.context.clone(),
@@ -1943,8 +1945,10 @@ fn direction_session(cfg: ConnConfig, d: DirectionSessionPayload) -> Element {
         a.image_url = cfg.asset_url(&run, &a.image_url);
         a.image_url_light = a.image_url_light.as_deref().map(|u| cfg.asset_url(&run, u));
     }
+    let key = d.session_id.clone();
     rsx! {
         DirectionSession {
+            key: "{key}",
             cfg,
             prompt: d.prompt.clone(),
             context: d.context.clone(),
@@ -2066,8 +2070,13 @@ fn picker_session(cfg: ConnConfig, p: PickerSessionPayload) -> Element {
                 | darkrun_api::common::SessionStatus::Approved
         );
     let seed = p.selection.as_ref().map(|s| s.id.clone());
+    let key = p.session_id.clone();
     rsx! {
+        // Key by session id so swapping pickers (factory -> mode -> size on the
+        // same run channel) REMOUNTS the component — otherwise its selection
+        // signal carries the previous picker's choice over.
         PickerSession {
+            key: "{key}",
             cfg,
             title: Some(p.title.clone()),
             prompt: p.prompt.clone(),

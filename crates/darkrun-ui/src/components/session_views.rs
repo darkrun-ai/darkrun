@@ -406,7 +406,8 @@ fn option_card(
     };
     let cursor = if answered { "default" } else { "pointer" };
     let card = format!(
-        "display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:8px;\
+        "appearance:none;-webkit-appearance:none;\
+         display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:8px;\
          background:{surface};border:1px solid {border};{ring}cursor:{cursor};\
          text-align:left;width:100%;color:{text};transition:border-color .12s ease;",
         surface = tokens::var::SURFACE_RAISED,
@@ -577,7 +578,8 @@ fn archetype_card(
     };
     let cursor = if decided { "default" } else { "pointer" };
     let card = format!(
-        "display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:8px;\
+        "appearance:none;-webkit-appearance:none;\
+         display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:8px;\
          background:{surface};border:1px solid {border};{ring}cursor:{cursor};\
          text-align:left;width:100%;color:{text};transition:border-color .12s ease;",
         surface = tokens::var::SURFACE_RAISED,
@@ -868,7 +870,10 @@ fn picker_row(
     let border = if selected { tokens::var::ACCENT } else { tokens::var::BORDER };
     let cursor = if decided { "default" } else { "pointer" };
     let row = format!(
-        "display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:6px;\
+        // appearance:none is load-bearing: without it WKWebView paints the
+        // native push-button chrome (silver gradient) over our background.
+        "appearance:none;-webkit-appearance:none;\
+         display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:6px;\
          background:{surface};border:1px solid {border};{rail}cursor:{cursor};\
          text-align:left;width:100%;color:{text};transition:border-color .12s ease;",
         surface = tokens::var::SURFACE_RAISED,

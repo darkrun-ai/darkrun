@@ -876,6 +876,21 @@ impl GitBackend for GixBackend {
             .map_err(gix_err)?;
         let target_tree = target.tree().map_err(gix_err)?;
 
+        // Fast path: the target branch is at the SAME commit as HEAD. The
+        // working tree + index already match, so re-materializing the tree is
+        // both wasteful and wrong — `checkout_tree_into` writes files that
+        // already exist and fails with EEXIST (os error 17). Just flip HEAD to
+        // the branch ref, the way `git checkout` handles a same-commit switch.
+        if let Ok(head) = repo.head_commit() {
+            if head.id == target.id() {
+                std::fs::write(
+                    repo.git_dir().join("HEAD"),
+                    format!("ref: refs/heads/{branch}\n"),
+                )?;
+                return Ok(());
+            }
+        }
+
         // (1) delete tracked-in-old, absent-in-new files (then prune any dirs
         // those deletions emptied — git does the same).
         let mut new_paths = Vec::new();
