@@ -240,6 +240,21 @@ impl RunState {
     }
 }
 
+/// Reduce an arbitrary label (e.g. a station name) to a single safe path
+/// component: alphanumerics, `-`, `_` survive; everything else becomes `-`. An
+/// empty result falls back to `_`.
+fn sanitize_component(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    if out.is_empty() {
+        "_".to_string()
+    } else {
+        out
+    }
+}
+
 pub(crate) fn io<T>(path: &Path, r: std::io::Result<T>) -> Result<T> {
     r.map_err(|source| CoreError::Io {
         path: path.to_path_buf(),
@@ -303,25 +318,62 @@ impl StateStore {
         self.run_dir(slug).join("feedback")
     }
 
-    /// The `interactive/` directory for a run — where raised operator sessions
-    /// (questions, directions, pickers) persist as `<session_id>.json` so they
-    /// survive an engine restart and reappear when the desktop reconnects.
+    /// The `interactive/` root for a run. Operator sessions (questions,
+    /// directions, pickers) persist UNDER a per-STATION subdirectory
+    /// (`interactive/<station>/<session_id>.json`) so they belong to the
+    /// station that raised them: only the active station's open prompt
+    /// resurfaces, and a station reset clears its own prompts. Sessions survive
+    /// an engine restart and reappear when the desktop reconnects.
     pub fn interactive_dir(&self, slug: &str) -> PathBuf {
         self.run_dir(slug).join("interactive")
+    }
+
+    /// The per-station interactive directory (`interactive/<station>/`).
+    pub fn interactive_station_dir(&self, slug: &str, station: &str) -> PathBuf {
+        self.interactive_dir(slug).join(sanitize_component(station))
+    }
+
+    /// The station subdir a given session id already lives under, if any — so a
+    /// re-persist (recording the answer) lands in the SAME station it was
+    /// raised under, even if the run has since advanced.
+    fn interactive_station_of(&self, slug: &str, session_id: &str) -> Option<String> {
+        let root = self.interactive_dir(slug);
+        let file = format!("{session_id}.json");
+        let entries = fs::read_dir(&root).ok()?;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() && p.join(&file).is_file() {
+                return p.file_name().and_then(|n| n.to_str()).map(str::to_string);
+            }
+        }
+        None
     }
 
     /// Persist an interactive operator session: a [`SessionPayload`] that is a
     /// Question / Direction / Picker carrying a `run_slug`. Both the raise and
     /// the answer flow through here, so the on-disk copy always reflects the
     /// latest state (including the recorded answer). A non-interactive payload,
-    /// or one with no run, is a silent no-op. Writes the full JSON to
-    /// `<run>/interactive/<session_id>.json`.
+    /// or one with no run, is a silent no-op.
+    ///
+    /// The station it lands under is: the one it was already persisted under
+    /// (so an answer re-writes in place), else the run's active station, else a
+    /// `_run` fallback when no state is readable.
     pub fn write_interactive_session(&self, payload: &darkrun_api::SessionPayload) -> Result<()> {
         let Some(meta) = payload.interactive() else {
             return Ok(());
         };
         let Some(run) = meta.run else { return Ok(()) };
-        let dir = self.interactive_dir(run);
+        let station = self
+            .interactive_station_of(run, payload.session_id())
+            .or_else(|| {
+                self.read_state(run)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.active_station)
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| "_run".to_string());
+        let dir = self.interactive_station_dir(run, &station);
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{}.json", payload.session_id()));
         let json = serde_json::to_vec_pretty(payload)?;
@@ -329,22 +381,36 @@ impl StateStore {
         Ok(())
     }
 
-    /// Read every persisted interactive session for a run, newest id first
-    /// (ids are monotonic `q-NN`/`d-NN`/`p-NN`, so a reverse lexical sort puts
-    /// the most recent first). Unparseable files are skipped. Empty when the
-    /// run has none.
+    /// Read EVERY persisted interactive session for a run across all stations
+    /// (newest id first — ids are monotonic `q-NN`/`d-NN`/`p-NN`), plus any
+    /// legacy flat `interactive/*.json` files from before per-station scoping.
+    /// Used to re-attach all sessions to the registry on reconnect/restart so
+    /// each remains answerable. Unparseable files are skipped.
     pub fn list_interactive_sessions(&self, slug: &str) -> Vec<darkrun_api::SessionPayload> {
-        let dir = self.interactive_dir(slug);
-        let Ok(entries) = fs::read_dir(&dir) else {
+        let root = self.interactive_dir(slug);
+        let Ok(entries) = fs::read_dir(&root) else {
             return Vec::new();
         };
-        let mut files: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "json"))
-            .collect();
-        files.sort();
-        files.reverse();
+        let mut files: Vec<PathBuf> = Vec::new();
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                // A station subdir: collect its session files.
+                if let Ok(inner) = fs::read_dir(&p) {
+                    files.extend(
+                        inner
+                            .flatten()
+                            .map(|e| e.path())
+                            .filter(|f| f.extension().is_some_and(|x| x == "json")),
+                    );
+                }
+            } else if p.extension().is_some_and(|x| x == "json") {
+                // A legacy flat file (pre per-station scoping).
+                files.push(p);
+            }
+        }
+        // Sort by file name (the monotonic session id), newest first.
+        files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
         files
             .iter()
             .filter_map(|p| fs::read(p).ok())
@@ -352,12 +418,49 @@ impl StateStore {
             .collect()
     }
 
-    /// The most recent OPEN (still-awaiting) interactive session for a run, if
-    /// any — the one the desktop should surface when it opens the run.
-    pub fn latest_open_interactive(&self, slug: &str) -> Option<darkrun_api::SessionPayload> {
-        self.list_interactive_sessions(slug)
+    /// The most recent OPEN (still-awaiting) interactive session for a run's
+    /// given STATION — the one the desktop surfaces when it opens the run. Also
+    /// considers legacy flat files (which carry no station) so a prompt raised
+    /// before per-station scoping still resurfaces.
+    pub fn latest_open_interactive(
+        &self,
+        slug: &str,
+        station: &str,
+    ) -> Option<darkrun_api::SessionPayload> {
+        // The station's own sessions, newest first.
+        let dir = self.interactive_station_dir(slug, station);
+        let mut files: Vec<PathBuf> = fs::read_dir(&dir)
             .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        // Plus legacy flat files at the interactive root (no station recorded).
+        if let Ok(root) = fs::read_dir(self.interactive_dir(slug)) {
+            files.extend(
+                root.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json")),
+            );
+        }
+        files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        files
+            .iter()
+            .filter_map(|p| fs::read(p).ok())
+            .filter_map(|b| serde_json::from_slice::<darkrun_api::SessionPayload>(&b).ok())
             .find(|p| p.interactive().is_some_and(|m| m.open))
+    }
+
+    /// Remove all interactive sessions raised under a station (its prompts go
+    /// with the station when it is reset/dropped). Best-effort; a missing dir
+    /// is a no-op.
+    pub fn clear_station_interactive(&self, slug: &str, station: &str) -> Result<()> {
+        let dir = self.interactive_station_dir(slug, station);
+        if dir.exists() {
+            io(&dir, fs::remove_dir_all(&dir))?;
+        }
+        Ok(())
     }
 
     /// List the slugs of every run on disk (sorted).
@@ -1017,11 +1120,18 @@ mod tests {
 
     #[test]
     fn interactive_sessions_round_trip_and_track_open_state() {
-        use darkrun_api::{QuestionSessionPayload, SessionPayload};
         use darkrun_api::common::SessionStatus;
+        use darkrun_api::{QuestionSessionPayload, SessionPayload};
 
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path());
+        // The run is at the `build` station, so prompts land under build/.
+        store
+            .write_state(
+                "r",
+                &RunState { active_station: "build".into(), ..Default::default() },
+            )
+            .unwrap();
 
         let q = |id: &str, status| {
             SessionPayload::Question(QuestionSessionPayload {
@@ -1033,37 +1143,55 @@ mod tests {
             })
         };
 
-        // No run, no sessions.
+        // No sessions yet.
         assert!(store.list_interactive_sessions("r").is_empty());
-        assert!(store.latest_open_interactive("r").is_none());
+        assert!(store.latest_open_interactive("r", "build").is_none());
 
-        // Two raised, q-02 the newer; both open.
+        // Two raised at build, q-02 the newer; both open.
         store.write_interactive_session(&q("q-01", SessionStatus::Pending)).unwrap();
         store.write_interactive_session(&q("q-02", SessionStatus::Pending)).unwrap();
         assert_eq!(store.list_interactive_sessions("r").len(), 2);
+        // They live under the station subdir.
+        assert!(store.interactive_station_dir("r", "build").join("q-01.json").is_file());
         // Newest open first.
         assert_eq!(
-            store.latest_open_interactive("r").unwrap().session_id(),
+            store.latest_open_interactive("r", "build").unwrap().session_id(),
             "q-02"
         );
+        // A DIFFERENT station has no open prompt of its own.
+        assert!(store.latest_open_interactive("r", "frame").is_none());
 
-        // Answering q-02 (re-write same id) leaves q-01 as the open one.
+        // Answering q-02 re-writes IN PLACE (same station) and leaves q-01 open
+        // — even though the run has since moved to `prove`.
+        store
+            .write_state(
+                "r",
+                &RunState { active_station: "prove".into(), ..Default::default() },
+            )
+            .unwrap();
         store.write_interactive_session(&q("q-02", SessionStatus::Answered)).unwrap();
+        assert!(
+            store.interactive_station_dir("r", "build").join("q-02.json").is_file(),
+            "the answer re-wrote under the original station, not the active one"
+        );
         assert_eq!(
-            store.latest_open_interactive("r").unwrap().session_id(),
+            store.latest_open_interactive("r", "build").unwrap().session_id(),
             "q-01",
             "an answered session is no longer the open surface"
         );
-        // Both still on disk (answer persisted, history retained).
-        assert_eq!(store.list_interactive_sessions("r").len(), 2);
 
-        // A run-less or non-interactive payload is a no-op.
-        let no_run = SessionPayload::Question(QuestionSessionPayload {
-            session_id: "q-09".into(),
-            run_slug: None,
-            ..Default::default()
-        });
-        store.write_interactive_session(&no_run).unwrap();
-        assert_eq!(store.list_interactive_sessions("r").len(), 2);
+        // Resetting the build station takes its prompts with it.
+        store.clear_station_interactive("r", "build").unwrap();
+        assert!(store.list_interactive_sessions("r").is_empty());
+
+        // A run-less payload is a no-op.
+        store
+            .write_interactive_session(&SessionPayload::Question(QuestionSessionPayload {
+                session_id: "q-09".into(),
+                run_slug: None,
+                ..Default::default()
+            }))
+            .unwrap();
+        assert!(store.list_interactive_sessions("r").is_empty());
     }
 }

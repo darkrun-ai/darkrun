@@ -6343,3 +6343,61 @@ fn a_raised_question_surfaces_on_the_run_channel() {
         "the focus pointer is a review, not the interactive payload"
     );
 }
+
+// ── Mode-gating: questions don't stall a lights-out run ──────────────────────
+
+#[test]
+fn a_dark_run_refuses_a_blocking_question() {
+    let (_d, server) = server();
+    // A dark (autonomous) run.
+    server
+        .darkrun_run_new(Parameters(RunStartInput {
+            slug: "r".into(),
+            factory: "software".into(),
+            title: Some("Run".into()),
+            mode: "dark".into(),
+            size: "full".into(),
+        }))
+        .unwrap();
+
+    let res = server
+        .darkrun_question(Parameters(QuestionInput {
+            slug: "r".into(),
+            title: None,
+            prompt: "which?".into(),
+            context: None,
+            options: vec![q_opt("a", "A"), q_opt("b", "B")],
+            multi_select: false,
+            image_urls: vec![],
+        }))
+        .unwrap();
+    // The raise is refused with guidance to decide + record, and no session is
+    // created on the run channel.
+    assert!(is_err(&res), "the raise is refused");
+    let text = err_message(&res);
+    assert!(text.contains("dark"), "refusal mentions the mode: {text}");
+    assert!(
+        text.contains("knowledge_record") || text.contains("assumption"),
+        "refusal tells the agent to decide + record: {text}"
+    );
+    assert!(server.sessions().get("q-01").is_none(), "no question session was raised");
+    assert!(server.sessions().get("r").is_none(), "nothing mirrored onto the run channel");
+}
+
+#[test]
+fn an_interactive_run_allows_a_question() {
+    // The same call on a solo run is allowed (the operator is in the loop).
+    let (_d, server) = started("r");
+    server
+        .darkrun_question(Parameters(QuestionInput {
+            slug: "r".into(),
+            title: None,
+            prompt: "which?".into(),
+            context: None,
+            options: vec![q_opt("a", "A"), q_opt("b", "B")],
+            multi_select: false,
+            image_urls: vec![],
+        }))
+        .unwrap();
+    assert!(server.sessions().get("q-01").is_some(), "solo run raises the question");
+}
