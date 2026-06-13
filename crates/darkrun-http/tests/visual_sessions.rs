@@ -788,3 +788,31 @@ async fn a_session_miss_materializes_on_demand() {
     let resp = send(build_router(state), get("/api/session/nope")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn answering_a_question_fires_the_surface_resolver_with_its_run() {
+    use std::sync::{Arc, Mutex};
+    let resolved: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = resolved.clone();
+    let state = test_state().with_surface_resolver(move |run| {
+        sink.lock().unwrap().push(run.to_string());
+    });
+    // A question that knows its run.
+    state.sessions.upsert(SessionPayload::Question(QuestionSessionPayload {
+        session_id: "q".into(),
+        status: SessionStatus::Pending,
+        run_slug: Some("r".into()),
+        prompt: "pick".into(),
+        options: vec![QuestionOption { id: "a".into(), label: "A".into(), image_url: None, image_url_light: None, description: None }],
+        ..Default::default()
+    }));
+    let resp = send(
+        build_router(state.clone()),
+        post_json("/question/q/answer", &json!({ "selected": ["a"] })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // The run was handed to the re-surface hook so the desktop advances off the
+    // answered prompt instead of being stuck on it.
+    assert_eq!(*resolved.lock().unwrap(), vec!["r".to_string()]);
+}

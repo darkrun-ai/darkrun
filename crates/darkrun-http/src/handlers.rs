@@ -240,9 +240,13 @@ pub async fn question_answer(
     };
 
     let answer = req.to_answer();
+    let run = question.run_slug.clone();
     question.answer = Some(answer.clone());
     question.status = SessionStatus::Answered;
     state.sessions.upsert(SessionPayload::Question(question));
+    // Dismiss the answered prompt + surface the next open one (or the review)
+    // on the run channel, so the operator isn't stuck on a resolved question.
+    state.resolve_surface(run.as_deref());
 
     (
         StatusCode::OK,
@@ -278,10 +282,12 @@ pub async fn direction_select(
         return unprocessable("unknown archetype id", &req.archetype);
     }
 
+    let run = direction.run_slug.clone();
     direction.chosen_archetype = Some(req.archetype.clone());
     direction.annotations = req.annotations;
     direction.status = SessionStatus::Decided;
     state.sessions.upsert(SessionPayload::Direction(direction));
+    state.resolve_surface(run.as_deref());
 
     (
         StatusCode::OK,
@@ -314,9 +320,11 @@ pub async fn picker_select(
         return unprocessable("unknown option id", &req.id);
     }
 
+    let run = picker.run_slug.clone();
     picker.selection = Some(darkrun_api::PickerSelection { id: req.id.clone() });
     picker.status = SessionStatus::Decided;
     state.sessions.upsert(SessionPayload::Picker(picker));
+    state.resolve_surface(run.as_deref());
 
     (
         StatusCode::OK,

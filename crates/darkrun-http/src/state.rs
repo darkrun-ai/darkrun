@@ -353,6 +353,12 @@ pub struct AppState {
     /// real (e.g. a run slug → its show session). Lets a desktop open a run's
     /// review without waiting for the engine to tick first.
     pub materialize_session: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    /// Optional re-surface hook the engine installs: called with a run slug
+    /// after an operator resolves an interactive session (answers a question,
+    /// picks a direction/option). Re-pushes the run's surface so the answered
+    /// prompt is dismissed and the NEXT open one — or the review — takes its
+    /// place on the desktop, without waiting for the agent's next tick.
+    pub resolve_surface: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 impl AppState {
@@ -364,6 +370,7 @@ impl AppState {
             store: Arc::new(store),
             limits,
             materialize_session: None,
+            resolve_surface: None,
         }
     }
 
@@ -376,6 +383,15 @@ impl AppState {
         self
     }
 
+    /// Install the re-surface hook (see `resolve_surface`).
+    pub fn with_surface_resolver(
+        mut self,
+        f: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        self.resolve_surface = Some(Arc::new(f));
+        self
+    }
+
     /// Ensure `id` exists in the session registry, building it on demand via
     /// the installed materializer when absent. Returns whether it now exists.
     pub fn ensure_session(&self, id: &str) -> bool {
@@ -385,6 +401,14 @@ impl AppState {
         match &self.materialize_session {
             Some(build) => build(id) && self.sessions.contains(id),
             None => false,
+        }
+    }
+
+    /// Re-surface the run channel after an interactive session resolved, via
+    /// the installed hook. No-op when no run is known or no hook is installed.
+    pub fn resolve_surface(&self, run: Option<&str>) {
+        if let (Some(run), Some(hook)) = (run, &self.resolve_surface) {
+            hook(run);
         }
     }
 }
