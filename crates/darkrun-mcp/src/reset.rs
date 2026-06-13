@@ -54,6 +54,9 @@ pub fn reset(
                     state.stations.remove(station);
                     store.write_state(slug, &state)?;
                 }
+                // Its operator prompts (questions/directions/pickers) go with
+                // it — they were scoped to this station's work.
+                store.clear_station_interactive(slug, station)?;
             }
             if confirm {
                 let _ = crate::commit::commit_state(

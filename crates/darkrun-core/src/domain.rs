@@ -223,6 +223,16 @@ impl Mode {
         !matches!(self, Mode::Dark)
     }
 
+    /// Whether the run executes AUTONOMOUSLY — lights-out, no operator in the
+    /// loop to answer a blocking prompt. Only `dark`. A `darkrun_question` /
+    /// `direction` / `picker` raised in this mode would stall a run that is
+    /// meant to run without stops, so the engine refuses it: the agent must
+    /// decide and record the assumption instead (the operator overrides later
+    /// via feedback). `team`/`solo` keep the operator present, so they block.
+    pub fn is_autonomous(self) -> bool {
+        matches!(self, Mode::Dark)
+    }
+
     /// Parse a mode from a label, tolerating the legacy mode strings the engine
     /// used before the team/solo/dark model. The old sizing strings
     /// (`quick`/`bugfix`/`refactor`) named a *plan*, not a review posture, so they

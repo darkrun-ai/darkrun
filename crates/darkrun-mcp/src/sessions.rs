@@ -247,12 +247,22 @@ pub fn create_show_with_focus(
 /// staler disk copy), then mirror the most recent OPEN one onto the run
 /// channel so the desktop surfaces it. Idempotent; safe to call every tick.
 fn hydrate_interactive(registry: &SessionRegistry, store: &StateStore, slug: &str) {
+    // Re-attach EVERY persisted session (across all stations) so each stays
+    // answerable, without clobbering a fresher in-memory copy.
     for payload in store.list_interactive_sessions(slug) {
         if !registry.contains(payload.session_id()) {
             registry.upsert(payload);
         }
     }
-    if let Some(open) = store.latest_open_interactive(slug) {
+    // Surface only the ACTIVE station's open prompt — a question raised in an
+    // earlier station that's since locked must not reappear.
+    let active = store
+        .read_state(slug)
+        .ok()
+        .flatten()
+        .map(|s| s.active_station)
+        .unwrap_or_default();
+    if let Some(open) = store.latest_open_interactive(slug, &active) {
         // Mirror under the run slug only — keep `current` pointing at the run
         // (a review focus) so the home still navigates correctly.
         registry.upsert_under(slug, open);

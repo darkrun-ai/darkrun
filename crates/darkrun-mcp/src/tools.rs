@@ -115,6 +115,33 @@ impl DarkrunServer {
         StateStore::new(self.repo_root.as_ref())
     }
 
+    /// Refuse a blocking operator prompt (question / direction / picker) when
+    /// the run is AUTONOMOUS (dark mode): a lights-out run has no operator in
+    /// the loop to answer, so raising one would stall it indefinitely. Returns
+    /// `Some(error)` to return to the agent — instructing it to decide and
+    /// record the assumption instead — or `None` when the run is interactive
+    /// (team/solo) and the prompt is allowed. A run whose mode can't be read
+    /// (no state yet) is treated as interactive (allowed).
+    fn refuse_if_autonomous(&self, slug: &str, kind: &str) -> Option<CallToolResult> {
+        let store = self.store();
+        let mode = store
+            .read_state(slug)
+            .ok()
+            .flatten()
+            .map(|s| s.mode)
+            .or_else(|| store.read_run(slug).ok().map(|r| r.frontmatter.mode))?;
+        if mode.is_autonomous() {
+            Some(err_text(format!(
+                "run '{slug}' is in dark (autonomous) mode — a blocking {kind} \
+                 would stall a lights-out run. Decide it yourself, record the \
+                 assumption with darkrun_knowledge_record (the operator can \
+                 override it later via feedback), and continue."
+            )))
+        } else {
+            None
+        }
+    }
+
     /// Resolve which run a slug-optional command (e.g. `darkrun_run_inspect`) targets.
     ///
     /// Priority, so a user standing in a run's worktree never has to name it:
@@ -2616,6 +2643,9 @@ impl DarkrunServer {
         &self,
         Parameters(input): Parameters<QuestionInput>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        if let Some(refusal) = self.refuse_if_autonomous(&input.slug, "question") {
+            return Ok(refusal);
+        }
         let options = input
             .options
             .into_iter()
@@ -2670,6 +2700,9 @@ impl DarkrunServer {
         &self,
         Parameters(input): Parameters<DirectionInput>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        if let Some(refusal) = self.refuse_if_autonomous(&input.slug, "direction") {
+            return Ok(refusal);
+        }
         let archetypes = input
             .archetypes
             .into_iter()
@@ -2721,6 +2754,9 @@ impl DarkrunServer {
         &self,
         Parameters(input): Parameters<PickerInput>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        if let Some(refusal) = self.refuse_if_autonomous(&input.slug, "picker") {
+            return Ok(refusal);
+        }
         let kind = match sessions::parse_picker_kind(&input.kind) {
             Some(k) => k,
             None => return Ok(err_text(format!("invalid picker kind: {}", input.kind))),
