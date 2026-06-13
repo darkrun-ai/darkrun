@@ -104,6 +104,17 @@ pub async fn serve_stdio_on(
             crate::sessions::create_show_with_focus(&sessions, &mat_store, id, false).is_ok()
         })
     };
+    // Re-surface a run after the operator resolves an interactive session: drop
+    // the answered prompt and push the next open one (or the review) onto the
+    // run channel, so answering dismisses + advances without waiting for the
+    // agent's next tick.
+    let state = {
+        let sessions = state.sessions.clone();
+        let res_store = state.store.clone();
+        state.with_surface_resolver(move |run| {
+            let _ = crate::sessions::create_show_with_focus(&sessions, &res_store, run, false);
+        })
+    };
     // Durability: every interactive session (question / direction / picker) the
     // registry upserts — on raise AND on answer — is written to the run's
     // `interactive/` dir, so an open question and its eventual answer survive an
