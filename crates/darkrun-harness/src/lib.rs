@@ -102,7 +102,7 @@ impl Harness {
                 mcp_resources: true,
                 browser_ui: true,
                 model_provider: "anthropic",
-                model_tiers: &["haiku", "sonnet", "opus", "fable"],
+                model_tiers: &["haiku", "sonnet", "opus"],
                 subagents: Subagents {
                     supported: true,
                     tool_names: &["Agent", "Task"],
@@ -241,7 +241,7 @@ impl Harness {
                 mcp_resources: true,
                 browser_ui: false,
                 model_provider: "anthropic",
-                model_tiers: &["haiku", "sonnet", "opus", "fable"],
+                model_tiers: &["haiku", "sonnet", "opus"],
                 subagents: Subagents {
                     supported: true,
                     tool_names: &["/spawn"],
@@ -373,11 +373,14 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// Translate a canonical model tier (`haiku`/`sonnet`/`opus`/`fable`, as
-    /// the factory corpus names them) into this harness's provider vocabulary.
-    /// `fable` is the Mythos-family frontier tier — the deepest reasoning the
-    /// provider offers; harnesses without a distinct frontier collapse it onto
-    /// their top tier. Unknown tiers fall back to the balanced middle.
+    /// Translate a canonical model tier (`haiku`/`sonnet`/`opus`, as the factory
+    /// corpus names them) into this harness's provider vocabulary. Unknown tiers
+    /// fall back to the balanced middle.
+    ///
+    /// `fable`/`mythos` (the former frontier tier) is **pulled** — Anthropic
+    /// removed support — so it is no longer a selectable tier. A run that still
+    /// pins it degrades gracefully to the top available tier (opus on Anthropic)
+    /// rather than erroring. Restore the frontier mapping here if it returns.
     pub fn map_model(&self, tier: &str) -> &'static str {
         let t = tier.trim().to_ascii_lowercase();
         match self.model_provider {
@@ -385,8 +388,8 @@ impl Capabilities {
             "anthropic" => match t.as_str() {
                 "haiku" => "haiku",
                 "sonnet" => "sonnet",
-                "opus" => "opus",
-                "fable" | "mythos" => "fable",
+                // `fable`/`mythos` pinned by an older run degrade to opus.
+                "opus" | "fable" | "mythos" => "opus",
                 _ => "sonnet",
             },
             // Google collapses to flash (cheap) / pro (everything else).
@@ -715,14 +718,17 @@ mod tests {
     }
 
     #[test]
-    fn fable_tier_maps_to_each_providers_frontier() {
-        assert_eq!(Harness::ClaudeCode.capabilities().map_model("fable"), "fable");
-        assert_eq!(Harness::ClaudeCode.capabilities().map_model("mythos"), "fable");
+    fn fable_is_pulled_but_a_pinned_run_degrades_gracefully() {
+        // `fable`/`mythos` is no longer advertised as a tier...
+        assert!(!Harness::ClaudeCode.capabilities().model_tiers.contains(&"fable"));
+        assert!(!Harness::ClaudeCode.capabilities().model_tiers.contains(&"mythos"));
+        // ...but a run that still pins it never errors — it maps to the top
+        // available tier per provider (opus on Anthropic).
+        assert_eq!(Harness::ClaudeCode.capabilities().map_model("fable"), "opus");
+        assert_eq!(Harness::ClaudeCode.capabilities().map_model("mythos"), "opus");
         assert_eq!(Harness::GeminiCli.capabilities().map_model("fable"), "pro");
         assert_eq!(Harness::Codex.capabilities().map_model("fable"), "high");
         assert_eq!(Harness::Opencode.capabilities().map_model("fable"), "powerful");
-        // The tier list advertises it where the provider distinguishes it.
-        assert!(Harness::ClaudeCode.capabilities().model_tiers.contains(&"fable"));
     }
 
 }
