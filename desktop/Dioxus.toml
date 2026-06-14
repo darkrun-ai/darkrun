@@ -1,0 +1,34 @@
+# dx (Dioxus CLI) bundling config for the darkrun cross-platform app.
+#
+# Drives `dx bundle` / `dx build` for desktop (macOS/Windows/Linux) and the
+# mobile targets (iOS/Android). The same crate also builds to web (the version
+# served at app.darkrun.ai) via `dx build --platform web`.
+
+[application]
+name = "darkrun"
+
+[bundle]
+# The single app identifier across EVERY platform — iOS, macOS, Windows,
+# Linux, Android. Per-platform `[ios]`/`[macos]`/`[android] identifier`
+# overrides exist but we deliberately use one stable id everywhere.
+identifier = "ai.darkrun.app"
+publisher = "darkrun"
+
+# Universal Links (iOS) / App Links (Android) / web deep links.
+#
+# `hosts` maps to the `applinks:` Associated-Domains entitlement on Apple
+# platforms and to App-Link intent filters on Android — so tapping an
+# https://app.darkrun.ai/... link opens the installed native app instead of
+# the browser, landing on the same route the web app would. The web build at
+# app.darkrun.ai is the fallback when the native app isn't installed.
+#
+# The SERVER side of this handshake (the apple-app-site-association +
+# assetlinks.json files that app.darkrun.ai must serve from /.well-known/)
+# lives under web/well-known/ — see the README there.
+[deep_links]
+hosts = ["app.darkrun.ai"]
+# Empty `paths` = every path on the host is an app link (app.darkrun.ai is the
+# app host, so all of its routes belong to the app).
+paths = []
+# Custom-scheme fallback for environments without universal-link support.
+schemes = ["darkrun"]
