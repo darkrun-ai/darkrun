@@ -277,6 +277,17 @@ fn err_text(message: impl std::fmt::Display) -> CallToolResult {
     CallToolResult::error(vec![Content::text(message.to_string())])
 }
 
+/// The darkrun web/app host — where the Dioxus app is served and the target of
+/// the `app.darkrun.ai` universal link (see `desktop/Dioxus.toml`).
+const APP_BASE_URL: &str = "https://app.darkrun.ai";
+
+/// The device-agnostic deep link to a run: an `app.darkrun.ai` universal link
+/// that opens the installed native app when present, else the web build. The
+/// fallback the engine hands an operator when no local desktop can show the run.
+fn run_web_url(slug: &str) -> String {
+    format!("{APP_BASE_URL}/runs/{slug}")
+}
+
 // ── Tool input schemas ──────────────────────────────────────────────────
 
 /// Input for `darkrun_run_new`.
@@ -1559,6 +1570,13 @@ impl DarkrunServer {
     /// Surface the desktop for `slug`: reuse a connected app, else launch one
     /// pointed at the run. F5: presence carries a grace window, so a
     /// backgrounded window or a network blip doesn't respawn the desktop.
+    ///
+    /// When NO desktop is connected, the result also carries a `web_url` — the
+    /// `app.darkrun.ai` universal link, deep-linked to this run. That's the
+    /// fallback for an operator driving the engine from a context that can't pop
+    /// a native window (mobile Claude Code, web Claude Code, a launch that timed
+    /// out / wasn't found): the agent shows the URL and the operator opens the
+    /// run in the installed app, or the web build, from any device.
     fn surface_desktop(&self, slug: &str) -> serde_json::Value {
         // Any surfacing counts toward the once-per-process tick launch.
         self.desktop_surfaced
@@ -1566,12 +1584,19 @@ impl DarkrunServer {
         if self.sessions.presence().is_present() {
             // A desktop is connected (or within the grace window); the live
             // mirror pushes the raised session to it.
-            serde_json::json!({ "status": "connected" })
-        } else if let Some(addr) = self.announced_addr {
+            return serde_json::json!({ "status": "connected" });
+        }
+        let mut result = if let Some(addr) = self.announced_addr {
             self.launch_desktop(addr.port(), slug)
         } else {
             serde_json::json!({ "status": "no_engine_port" })
+        };
+        // No local app showed the run — hand the operator the device-agnostic
+        // deep link so they can open it on web/mobile.
+        if let Some(o) = result.as_object_mut() {
+            o.insert("web_url".to_string(), run_web_url(slug).into());
         }
+        result
     }
 
     /// Surface the desktop at most ONCE per engine process outside an explicit
@@ -3224,6 +3249,25 @@ impl ServerHandler for DarkrunServer {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn run_web_url_is_the_app_deep_link() {
+        assert_eq!(
+            run_web_url("quiet-tumbling-canyon"),
+            "https://app.darkrun.ai/runs/quiet-tumbling-canyon"
+        );
+    }
+
+    #[test]
+    fn surface_desktop_without_engine_offers_the_web_url() {
+        let dir = tempdir().unwrap();
+        // No announced addr (bare server) and no connected desktop → the
+        // operator gets the device-agnostic deep link as the fallback.
+        let server = DarkrunServer::new(dir.path());
+        let surface = server.surface_desktop("my-run");
+        assert_eq!(surface["status"], "no_engine_port");
+        assert_eq!(surface["web_url"], "https://app.darkrun.ai/runs/my-run");
+    }
 
     #[test]
     fn mutating_tools_refresh_reads_and_lifecycle_do_not() {
