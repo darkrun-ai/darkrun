@@ -1,0 +1,79 @@
+rules_version = '2';
+
+// darkrun Firestore security rules — the authorization layer for the
+// Firebase-native sync model.
+//
+// Trust model:
+//   - The Rust ENGINE writes run/session/unit docs through the Firebase Admin
+//     SDK (a service account), which BYPASSES these rules entirely. So these
+//     rules govern only CLIENT (web/mobile app) access.
+//   - A client is a signed-in Firebase Auth user. Its `uid` IS the account id —
+//     one account, with GitHub and/or GitLab linked as providers (account
+//     linking), all resolving to the same uid.
+//   - A client may READ everything it owns (its account, its runs, and the runs'
+//     subcollections) so it can subscribe for real-time cross-device sync, and
+//     may make only the NARROW writes the UI needs (answering an interactive
+//     session, registering a device for push). Everything else is engine-only.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Whether the request is the owner of account `aid`.
+    function isOwner(aid) {
+      return request.auth != null && request.auth.uid == aid;
+    }
+
+    // The owning account id recorded on a run doc.
+    function runOwner(runId) {
+      return get(/databases/$(database)/documents/runs/$(runId)).data.ownerAccountId;
+    }
+
+    // ── Accounts + linked identities + devices ──────────────────────────────
+    // The account doc and its identities are owner-readable; writes are
+    // engine/admin-only EXCEPT device registration (the client adds its own FCM
+    // token so it can receive notifications).
+    match /accounts/{accountId} {
+      allow read: if isOwner(accountId);
+      allow write: if false; // engine/admin only
+
+      match /identities/{identityId} {
+        allow read: if isOwner(accountId);
+        allow write: if false; // linking is brokered by the engine/admin
+      }
+
+      match /devices/{deviceId} {
+        allow read: if isOwner(accountId);
+        // A client registers/updates/removes ITS OWN push device.
+        allow write: if isOwner(accountId);
+      }
+    }
+
+    // ── Runs + their subcollections ─────────────────────────────────────────
+    // The live surface the apps subscribe to. Owner-readable; run/unit/state
+    // docs are engine-written (admin, bypasses rules) so clients can't forge
+    // engine state.
+    match /runs/{runId} {
+      allow read: if request.auth != null
+                  && resource.data.ownerAccountId == request.auth.uid;
+      allow write: if false; // engine/admin only
+
+      match /units/{unitId} {
+        allow read: if isOwner(runOwner(runId));
+        allow write: if false; // engine/admin only
+      }
+
+      // Interactive sessions (review / question / direction / picker). The
+      // client READS the open prompt and WRITES ONLY its answer back, under a
+      // constrained `answer` field — the engine watches for it and advances.
+      match /sessions/{sessionId} {
+        allow read: if isOwner(runOwner(runId));
+        // Narrow write: the client may set/replace the `answer` map and nothing
+        // else on the doc (the engine owns every other field).
+        allow update: if isOwner(runOwner(runId))
+                      && request.resource.data.diff(resource.data).affectedKeys()
+                          .hasOnly(['answer', 'answeredAt']);
+        allow create, delete: if false;
+      }
+    }
+  }
+}

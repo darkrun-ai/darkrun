@@ -1,0 +1,24 @@
+{
+  "indexes": [
+    {
+      "comment": "List an account's runs newest-first — the app's run list.",
+      "collectionGroup": "runs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ownerAccountId", "order": "ASCENDING" },
+        { "fieldPath": "updatedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "comment": "An account's OPEN interactive sessions across all runs (collection-group) — what needs the operator now.",
+      "collectionGroup": "sessions",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "ownerAccountId", "order": "ASCENDING" },
+        { "fieldPath": "open", "order": "ASCENDING" },
+        { "fieldPath": "raisedAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
