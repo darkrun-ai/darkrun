@@ -1,0 +1,40 @@
+# fastlane lanes for darkrun App Store screenshots.
+#
+# darkrun's app is built with Dioxus (`dx`), not an Xcode UI-test target, so we
+# DON'T use `capture_screenshots` (that drives XCUITest). Instead: capture raw
+# screens however you like (the web build at app.darkrun.ai rendered at each
+# device size, or the simulator), drop the PNGs in fastlane/screenshots/<locale>/,
+# then `frameit` wraps them in device bezels + the dark-brand caption, and
+# `deliver` uploads them to App Store Connect.
+
+default_platform(:ios)
+
+platform :ios do
+  desc "Frame raw screenshots with device bezels + dark-brand captions"
+  desc "Input:  fastlane/screenshots/<locale>/*.png  (raw, named <device>-<screen>.png)"
+  desc "Output: …_framed.png beside each, ready for `deliver`"
+  lane :screenshots do
+    # One-time per machine: pull the device frame images frameit composites.
+    #   bundle exec fastlane frameit download_frames
+    # (Not run here — it's a large binary download, cached under ~/.frameit.)
+    frameit(
+      path: "./fastlane/screenshots",
+      use_platform: "IOS"
+    )
+    UI.success("Framed screenshots written. Review them, then `fastlane upload_screenshots`.")
+  end
+
+  desc "Upload the framed screenshots to App Store Connect (no binary, no submit)"
+  lane :upload_screenshots do
+    deliver(
+      app_identifier: "ai.darkrun.app",
+      screenshots_path: "./fastlane/screenshots",
+      skip_binary_upload: true,
+      skip_metadata: true,
+      skip_app_version_update: true,
+      overwrite_screenshots: true,
+      run_precheck_before_submit: false,
+      force: true
+    )
+  end
+end

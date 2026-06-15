@@ -1,0 +1,14 @@
+# fastlane Appfile — the darkrun app's App Store Connect identity.
+#
+# The two account-specific values (apple_id, itc_team_id / team_id) come from
+# your Apple Developer + App Store Connect account, NOT the codebase — fill them
+# before running `deliver`. The bundle id matches desktop/Dioxus.toml.
+
+app_identifier("ai.darkrun.app")
+
+# Your Apple ID email for App Store Connect.
+apple_id(ENV["DARKRUN_APPLE_ID"] || "REPLACE_WITH_APPLE_ID_EMAIL")
+
+# Developer Portal team id (10 chars) and App Store Connect team id.
+team_id(ENV["DARKRUN_APPLE_TEAM_ID"] || "REPLACE_WITH_TEAM_ID")
+itc_team_id(ENV["DARKRUN_ASC_TEAM_ID"] || "")

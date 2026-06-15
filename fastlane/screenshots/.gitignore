@@ -1,0 +1,6 @@
+# Raw captures and frameit output are build artifacts — regenerated, not tracked.
+# The config (Framefile.json, *.strings, background.png) IS tracked, one dir up.
+*.png
+# …but keep the per-locale structure + caption strings under version control.
+!**/title.strings
+!**/keyword.strings

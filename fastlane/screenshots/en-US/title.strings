@@ -1,0 +1,8 @@
+/* The headline UNDER the accent keyword on each framed screenshot. Keyed by the
+   filter in Framefile.json (a substring of the raw screenshot filename). Keep
+   each to a short, concrete line — authority through specificity, no hype. */
+"review"     = "Watch every station run, live";
+"dag"        = "Your work as an assembly line";
+"statusline" = "The factory, right in your statusline";
+"factory"    = "Pick the factory for the work";
+"checkpoint" = "Approve, or send it back";

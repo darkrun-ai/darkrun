@@ -1,0 +1,44 @@
+{
+  "device_frame_version": "latest",
+  "default": {
+    "background": "./background.png",
+    "frame": "BLACK",
+    "padding": 96,
+    "show_complete_frame": false,
+    "stack_title": false,
+    "title_below_image": true,
+    "title": {
+      "color": "#e6edf3"
+    },
+    "keyword": {
+      "color": "#5fd7ff"
+    }
+  },
+  "data": [
+    {
+      "filter": "review",
+      "keyword": { "color": "#5fd7ff" },
+      "title": { "color": "#e6edf3" }
+    },
+    {
+      "filter": "dag",
+      "keyword": { "color": "#5fd7ff" },
+      "title": { "color": "#e6edf3" }
+    },
+    {
+      "filter": "statusline",
+      "keyword": { "color": "#5fd7ff" },
+      "title": { "color": "#e6edf3" }
+    },
+    {
+      "filter": "factory",
+      "keyword": { "color": "#5fd7ff" },
+      "title": { "color": "#e6edf3" }
+    },
+    {
+      "filter": "checkpoint",
+      "keyword": { "color": "#5fd7ff" },
+      "title": { "color": "#e6edf3" }
+    }
+  ]
+}
