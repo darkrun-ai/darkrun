@@ -725,13 +725,37 @@ impl StateStore {
         slugs.iter().map(|s| self.read_unit(run, s)).collect()
     }
 
+    /// The file path of a unit document.
+    pub fn unit_path(&self, run: &str, slug: &str) -> PathBuf {
+        self.units_dir(run).join(format!("{slug}.md"))
+    }
+
     /// Write a single unit document.
+    ///
+    /// UNGUARDED — engine-internal writers (beat, stamp, drift restamp, reset).
+    /// Agent-driven edits go through [`write_unit_guarded`](Self::write_unit_guarded).
     pub fn write_unit(&self, run: &str, unit: &Unit) -> Result<()> {
         let dir = self.units_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{}.md", unit.slug));
         let content = frontmatter::serialize(&unit.frontmatter, &unit.body)?;
         io(&path, fs::write(&path, content))
+    }
+
+    /// Guarded write of a unit document: overwriting an EXISTING unit requires
+    /// `expected_sha` to match the on-disk content, so an agent edit can't
+    /// silently clobber a change (an operator's, or an engine restamp) made
+    /// since the unit was read. Returns the new sha. See
+    /// [`write_guarded`](Self::write_guarded).
+    pub fn write_unit_guarded(
+        &self,
+        run: &str,
+        unit: &Unit,
+        expected_sha: Option<&str>,
+    ) -> Result<String> {
+        let path = self.unit_path(run, &unit.slug);
+        let content = frontmatter::serialize(&unit.frontmatter, &unit.body)?;
+        self.write_guarded(&path, &content, expected_sha)
     }
 
     // ─── Derived state (state.json) ──────────────────────────────────────
@@ -788,12 +812,32 @@ impl StateStore {
         Ok(out)
     }
 
-    /// Write a raw feedback document.
+    /// The file path of a feedback document.
+    pub fn feedback_path(&self, run: &str, id: &str) -> PathBuf {
+        self.feedback_dir(run).join(format!("{id}.md"))
+    }
+
+    /// Write a raw feedback document. UNGUARDED — used by creation (a fresh
+    /// auto-id, no clobber risk) and engine-internal transitions. Agent-driven
+    /// status changes go through [`write_feedback_guarded`](Self::write_feedback_guarded).
     pub fn write_feedback_raw(&self, run: &str, id: &str, content: &str) -> Result<()> {
         let dir = self.feedback_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{id}.md"));
         io(&path, fs::write(&path, content))
+    }
+
+    /// Guarded write of a feedback document — overwriting an existing item
+    /// requires `expected_sha`. Returns the new sha.
+    pub fn write_feedback_guarded(
+        &self,
+        run: &str,
+        id: &str,
+        content: &str,
+        expected_sha: Option<&str>,
+    ) -> Result<String> {
+        let path = self.feedback_path(run, id);
+        self.write_guarded(&path, content, expected_sha)
     }
 
     /// The `reflections/` directory for a run — where the Reflect phase's
@@ -937,12 +981,30 @@ impl StateStore {
         Ok(out)
     }
 
-    /// Write a raw brief/outcome document (`<id>.md`).
+    /// The file path of a brief/outcome document.
+    pub fn brief_path(&self, run: &str, id: &str) -> PathBuf {
+        self.briefs_dir(run).join(format!("{id}.md"))
+    }
+
+    /// Write a raw brief/outcome document (`<id>.md`). UNGUARDED.
     pub fn write_brief_raw(&self, run: &str, id: &str, content: &str) -> Result<()> {
         let dir = self.briefs_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{id}.md"));
         io(&path, fs::write(&path, content))
+    }
+
+    /// Guarded write of a brief/outcome — overwriting an existing brief requires
+    /// `expected_sha`. Returns the new sha.
+    pub fn write_brief_guarded(
+        &self,
+        run: &str,
+        id: &str,
+        content: &str,
+        expected_sha: Option<&str>,
+    ) -> Result<String> {
+        let path = self.brief_path(run, id);
+        self.write_guarded(&path, content, expected_sha)
     }
 
     /// The `prompts/` directory for a run — where every rendered engine prompt
