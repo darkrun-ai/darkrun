@@ -3562,7 +3562,7 @@ mod tests {
     fn spec_prompt_surfaces_project_knowledge_priors() {
         let (_d, store) = store();
         // A prior recorded by an earlier run's explorer (project-scoped).
-        crate::knowledge::record(&store, "auth-store", "tokens live in the CredentialStore").unwrap();
+        crate::knowledge::record(&store, "auth-store", "tokens live in the CredentialStore", None).unwrap();
         run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
         let t = run_tick(&store, "r").expect("tick");
         assert!(matches!(t.action, RunAction::Spec { .. }), "first action is Spec");

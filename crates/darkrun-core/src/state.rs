@@ -266,6 +266,25 @@ pub(crate) fn io<T>(path: &Path, r: std::io::Result<T>) -> Result<T> {
     })
 }
 
+/// Why a guarded artifact write was refused: the bytes on disk are not the ones
+/// the caller last read, so overwriting would silently clobber the newer
+/// content. Carries the CURRENT sha + content so the caller can re-read,
+/// reconcile, and retry with [`current_sha`](WriteConflict::current_sha).
+///
+/// Produced by [`StateStore::write_guarded`] and carried in
+/// [`CoreError::Conflict`](crate::CoreError::Conflict).
+#[derive(Debug, Clone)]
+pub struct WriteConflict {
+    /// The artifact path the write targeted.
+    pub path: PathBuf,
+    /// The SHA-256 of the bytes currently on disk — the token a retry must
+    /// present as `expected_sha`.
+    pub current_sha: String,
+    /// The full current content, so a caller can show/merge it without a second
+    /// read.
+    pub current_content: String,
+}
+
 /// Reads and writes the `.darkrun/` filesystem state layout.
 #[derive(Debug, Clone)]
 pub struct StateStore {
@@ -293,6 +312,57 @@ impl StateStore {
     /// The `units/` directory for a run.
     pub fn units_dir(&self, slug: &str) -> PathBuf {
         self.run_dir(slug).join("units")
+    }
+
+    // ─── Guarded artifact writes (optimistic concurrency) ────────────────
+    //
+    // The agent-facing artifact tools (knowledge, units, briefs, proofs, …)
+    // mutate files an operator and other workers may also touch. To stop a
+    // blind overwrite from silently dropping someone else's edit, those writes
+    // funnel through `write_guarded`: a read hands back a sha, and a write must
+    // present that sha to overwrite an existing file. This mirrors the editor's
+    // read-before-write contract and gives every artifact an etag-style token.
+
+    /// The SHA-256 of an artifact file's current bytes — the concurrency token a
+    /// guarded write checks. `None` when the file is absent (a brand-new
+    /// artifact needs no token to create).
+    pub fn artifact_sha(&self, path: &Path) -> Option<String> {
+        crate::witness::hash_file(path)
+    }
+
+    /// Write `content` to `path`, GUARDING against a blind overwrite:
+    ///
+    /// - **absent file** → always written (a new artifact); returns its sha;
+    /// - **existing file** + `expected_sha` equal to the on-disk sha → written;
+    ///   returns the new sha;
+    /// - **existing file** + a missing or stale `expected_sha` →
+    ///   [`CoreError::Conflict`](crate::CoreError::Conflict) carrying the current
+    ///   sha + content, so nothing is clobbered.
+    ///
+    /// Parent directories are created. The returned sha is over the bytes now on
+    /// disk, ready to thread into the next guarded write.
+    pub fn write_guarded(
+        &self,
+        path: &Path,
+        content: &str,
+        expected_sha: Option<&str>,
+    ) -> Result<String> {
+        if let Some(parent) = path.parent() {
+            io(parent, fs::create_dir_all(parent))?;
+        }
+        if path.exists() {
+            let current = io(path, fs::read_to_string(path))?;
+            let current_sha = crate::witness::hash_bytes(current.as_bytes());
+            if expected_sha != Some(current_sha.as_str()) {
+                return Err(CoreError::Conflict(Box::new(WriteConflict {
+                    path: path.to_path_buf(),
+                    current_sha,
+                    current_content: current,
+                })));
+            }
+        }
+        io(path, fs::write(path, content))?;
+        Ok(crate::witness::hash_bytes(content.as_bytes()))
     }
 
     /// Append one line to a run-scoped append-only journal (e.g.
@@ -787,22 +857,57 @@ impl StateStore {
         Ok(out)
     }
 
+    /// The file path of a project knowledge document.
+    pub fn knowledge_path(&self, topic: &str) -> PathBuf {
+        self.knowledge_dir().join(format!("{topic}.md"))
+    }
+
     /// Read one project knowledge document by topic id, or `None` when absent.
     pub fn read_knowledge_entry(&self, topic: &str) -> Result<Option<String>> {
-        let path = self.knowledge_dir().join(format!("{topic}.md"));
+        let path = self.knowledge_path(topic);
         if !path.exists() {
             return Ok(None);
         }
         Ok(Some(io(&path, fs::read_to_string(&path))?))
     }
 
+    /// Read a knowledge document with its concurrency token: `(content, sha)`,
+    /// or `None` when the topic doesn't exist yet. The sha is what a subsequent
+    /// [`write_knowledge_guarded`](Self::write_knowledge_guarded) must present to
+    /// overwrite it.
+    pub fn read_knowledge_with_sha(&self, topic: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .read_knowledge_entry(topic)?
+            .map(|content| {
+                let sha = crate::witness::hash_bytes(content.as_bytes());
+                (content, sha)
+            }))
+    }
+
     /// Write a project knowledge document (`<topic>.md`), overwriting in place
     /// so re-recording a topic updates the shared prior rather than duplicating.
+    ///
+    /// UNGUARDED — engine-internal callers only. Agent-driven recording goes
+    /// through [`write_knowledge_guarded`](Self::write_knowledge_guarded).
     pub fn write_knowledge_raw(&self, topic: &str, content: &str) -> Result<()> {
         let dir = self.knowledge_dir();
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{topic}.md"));
         io(&path, fs::write(&path, content))
+    }
+
+    /// Guarded write of a knowledge document: overwriting an EXISTING topic
+    /// requires `expected_sha` to match the on-disk content, so a re-record
+    /// can't silently clobber a topic another worker updated since it was read.
+    /// Returns the new sha. See [`write_guarded`](Self::write_guarded).
+    pub fn write_knowledge_guarded(
+        &self,
+        topic: &str,
+        content: &str,
+        expected_sha: Option<&str>,
+    ) -> Result<String> {
+        let path = self.knowledge_path(topic);
+        self.write_guarded(&path, content, expected_sha)
     }
 
     /// The `briefs/` directory for a run — where each station's pre-execution
@@ -905,6 +1010,50 @@ pub fn run_is_complete(run: &Run) -> bool {
 mod tests {
     use super::*;
     use crate::domain::{Station, StationPhase, Status};
+
+    #[test]
+    fn write_guarded_creates_then_requires_the_sha_to_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        let path = store.root().join("artifact.md");
+
+        // Brand-new file: no sha needed; returns the content sha.
+        let sha1 = store.write_guarded(&path, "v1", None).unwrap();
+        assert_eq!(sha1, crate::witness::hash_bytes(b"v1"));
+        assert_eq!(store.artifact_sha(&path), Some(sha1.clone()));
+
+        // Overwrite WITHOUT a sha → conflict carrying the current state.
+        let err = store.write_guarded(&path, "v2", None).unwrap_err();
+        match err {
+            CoreError::Conflict(c) => {
+                assert_eq!(c.current_sha, sha1);
+                assert_eq!(c.current_content, "v1");
+                assert_eq!(c.path, path);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        // Disk is untouched by the refused write.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v1");
+
+        // Overwrite with a STALE sha → conflict.
+        assert!(matches!(
+            store.write_guarded(&path, "v2", Some("deadbeef")),
+            Err(CoreError::Conflict(_))
+        ));
+
+        // Overwrite with the CURRENT sha → succeeds, returns the new sha.
+        let sha2 = store.write_guarded(&path, "v2", Some(&sha1)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v2");
+        assert_ne!(sha1, sha2);
+        assert_eq!(store.artifact_sha(&path), Some(sha2));
+    }
+
+    #[test]
+    fn artifact_sha_is_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        assert!(store.artifact_sha(&store.root().join("nope.md")).is_none());
+    }
 
     fn station(name: &str, status: Status, phase: StationPhase) -> Station {
         Station {

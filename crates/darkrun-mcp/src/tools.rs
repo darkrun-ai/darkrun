@@ -277,6 +277,36 @@ fn err_text(message: impl std::fmt::Display) -> CallToolResult {
     CallToolResult::error(vec![Content::text(message.to_string())])
 }
 
+/// Map an artifact write error into an agent-actionable tool result. A guarded
+/// write CONFLICT (the file changed since the agent read it) returns the current
+/// sha + content inline, so the agent re-reads, reconciles its change into the
+/// current content, and retries with the fresh `expected_sha` — never a blind
+/// retry that would re-clobber. Any other error stringifies as usual.
+fn artifact_write_error(e: crate::error::McpError) -> CallToolResult {
+    if let crate::error::McpError::Core(darkrun_core::CoreError::Conflict(c)) = &e {
+        return CallToolResult::error(vec![Content::text(format!(
+            "WRITE CONFLICT — {} changed since you read it. Do NOT retry blindly: \
+             re-read, reconcile your change into the current content below, then \
+             retry with expected_sha={}.\n\n--- current content ---\n{}",
+            c.path.display(),
+            c.current_sha,
+            c.current_content
+        ))]);
+    }
+    err_text(e)
+}
+
+/// The darkrun web/app host — where the Dioxus app is served and the target of
+/// the `app.darkrun.ai` universal link (see `desktop/Dioxus.toml`).
+const APP_BASE_URL: &str = "https://app.darkrun.ai";
+
+/// The device-agnostic deep link to a run: an `app.darkrun.ai` universal link
+/// that opens the installed native app when present, else the web build. The
+/// fallback the engine hands an operator when no local desktop can show the run.
+fn run_web_url(slug: &str) -> String {
+    format!("{APP_BASE_URL}/runs/{slug}")
+}
+
 // ── Tool input schemas ──────────────────────────────────────────────────
 
 /// Input for `darkrun_run_new`.
@@ -673,6 +703,13 @@ pub struct KnowledgeRecordInput {
     /// The knowledge prose — a durable project fact, constraint, prior art, or
     /// trap worth carrying into future runs.
     pub body: String,
+    /// The concurrency token for an OVERWRITE: the `sha` returned by
+    /// `darkrun_knowledge_list`/record when you read the existing topic.
+    /// REQUIRED to overwrite an existing topic — a missing or stale sha is
+    /// refused (so a re-record can't clobber a newer edit). Omit only when
+    /// recording a brand-new topic.
+    #[serde(default)]
+    pub expected_sha: Option<String>,
 }
 
 /// Input for `darkrun_knowledge_list` — read the project's knowledge store.
@@ -1559,6 +1596,13 @@ impl DarkrunServer {
     /// Surface the desktop for `slug`: reuse a connected app, else launch one
     /// pointed at the run. F5: presence carries a grace window, so a
     /// backgrounded window or a network blip doesn't respawn the desktop.
+    ///
+    /// When NO desktop is connected, the result also carries a `web_url` — the
+    /// `app.darkrun.ai` universal link, deep-linked to this run. That's the
+    /// fallback for an operator driving the engine from a context that can't pop
+    /// a native window (mobile Claude Code, web Claude Code, a launch that timed
+    /// out / wasn't found): the agent shows the URL and the operator opens the
+    /// run in the installed app, or the web build, from any device.
     fn surface_desktop(&self, slug: &str) -> serde_json::Value {
         // Any surfacing counts toward the once-per-process tick launch.
         self.desktop_surfaced
@@ -1566,12 +1610,19 @@ impl DarkrunServer {
         if self.sessions.presence().is_present() {
             // A desktop is connected (or within the grace window); the live
             // mirror pushes the raised session to it.
-            serde_json::json!({ "status": "connected" })
-        } else if let Some(addr) = self.announced_addr {
+            return serde_json::json!({ "status": "connected" });
+        }
+        let mut result = if let Some(addr) = self.announced_addr {
             self.launch_desktop(addr.port(), slug)
         } else {
             serde_json::json!({ "status": "no_engine_port" })
+        };
+        // No local app showed the run — hand the operator the device-agnostic
+        // deep link so they can open it on web/mobile.
+        if let Some(o) = result.as_object_mut() {
+            o.insert("web_url".to_string(), run_web_url(slug).into());
         }
+        result
     }
 
     /// Surface the desktop at most ONCE per engine process outside an explicit
@@ -2152,9 +2203,9 @@ impl DarkrunServer {
             return Ok(err_text("knowledge topic must not be empty"));
         }
         let store = self.store();
-        match knowledge::record(&store, &input.topic, &input.body) {
+        match knowledge::record(&store, &input.topic, &input.body, input.expected_sha.as_deref()) {
             Ok(k) => ok_json(&k),
-            Err(e) => Ok(err_text(e)),
+            Err(e) => Ok(artifact_write_error(e)),
         }
     }
 
@@ -3010,8 +3061,112 @@ fn adapt_tool_list(
     tools
 }
 
+/// Tools that should NOT trigger the post-call live refresh (see
+/// [`DarkrunServer::call_tool`]). Everything *not* listed here is treated as a
+/// state mutation and re-broadcasts the run's session payload off disk — so a
+/// new unit, feedback item, knowledge note, brief, proof, etc. appears in the
+/// desktop the instant the tool records it, not only at the next tick.
+///
+/// The denylist (rather than an allowlist) is deliberate: a tool added later
+/// defaults to refreshing, which is the safe direction — at worst a redundant
+/// idempotent rebuild. Listed here are (1) pure reads, whose rebuilt payload is
+/// identical; (2) the lifecycle tools that already surface (focused) within
+/// their own dispatch or via the tick mirror; (3) the interactive raisers, which
+/// manage their own surfaced session + focus; and (4) meta tools with no run.
+const REFRESH_SKIP: &[&str] = &[
+    // (1) reads — identical payload, nothing to broadcast
+    "darkrun_run_list",
+    "darkrun_run_inspect",
+    "darkrun_run_show",
+    "darkrun_run_composite",
+    "darkrun_unit_list",
+    "darkrun_unit_get",
+    "darkrun_factory_list",
+    "darkrun_factory_detail",
+    "darkrun_feedback_list",
+    "darkrun_knowledge_list",
+    "darkrun_reflection_list",
+    "darkrun_annotation_list",
+    "darkrun_annotation_payload",
+    "darkrun_proof_get",
+    "darkrun_backlog",
+    "darkrun_changelog",
+    "darkrun_report",
+    "darkrun_debug",
+    "darkrun_version_info",
+    "darkrun_question_result",
+    "darkrun_direction_result",
+    "darkrun_picker_result",
+    // (2) self-surfacing lifecycle — adapt_tick / run_start already mirror live
+    "darkrun_advance",
+    "darkrun_tick",
+    "darkrun_run_new",
+    "darkrun_run_start",
+    // (3) interactive raisers — own their surfaced session + focus
+    "darkrun_question",
+    "darkrun_direction",
+    "darkrun_picker",
+    // (4) meta / no run target
+    "darkrun_setup",
+    "darkrun_scaffold",
+    "darkrun_zap",
+];
+
+/// Whether a successful call to `tool` should re-broadcast the run's live
+/// payload (see [`REFRESH_SKIP`]).
+fn tool_refreshes_run(tool: &str) -> bool {
+    !REFRESH_SKIP.contains(&tool)
+}
+
 #[tool_handler]
 impl ServerHandler for DarkrunServer {
+    /// Dispatch a tool call, then — for any state-mutating tool — re-broadcast the
+    /// run's live session payload so the desktop reflects the change immediately.
+    ///
+    /// `#[tool_handler]` only generates `call_tool` when none is defined, so this
+    /// override wraps the macro's dispatch: it routes through the same
+    /// `Self::tool_router()`, then, on a successful mutating call, rebuilds the
+    /// run's payload off disk and upserts it (UNFOCUSED — a background data write
+    /// must not repoint the `current` focus channel other windows watch; only
+    /// ticks and gates navigate). This extends the every-tick live mirror in
+    /// [`DarkrunServer::adapt_tick`] to every mutating tool: units, feedback,
+    /// knowledge, briefs, proofs, drift, reflections — visible as they're written.
+    #[cfg(not(tarpaulin_include))] // MCP protocol dispatch (needs a live RequestContext); tool_refreshes_run is tested
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        // Capture the dispatch inputs before `request` is consumed by the router.
+        let refresh = tool_refreshes_run(&request.name);
+        let slug = request
+            .arguments
+            .as_ref()
+            .and_then(|a| a.get("slug"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let result = Self::tool_router().call(tcc).await;
+
+        if refresh {
+            if let Ok(call) = &result {
+                if !call.is_error.unwrap_or(false) {
+                    let store = self.store();
+                    if let Some(run) = self.resolve_run_slug(&store, slug.as_deref()) {
+                        let _ = crate::sessions::create_show_with_focus(
+                            &self.sessions,
+                            &store,
+                            &run,
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+        result
+    }
+
     /// List the tools, adapted to the active harness: drop the browser/visual
     /// tools on harnesses without a desktop UI, then enforce the harness tool
     /// budget (e.g. Cursor caps at ~40). `get_info`/`call_tool` are generated by
@@ -3120,6 +3275,57 @@ impl ServerHandler for DarkrunServer {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn run_web_url_is_the_app_deep_link() {
+        assert_eq!(
+            run_web_url("quiet-tumbling-canyon"),
+            "https://app.darkrun.ai/runs/quiet-tumbling-canyon"
+        );
+    }
+
+    #[test]
+    fn surface_desktop_without_engine_offers_the_web_url() {
+        let dir = tempdir().unwrap();
+        // No announced addr (bare server) and no connected desktop → the
+        // operator gets the device-agnostic deep link as the fallback.
+        let server = DarkrunServer::new(dir.path());
+        let surface = server.surface_desktop("my-run");
+        assert_eq!(surface["status"], "no_engine_port");
+        assert_eq!(surface["web_url"], "https://app.darkrun.ai/runs/my-run");
+    }
+
+    #[test]
+    fn mutating_tools_refresh_reads_and_lifecycle_do_not() {
+        // Data-mutating tools re-broadcast the live payload…
+        for t in [
+            "darkrun_unit_create",
+            "darkrun_unit_update",
+            "darkrun_unit_beat",
+            "darkrun_feedback_create",
+            "darkrun_knowledge_record",
+            "darkrun_brief_record",
+            "darkrun_reflection_record",
+            "darkrun_proof_attach",
+            "darkrun_drift_witness",
+            "darkrun_checkpoint_decide",
+        ] {
+            assert!(tool_refreshes_run(t), "{t} should refresh");
+        }
+        // …reads, self-surfacing lifecycle, and interactive raisers do not.
+        for t in [
+            "darkrun_run_list",
+            "darkrun_unit_list",
+            "darkrun_knowledge_list",
+            "darkrun_advance",
+            "darkrun_tick",
+            "darkrun_run_new",
+            "darkrun_question",
+            "darkrun_picker",
+        ] {
+            assert!(!tool_refreshes_run(t), "{t} should NOT refresh");
+        }
+    }
 
     #[test]
     fn claude_code_lists_every_tool_including_visual() {

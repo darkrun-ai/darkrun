@@ -1,0 +1,18 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["TEAMID.ai.darkrun.app"],
+        "components": [
+          {
+            "/": "/*",
+            "comment": "All app.darkrun.ai paths open the darkrun app."
+          }
+        ]
+      }
+    ]
+  },
+  "webcredentials": {
+    "apps": ["TEAMID.ai.darkrun.app"]
+  }
+}

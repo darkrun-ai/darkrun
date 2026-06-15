@@ -55,6 +55,18 @@ pub enum CoreError {
         /// The configured timeout in milliseconds.
         timeout_ms: u64,
     },
+
+    /// A guarded artifact write was refused to avoid clobbering newer content:
+    /// the on-disk sha didn't match the `expected_sha` the caller presented (or
+    /// none was presented for an existing artifact). Boxed to keep the error
+    /// enum small. See [`WriteConflict`](crate::WriteConflict).
+    #[error(
+        "write conflict at {}: on-disk sha is {}, not the expected sha — \
+         read it again, reconcile, and retry with the current sha",
+        .0.path.display(),
+        .0.current_sha
+    )]
+    Conflict(Box<crate::WriteConflict>),
 }
 
 /// Convenience alias for results in this crate.

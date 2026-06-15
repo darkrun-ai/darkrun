@@ -106,15 +106,31 @@ fn inject_state_file(cwd: &Path) -> Option<String> {
 
 // ─── guard-workflow-fields (the one blocking hook, mechanic #3) ──────────────
 
-/// How a path under `.darkrun/<slug>/` is classified for the ownership guard.
-/// `None` means the path is NOT engine-owned state (the guard allows it).
+/// How an engine-owned path under `.darkrun/` is classified for the ownership
+/// guard. `None` means the path is NOT engine-owned state (the guard allows it).
+/// Each variant redirects a blocked harness write to the engine tool that owns
+/// that artifact — which validates its location and guards against clobbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnginePathKind {
     /// A Unit spec (`units/*.md`) — authored via `darkrun_unit_*`.
     Unit,
     /// A feedback record (`feedback/*.md`) — via `darkrun_feedback_*`.
     Feedback,
-    /// The run doc or derived state (`run.md` / `state.json`) — engine-internal.
+    /// A project knowledge topic (`knowledge/*.md`, project-scoped, not under a
+    /// run) — via `darkrun_knowledge_record`. The case the predecessor kept
+    /// getting wrong (writing knowledge to the wrong spot).
+    Knowledge,
+    /// A reflection retrospective (`reflections/*.md`) — via
+    /// `darkrun_reflection_record`.
+    Reflection,
+    /// A station brief / outcome (`briefs/*.md`) — via `darkrun_brief_record`.
+    Brief,
+    /// The objective proof store (`proof.json`) — via `darkrun_proof_attach`.
+    Proof,
+    /// An annotation record (`annotations/*`) — via `darkrun_annotation_submit`.
+    Annotation,
+    /// The run doc or derived state (`run.md` / `state.json`) and any other
+    /// engine-owned run subtree — engine-internal.
     EngineState,
 }
 
@@ -128,6 +144,14 @@ impl EnginePathKind {
             EnginePathKind::Feedback => {
                 "use the `darkrun_feedback_*` tools (darkrun_feedback_create / _resolve / _move)"
             }
+            EnginePathKind::Knowledge => {
+                "use `darkrun_knowledge_record` — it writes the topic to the right place and \
+                 guards against overwriting a newer edit (pass the `expected_sha` you read)"
+            }
+            EnginePathKind::Reflection => "use `darkrun_reflection_record`",
+            EnginePathKind::Brief => "use `darkrun_brief_record`",
+            EnginePathKind::Proof => "use `darkrun_proof_attach`",
+            EnginePathKind::Annotation => "use `darkrun_annotation_submit`",
             EnginePathKind::EngineState => {
                 "the run document + state are engine-managed — drive them with `darkrun_advance` \
                  / `darkrun_checkpoint_decide`, never a raw write"
@@ -136,15 +160,21 @@ impl EnginePathKind {
     }
 }
 
-/// Classify a path relative to the `.darkrun/<slug>/` state tree. Returns `None`
+/// Classify a path relative to the `.darkrun/` state tree. Returns `None`
 /// when the path is not engine-owned (agent code, `.darkrun/settings.yml`,
 /// `.darkrun/prompts/…`, scaffolds, etc. — all freely writable).
 fn classify_engine_path(path: &str) -> Option<EnginePathKind> {
-    // Locate the `.darkrun/` segment, then require a `<slug>/` after it.
+    // Locate the `.darkrun/` segment.
     let rel = match path.find("/.darkrun/") {
         Some(idx) => &path[idx + "/.darkrun/".len()..],
         None => path.strip_prefix(".darkrun/")?,
     };
+    // PROJECT-level knowledge sits at `.darkrun/knowledge/<topic>.md` — a sibling
+    // of the run dirs, NOT under a run slug — so classify it before the per-run
+    // logic below.
+    if let Some(rest) = rel.strip_prefix("knowledge/") {
+        return rest.ends_with(".md").then_some(EnginePathKind::Knowledge);
+    }
     // rel is now `<slug>/<...>`. A bare top-level file (settings.yml) or a
     // non-run subtree (prompts/, factories/, worktrees/) is not run state.
     let mut parts = rel.splitn(2, '/');
@@ -162,11 +192,18 @@ fn classify_engine_path(path: &str) -> Option<EnginePathKind> {
         Some(EnginePathKind::Unit)
     } else if tail.starts_with("feedback/") && tail.ends_with(".md") {
         Some(EnginePathKind::Feedback)
-    } else if tail == "run.md" || tail == "state.json" {
-        Some(EnginePathKind::EngineState)
+    } else if tail.starts_with("reflections/") && tail.ends_with(".md") {
+        Some(EnginePathKind::Reflection)
+    } else if tail.starts_with("briefs/") && tail.ends_with(".md") {
+        Some(EnginePathKind::Brief)
+    } else if tail.starts_with("annotations/") {
+        Some(EnginePathKind::Annotation)
+    } else if tail == "proof.json" {
+        Some(EnginePathKind::Proof)
     } else {
-        // Other engine-owned run state (drift/, reflections/, proof/, …) — the
-        // whole run subtree is engine-owned, so block generic writes broadly.
+        // run.md / state.json and any OTHER engine-owned run subtree (drift/,
+        // interactive/, prompts written per-run, …) — the whole run subtree is
+        // engine-owned, so block generic writes broadly.
         Some(EnginePathKind::EngineState)
     }
 }
@@ -530,6 +567,37 @@ mod tests {
             .contains("darkrun_feedback_"));
         assert!(guard_workflow_fields(&write_to(".darkrun/r/state.json"), tmp.path()).is_some());
         assert!(guard_workflow_fields(&write_to(".darkrun/r/run.md"), tmp.path()).is_some());
+    }
+
+    #[test]
+    fn guard_redirects_knowledge_to_its_own_tool() {
+        let tmp = TempDir::new().unwrap();
+        // The named case: a harness write to the project knowledge store is
+        // blocked and redirected to darkrun_knowledge_record (NOT the run-state
+        // redirect), so knowledge can't land in the wrong spot.
+        let msg = guard_workflow_fields(
+            &write_to("/repo/.darkrun/knowledge/auth-conventions.md"),
+            tmp.path(),
+        )
+        .expect("should block");
+        assert!(msg.contains("darkrun_knowledge_record"), "{msg}");
+        assert!(msg.contains("expected_sha"), "names the overwrite guard: {msg}");
+    }
+
+    #[test]
+    fn guard_redirects_each_artifact_to_its_tool() {
+        let tmp = TempDir::new().unwrap();
+        let cases = [
+            (".darkrun/r/reflections/refl-01.md", "darkrun_reflection_record"),
+            (".darkrun/r/briefs/spec-pre.md", "darkrun_brief_record"),
+            (".darkrun/r/proof.json", "darkrun_proof_attach"),
+            (".darkrun/r/annotations/a1.json", "darkrun_annotation_submit"),
+        ];
+        for (path, tool) in cases {
+            let msg = guard_workflow_fields(&write_to(path), tmp.path())
+                .unwrap_or_else(|| panic!("{path} should block"));
+            assert!(msg.contains(tool), "{path} → {tool}: {msg}");
+        }
     }
 
     #[test]
