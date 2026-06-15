@@ -277,6 +277,25 @@ fn err_text(message: impl std::fmt::Display) -> CallToolResult {
     CallToolResult::error(vec![Content::text(message.to_string())])
 }
 
+/// Map an artifact write error into an agent-actionable tool result. A guarded
+/// write CONFLICT (the file changed since the agent read it) returns the current
+/// sha + content inline, so the agent re-reads, reconciles its change into the
+/// current content, and retries with the fresh `expected_sha` — never a blind
+/// retry that would re-clobber. Any other error stringifies as usual.
+fn artifact_write_error(e: crate::error::McpError) -> CallToolResult {
+    if let crate::error::McpError::Core(darkrun_core::CoreError::Conflict(c)) = &e {
+        return CallToolResult::error(vec![Content::text(format!(
+            "WRITE CONFLICT — {} changed since you read it. Do NOT retry blindly: \
+             re-read, reconcile your change into the current content below, then \
+             retry with expected_sha={}.\n\n--- current content ---\n{}",
+            c.path.display(),
+            c.current_sha,
+            c.current_content
+        ))]);
+    }
+    err_text(e)
+}
+
 /// The darkrun web/app host — where the Dioxus app is served and the target of
 /// the `app.darkrun.ai` universal link (see `desktop/Dioxus.toml`).
 const APP_BASE_URL: &str = "https://app.darkrun.ai";
@@ -684,6 +703,13 @@ pub struct KnowledgeRecordInput {
     /// The knowledge prose — a durable project fact, constraint, prior art, or
     /// trap worth carrying into future runs.
     pub body: String,
+    /// The concurrency token for an OVERWRITE: the `sha` returned by
+    /// `darkrun_knowledge_list`/record when you read the existing topic.
+    /// REQUIRED to overwrite an existing topic — a missing or stale sha is
+    /// refused (so a re-record can't clobber a newer edit). Omit only when
+    /// recording a brand-new topic.
+    #[serde(default)]
+    pub expected_sha: Option<String>,
 }
 
 /// Input for `darkrun_knowledge_list` — read the project's knowledge store.
@@ -2177,9 +2203,9 @@ impl DarkrunServer {
             return Ok(err_text("knowledge topic must not be empty"));
         }
         let store = self.store();
-        match knowledge::record(&store, &input.topic, &input.body) {
+        match knowledge::record(&store, &input.topic, &input.body, input.expected_sha.as_deref()) {
             Ok(k) => ok_json(&k),
-            Err(e) => Ok(err_text(e)),
+            Err(e) => Ok(artifact_write_error(e)),
         }
     }
 
