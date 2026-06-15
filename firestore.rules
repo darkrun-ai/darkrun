@@ -1,78 +1,61 @@
 rules_version = '2';
 
-// darkrun Firestore security rules — the authorization layer for the
-// Firebase-native sync model.
+// darkrun Firestore security rules.
 //
-// Trust model:
-//   - The Rust ENGINE writes run/session/unit docs through the Firebase Admin
-//     SDK (a service account), which BYPASSES these rules entirely. So these
-//     rules govern only CLIENT (web/mobile app) access.
-//   - A client is a signed-in Firebase Auth user. Its `uid` IS the account id —
-//     one account, with GitHub and/or GitLab linked as providers (account
-//     linking), all resolving to the same uid.
-//   - A client may READ everything it owns (its account, its runs, and the runs'
-//     subcollections) so it can subscribe for real-time cross-device sync, and
-//     may make only the NARROW writes the UI needs (answering an interactive
-//     session, registering a device for push). Everything else is engine-only.
+// Firestore here is NOT a mirror of run state — run state lives on the host (the
+// agent's live MCP session, read through a tunnel) or in the git repo (read-only
+// when no session is live). Firestore holds only: accounts + linked identities +
+// push devices, and a SESSION REGISTRY (liveness + how to reach a live host) with
+// its tunnel-signaling subcollection.
+//
+// Trust model: every writer is a signed-in Firebase Auth user; its `uid` is the
+// account id. The HOST runs on the user's machine signed in as that account, so
+// it writes its OWN session records directly (no service account). For now a
+// session is single-owner (your own devices); multi-party "channels" come later
+// and will widen the session read/signal scope.
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Whether the request is the owner of account `aid`.
     function isOwner(aid) {
       return request.auth != null && request.auth.uid == aid;
     }
 
-    // The owning account id recorded on a run doc.
-    function runOwner(runId) {
-      return get(/databases/$(database)/documents/runs/$(runId)).data.ownerAccountId;
+    // The account that owns a session doc.
+    function sessionOwner(sessionId) {
+      return get(/databases/$(database)/documents/sessions/$(sessionId)).data.ownerAccountId;
     }
 
-    // ── Accounts + linked identities + devices ──────────────────────────────
-    // The account doc and its identities are owner-readable; writes are
-    // engine/admin-only EXCEPT device registration (the client adds its own FCM
-    // token so it can receive notifications).
+    // ── Accounts + linked identities + push devices ─────────────────────────
     match /accounts/{accountId} {
       allow read: if isOwner(accountId);
       allow write: if false; // engine/admin only
 
       match /identities/{identityId} {
         allow read: if isOwner(accountId);
-        allow write: if false; // linking is brokered by the engine/admin
+        allow write: if false; // linking is admin-brokered
       }
 
       match /devices/{deviceId} {
         allow read: if isOwner(accountId);
-        // A client registers/updates/removes ITS OWN push device.
-        allow write: if isOwner(accountId);
+        allow write: if isOwner(accountId); // client registers its own FCM token
       }
     }
 
-    // ── Runs + their subcollections ─────────────────────────────────────────
-    // The live surface the apps subscribe to. Owner-readable; run/unit/state
-    // docs are engine-written (admin, bypasses rules) so clients can't forge
-    // engine state.
-    match /runs/{runId} {
-      allow read: if request.auth != null
-                  && resource.data.ownerAccountId == request.auth.uid;
-      allow write: if false; // engine/admin only
+    // ── Session registry: live agent MCP sessions ───────────────────────────
+    // A host registers + heartbeats its OWN sessions; clients of the same account
+    // read them to discover what's live and how to tunnel in. No run state here —
+    // just liveness + reachability + a notification hint.
+    match /sessions/{sessionId} {
+      allow read: if isOwner(resource.data.ownerAccountId);
+      // Host writes its own session record (ownerAccountId must be itself).
+      allow create: if isOwner(request.resource.data.ownerAccountId);
+      allow update, delete: if isOwner(resource.data.ownerAccountId);
 
-      match /units/{unitId} {
-        allow read: if isOwner(runOwner(runId));
-        allow write: if false; // engine/admin only
-      }
-
-      // Interactive sessions (review / question / direction / picker). The
-      // client READS the open prompt and WRITES ONLY its answer back, under a
-      // constrained `answer` field — the engine watches for it and advances.
-      match /sessions/{sessionId} {
-        allow read: if isOwner(runOwner(runId));
-        // Narrow write: the client may set/replace the `answer` map and nothing
-        // else on the doc (the engine owns every other field).
-        allow update: if isOwner(runOwner(runId))
-                      && request.resource.data.diff(resource.data).affectedKeys()
-                          .hasOnly(['answer', 'answeredAt']);
-        allow create, delete: if false;
+      // Tunnel handshake — both host and client (same owner for now) exchange
+      // signaling payloads to establish the tunnel. Widens with channels later.
+      match /signals/{signalId} {
+        allow read, write: if isOwner(sessionOwner(sessionId));
       }
     }
   }
