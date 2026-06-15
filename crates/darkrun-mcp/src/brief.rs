@@ -62,16 +62,22 @@ pub struct Brief {
     pub created_at: String,
     /// The narrative prose.
     pub body: String,
+    /// The SHA-256 of the document on disk — the concurrency token. Overwriting
+    /// an existing brief requires this as `expected_sha`.
+    pub sha: String,
 }
 
-/// Record a station brief/outcome, overwriting any prior doc for that
-/// (station, phase). Returns the persisted [`Brief`].
+/// Record a station brief/outcome. Overwriting an EXISTING (station, phase) doc
+/// is GUARDED: `expected_sha` must match the current on-disk sha, else
+/// [`CoreError::Conflict`](darkrun_core::CoreError::Conflict). A first write for
+/// that (station, phase) needs no sha. Returns the persisted [`Brief`].
 pub fn record(
     store: &StateStore,
     slug: &str,
     station: &str,
     phase: BriefPhase,
     body: &str,
+    expected_sha: Option<&str>,
 ) -> Result<Brief> {
     let created_at = Utc::now().to_rfc3339();
     let id = format!("{station}-{}", phase.as_str());
@@ -80,7 +86,7 @@ pub fn record(
         phase.as_str(),
         body.trim()
     );
-    store.write_brief_raw(slug, &id, &doc)?;
+    let sha = store.write_brief_guarded(slug, &id, &doc, expected_sha)?;
     let _ = crate::commit::commit_state(store, &format!("darkrun: brief {id}"));
     Ok(Brief {
         id,
@@ -88,18 +94,25 @@ pub fn record(
         phase,
         created_at,
         body: body.trim().to_string(),
+        sha,
     })
 }
 
-/// List every brief/outcome for a run, oldest id first.
+/// List every brief/outcome for a run, oldest id first, each with its sha.
 pub fn list(store: &StateStore, slug: &str) -> Result<Vec<Brief>> {
     let raw = store.read_briefs_raw(slug)?;
-    Ok(raw.into_iter().map(|(id, doc)| parse(id, &doc)).collect())
+    Ok(raw
+        .into_iter()
+        .map(|(id, doc)| {
+            let sha = darkrun_core::hash_bytes(doc.as_bytes());
+            parse(id, &doc, sha)
+        })
+        .collect())
 }
 
 /// Parse a brief document. Tolerant of a missing frontmatter fence (everything
 /// becomes the body; phase defaults to Pre).
-fn parse(id: String, doc: &str) -> Brief {
+fn parse(id: String, doc: &str, sha: String) -> Brief {
     let doc = doc.trim_start_matches('\u{feff}');
     let field = |fm: &str, key: &str| -> String {
         fm.lines()
@@ -116,6 +129,7 @@ fn parse(id: String, doc: &str) -> Brief {
                 phase: BriefPhase::parse(&field(fm, "phase:")).unwrap_or(BriefPhase::Pre),
                 created_at: field(fm, "created_at:"),
                 body,
+                sha,
             };
         }
     }
@@ -125,6 +139,7 @@ fn parse(id: String, doc: &str) -> Brief {
         phase: BriefPhase::Pre,
         created_at: String::new(),
         body: doc.trim().to_string(),
+        sha,
     }
 }
 
@@ -142,8 +157,8 @@ mod tests {
     #[test]
     fn record_persists_pre_and_post_then_round_trips() {
         let (_d, store) = store();
-        record(&store, "r", "frame", BriefPhase::Pre, "  going to frame X  ").unwrap();
-        record(&store, "r", "frame", BriefPhase::Post, "framed X, locked").unwrap();
+        record(&store, "r", "frame", BriefPhase::Pre, "  going to frame X  ", None).unwrap();
+        record(&store, "r", "frame", BriefPhase::Post, "framed X, locked", None).unwrap();
 
         let all = list(&store, "r").unwrap();
         assert_eq!(all.len(), 2);
@@ -151,16 +166,23 @@ mod tests {
         assert_eq!(pre.id, "frame-pre");
         assert_eq!(pre.station, "frame");
         assert_eq!(pre.body, "going to frame X");
+        assert_eq!(pre.sha.len(), 64);
         let post = all.iter().find(|b| b.phase == BriefPhase::Post).unwrap();
         assert_eq!(post.id, "frame-post");
         assert_eq!(post.body, "framed X, locked");
     }
 
     #[test]
-    fn re_recording_a_phase_overwrites_in_place() {
+    fn re_recording_a_phase_requires_the_current_sha() {
         let (_d, store) = store();
-        record(&store, "r", "frame", BriefPhase::Pre, "first").unwrap();
-        record(&store, "r", "frame", BriefPhase::Pre, "revised").unwrap();
+        let first = record(&store, "r", "frame", BriefPhase::Pre, "first", None).unwrap();
+        // A bare overwrite of an existing brief is refused.
+        assert!(matches!(
+            record(&store, "r", "frame", BriefPhase::Pre, "revised", None),
+            Err(crate::error::McpError::Core(darkrun_core::CoreError::Conflict(_)))
+        ));
+        // The current sha succeeds.
+        record(&store, "r", "frame", BriefPhase::Pre, "revised", Some(&first.sha)).unwrap();
         let all = list(&store, "r").unwrap();
         assert_eq!(all.len(), 1, "same (station, phase) overwrites");
         assert_eq!(all[0].body, "revised");

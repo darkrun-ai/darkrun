@@ -305,6 +305,11 @@ pub struct UnitUpdate {
     pub quality_gates: Option<Vec<darkrun_core::domain::QualityGate>>,
     /// New model tier (pending-only).
     pub model: Option<String>,
+    /// Optional concurrency token: the unit doc's `sha` as last read. When
+    /// `Some`, the write is guarded (a stale sha conflicts); when `None`, the
+    /// write proceeds unguarded — the unit lifecycle isn't gated on a re-read
+    /// before every status transition. See [`update`].
+    pub expected_sha: Option<String>,
 }
 
 /// Apply a corrective update to a unit.
@@ -520,7 +525,21 @@ pub fn update(store: &StateStore, run: &str, slug: &str, upd: UnitUpdate) -> Res
         unit_type: Some(unit.frontmatter.unit_type.clone()),
     };
     validate_spec(slug, &spec, &siblings)?;
-    store.write_unit(run, &unit)?;
+    // The unit lifecycle is the engine's highest-frequency write path (every
+    // status transition rewrites the doc), so the sha guard is OPTIONAL here:
+    // when the caller presents an `expected_sha` it's ENFORCED (a stale token
+    // conflicts, so a content edit can't clobber a change made since the read);
+    // when omitted, the write proceeds (the lifecycle isn't gated on a re-read
+    // before every transition). Knowledge/briefs/proof — the shared documents —
+    // are hard-guarded instead.
+    match upd.expected_sha.as_deref() {
+        Some(sha) => {
+            store.write_unit_guarded(run, &unit, Some(sha))?;
+        }
+        None => {
+            store.write_unit(run, &unit)?;
+        }
+    }
     let _ = crate::commit::commit_state(store, &format!("darkrun: update unit {slug}"));
     Ok(unit)
 }

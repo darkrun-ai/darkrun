@@ -296,6 +296,28 @@ fn artifact_write_error(e: crate::error::McpError) -> CallToolResult {
     err_text(e)
 }
 
+/// Serialize an artifact value with its concurrency `sha` merged into the JSON
+/// object — the token the agent reads, then presents as `expected_sha` on the
+/// next write. Used by the artifact read/write tools so a read always hands back
+/// what a guarded overwrite will require.
+fn json_with_sha<T: Serialize>(value: &T, sha: &str) -> std::result::Result<CallToolResult, ErrorData> {
+    let mut v = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.insert("sha".to_string(), sha.into());
+    }
+    ok_json(&v)
+}
+
+/// A unit tool's response: the unit plus the sha of its document on disk.
+fn unit_response(
+    store: &StateStore,
+    run: &str,
+    unit: &darkrun_core::domain::Unit,
+) -> std::result::Result<CallToolResult, ErrorData> {
+    let sha = store.artifact_sha(&store.unit_path(run, &unit.slug)).unwrap_or_default();
+    json_with_sha(unit, &sha)
+}
+
 /// The darkrun web/app host — where the Dioxus app is served and the target of
 /// the `app.darkrun.ai` universal link (see `desktop/Dioxus.toml`).
 const APP_BASE_URL: &str = "https://app.darkrun.ai";
@@ -496,6 +518,13 @@ pub struct UnitUpdateInput {
     /// New model tier (pending units only).
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional concurrency token: the `sha` from `darkrun_unit_get`/`_list`
+    /// when you read this unit. When PROVIDED it's enforced — a stale sha is
+    /// refused (the response returns the current sha + content to reconcile),
+    /// so a content edit can't clobber a change made since the read. Omit it for
+    /// a routine status transition; pass it when editing the spec body/fields.
+    #[serde(default)]
+    pub expected_sha: Option<String>,
 }
 
 /// Input for `darkrun_unit_beat` — record one Pass beat (Make/Challenge/Resolve).
@@ -731,6 +760,11 @@ pub struct BriefRecordInput {
     pub phase: String,
     /// The narrative prose.
     pub body: String,
+    /// The concurrency token to OVERWRITE an existing brief for this
+    /// (station, phase): the `sha` from `darkrun_brief_record`/list. Required to
+    /// overwrite; omit for the first write of a (station, phase).
+    #[serde(default)]
+    pub expected_sha: Option<String>,
 }
 
 /// Input for `darkrun_drift_witness` — accept an intentional change to a locked
@@ -1695,7 +1729,24 @@ impl DarkrunServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
         match store.read_units(&input.slug) {
-            Ok(units) => ok_json(&units),
+            // Each unit carries its concurrency `sha`, so the agent can read here
+            // then guard an overwrite via darkrun_unit_update.
+            Ok(units) => {
+                let with_sha: Vec<serde_json::Value> = units
+                    .iter()
+                    .map(|u| {
+                        let sha = store
+                            .artifact_sha(&store.unit_path(&input.slug, &u.slug))
+                            .unwrap_or_default();
+                        let mut v = serde_json::to_value(u).unwrap_or(serde_json::Value::Null);
+                        if let Some(o) = v.as_object_mut() {
+                            o.insert("sha".to_string(), sha.into());
+                        }
+                        v
+                    })
+                    .collect();
+                ok_json(&with_sha)
+            }
             Err(e) => Ok(err_text(e)),
         }
     }
@@ -1755,7 +1806,7 @@ impl DarkrunServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
         match units::get(&store, &input.slug, &input.unit) {
-            Ok(unit) => ok_json(&unit),
+            Ok(unit) => unit_response(&store, &input.slug, &unit),
             Err(e) => Ok(err_text(e)),
         }
     }
@@ -1788,7 +1839,7 @@ impl DarkrunServer {
             unit_type: input.unit_type.clone(),
         };
         match units::create(&store, &input.slug, &input.unit, &input.station, spec) {
-            Ok(unit) => ok_json(&unit),
+            Ok(unit) => unit_response(&store, &input.slug, &unit),
             Err(e) => Ok(err_text(e)),
         }
     }
@@ -1826,10 +1877,11 @@ impl DarkrunServer {
                     .collect()
             }),
             model: input.model.clone(),
+            expected_sha: input.expected_sha.clone(),
         };
         match units::update(&store, &input.slug, &input.unit, upd) {
-            Ok(unit) => ok_json(&unit),
-            Err(e) => Ok(err_text(e)),
+            Ok(unit) => unit_response(&store, &input.slug, &unit),
+            Err(e) => Ok(artifact_write_error(e)),
         }
     }
 
@@ -2183,9 +2235,16 @@ impl DarkrunServer {
             )));
         };
         let store = self.store();
-        match brief::record(&store, &input.slug, &input.station, phase, &input.body) {
+        match brief::record(
+            &store,
+            &input.slug,
+            &input.station,
+            phase,
+            &input.body,
+            input.expected_sha.as_deref(),
+        ) {
             Ok(b) => ok_json(&b),
-            Err(e) => Ok(err_text(e)),
+            Err(e) => Ok(artifact_write_error(e)),
         }
     }
 

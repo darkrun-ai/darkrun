@@ -1397,8 +1397,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path());
         crate::position::run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
-        crate::brief::record(&store, "r", "frame", crate::brief::BriefPhase::Pre, "framing the problem").unwrap();
-        crate::brief::record(&store, "r", "frame", crate::brief::BriefPhase::Post, "frame.md locked").unwrap();
+        crate::brief::record(&store, "r", "frame", crate::brief::BriefPhase::Pre, "framing the problem", None).unwrap();
+        crate::brief::record(&store, "r", "frame", crate::brief::BriefPhase::Post, "frame.md locked", None).unwrap();
 
         let reg = registry();
         create_show(&reg, &store, "r").unwrap();
