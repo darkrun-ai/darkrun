@@ -25,6 +25,7 @@
 mod broker;
 mod config;
 mod oauth_routes;
+mod relay;
 mod state;
 mod transport;
 
@@ -38,6 +39,7 @@ use tower_http::services::{ServeDir, ServeFile};
 pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
 pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
+pub use relay::{relay_router, AttachError, DevTokenAuth, Frame, Relay, RelayAuth, RelayState};
 pub use state::{SharedTransport, WebState};
 pub use transport::ReqwestTransport;
 
@@ -81,6 +83,21 @@ pub fn build_oauth_only(state: WebState) -> Router {
     oauth_router(state)
 }
 
+/// Build the remote-tunnel relay router from the environment, or `None` when no
+/// token verifier is configured — in which case the relay endpoints are NOT
+/// exposed (safe default until the Firebase verifier is wired in the auth slice).
+///
+/// Dev/local: `DARKRUN_RELAY_DEV_AUTH=1` mounts the relay with [`DevTokenAuth`],
+/// which trusts the token as the account id. Never set this in production.
+pub fn relay_router_from_env() -> Option<Router> {
+    if std::env::var("DARKRUN_RELAY_DEV_AUTH").ok().as_deref() == Some("1") {
+        let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth));
+        Some(relay_router(state))
+    } else {
+        None
+    }
+}
+
 /// Resolve the static site directory from `DARKRUN_SITE_DIR`, falling back to
 /// [`DEFAULT_SITE_DIR`].
 pub fn site_dir_from_env() -> PathBuf {
@@ -111,7 +128,13 @@ pub fn state_from_env() -> std::io::Result<WebState> {
 pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
     let state = state_from_env()?;
     let site_dir = site_dir_from_env();
-    let router = build_router(state, &site_dir);
+    let mut router = build_router(state, &site_dir);
+    // Mount the remote-tunnel relay when a verifier is configured (else the
+    // endpoints stay absent — safe until the Firebase verifier lands).
+    if let Some(relay) = relay_router_from_env() {
+        router = router.merge(relay);
+        tracing::info!("relay endpoints mounted (/relay/host, /relay/client)");
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
