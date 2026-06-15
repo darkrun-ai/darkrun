@@ -1,0 +1,7 @@
+/* The small accent line ABOVE each screenshot's title. Keyed by the filter in
+   Framefile.json (which matches a substring of the raw screenshot filename). */
+"review"     = "LIVE REVIEW";
+"dag"        = "THE LINE";
+"statusline" = "IN YOUR TERMINAL";
+"factory"    = "FACTORIES";
+"checkpoint" = "YOU DECIDE";

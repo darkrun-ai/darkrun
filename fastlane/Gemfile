@@ -1,0 +1,5 @@
+source "https://rubygems.org"
+
+# fastlane drives frameit (device-frame the screenshots) + deliver (upload to
+# App Store Connect). Pinned to the 2.x line.
+gem "fastlane", "~> 2.220"
