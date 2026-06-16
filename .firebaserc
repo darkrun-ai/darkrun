@@ -1,9 +1,9 @@
 {
   "projects": {
-    "default": "REPLACE_WITH_FIREBASE_PROJECT_ID"
+    "default": "darkrun"
   },
   "targets": {
-    "REPLACE_WITH_FIREBASE_PROJECT_ID": {
+    "darkrun": {
       "hosting": {
         "darkrun-app": ["darkrun-app"]
       }
