@@ -25,6 +25,7 @@
 mod broker;
 mod config;
 mod firebase_auth;
+mod gcp_auth;
 mod oauth_routes;
 mod push;
 mod relay;
@@ -43,6 +44,7 @@ pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
 pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
 pub use firebase_auth::{FirebaseTokenAuth, FIREBASE_CERTS_URL};
+pub use gcp_auth::{ServiceAccount, ServiceAccountTokenSource, FCM_SCOPE};
 pub use relay_broker::{relay_auth_router, ClaimPayload, RelayBroker};
 pub use push::{
     fan_out, fcm_endpoint, fcm_message, AccessTokenSource, DeviceRegistry, DeviceToken,
@@ -112,7 +114,7 @@ pub async fn relay_router_from_env() -> Option<Router> {
         .ok()
         .filter(|p| !p.trim().is_empty())
     {
-        let auth = Arc::new(FirebaseTokenAuth::new(project));
+        let auth = Arc::new(FirebaseTokenAuth::new(project.clone()));
         match auth.refresh_from_google().await {
             Ok(n) => tracing::info!(keys = n, "loaded Firebase signing certs"),
             Err(e) => tracing::warn!(error = %e, "could not load Firebase certs at startup"),
@@ -129,7 +131,21 @@ pub async fn relay_router_from_env() -> Option<Router> {
                 }
             }
         });
-        let state = RelayState::new(Arc::new(Relay::new()), auth);
+        // Wire FCM remote push when service-account credentials are present
+        // (GOOGLE_APPLICATION_CREDENTIALS). Absent → push stays disabled; the
+        // host's LOCAL OS notification still fires.
+        let mut state = RelayState::new(Arc::new(Relay::new()), auth);
+        if let Some(tokens) = ServiceAccountTokenSource::from_env() {
+            tracing::info!("FCM remote push enabled (service-account credentials loaded)");
+            state = state.with_push(
+                Arc::new(InMemoryDeviceRegistry::new()),
+                Arc::new(FcmPushSender::new(project, tokens)),
+            );
+        } else {
+            tracing::info!(
+                "FCM credentials absent — remote push disabled (local notifications still fire)"
+            );
+        }
         return Some(relay_router(state.clone()).merge(device_router(state)));
     }
     if std::env::var("DARKRUN_RELAY_DEV_AUTH").ok().as_deref() == Some("1") {
