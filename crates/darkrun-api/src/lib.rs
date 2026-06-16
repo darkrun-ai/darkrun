@@ -17,6 +17,7 @@ pub mod annotation;
 pub mod common;
 pub mod direction;
 pub mod feedback;
+pub mod notify;
 pub mod openapi;
 pub mod output_review;
 pub mod proof;
