@@ -1560,7 +1560,7 @@ mod tests {
         let mark = PixelMark {
             shape: ImageShape::Rect,
             point: None,
-            rect: Some(rect.clone()),
+            rect: Some(rect),
             arrow_from: None,
             arrow_to: None,
             path: vec![],
@@ -1578,17 +1578,17 @@ mod tests {
             dom: DomAnchor { selector: ".btn".into(), src: None, outer_html: None },
         };
         assert_eq!(describe_anchor(&html), ".btn");
-        assert_eq!(describe_anchor(&Anchor::Pdf { page: 3, rect: rect.clone() }), "pdf page 3");
+        assert_eq!(describe_anchor(&Anchor::Pdf { page: 3, rect }), "pdf page 3");
         assert_eq!(
-            describe_anchor(&Anchor::Svg { element_id: Some("#icon".into()), xpath: None, bbox: rect.clone() }),
+            describe_anchor(&Anchor::Svg { element_id: Some("#icon".into()), xpath: None, bbox: rect }),
             "#icon"
         );
         assert_eq!(
-            describe_anchor(&Anchor::Svg { element_id: None, xpath: Some("/svg/g".into()), bbox: rect.clone() }),
+            describe_anchor(&Anchor::Svg { element_id: None, xpath: Some("/svg/g".into()), bbox: rect }),
             "/svg/g"
         );
         assert_eq!(
-            describe_anchor(&Anchor::Svg { element_id: None, xpath: None, bbox: rect.clone() }),
+            describe_anchor(&Anchor::Svg { element_id: None, xpath: None, bbox: rect }),
             "svg element"
         );
         assert!(describe_anchor(&Anchor::Video { t_start: 12.0, t_end: 15.0, rect: None }).contains("video @ 12"));

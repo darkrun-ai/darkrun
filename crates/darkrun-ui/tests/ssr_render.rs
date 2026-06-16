@@ -4,6 +4,10 @@
 //! that supplies props through `rsx!`, renders it to a string, and asserts a
 //! marker class/text the component emits.
 
+// Dioxus components are PascalCase by convention (the `rsx!` macro expects it);
+// clippy's non_snake_case doesn't apply to them.
+#![allow(non_snake_case)]
+
 use darkrun_ui::prelude::*;
 
 /// Render a no-prop root component to HTML.

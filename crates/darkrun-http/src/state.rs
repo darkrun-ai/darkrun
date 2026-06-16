@@ -337,6 +337,14 @@ impl ProofRegistry {
     }
 }
 
+/// On-demand session builder: given a session id that misses the registry,
+/// build it when it names something real (e.g. a run slug → its show session).
+pub type SessionMaterializer = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Re-surface hook: called with a run slug after an operator resolves an
+/// interactive session, to re-push the run's surface.
+pub type SurfaceResolver = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// The shared application state threaded through every handler.
 #[derive(Clone)]
 pub struct AppState {
@@ -352,13 +360,13 @@ pub struct AppState {
     /// a session id that MISSES the registry, build it when it names something
     /// real (e.g. a run slug → its show session). Lets a desktop open a run's
     /// review without waiting for the engine to tick first.
-    pub materialize_session: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    pub materialize_session: Option<SessionMaterializer>,
     /// Optional re-surface hook the engine installs: called with a run slug
     /// after an operator resolves an interactive session (answers a question,
     /// picks a direction/option). Re-pushes the run's surface so the answered
     /// prompt is dismissed and the NEXT open one — or the review — takes its
     /// place on the desktop, without waiting for the agent's next tick.
-    pub resolve_surface: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub resolve_surface: Option<SurfaceResolver>,
 }
 
 impl AppState {

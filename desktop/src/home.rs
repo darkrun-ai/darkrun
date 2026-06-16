@@ -30,6 +30,10 @@
 //! hamburger drawer and compacts the station strip on a narrow window, matching
 //! the mockup's mobile frame.
 
+// Dioxus components are PascalCase by convention (the `rsx!` macro expects it);
+// clippy's non_snake_case doesn't apply to them.
+#![allow(non_snake_case)]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 

@@ -397,9 +397,6 @@ fn parse_git_url(url: &str) -> Option<(String, String, String)> {
     ))
 }
 
-/// Render the status line. Returns `None` when there is no active Run, in which
-/// case the caller prints nothing.
-
 /// The in-station PHASE TRACK — a pip run right of the station name showing
 /// where the six-phase machine stands: `▰` bright for phases already passed,
 /// the active phase's pip in its hue (magenta when parked at a gate), `▱` dim

@@ -2148,14 +2148,6 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
     Ok(ctx)
 }
 
-/// Render the engine-driven instructions for `action` through the prompt
-/// cascade, returning the final markdown the agent should follow.
-///
-/// Maps the action's serde tag to its template key, builds the live
-/// [`PromptContext`], and calls [`darkrun_prompts::render`] — so a project
-/// override at `<repo_root>/.darkrun/prompts/<key>.md` transparently replaces
-/// the embedded default. Returns `Ok(None)` when the action has no template key.
-
 /// Climb the model ladder `steps` tiers up from `base`, capping at the top —
 /// the reject-escalation rule: a bounced beat re-runs with more model. An
 /// unknown base passes through unchanged (a provider-specific name the

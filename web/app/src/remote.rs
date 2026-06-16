@@ -112,8 +112,9 @@ pub async fn run_connection(
                         Some(Ok(_)) => continue,
                         _ => break, // closed/errored
                     },
-                    cmd = cmd_rx.next().fuse() => match cmd {
-                        Some(command) => {
+                    cmd = cmd_rx.next().fuse() => {
+                        // `None` = the UI's sender was dropped; just keep reading.
+                        if let Some(command) = cmd {
                             let frame = ClientFrame::Cmd { id: next_command_id(), command };
                             if let Ok(j) = serde_json::to_string(&frame) {
                                 if tx.send(Message::Text(j)).await.is_err() {
@@ -121,7 +122,6 @@ pub async fn run_connection(
                                 }
                             }
                         }
-                        None => {} // the UI's sender was dropped; keep reading
                     },
                 }
             }
