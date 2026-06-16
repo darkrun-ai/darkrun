@@ -1,0 +1,76 @@
+name: coverage
+
+# Code-coverage tracking with cargo-tarpaulin (the codebase is already annotated
+# with `#[cfg(not(tarpaulin_include))]` on the irreducible-I/O paths) → Codecov.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # The workspace compiles a heavy dep graph twice under instrumentation;
+      # reclaim disk first (same cleanup as the `ci` workflow).
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install desktop GUI deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+
+      # Fixture tests in darkrun-git shell out to `git`; give the runner an
+      # identity so `git commit` succeeds.
+      - name: Configure git identity (for fixture tests)
+        run: |
+          git config --global user.email "ci@darkrun.ai"
+          git config --global user.name "darkrun ci"
+          git config --global init.defaultBranch main
+
+      - name: Install cargo-tarpaulin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+
+      # The wasm-only crates (darkrun-site, darkrun-app) don't run native tests
+      # meaningfully — exclude them so coverage reflects the engine/CLI/server.
+      # `--engine llvm` is faster + more accurate than ptrace; the timeout guards
+      # a wedged test from hanging the job.
+      - name: Run coverage
+        run: |
+          cargo tarpaulin --workspace \
+            --exclude darkrun-site --exclude darkrun-app \
+            --engine llvm \
+            --out Xml --output-dir target/tarpaulin \
+            --timeout 600 --skip-clean
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: target/tarpaulin/cobertura.xml
+          fail_ci_if_error: false
