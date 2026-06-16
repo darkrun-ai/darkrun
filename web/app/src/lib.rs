@@ -16,6 +16,9 @@ use darkrun_ui::prelude::*;
 use darkrun_ui::tokens;
 
 use banner::InstallBanner;
+use darkrun_api::tunnel::ClientCommand;
+use futures::channel::mpsc::UnboundedReceiver;
+
 use login::LoginPage;
 use remote::{run_connection, target_from_url, RemoteState};
 
@@ -38,10 +41,12 @@ pub fn App() -> Element {
 
     let state = use_signal(|| RemoteState::Unconfigured);
 
-    // Open the relay connection on mount when the URL names a target.
-    use_effect(move || {
+    // The connection runs as a coroutine so its handle doubles as the command
+    // channel: the UI sends a `ClientCommand` (approve a gate, file feedback) and
+    // the connection forwards it to the host over the tunnel.
+    let commands = use_coroutine(move |cmd_rx: UnboundedReceiver<ClientCommand>| async move {
         if let Some(target) = target_from_url() {
-            spawn(run_connection(target.url, state));
+            run_connection(target.url, state, cmd_rx).await;
         }
     });
 
@@ -62,7 +67,7 @@ pub fn App() -> Element {
                     RemoteState::Unconfigured => rsx! { NoTarget {} },
                     RemoteState::Connecting => rsx! { Status { text: "Connecting to your run\u{2026}" } },
                     RemoteState::Reconnecting => rsx! { Status { text: "Reconnecting\u{2026}" } },
-                    RemoteState::Live(payload) => session_view(&payload),
+                    RemoteState::Live(payload) => session_view(&payload, commands),
                 }
             }
         }
@@ -127,10 +132,12 @@ fn NoTarget() -> Element {
     }
 }
 
-/// The live review surface for one run: identity, the phase strip, and the
-/// stations with their status. A plain function (not a `#[component]`) because
-/// the payload isn't `PartialEq` — it's re-rendered on every live update.
-fn session_view(payload: &ReviewSessionPayload) -> Element {
+/// The live review surface for one run: identity, the phase strip, the stations,
+/// the station narrative, and — when a gate is open — an Approve action that
+/// pushes a command back to the host over the tunnel. A plain function (not a
+/// `#[component]`) because the payload isn't `PartialEq` — it's re-rendered on
+/// every live update. `commands` forwards operator actions to the connection.
+fn session_view(payload: &ReviewSessionPayload, commands: Coroutine<ClientCommand>) -> Element {
     let run = payload.run_slug.clone().unwrap_or_else(|| "run".to_string());
     let phase = active_phase(&payload);
 
@@ -148,15 +155,36 @@ fn session_view(payload: &ReviewSessionPayload) -> Element {
                 StationPipeline { dots: strip_for(phase), labels: true }
             }
 
-            // Gate banner — what needs the operator now.
+            // Gate — what needs the operator now, with the Approve action that
+            // advances the run past it (pushed to the host over the tunnel).
             if let Some(gate) = payload.gate_type {
-                div {
-                    style: format!(
-                        "padding:12px 16px;border:1px solid {};border-radius:8px;background:{};\
-                         font-family:{};font-size:14px;color:{};",
-                        tokens::ACCENT_STRONG, tokens::SURFACE_RAISED, tokens::FONT_SANS, tokens::TEXT,
-                    ),
-                    { format!("A {gate:?} checkpoint is waiting for your decision.") }
+                {
+                    let run = run.clone();
+                    rsx! {
+                        div {
+                            style: format!(
+                                "display:flex;align-items:center;gap:14px;flex-wrap:wrap;\
+                                 padding:14px 16px;border:1px solid {};border-radius:8px;background:{};",
+                                tokens::ACCENT_STRONG, tokens::SURFACE_RAISED,
+                            ),
+                            span {
+                                style: format!(
+                                    "flex:1;min-width:200px;font-family:{};font-size:14px;color:{};",
+                                    tokens::FONT_SANS, tokens::TEXT,
+                                ),
+                                { format!("A {gate:?} checkpoint is waiting for your decision.") }
+                            }
+                            button {
+                                style: format!(
+                                    "padding:8px 18px;border:none;border-radius:6px;cursor:pointer;\
+                                     background:{};color:{};font-family:{};font-size:14px;font-weight:600;",
+                                    tokens::ACCENT, tokens::ON_ACCENT, tokens::FONT_SANS,
+                                ),
+                                onclick: move |_| commands.send(ClientCommand::Advance { run: run.clone() }),
+                                "Approve"
+                            }
+                        }
+                    }
                 }
             }
 
@@ -178,6 +206,54 @@ fn session_view(payload: &ReviewSessionPayload) -> Element {
                             }
                         }
                     }
+                }
+            }
+
+            // Station narrative: what each station produced (the post-outcomes),
+            // else what it's about to do (the pre-briefs) — the durable record.
+            {
+                let narrative = if !payload.station_outcomes.is_empty() {
+                    Some(("Outcomes", &payload.station_outcomes))
+                } else if !payload.station_briefs.is_empty() {
+                    Some(("Briefs", &payload.station_briefs))
+                } else {
+                    None
+                };
+                match narrative {
+                    Some((label, entries)) => rsx! {
+                        div { style: "display:flex;flex-direction:column;gap:12px;",
+                            h2 {
+                                style: format!(
+                                    "font-family:{};font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:{};margin:8px 0 0;",
+                                    tokens::FONT_MONO, tokens::TEXT_FAINT,
+                                ),
+                                "{label}"
+                            }
+                            for (station, body) in entries.iter() {
+                                div {
+                                    style: format!(
+                                        "padding:12px 14px;border:1px solid {};border-radius:8px;background:{};",
+                                        tokens::BORDER, tokens::SURFACE_RAISED,
+                                    ),
+                                    div {
+                                        style: format!(
+                                            "font-family:{};font-size:12px;color:{};margin-bottom:6px;",
+                                            tokens::FONT_MONO, tokens::ACCENT,
+                                        ),
+                                        "{station}"
+                                    }
+                                    p {
+                                        style: format!(
+                                            "font-family:{};font-size:13px;color:{};margin:0;white-space:pre-wrap;line-height:1.5;",
+                                            tokens::FONT_SANS, tokens::TEXT_MUTED,
+                                        ),
+                                        "{body}"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    None => rsx! {},
                 }
             }
         }

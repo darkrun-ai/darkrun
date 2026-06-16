@@ -8,12 +8,14 @@
 //! live session on connect. A dropped socket reconnects with a fixed backoff
 //! (the snapshot-on-connect resync means no state is lost).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use darkrun_api::session::{ReviewSessionPayload, SessionPayload};
-use darkrun_api::tunnel::{ClientFrame, ServerFrame};
+use darkrun_api::tunnel::{ClientCommand, ClientFrame, ServerFrame};
 use dioxus::prelude::*;
-use futures::{SinkExt, StreamExt};
+use futures::channel::mpsc::UnboundedReceiver;
+use futures::{select, FutureExt, SinkExt, StreamExt};
 use gloo_net::websocket::{futures::WebSocket, Message};
 
 /// The live connection state the UI renders. (Not `PartialEq` — the review
@@ -75,9 +77,21 @@ fn decode(s: &str) -> String {
     s.replace("%3A", ":").replace("%2F", "/").replace("%2f", "/")
 }
 
-/// Run the connection loop forever, pushing live review payloads into `state`.
-/// Reconnects with a fixed backoff after any drop.
-pub async fn run_connection(url: String, mut state: Signal<RemoteState>) {
+/// A monotonic id for outbound commands (the protocol's idempotency/ack key).
+fn next_command_id() -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!("c{}", N.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Run the connection loop forever: push live review payloads into `state`, and
+/// forward any [`ClientCommand`] arriving on `cmd_rx` to the host as a guarded,
+/// acked `Cmd` frame. Reconnects with a fixed backoff after any drop. Commands
+/// sent while disconnected are dropped (the operator retries from the live UI).
+pub async fn run_connection(
+    url: String,
+    mut state: Signal<RemoteState>,
+    mut cmd_rx: UnboundedReceiver<ClientCommand>,
+) {
     loop {
         state.set(RemoteState::Connecting);
         if let Ok(ws) = WebSocket::open(&url) {
@@ -86,15 +100,29 @@ pub async fn run_connection(url: String, mut state: Signal<RemoteState>) {
             if let Ok(hello) = serde_json::to_string(&ClientFrame::Hello { last_seq: None }) {
                 let _ = tx.send(Message::Text(hello)).await;
             }
-            while let Some(msg) = rx.next().await {
-                match msg {
-                    Ok(Message::Text(t)) => {
-                        if let Some(payload) = review_payload(&t) {
-                            state.set(RemoteState::Live(Box::new(payload)));
+            // Pump inbound review frames AND outbound commands over the one socket.
+            loop {
+                select! {
+                    msg = rx.next().fuse() => match msg {
+                        Some(Ok(Message::Text(t))) => {
+                            if let Some(payload) = review_payload(&t) {
+                                state.set(RemoteState::Live(Box::new(payload)));
+                            }
                         }
-                    }
-                    Ok(_) => continue,
-                    Err(_) => break,
+                        Some(Ok(_)) => continue,
+                        _ => break, // closed/errored
+                    },
+                    cmd = cmd_rx.next().fuse() => match cmd {
+                        Some(command) => {
+                            let frame = ClientFrame::Cmd { id: next_command_id(), command };
+                            if let Ok(j) = serde_json::to_string(&frame) {
+                                if tx.send(Message::Text(j)).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        None => {} // the UI's sender was dropped; keep reading
+                    },
                 }
             }
         }
