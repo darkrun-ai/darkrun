@@ -691,6 +691,7 @@ mod tests {
             slug: "proj-deadbeef".into(),
             harness: "claude".into(),
             started_at: "2026-05-31T00:00:00+00:00".into(),
+            reachability: Default::default(),
         };
         let eng = DiscoveredEngine::from_descriptor(desc);
         assert_eq!(eng.port, 5151);

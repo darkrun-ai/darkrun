@@ -163,11 +163,51 @@ pub async fn serve_stdio_on(
     let listener = darkrun_http::bind_listener(addr).await?;
     let bound = listener.local_addr()?;
 
+    // The active run (if any) is what a remote client tunnels into, and its slug
+    // is the relay session id.
+    let active_run = state.store.active_run().ok().flatten();
+
+    // Remote access is OPT-IN. With `DARKRUN_RELAY_URL` set AND an active run, the
+    // engine advertises a relay candidate and (below) dials the relay so remote
+    // clients can reach the run. Without it the engine is LOCAL-ONLY — reachable
+    // on loopback without auth, exactly as before. The dial token
+    // (`DARKRUN_RELAY_TOKEN`, from `/darkrun:darkrun-login`) is a SECRET: it's
+    // used to connect but never written to the descriptor.
+    let relay_candidate = resolve_relay_candidate(active_run.as_deref());
+
     // Advertise the engine in the home discovery registry. Best-effort: a write
     // failure (e.g. no home dir) is non-fatal — the engine still serves, it's
     // just not auto-discoverable. The descriptor is RETAINED on exit (flagged
     // stale, never deleted), so we hold the registry handle to mark it stale.
-    let engine_registry = announce_engine(&repo_root, bound, harness.key());
+    let engine_registry = announce_engine(&repo_root, bound, harness.key(), relay_candidate.clone());
+
+    // Dial the relay when remote access is enabled: the host connector parks an
+    // outbound WebSocket and bridges remote clients to this loopback server.
+    if let (Some(cand), Some(run)) = (relay_candidate, active_run.as_deref()) {
+        if let Some(token) = std::env::var("DARKRUN_RELAY_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+        {
+            let cfg = darkrun_tunnel::ConnectorConfig {
+                relay_host_url: format!(
+                    "{}/relay/host/{}?token={}",
+                    cand.url.trim_end_matches('/'),
+                    cand.session,
+                    token
+                ),
+                local_http_base: format!("http://{bound}"),
+                run: run.to_string(),
+                reconnect: std::time::Duration::from_secs(3),
+            };
+            eprintln!("darkrun: remote access enabled — dialing relay {}", cand.url);
+            tokio::spawn(darkrun_tunnel::run(cfg));
+        } else {
+            eprintln!(
+                "darkrun: DARKRUN_RELAY_URL set but no DARKRUN_RELAY_TOKEN — \
+                 run /darkrun:darkrun-login to enable remote access (staying local-only)"
+            );
+        }
+    }
 
     // Spawn the axum HTTP/WS server on the same runtime, sharing the state, on
     // the already-bound listener.
@@ -192,9 +232,9 @@ pub async fn serve_stdio_on(
     // instead of waiting for a gate (or even a first tick) to raise it. The
     // show session is PUSHED here too (focused), so the app has a payload to
     // render the instant it connects.
-    if let Ok(Some(active)) = state.store.active_run() {
-        let _ = crate::sessions::create_show(&state.sessions, &state.store, &active);
-        server.surface_desktop_once(&active);
+    if let Some(active) = active_run.as_deref() {
+        let _ = crate::sessions::create_show(&state.sessions, &state.store, active);
+        server.surface_desktop_once(active);
     }
     let running = server
         .serve(stdio())
@@ -217,21 +257,39 @@ pub async fn serve_stdio_on(
     Ok(())
 }
 
+/// The relay candidate to advertise + dial, resolved from the environment.
+/// Remote access is enabled when `DARKRUN_RELAY_URL` is set AND there's an active
+/// run to tunnel into (its slug is the relay session id). Returns `None` for a
+/// local-only engine. The dial token is read separately — it's a secret and
+/// never enters the candidate (which is written to the public descriptor).
+fn resolve_relay_candidate(active_run: Option<&str>) -> Option<darkrun_api::tunnel::RelayCandidate> {
+    let url = std::env::var("DARKRUN_RELAY_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())?;
+    let session = active_run?.to_string();
+    Some(darkrun_api::tunnel::RelayCandidate { url, session })
+}
+
 /// Write the home discovery descriptor for this engine, returning the registry
 /// handle (used to flag the descriptor stale on shutdown) or `None` if the
-/// registry could not be set up or the write failed.
+/// registry could not be set up or the write failed. `relay` advertises the
+/// remote candidate alongside the local one when remote access is enabled.
 fn announce_engine(
     repo_root: &std::path::Path,
     addr: SocketAddr,
     harness_key: &str,
+    relay: Option<darkrun_api::tunnel::RelayCandidate>,
 ) -> Option<EngineRegistry> {
-    let registry = match EngineRegistry::new(repo_root) {
+    let mut registry = match EngineRegistry::new(repo_root) {
         Ok(registry) => registry,
         Err(e) => {
             eprintln!("darkrun: discovery registry unavailable: {e}");
             return None;
         }
     };
+    if let Some(cand) = relay {
+        registry = registry.with_relay(cand);
+    }
     match registry.announce(addr, harness_key) {
         Ok(_descriptor) => {
             eprintln!(
