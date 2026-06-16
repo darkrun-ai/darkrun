@@ -15,6 +15,9 @@ path = "src/bin/darkrun-web.rs"
 [dependencies]
 darkrun-telemetry.workspace = true
 darkrun-vcs.workspace = true
+# Shared tunnel protocol (relay routing envelope + app frames), one source of
+# truth across the relay, the host connector, and every client.
+darkrun-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

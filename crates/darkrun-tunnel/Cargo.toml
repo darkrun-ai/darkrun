@@ -1,0 +1,28 @@
+[package]
+name = "darkrun-tunnel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "darkrun host connector: durably bridges the relay to the engine's local HTTP/WS so remote clients reach a live run"
+
+[dependencies]
+# The shared tunnel protocol (routing envelope + app frames).
+darkrun-api.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Outbound WS to the relay + the local /ws/session subscription.
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+# Local REST writes (advance / answer / feedback) — async client.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# Stand up the real relay (with DevTokenAuth) for the end-to-end bridge test.
+darkrun-web = { path = "../../web/server" }
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] }

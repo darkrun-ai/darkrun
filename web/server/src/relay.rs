@@ -38,8 +38,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::mpsc;
+
+// The relay routing envelope is the SHARED tunnel contract — one source of truth
+// in darkrun-api, spoken by the relay, the host connector, and every client.
+pub use darkrun_api::tunnel::{HostCmd, HostEvent};
 
 /// One opaque review frame shuttled across the bridge. The relay never parses the
 /// payload — both kinds are carried verbatim.
@@ -49,46 +53,6 @@ pub enum Frame {
     Text(String),
     /// A binary frame.
     Binary(Vec<u8>),
-}
-
-/// What the relay delivers TO the host over its socket: a client lifecycle event
-/// or a client frame, each tagged with the client id so the host can open/close
-/// per-client local subscriptions and attribute incoming commands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum HostEvent {
-    /// A client attached — the host should open its session subscription and
-    /// stream it back addressed to this client.
-    Join {
-        /// The relay-assigned client id.
-        client: u64,
-    },
-    /// A client detached — the host should tear down that client's subscription.
-    Leave {
-        /// The client id that left.
-        client: u64,
-    },
-    /// A frame the client sent (a command — answer / advance / feedback).
-    Msg {
-        /// The originating client id.
-        client: u64,
-        /// The client's raw text frame.
-        data: String,
-    },
-}
-
-/// What the host sends back to the relay: route a frame to a specific client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum HostCmd {
-    /// Deliver `data` to client `client` (e.g. a snapshot or a live update from
-    /// that client's session subscription).
-    To {
-        /// The destination client id.
-        client: u64,
-        /// The raw text frame to deliver.
-        data: String,
-    },
 }
 
 /// The live state of one tunnelled session: the host's event sink plus every
