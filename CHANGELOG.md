@@ -2,6 +2,21 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.6.0](https://github.com/darkrun-ai/darkrun/compare/v0.5.0...v0.6.0) (2026-06-16)
+
+
+### Features
+
+* **relay:** remote-push spine — FCM fan-out + device registration ([d3f15c3](https://github.com/darkrun-ai/darkrun/commit/d3f15c33c6da33f25144d8500babb77a1db0ef7e))
+* **tunnel:** host connector pushes a remote notification on gate entry ([e294a91](https://github.com/darkrun-ai/darkrun/commit/e294a91e8a2c0ed6afc59059e5aa6d0c14848b27))
+* **web:** Google service-account token source — FCM push goes live ([19b60cc](https://github.com/darkrun-ai/darkrun/commit/19b60ccd10d7822a8d352da07a9111a75a3291bb))
+
+
+### Bug Fixes
+
+* **app:** mount the shared theme — kills the white viewport border ([0614437](https://github.com/darkrun-ai/darkrun/commit/0614437c98c24fcd2267626d80ae64bd0978479d))
+* **site:** serve /assets/* (OG image, favicon, screenshots) ([48cf7a6](https://github.com/darkrun-ai/darkrun/commit/48cf7a6835fab98d7e79ae017e2c47c68fd92092))
+
 ## [0.5.0](https://github.com/darkrun-ai/darkrun/compare/v0.4.0...v0.5.0) (2026-06-16)
 
 
