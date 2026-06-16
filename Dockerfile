@@ -28,6 +28,16 @@ RUN set -eux; \
     if [ -z "$src" ] && [ -d web/site/dist ]; then src=web/site/dist; fi; \
     mkdir -p /app/site && cp -r "$src/." /app/site/
 
+# Ensure the literal /assets/* paths resolve. index.html references the social
+# card, favicon, and desktop screenshots by fixed path (/assets/og.png, …), but
+# `dx bundle` doesn't copy web/site/assets into the public bundle — so those URLs
+# 404'd and the SPA fallback served index.html (OG image, favicon, and the site
+# screenshots all came back as HTML). Copy the dir in so they serve as files.
+# Contents-copy (.../.) merges with any dx-managed assets dir without nesting.
+RUN if [ -d web/site/assets ]; then \
+        mkdir -p /app/site/assets && cp -r web/site/assets/. /app/site/assets/; \
+    fi
+
 # ── Runtime ──────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
