@@ -184,10 +184,7 @@ pub async fn serve_stdio_on(
     // Dial the relay when remote access is enabled: the host connector parks an
     // outbound WebSocket and bridges remote clients to this loopback server.
     if let (Some(cand), Some(run)) = (relay_candidate, active_run.as_deref()) {
-        if let Some(token) = std::env::var("DARKRUN_RELAY_TOKEN")
-            .ok()
-            .filter(|t| !t.trim().is_empty())
-        {
+        if let Some(token) = resolve_relay_token() {
             let cfg = darkrun_tunnel::ConnectorConfig {
                 relay_host_url: format!(
                     "{}/relay/host/{}?token={}",
@@ -255,6 +252,21 @@ pub async fn serve_stdio_on(
 
     wait?;
     Ok(())
+}
+
+/// The relay dial token (a Firebase ID token from `/darkrun:darkrun-login`):
+/// the `DARKRUN_RELAY_TOKEN` env override, else the token `darkrun login` stored
+/// at `~/.darkrun/relay-token`. `None` when not logged in (remote stays off).
+fn resolve_relay_token() -> Option<String> {
+    if let Ok(t) = std::env::var("DARKRUN_RELAY_TOKEN") {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    let path = crate::registry::default_root()?.join("relay-token");
+    let t = std::fs::read_to_string(path).ok()?.trim().to_string();
+    (!t.is_empty()).then_some(t)
 }
 
 /// The relay candidate to advertise + dial, resolved from the environment.
