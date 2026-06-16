@@ -31,7 +31,7 @@ dioxus = { version = "0.7", default-features = false, features = ["lib", "web", 
 gloo-net = { version = "0.7", default-features = false, features = ["websocket", "http", "json"] }
 # Reconnect backoff timer in wasm.
 gloo-timers = { version = "0.3", default-features = false, features = ["futures"] }
-futures = { version = "0.3", default-features = false, features = ["std"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
