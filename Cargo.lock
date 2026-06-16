@@ -1632,6 +1632,7 @@ name = "darkrun-web"
 version = "0.4.0"
 dependencies = [
  "axum",
+ "darkrun-api",
  "darkrun-telemetry",
  "darkrun-vcs",
  "futures-util",
