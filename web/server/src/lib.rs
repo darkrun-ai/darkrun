@@ -39,7 +39,10 @@ use tower_http::services::{ServeDir, ServeFile};
 pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
 pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
-pub use relay::{relay_router, AttachError, DevTokenAuth, Frame, Relay, RelayAuth, RelayState};
+pub use relay::{
+    relay_router, AttachError, DevTokenAuth, Frame, HostCmd, HostEvent, Relay, RelayAuth,
+    RelayState,
+};
 pub use state::{SharedTransport, WebState};
 pub use transport::ReqwestTransport;
 
