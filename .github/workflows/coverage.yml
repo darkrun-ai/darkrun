@@ -19,6 +19,8 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
+    # Hard cap so a wedged instrumentation run fails fast instead of hanging.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -56,17 +58,27 @@ jobs:
         with:
           tool: cargo-tarpaulin
 
-      # The wasm-only crates (darkrun-site, darkrun-app) don't run native tests
-      # meaningfully — exclude them so coverage reflects the engine/CLI/server.
-      # `--engine llvm` is faster + more accurate than ptrace; the timeout guards
-      # a wedged test from hanging the job.
+      # Scope to the LIBRARY crates' coverage. Excluded:
+      #   - darkrun-cli / darkrun-e2e: their tests fork the `darkrun` binary
+      #     thousands of times, so llvm instrumentation emits thousands of
+      #     .profraw files and the merge step hangs (the original 21-min cancel).
+      #   - darkrun-desktop: links the native webview, not unit-tested.
+      #   - darkrun-site / darkrun-app: wasm-only, no meaningful native tests.
+      # What's left — core / mcp / http / api / git / content / prompts / vcs /
+      # harness / verify — is the engine, where coverage actually matters.
+      # `--lib` skips integration tests (the other subprocess source).
       - name: Run coverage
         run: |
           cargo tarpaulin --workspace \
-            --exclude darkrun-site --exclude darkrun-app \
+            --exclude darkrun-cli \
+            --exclude darkrun-e2e \
+            --exclude darkrun-desktop \
+            --exclude darkrun-site \
+            --exclude darkrun-app \
+            --lib \
             --engine llvm \
             --out Xml --output-dir target/tarpaulin \
-            --timeout 600 --skip-clean
+            --timeout 180 --skip-clean
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
