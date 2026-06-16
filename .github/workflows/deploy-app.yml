@@ -1,0 +1,64 @@
+name: deploy-app
+
+# Build the Dioxus web app (app.darkrun.ai) and deploy it to Firebase Hosting
+# (the `darkrun-app` site in firebase.json). Manual-only until the deploy
+# credential exists — same posture as deploy-web.yml.
+#
+# Enable by adding the repo secret:
+#   secrets.FIREBASE_SERVICE_ACCOUNT_DARKRUN   (a Firebase Hosting deployer SA key)
+# then uncomment the `push:` trigger below.
+
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  #   paths: ["web/app/**", "crates/darkrun-ui/**", "crates/darkrun-api/**", "firebase.json", "web/well-known/**"]
+
+concurrency:
+  group: deploy-app-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL "$AGENT_TOOLSDIRECTORY" || true
+
+      - name: Install Rust (+ wasm target)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install dx (Dioxus CLI)
+        run: cargo install dioxus-cli@0.7.9 --locked
+
+      - name: Build the web app
+        run: dx build --package darkrun-app --platform web --release
+
+      # Assemble the deploy dir firebase.json points at (web/app/dist): the dx
+      # web output + the universal-link well-known files served from /.well-known.
+      - name: Assemble dist
+        run: |
+          rm -rf web/app/dist && mkdir -p web/app/dist/.well-known
+          cp -r target/dx/darkrun-app/release/web/public/. web/app/dist/
+          cp web/well-known/apple-app-site-association web/app/dist/.well-known/
+          cp web/well-known/assetlinks.json web/app/dist/.well-known/
+
+      - name: Deploy to Firebase Hosting
+        uses: FirebaseExtended/action-hosting-deploy@e2eda2e106cfa35cdbcf4ac9ddaf6c4756df2c8c # v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DARKRUN }}
+          projectId: darkrun
+          target: darkrun-app
+          channelId: live
