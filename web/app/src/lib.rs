@@ -7,6 +7,8 @@
 //! banner points at the native apps, which take over via the universal link.
 
 mod banner;
+mod firebase;
+mod login;
 mod remote;
 
 use darkrun_api::session::ReviewSessionPayload;
@@ -14,12 +16,27 @@ use darkrun_ui::prelude::*;
 use darkrun_ui::tokens;
 
 use banner::InstallBanner;
+use login::LoginPage;
 use remote::{run_connection, target_from_url, RemoteState};
 
-/// The app root: the dark shell, the install banner, and the live session view.
+/// Whether the current page path is the login route.
+fn is_login_path() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().pathname().ok())
+        .map(|p| p.trim_end_matches('/').ends_with("/login"))
+        .unwrap_or(false)
+}
+
+/// The app root: the `/login` page, or the dark shell + install banner + the
+/// live session view.
 #[component]
 pub fn App() -> Element {
-    let mut state = use_signal(|| RemoteState::Unconfigured);
+    // `/login` is the browser side of `darkrun login` — a distinct flow.
+    if is_login_path() {
+        return rsx! { LoginPage {} };
+    }
+
+    let state = use_signal(|| RemoteState::Unconfigured);
 
     // Open the relay connection on mount when the URL names a target.
     use_effect(move || {
