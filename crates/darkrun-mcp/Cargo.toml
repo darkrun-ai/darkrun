@@ -15,6 +15,8 @@ darkrun-git.workspace = true
 darkrun-vcs.workspace = true
 ureq.workspace = true
 darkrun-http = { path = "../darkrun-http" }
+# Host connector: dials the relay + bridges remote clients to the local server.
+darkrun-tunnel = { path = "../darkrun-tunnel" }
 darkrun-prompts.workspace = true
 darkrun-harness.workspace = true
 serde.workspace = true

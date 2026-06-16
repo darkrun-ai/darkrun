@@ -48,6 +48,12 @@ pub struct EngineDescriptor {
     pub harness: String,
     /// RFC3339 timestamp the descriptor was written at boot.
     pub started_at: String,
+    /// How a client can reach this engine: always a LOCAL candidate (the loopback
+    /// `addr`, connectable without auth from the same machine), plus a RELAY
+    /// candidate when the engine is configured for remote access (the host has
+    /// dialed the relay). A local-only engine carries just the local candidate.
+    #[serde(default)]
+    pub reachability: darkrun_api::tunnel::Reachability,
 }
 
 /// The registry rooted at `~/.darkrun`, owning the descriptor lifecycle for ONE
@@ -63,6 +69,10 @@ pub struct EngineRegistry {
     slug: String,
     /// This engine's pid.
     pid: u32,
+    /// The relay candidate to advertise, when remote access is enabled. `None`
+    /// for a local-only engine (the descriptor then carries only the loopback
+    /// local candidate).
+    relay: Option<darkrun_api::tunnel::RelayCandidate>,
 }
 
 impl EngineRegistry {
@@ -90,7 +100,16 @@ impl EngineRegistry {
             slug: slug_for(&repo_root),
             repo_root,
             pid: std::process::id(),
+            relay: None,
         }
+    }
+
+    /// Advertise a RELAY candidate alongside the local one — set when the engine
+    /// has remote access enabled (it dials the relay). A discoverer then learns
+    /// both how to reach the engine locally and how to tunnel in remotely.
+    pub fn with_relay(mut self, relay: darkrun_api::tunnel::RelayCandidate) -> Self {
+        self.relay = Some(relay);
+        self
     }
 
     /// The slug directory for this engine's repo (`<root>/<slug>`).
@@ -110,6 +129,13 @@ impl EngineRegistry {
     /// non-fatal (the engine still serves; it just isn't auto-discoverable).
     pub fn announce(&self, addr: SocketAddr, harness: &str) -> io::Result<EngineDescriptor> {
         fs::create_dir_all(self.slug_dir())?;
+        let reachability = darkrun_api::tunnel::Reachability {
+            local: Some(darkrun_api::tunnel::LocalCandidate {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+            }),
+            relay: self.relay.clone(),
+        };
         let descriptor = EngineDescriptor {
             pid: self.pid,
             addr,
@@ -117,6 +143,7 @@ impl EngineRegistry {
             slug: self.slug.clone(),
             harness: harness.to_string(),
             started_at: now_rfc3339(),
+            reachability,
         };
         let json = serde_json::to_vec_pretty(&descriptor)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -581,10 +608,38 @@ mod tests {
             slug: "darkrun-deadbeef".to_string(),
             harness: "claude".to_string(),
             started_at: "2026-05-31T00:00:00+00:00".to_string(),
+            reachability: darkrun_api::tunnel::Reachability {
+                local: Some(darkrun_api::tunnel::LocalCandidate {
+                    host: "127.0.0.1".into(),
+                    port: 4317,
+                }),
+                relay: None,
+            },
         };
         let json = serde_json::to_vec(&descriptor).unwrap();
         let back: EngineDescriptor = serde_json::from_slice(&json).unwrap();
         assert_eq!(descriptor, back);
+        // A local-only engine advertises just the loopback candidate.
+        assert!(back.reachability.local.is_some());
+        assert!(back.reachability.relay.is_none());
+    }
+
+    #[test]
+    fn announce_with_relay_advertises_both_candidates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = EngineRegistry::with_root(tmp.path(), "/Users/dev/some-repo").with_relay(
+            darkrun_api::tunnel::RelayCandidate {
+                url: "wss://relay.darkrun.ai".into(),
+                session: "some-repo".into(),
+            },
+        );
+        let d = registry.announce(sample_addr(), "claude").unwrap();
+        // Local candidate is the loopback addr; relay candidate is advertised too.
+        let local = d.reachability.local.expect("local candidate");
+        assert_eq!(local.port, 4317);
+        let relay = d.reachability.relay.expect("relay candidate");
+        assert_eq!(relay.url, "wss://relay.darkrun.ai");
+        assert_eq!(relay.session, "some-repo");
     }
 
     #[test]
