@@ -23,9 +23,25 @@ resource "google_project_service" "services" {
     "secretmanager.googleapis.com",
     "iam.googleapis.com",
     "dns.googleapis.com",
+    # Hosting deploy for app.darkrun.ai (the deploy-app workflow).
+    "firebasehosting.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false
+}
+
+# Let the existing CI service account (cloudbuild-web, already Workload-Identity-
+# bound to this repo in bootstrap-gha.sh) deploy the web app to Firebase Hosting.
+# Reusing it keeps the deploy KEYLESS (WIF — no service-account key to store or
+# leak) and grants only the least Hosting-deploy permission, far narrower than
+# the Firebase Admin SDK SA. The deploy-app workflow authenticates as this SA
+# via WIF, exactly like deploy-web.
+resource "google_project_iam_member" "app_hosting_deployer" {
+  project = var.gcp_project
+  role    = "roles/firebasehosting.admin"
+  member  = "serviceAccount:cloudbuild-web@${var.gcp_project}.iam.gserviceaccount.com"
+
+  depends_on = [google_project_service.services]
 }
 
 module "sentry" {

@@ -1,12 +1,17 @@
 name: deploy-app
 
 # Build the Dioxus web app (app.darkrun.ai) and deploy it to Firebase Hosting
-# (the `darkrun-app` site in firebase.json). Manual-only until the deploy
-# credential exists — same posture as deploy-web.yml.
+# (the `darkrun-app` site in firebase.json) — KEYLESS, via Workload Identity
+# Federation, exactly like deploy-web. No service-account key is stored anywhere:
+# CI impersonates the `cloudbuild-web` SA (granted firebasehosting.admin in
+# infra/main.tf) through the repo-scoped WIF provider.
 #
-# Enable by adding the repo secret:
-#   secrets.FIREBASE_SERVICE_ACCOUNT_DARKRUN   (a Firebase Hosting deployer SA key)
-# then uncomment the `push:` trigger below.
+# Manual-only until the WIF secrets exist + the Terraform IAM has applied.
+# Enable by uncommenting the `push:` trigger once:
+#   secrets.GCP_WORKLOAD_IDENTITY_PROVIDER
+#   secrets.GCP_BUILD_SA
+# are set (see infra/bootstrap-gha.sh) and `terraform apply` has granted the SA
+# Hosting access.
 
 on:
   workflow_dispatch:
@@ -20,6 +25,7 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write # for Workload Identity Federation
 
 jobs:
   deploy:
@@ -54,11 +60,15 @@ jobs:
           cp web/well-known/apple-app-site-association web/app/dist/.well-known/
           cp web/well-known/assetlinks.json web/app/dist/.well-known/
 
-      - name: Deploy to Firebase Hosting
-        uses: FirebaseExtended/action-hosting-deploy@e2eda2e106cfa35cdbcf4ac9ddaf6c4756df2c8c # v0
+      # Keyless auth: federate the GitHub OIDC token to the cloudbuild-web SA.
+      # Exports GOOGLE_APPLICATION_CREDENTIALS, which the firebase CLI uses.
+      - name: Authenticate to GCP (WIF)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DARKRUN }}
-          projectId: darkrun
-          target: darkrun-app
-          channelId: live
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_BUILD_SA }}
+
+      - name: Deploy to Firebase Hosting
+        run: |
+          npm install -g firebase-tools
+          firebase deploy --only hosting:darkrun-app --project darkrun --non-interactive
