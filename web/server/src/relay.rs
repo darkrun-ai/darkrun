@@ -327,10 +327,13 @@ async fn register_device(
     let Some(account) = bearer(&headers).and_then(|t| state.account_for(t)) else {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     };
-    state.devices.register(
-        &account,
-        crate::push::DeviceToken { token: body.token, platform: body.platform },
-    );
+    state
+        .devices
+        .register(
+            &account,
+            crate::push::DeviceToken { token: body.token, platform: body.platform },
+        )
+        .await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -344,7 +347,7 @@ async fn unregister_device(
     if bearer(&headers).and_then(|t| state.account_for(t)).is_none() {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
-    state.devices.unregister(&token);
+    state.devices.unregister(&token).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -495,7 +498,9 @@ mod tests {
     #[tokio::test]
     async fn notify_owner_fans_out_to_the_owners_devices() {
         let registry: Arc<dyn DeviceRegistry> = Arc::new(InMemoryDeviceRegistry::new());
-        registry.register("owner", DeviceToken { token: "t1".into(), platform: "ios".into() });
+        registry
+            .register("owner", DeviceToken { token: "t1".into(), platform: "ios".into() })
+            .await;
         let sender = Arc::new(RecordingSender::default());
         let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth))
             .with_push(registry, sender.clone());
@@ -528,7 +533,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-        assert!(registry.devices_for("acct-a").is_empty());
+        assert!(registry.devices_for("acct-a").await.is_empty());
 
         // With a bearer token (DevTokenAuth: token == account) → registered.
         let res = app
@@ -544,7 +549,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         assert_eq!(
-            registry.devices_for("acct-a"),
+            registry.devices_for("acct-a").await,
             vec![DeviceToken { token: "d1".into(), platform: "ios".into() }]
         );
 
@@ -560,7 +565,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let _ = res.into_body().collect().await;
-        assert!(registry.devices_for("acct-a").is_empty());
+        assert!(registry.devices_for("acct-a").await.is_empty());
     }
 
     #[test]

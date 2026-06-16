@@ -25,6 +25,9 @@ use crate::push::AccessTokenSource;
 /// The OAuth scope an access token must carry to call FCM `messages:send`.
 pub const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 
+/// The OAuth scope for the Firestore REST API (the persistent device registry).
+pub const DATASTORE_SCOPE: &str = "https://www.googleapis.com/auth/datastore";
+
 /// The default OAuth token endpoint (a service-account JSON normally carries its
 /// own `token_uri`, but older keys may omit it).
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
@@ -69,6 +72,24 @@ impl ServiceAccount {
     pub fn from_file(path: &str) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
         Self::from_json(&text)
+    }
+
+    /// Read the service-account key from `GOOGLE_APPLICATION_CREDENTIALS` (the
+    /// engine's runtime credential), or `None` when unset/blank/unreadable.
+    /// Returns the parsed account so callers can mint several scoped token
+    /// sources (FCM + Firestore) from the one key.
+    #[cfg(not(tarpaulin_include))] // env + filesystem
+    pub fn from_env() -> Option<Self> {
+        let path = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+            .ok()
+            .filter(|p| !p.trim().is_empty())?;
+        match Self::from_file(&path) {
+            Ok(account) => Some(account),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not load service-account credentials");
+                None
+            }
+        }
     }
 }
 
@@ -133,7 +154,7 @@ pub struct ServiceAccountTokenSource {
 }
 
 impl ServiceAccountTokenSource {
-    /// A token source for `account`, scoped to FCM `messages:send`.
+    /// A token source for `account`, scoped to FCM `messages:send` by default.
     pub fn new(account: ServiceAccount) -> Self {
         Self {
             account,
@@ -141,6 +162,13 @@ impl ServiceAccountTokenSource {
             http: reqwest::Client::new(),
             cache: Mutex::new(None),
         }
+    }
+
+    /// Override the OAuth scope (e.g. [`DATASTORE_SCOPE`] for the Firestore
+    /// registry). Tokens are scope-specific, so each consumer gets its own source.
+    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = scope.into();
+        self
     }
 
     /// Build from `GOOGLE_APPLICATION_CREDENTIALS` (the path to the SA JSON), or
