@@ -2,6 +2,55 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.5.0](https://github.com/darkrun-ai/darkrun/compare/v0.4.0...v0.5.0) (2026-06-16)
+
+
+### Features
+
+* **api:** add PickerKind::Size ([a5c9e9c](https://github.com/darkrun-ai/darkrun/commit/a5c9e9c8d0f1d16291bf123ccfd521ded8efacd6))
+* **api:** local-first connect selection — detect local vs remote ([7a6d04c](https://github.com/darkrun-ai/darkrun/commit/7a6d04c4b8f02cb910e2ffc8f66182a26f546fae))
+* **api:** shared tunnel protocol — the durable, local/remote contract ([d3a00e2](https://github.com/darkrun-ai/darkrun/commit/d3a00e2ec02efe4368f0ec7a230295fc220cb594))
+* **cli:** darkrun login — enable remote access (closes the engine-side loop) ([39d99b5](https://github.com/darkrun-ai/darkrun/commit/39d99b51399e32ec4f77c692559a36d4da6b2c34))
+* **cli:** engine-data write guard redirects each artifact to its own tool ([bf6f206](https://github.com/darkrun-ai/darkrun/commit/bf6f206d10745d74f7e632ebbb5150715b9c3c39))
+* **cloud:** Firebase-native foundation — Firestore data model, rules, project config ([b97cfa4](https://github.com/darkrun-ai/darkrun/commit/b97cfa4f9b09bc2feea7e709003964dd5c1b64d0))
+* **core+mcp:** fan the SHA write-guard out to units and briefs ([b4fea39](https://github.com/darkrun-ai/darkrun/commit/b4fea3941827351875f6299a28e0b0232e6a6e72))
+* **core+mcp:** SHA optimistic-concurrency guard on artifact writes (knowledge first) ([138fb1e](https://github.com/darkrun-ai/darkrun/commit/138fb1e3aaaffd2cba9a1dc54e0f8e6436a4991f))
+* **desktop:** readable question prompts — markdown, text-only cards, real mockups ([d71321a](https://github.com/darkrun-ai/darkrun/commit/d71321afb997617ca66f1797d40a5b8cbf751b9d))
+* **engine+desktop:** questions surface on the run + persist across restarts ([598d98e](https://github.com/darkrun-ai/darkrun/commit/598d98ef384116869b23af9653be6c15df01ad6b))
+* **engine+desktop:** sessions materialize on demand; chrome is not selectable ([c3c2395](https://github.com/darkrun-ai/darkrun/commit/c3c2395d87f5820142f6cf706e33e59a7800031a))
+* **engine:** engine-driven run-setup elicitation (factory/mode/size pickers) ([905e8ca](https://github.com/darkrun-ai/darkrun/commit/905e8cadb65f1b41d1ca1f751711c350a5171b4b))
+* **engine:** mode-gate questions + scope interactive sessions per station ([e990bd4](https://github.com/darkrun-ai/darkrun/commit/e990bd4b8652d384ec6585bea146e603fc594f03))
+* **engine:** pull fable from the model selector (Anthropic removed support) ([38a4c80](https://github.com/darkrun-ai/darkrun/commit/38a4c805fe034cce808e1adb455e67b1878cb701))
+* **engine:** spawn the host connector + advertise reachability ([fab84f3](https://github.com/darkrun-ai/darkrun/commit/fab84f3fef3c88ec210fd6ead4868952682e7526))
+* **engine:** the desktop surfaces with the work, not at the first gate ([299011a](https://github.com/darkrun-ai/darkrun/commit/299011a3e69fbb6486f53435a95d8eb2df86eeea))
+* **login:** relay-token broker carries a browser-minted token to the engine ([b7e2082](https://github.com/darkrun-ai/darkrun/commit/b7e2082b25eb552c4f91fe4d3694c0e78831fbd0))
+* **mcp:** fall back to the app.darkrun.ai deep link when no desktop can open ([29b7830](https://github.com/darkrun-ai/darkrun/commit/29b783020b40d9351b37d33320308a10ffc25993))
+* **mcp:** live-mirror the run payload after every mutating tool ([7542bfe](https://github.com/darkrun-ai/darkrun/commit/7542bfeb181ddebb3bd17aa80243f812524471c0))
+* **mcp:** local OS notification when a run reaches a gate ([8c15fdf](https://github.com/darkrun-ai/darkrun/commit/8c15fdf15e8cc80e3ed74f403ef32c4535a7f4be))
+* **site:** social card (Open Graph / Twitter) — the factory-line hero ([a3a2781](https://github.com/darkrun-ai/darkrun/commit/a3a2781765bd6cec1d8e614e6eda034bcd7ccb63))
+* **statusline:** explorer chips at Spec + dev launcher freshness ([170ea16](https://github.com/darkrun-ai/darkrun/commit/170ea16fa08ddf17ae2b9b13c55dfbcbe31f724f))
+* **tunnel:** host connector — durably bridge the relay to the local engine ([4065891](https://github.com/darkrun-ai/darkrun/commit/4065891ed6bf7ee0f5c48dd1f4a7d678e0508fb0))
+* **web:** actionable gate + station narrative in the web app ([bb6c7a7](https://github.com/darkrun-ai/darkrun/commit/bb6c7a748425e8481185bdc6891e446a453279dc))
+* **web:** app.darkrun.ai — the Dioxus web client for live remote runs ([694e4a4](https://github.com/darkrun-ai/darkrun/commit/694e4a4820b47d43253c63151f656bead2cd4991))
+* **web:** client-addressed relay routing — read into a live session on connect ([48c1ae5](https://github.com/darkrun-ai/darkrun/commit/48c1ae56eac2f0badb22f606cf5f348cba0e7737))
+* **web:** Firebase ID-token verifier secures the relay + /darkrun:darkrun-login ([23ea0f1](https://github.com/darkrun-ai/darkrun/commit/23ea0f15e9af7231192316b208f61115dd473e48))
+* **web:** remote-tunnel relay — reverse-WS bridge in darkrun-web ([36e512b](https://github.com/darkrun-ai/darkrun/commit/36e512b43e8175d9dce3883da70292684cf63f2a))
+* **web:** web app Firebase Auth sign-in — closes the login chain ([11abc83](https://github.com/darkrun-ai/darkrun/commit/11abc83ddfea1bfbe6c99c53db7baa105ef1d121))
+
+
+### Bug Fixes
+
+* **cloud:** correct the Firebase model — session registry, NOT a state mirror ([52b2fbe](https://github.com/darkrun-ai/darkrun/commit/52b2fbe00e9c0053a5ee001b5922f641b6ca4ecb))
+* **desktop:** a stale dev launch bundle execs the fresher build ([042f83b](https://github.com/darkrun-ai/darkrun/commit/042f83be6a509fed0bdd46383f0b18084f0b812d))
+* **desktop:** key sidebar run lists by project slug, not display name ([14ec652](https://github.com/darkrun-ai/darkrun/commit/14ec652f6231531a49ce03134547cbdeeec64f11))
+* **engine:** answering an interactive session dismisses it + surfaces the next ([5828727](https://github.com/darkrun-ai/darkrun/commit/5828727a91a98889a383ec8d207f4f5e806cb434))
+* **engine:** raising a question/direction/picker gate launches the desktop ([e5586ef](https://github.com/darkrun-ai/darkrun/commit/e5586efaf3adb0dd01d9c96b6e7c179fae6259e4))
+* **git:** normalize the common dir before deriving the project root ([028d2e3](https://github.com/darkrun-ai/darkrun/commit/028d2e38e5574127c22863854da49166df46f4d9))
+* **http:** the Mine predicate checks the run's STABLE branch ([ab8eb8f](https://github.com/darkrun-ai/darkrun/commit/ab8eb8ff2dd1b7043183b82d095b327ffea98922))
+* picker UX (chrome, stale selection, auto-close) + same-commit checkout ([a085a7d](https://github.com/darkrun-ai/darkrun/commit/a085a7d6165b3015963ec23a5ec9e0f460c445b3))
+* **site:** preview question sample sets run_slug ([68f3edf](https://github.com/darkrun-ai/darkrun/commit/68f3edf99823643f0a259822c2e60548d59e4e0f))
+* **web:** select rust_crypto backend for jsonwebtoken 10 ([4ef9cdb](https://github.com/darkrun-ai/darkrun/commit/4ef9cdbbaea1efe8e2e8c322f2ba6aaba9d0a3d0))
+
 ## [0.4.0](https://github.com/darkrun-ai/darkrun/compare/v0.3.0...v0.4.0) (2026-06-11)
 
 
