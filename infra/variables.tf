@@ -34,6 +34,12 @@ variable "web_domain" {
   default     = "darkrun.ai"
 }
 
+variable "firebase_project" {
+  description = "Firebase project id powering the relay (Firebase-ID-token verification) and FCM remote push. Defaults to the GCP project. Empty disables the relay + remote push (the host's local OS notification still fires). Requires the FCM Admin SDK key in Secret Manager (infra/set-fcm-env.sh)."
+  type        = string
+  default     = "darkrun"
+}
+
 variable "min_instances" {
   description = "Cloud Run minimum instances. 0 = scale to zero."
   type        = number

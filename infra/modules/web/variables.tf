@@ -64,3 +64,15 @@ variable "sentry_dsn" {
   type        = string
   default     = ""
 }
+
+variable "firebase_project" {
+  description = "Firebase project id for the relay's Firebase-ID-token verification AND FCM remote push. Set turns the relay ON (DARKRUN_FIREBASE_PROJECT) and mounts the FCM credential; empty leaves the relay + remote push disabled."
+  type        = string
+  default     = ""
+}
+
+variable "fcm_secret_id" {
+  description = "Secret Manager secret_id holding the Admin SDK service-account JSON the relay signs FCM tokens with. Operator-created (infra/set-fcm-env.sh); referenced, never created by Terraform. Only used when firebase_project is set."
+  type        = string
+  default     = "FCM_SA_KEY"
+}
