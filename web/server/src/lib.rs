@@ -27,6 +27,7 @@ mod config;
 mod firebase_auth;
 mod oauth_routes;
 mod relay;
+mod relay_broker;
 mod state;
 mod transport;
 
@@ -41,6 +42,7 @@ pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
 pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
 pub use firebase_auth::{FirebaseTokenAuth, FIREBASE_CERTS_URL};
+pub use relay_broker::{relay_auth_router, ClaimPayload, RelayBroker};
 pub use relay::{
     relay_router, AttachError, DevTokenAuth, Frame, HostCmd, HostEvent, Relay, RelayAuth,
     RelayState,
@@ -169,6 +171,9 @@ pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
         router = router.merge(relay);
         tracing::info!("relay endpoints mounted (/relay/host, /relay/client)");
     }
+    // The relay-token broker carries a browser-minted Firebase token to the CLI
+    // (POST /auth/relay/deposit, GET /auth/relay/claim/:nonce).
+    router = router.merge(relay_auth_router(RelayBroker::new()));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
