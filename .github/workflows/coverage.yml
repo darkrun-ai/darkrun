@@ -19,6 +19,8 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
+    # Hard cap so a wedged instrumentation run fails fast instead of hanging.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -33,9 +35,9 @@ jobs:
           df -h /
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install desktop GUI deps
         run: |
@@ -52,24 +54,34 @@ jobs:
           git config --global init.defaultBranch main
 
       - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2
         with:
           tool: cargo-tarpaulin
 
-      # The wasm-only crates (darkrun-site, darkrun-app) don't run native tests
-      # meaningfully — exclude them so coverage reflects the engine/CLI/server.
-      # `--engine llvm` is faster + more accurate than ptrace; the timeout guards
-      # a wedged test from hanging the job.
+      # Scope to the LIBRARY crates' coverage. Excluded:
+      #   - darkrun-cli / darkrun-e2e: their tests fork the `darkrun` binary
+      #     thousands of times, so llvm instrumentation emits thousands of
+      #     .profraw files and the merge step hangs (the original 21-min cancel).
+      #   - darkrun-desktop: links the native webview, not unit-tested.
+      #   - darkrun-site / darkrun-app: wasm-only, no meaningful native tests.
+      # What's left — core / mcp / http / api / git / content / prompts / vcs /
+      # harness / verify — is the engine, where coverage actually matters.
+      # `--lib` skips integration tests (the other subprocess source).
       - name: Run coverage
         run: |
           cargo tarpaulin --workspace \
-            --exclude darkrun-site --exclude darkrun-app \
+            --exclude darkrun-cli \
+            --exclude darkrun-e2e \
+            --exclude darkrun-desktop \
+            --exclude darkrun-site \
+            --exclude darkrun-app \
+            --lib \
             --engine llvm \
             --out Xml --output-dir target/tarpaulin \
-            --timeout 600 --skip-clean
+            --timeout 180 --skip-clean
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: target/tarpaulin/cobertura.xml
