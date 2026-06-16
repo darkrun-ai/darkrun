@@ -1,0 +1,80 @@
+name: codeql
+
+# Advanced CodeQL setup — scans the languages actually in this repo, INCLUDING
+# Rust (the bulk), which GitHub's DEFAULT CodeQL setup does NOT support.
+#
+# ⚠️ PREREQUISITE: this advanced workflow cannot coexist with the default CodeQL
+# setup. Before merging, switch the repo to advanced:
+#   Settings → Code security → CodeQL analysis → Set up → Advanced
+# (or disable the default setup). Otherwise every run conflicts and fails.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Mondays 06:00 UTC
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # rust = the bulk; javascript = the browser collector + injector example;
+        # actions = the workflows themselves. (No ruby — there's none in the tree.)
+        language: [rust, javascript-typescript, actions]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # The Rust analysis builds the whole workspace (dioxus + webview + the
+      # image/AVIF codecs), which overruns the runner's disk — reclaim it first.
+      - name: Free disk space
+        if: matrix.language == 'rust'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Install Rust
+        if: matrix.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.language == 'rust'
+
+      - name: Install desktop GUI deps
+        if: matrix.language == 'rust'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
