@@ -198,6 +198,71 @@ pub struct RelayCandidate {
     pub session: String,
 }
 
+impl LocalCandidate {
+    /// The direct review WS URL for `run` — `ws://{host}:{port}/ws/session/{run}`.
+    /// No token: a local session is reachable on loopback/LAN without auth.
+    pub fn ws_url(&self, run: &str) -> String {
+        format!("ws://{}:{}/ws/session/{}", self.host, self.port, run)
+    }
+}
+
+impl RelayCandidate {
+    /// The relay client WS URL — `{url}/relay/client/{session}?token={token}`.
+    /// The token (from `/darkrun:darkrun-login`) is required: remote needs auth.
+    pub fn client_ws_url(&self, token: &str) -> String {
+        format!(
+            "{}/relay/client/{}?token={}",
+            self.url.trim_end_matches('/'),
+            self.session,
+            token
+        )
+    }
+}
+
+/// Which transport a [`ConnectCandidate`] uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CandidateKind {
+    /// A direct connection to the host's loopback/LAN server (no relay, no auth).
+    Local,
+    /// A connection through the relay (remote; needs the login token).
+    Relay,
+}
+
+/// One connection the client may try, with its WS URL — yielded in preference
+/// order by [`Reachability::connect_candidates`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectCandidate {
+    /// Local (direct) or relay (remote).
+    pub kind: CandidateKind,
+    /// The WebSocket URL to open.
+    pub url: String,
+}
+
+impl Reachability {
+    /// The connection candidates to try, **local first**: the direct loopback/LAN
+    /// endpoint (no auth) ahead of the relay (which needs `token`). The client
+    /// races them in order — a same-machine/LAN client connects directly and
+    /// skips the relay; everyone else falls through to it. The relay candidate is
+    /// dropped when no `token` is available (not logged in → remote unavailable).
+    pub fn connect_candidates(&self, run: &str, token: Option<&str>) -> Vec<ConnectCandidate> {
+        let mut out = Vec::new();
+        if let Some(local) = &self.local {
+            out.push(ConnectCandidate {
+                kind: CandidateKind::Local,
+                url: local.ws_url(run),
+            });
+        }
+        if let (Some(relay), Some(token)) = (&self.relay, token) {
+            out.push(ConnectCandidate {
+                kind: CandidateKind::Relay,
+                url: relay.client_ws_url(token),
+            });
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +317,47 @@ mod tests {
         let j = serde_json::to_string(&fb).unwrap();
         assert!(j.contains(r#""kind":"feedback""#));
         assert_eq!(serde_json::from_str::<ClientCommand>(&j).unwrap(), fb);
+    }
+
+    #[test]
+    fn connect_candidates_prefer_local_then_relay() {
+        let both = Reachability {
+            local: Some(LocalCandidate { host: "127.0.0.1".into(), port: 4317 }),
+            relay: Some(RelayCandidate {
+                url: "wss://relay.darkrun.ai/".into(), // trailing slash trimmed
+                session: "sess-1".into(),
+            }),
+        };
+        let cands = both.connect_candidates("my-run", Some("tok"));
+        assert_eq!(cands.len(), 2);
+        // Local first, no token, direct WS URL.
+        assert_eq!(cands[0].kind, CandidateKind::Local);
+        assert_eq!(cands[0].url, "ws://127.0.0.1:4317/ws/session/my-run");
+        // Relay second, with the token.
+        assert_eq!(cands[1].kind, CandidateKind::Relay);
+        assert_eq!(
+            cands[1].url,
+            "wss://relay.darkrun.ai/relay/client/sess-1?token=tok"
+        );
+    }
+
+    #[test]
+    fn connect_candidates_drop_relay_without_a_token() {
+        let r = Reachability {
+            local: Some(LocalCandidate { host: "127.0.0.1".into(), port: 9 }),
+            relay: Some(RelayCandidate { url: "wss://r".into(), session: "s".into() }),
+        };
+        // No token (not logged in) → only the local candidate is offered.
+        let cands = r.connect_candidates("run", None);
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].kind, CandidateKind::Local);
+
+        // Relay-only reachability with no token → nothing connectable.
+        let relay_only = Reachability {
+            local: None,
+            relay: Some(RelayCandidate { url: "wss://r".into(), session: "s".into() }),
+        };
+        assert!(relay_only.connect_candidates("run", None).is_empty());
     }
 
     #[test]
