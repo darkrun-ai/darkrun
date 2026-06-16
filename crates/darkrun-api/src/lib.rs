@@ -26,8 +26,13 @@ pub mod review_current;
 pub mod routes;
 pub mod runs;
 pub mod session;
+pub mod tunnel;
 
 pub use advance::AdvanceResponse;
+pub use tunnel::{
+    ClientCommand, ClientFrame, HostCmd, HostEvent, LocalCandidate, Reachability, RelayCandidate,
+    Seq, ServerFrame,
+};
 pub use annotation::{
     Anchor, Annotation, AnnotationStatus, ArtifactInfo, ArtifactType, Ask, AskKind, AskSeverity,
     DomAnchor, Expression, ImageShape, NormPoint, NormRect, PixelMark, Suggestion, TextRange,
