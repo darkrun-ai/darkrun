@@ -1,17 +1,23 @@
 name: release
 
-# Build per-arch native `darkrun` binaries and publish them to npm. Triggered by
-# the GitHub Release that release-please publishes when its release PR is merged
-# (NOT by raw tags). npm publish uses OIDC Trusted Publishing — no NPM_TOKEN
-# (configure the trusted publisher on each package: repo darkrun-ai/darkrun,
-# workflow release.yml).
+# Build per-arch native `darkrun` binaries, publish them to npm, AND attach the
+# tarballs to the GitHub Release. Triggered by the version TAG that release-please
+# pushes when its release PR merges (release-please creates the matching release as
+# a DRAFT — see release-please-config.json `draft: true`).
 #
-# Distribution is npm-only: the `darkrun` package + per-arch `@darkrun/<os>-<arch>`
-# sub-packages. GitHub Release tarballs are attached as raw downloads.
+# Why the tag (not the `release` event): GitHub treats a PUBLISHED release as
+# IMMUTABLE, so assets can't be attached after the fact. So release-please leaves
+# the release a draft; this workflow attaches the tarballs to the draft (mutable),
+# then the `publish-release` job un-drafts it once binaries AND npm are live. A
+# failed build leaves a draft (retryable), never a published-but-empty release.
+# The tag push fires reliably because release-please pushes it with a PAT.
+#
+# npm publish uses OIDC Trusted Publishing — no NPM_TOKEN (configure the trusted
+# publisher on each package: repo darkrun-ai/darkrun, workflow release.yml).
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       version:
@@ -33,8 +39,8 @@ jobs:
       - id: v
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            tag="${{ github.event.release.tag_name }}"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${{ github.ref_name }}"
           elif [ -n "${{ inputs.version }}" ]; then
             tag="v${{ inputs.version }}"
           else
@@ -162,23 +168,24 @@ jobs:
   github-release:
     needs: [version, build]
     runs-on: ubuntu-latest
-    # Best-effort: the repo uses IMMUTABLE releases, so assets can't be added once
-    # release-please has published the release. npm is the real distribution
-    # channel; the tarballs are a bonus. Don't fail the workflow if the attach is
-    # rejected as immutable.
-    continue-on-error: true
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           pattern: tarball-*
           path: dist
           merge-multiple: true
-      # Attach the tarballs to the existing release (release-please already created it).
-      - name: Attach tarballs to the release
+      # Attach the tarballs to release-please's DRAFT release. Drafts are mutable,
+      # so the upload succeeds (a published release is immutable and rejects it).
+      # `draft: true` keeps it a draft — the publish-release job un-drafts it once
+      # everything is green.
+      - name: Attach tarballs to the draft release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           tag_name: ${{ needs.version.outputs.ref }}
           files: dist/*.tar.gz
+          draft: true
 
   npm-publish:
     needs: [version, build]
@@ -234,3 +241,28 @@ jobs:
 
       - name: Publish main darkrun package (plugin)
         run: npm publish ./plugin --access public
+
+  publish-release:
+    # Un-draft the GitHub Release only after the binaries are attached AND npm is
+    # live — so "published" means "fully shipped". If any prior job fails, this is
+    # skipped and the release stays a draft (retryable), never announced empty.
+    needs: [version, github-release, npm-publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the release (un-draft)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.ref }}
+        run: |
+          # Resolve the draft release by tag (drafts aren't addressable by tag via
+          # `gh release view`, so list + match), then flip draft=false.
+          rel_id=$(gh api "repos/$REPO/releases" --paginate \
+            --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
+          if [ -z "$rel_id" ]; then
+            echo "::error::no release found for tag $TAG"; exit 1
+          fi
+          gh api -X PATCH "repos/$REPO/releases/$rel_id" -F draft=false
+          echo "published release $TAG (id $rel_id)"
