@@ -1,0 +1,40 @@
+name: terraform
+
+# Code quality for the infra/ Terraform — formatting + static lint. No
+# `terraform init`/`validate` (those need provider downloads + backend creds);
+# fmt + tflint are static and catch the common issues.
+
+on:
+  push:
+    branches: [main]
+    paths: ["infra/**"]
+  pull_request:
+    paths: ["infra/**"]
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: fmt + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Format check
+        run: terraform fmt -check -recursive infra
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Lint (recursive)
+        run: tflint --chdir infra --recursive
