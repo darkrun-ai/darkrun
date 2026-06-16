@@ -1,4 +1,4 @@
-//! The remote tunnel **relay** — a stateless reverse-WebSocket bridge.
+//! The remote tunnel **relay** — a client-addressed reverse-WebSocket bridge.
 //!
 //! Remote access to a run does NOT sync its state (see `firestore/SCHEMA.md`).
 //! The host (the machine running the agent's live MCP session) serves the run
@@ -8,16 +8,24 @@
 //! - the **host dials OUTBOUND** to `GET /relay/host/{session}` and parks an open
 //!   WebSocket here (outbound always traverses NAT — no inbound port);
 //! - a **client** connects to `GET /relay/client/{session}`;
-//! - the relay **bridges frames** between them — host→clients fans out to every
-//!   attached client (the seam for multi-party "channels"), client→host forwards
-//!   to the single host socket.
+//! - the relay **routes per client**: each client is addressed by an id, so the
+//!   host can open that client its OWN local session subscription (which fires
+//!   the snapshot the local server pushes on connect) and reply to just that
+//!   client. Without per-client routing a late joiner would miss the snapshot and
+//!   see nothing until the next update.
 //!
-//! The relay holds NO run state and never inspects frame contents — it shuttles
-//! opaque WebSocket frames, so the host's existing review protocol rides over it
-//! unchanged. Authorization binds at registration: the host's verified token
-//! fixes the session's owner account, and a client may attach only if its token
-//! resolves to that same owner (later: the same channel). Why a relay and not
-//! WebRTC: see the `tunnel-transport` decision.
+//! Wire protocol:
+//! - **client ↔ relay**: RAW review frames — the client speaks the host's review
+//!   protocol verbatim; the relay never parses the payload.
+//! - **relay → host** ([`HostEvent`]): `join` / `leave` / `msg{client,data}` —
+//!   so the host learns of each client and its frames.
+//! - **host → relay** ([`HostCmd`]): `to{client,data}` — route a frame to one
+//!   client. The relay parses only this thin routing envelope, never the payload.
+//!
+//! Authorization binds at registration: the host's verified token fixes the
+//! session's owner account, and a client may attach only if its token resolves to
+//! that same owner (later: the same channel). Why a relay and not WebRTC: see the
+//! `tunnel-transport` decision.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,11 +38,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-/// One opaque WebSocket frame shuttled across the bridge. The relay treats both
-/// kinds as payload — it never parses them.
+/// One opaque review frame shuttled across the bridge. The relay never parses the
+/// payload — both kinds are carried verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// A UTF-8 text frame (the review protocol's JSON messages).
@@ -43,16 +51,55 @@ pub enum Frame {
     Binary(Vec<u8>),
 }
 
-/// The live state of one tunnelled session: the host's outbound sink plus every
-/// attached client's sink. Senders are unbounded mpsc halves drained by each
-/// socket's writer task.
+/// What the relay delivers TO the host over its socket: a client lifecycle event
+/// or a client frame, each tagged with the client id so the host can open/close
+/// per-client local subscriptions and attribute incoming commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum HostEvent {
+    /// A client attached — the host should open its session subscription and
+    /// stream it back addressed to this client.
+    Join {
+        /// The relay-assigned client id.
+        client: u64,
+    },
+    /// A client detached — the host should tear down that client's subscription.
+    Leave {
+        /// The client id that left.
+        client: u64,
+    },
+    /// A frame the client sent (a command — answer / advance / feedback).
+    Msg {
+        /// The originating client id.
+        client: u64,
+        /// The client's raw text frame.
+        data: String,
+    },
+}
+
+/// What the host sends back to the relay: route a frame to a specific client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum HostCmd {
+    /// Deliver `data` to client `client` (e.g. a snapshot or a live update from
+    /// that client's session subscription).
+    To {
+        /// The destination client id.
+        client: u64,
+        /// The raw text frame to deliver.
+        data: String,
+    },
+}
+
+/// The live state of one tunnelled session: the host's event sink plus every
+/// attached client's frame sink.
 struct SessionConn {
-    /// The account that owns this session (set by the host at registration);
-    /// a client must resolve to the same owner to attach.
+    /// The account that owns this session; a client must resolve to the same
+    /// owner to attach.
     owner: String,
-    /// Push here to send a frame TO the host.
-    host_tx: mpsc::UnboundedSender<Frame>,
-    /// Push to a client's entry to send a frame TO that client.
+    /// Push here to deliver a [`HostEvent`] to the host.
+    host_tx: mpsc::UnboundedSender<HostEvent>,
+    /// Per-client frame sinks, keyed by client id.
     clients: HashMap<u64, mpsc::UnboundedSender<Frame>>,
 }
 
@@ -66,8 +113,7 @@ pub enum AttachError {
 }
 
 /// The in-memory bridge: `session_id -> SessionConn`. Stateless across restarts
-/// (a dropped relay just forces hosts + clients to reconnect). Cloneable handle
-/// semantics are provided by wrapping in an `Arc` at the router layer.
+/// (a dropped relay just forces hosts + clients to reconnect).
 #[derive(Default)]
 pub struct Relay {
     sessions: Mutex<HashMap<String, SessionConn>>,
@@ -81,13 +127,13 @@ impl Relay {
     }
 
     /// Register `session` as hosted by `owner`, returning the receiver the host's
-    /// writer task drains (frames bound for the host). Refuses (`None`) if a host
-    /// is already registered for that session — one host per session.
+    /// writer task drains ([`HostEvent`]s bound for the host). Refuses (`None`) if
+    /// a host is already registered — one host per session.
     pub fn register_host(
         &self,
         session: &str,
         owner: &str,
-    ) -> Option<mpsc::UnboundedReceiver<Frame>> {
+    ) -> Option<mpsc::UnboundedReceiver<HostEvent>> {
         let mut sessions = self.sessions.lock().unwrap();
         if sessions.contains_key(session) {
             return None;
@@ -104,16 +150,17 @@ impl Relay {
         Some(host_rx)
     }
 
-    /// Tear down a session when its host disconnects: drop the session entry so
-    /// every attached client's sender closes (ending their writer tasks) and a
-    /// later attach sees `NoHost`.
+    /// Tear down a session when its host disconnects: drop the entry so every
+    /// attached client's sender closes (ending their writer tasks) and a later
+    /// attach sees `NoHost`.
     pub fn drop_host(&self, session: &str) {
         self.sessions.lock().unwrap().remove(session);
     }
 
     /// Attach a client to `session` (owned by `owner`), returning `(client_id,
-    /// receiver)` — the receiver feeds the client's writer task. Refuses if no
-    /// host is live (`NoHost`) or the owner doesn't match (`Forbidden`).
+    /// receiver)` — the receiver feeds the client's writer task. Also signals the
+    /// host with [`HostEvent::Join`] so it opens this client's subscription.
+    /// Refuses if no host is live (`NoHost`) or the owner mismatches (`Forbidden`).
     pub fn attach_client(
         &self,
         session: &str,
@@ -127,32 +174,49 @@ impl Relay {
         let id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
         let (client_tx, client_rx) = mpsc::unbounded_channel();
         conn.clients.insert(id, client_tx);
+        // Tell the host a client joined (best-effort; host may be mid-teardown).
+        let _ = conn.host_tx.send(HostEvent::Join { client: id });
         Ok((id, client_rx))
     }
 
-    /// Detach a client (its socket closed). Idempotent.
+    /// Detach a client (its socket closed) and signal the host with
+    /// [`HostEvent::Leave`] so it tears down that client's subscription.
+    /// Idempotent.
     pub fn detach_client(&self, session: &str, client_id: u64) {
         if let Some(conn) = self.sessions.lock().unwrap().get_mut(session) {
-            conn.clients.remove(&client_id);
+            if conn.clients.remove(&client_id).is_some() {
+                let _ = conn.host_tx.send(HostEvent::Leave { client: client_id });
+            }
         }
     }
 
-    /// Route a frame the HOST sent: fan it out to every attached client. Drops
-    /// senders that have closed. No-op if the session is gone.
-    pub fn from_host(&self, session: &str, frame: Frame) {
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(conn) = sessions.get_mut(session) {
-            conn.clients.retain(|_, tx| tx.send(frame.clone()).is_ok());
-        }
-    }
-
-    /// Route a frame a CLIENT sent: forward it to the single host. Returns false
-    /// if there's no live host (the client should disconnect).
-    pub fn from_client(&self, session: &str, frame: Frame) -> bool {
+    /// Forward a frame a client sent to the host as [`HostEvent::Msg`]. Returns
+    /// false if there's no live host (the client should disconnect). Binary client
+    /// frames are dropped — review commands are text.
+    pub fn from_client(&self, session: &str, client_id: u64, frame: Frame) -> bool {
+        let Frame::Text(data) = frame else {
+            return true; // ignore non-text client frames
+        };
         let sessions = self.sessions.lock().unwrap();
         match sessions.get(session) {
-            Some(conn) => conn.host_tx.send(frame).is_ok(),
+            Some(conn) => conn
+                .host_tx
+                .send(HostEvent::Msg {
+                    client: client_id,
+                    data,
+                })
+                .is_ok(),
             None => false,
+        }
+    }
+
+    /// Route a frame the host addressed to one client. No-op if that client (or
+    /// the session) is gone.
+    pub fn to_client(&self, session: &str, client_id: u64, frame: Frame) {
+        if let Some(conn) = self.sessions.lock().unwrap().get(session) {
+            if let Some(tx) = conn.clients.get(&client_id) {
+                let _ = tx.send(frame);
+            }
         }
     }
 
@@ -182,8 +246,7 @@ pub trait RelayAuth: Send + Sync {
 }
 
 /// A development verifier that treats the token AS the account id. Only for local
-/// runs + tests — never wire this in production (it trusts any caller). Enable
-/// deliberately; the Firebase verifier replaces it.
+/// runs + tests — never wire this in production (it trusts any caller).
 pub struct DevTokenAuth;
 
 impl RelayAuth for DevTokenAuth {
@@ -222,26 +285,8 @@ pub fn relay_router(state: RelayState) -> Router {
         .with_state(state)
 }
 
-/// Convert a relay [`Frame`] into an axum WS message.
-fn into_msg(frame: Frame) -> Message {
-    match frame {
-        Frame::Text(t) => Message::Text(t.into()),
-        Frame::Binary(b) => Message::Binary(b.into()),
-    }
-}
-
-/// Convert an incoming WS message into a relay [`Frame`], or `None` for control
-/// frames (ping/pong/close) the relay doesn't shuttle.
-fn from_msg(msg: Message) -> Option<Frame> {
-    match msg {
-        Message::Text(t) => Some(Frame::Text(t.to_string())),
-        Message::Binary(b) => Some(Frame::Binary(b.to_vec())),
-        _ => None,
-    }
-}
-
 /// `GET /relay/host/{session}` — the host parks its outbound socket here.
-#[cfg(not(tarpaulin_include))] // WS upgrade + socket loop — exercised via the Relay hub tests
+#[cfg(not(tarpaulin_include))] // WS upgrade + socket loop — the Relay hub is unit-tested
 async fn host_ws(
     Path(session): Path<String>,
     Query(q): Query<RelayQuery>,
@@ -255,7 +300,7 @@ async fn host_ws(
 }
 
 /// `GET /relay/client/{session}` — a client attaches to a live session.
-#[cfg(not(tarpaulin_include))] // WS upgrade + socket loop — exercised via the Relay hub tests
+#[cfg(not(tarpaulin_include))] // WS upgrade + socket loop — the Relay hub is unit-tested
 async fn client_ws(
     Path(session): Path<String>,
     Query(q): Query<RelayQuery>,
@@ -268,8 +313,9 @@ async fn client_ws(
     ws.on_upgrade(move |socket| run_client(state.relay, session, owner, socket))
 }
 
-/// Drive a host socket: register it, fan its frames out to clients, and feed it
-/// frames clients send. Tears the session down when the socket closes.
+/// Drive a host socket: register it, deliver client events as JSON, and route the
+/// host's `to{client,data}` commands to the addressed client. Tears the session
+/// down when the socket closes.
 #[cfg(not(tarpaulin_include))] // socket I/O loop
 async fn run_host(relay: Arc<Relay>, session: String, owner: String, socket: WebSocket) {
     let Some(mut host_rx) = relay.register_host(&session, &owner) else {
@@ -277,8 +323,12 @@ async fn run_host(relay: Arc<Relay>, session: String, owner: String, socket: Web
     };
     let (mut sink, mut stream) = socket.split();
     let mut writer = tokio::spawn(async move {
-        while let Some(frame) = host_rx.recv().await {
-            if sink.send(into_msg(frame)).await.is_err() {
+        while let Some(event) = host_rx.recv().await {
+            let json = match serde_json::to_string(&event) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            if sink.send(Message::Text(json.into())).await.is_err() {
                 break;
             }
         }
@@ -286,22 +336,24 @@ async fn run_host(relay: Arc<Relay>, session: String, owner: String, socket: Web
     loop {
         tokio::select! {
             incoming = stream.next() => match incoming {
-                Some(Ok(msg)) => {
-                    if let Some(frame) = from_msg(msg) {
-                        relay.from_host(&session, frame);
+                Some(Ok(Message::Text(t))) => {
+                    if let Ok(HostCmd::To { client, data }) = serde_json::from_str::<HostCmd>(&t) {
+                        relay.to_client(&session, client, Frame::Text(data));
                     }
                 }
-                _ => break, // socket closed/errored
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => { /* host speaks JSON envelopes only */ }
             },
-            _ = &mut writer => break, // writer ended (rx closed)
+            _ = &mut writer => break,
         }
     }
     relay.drop_host(&session);
     writer.abort();
 }
 
-/// Drive a client socket: attach it, forward its frames to the host, and write
-/// host frames back. Detaches on close.
+/// Drive a client socket: attach it (signalling the host to open its
+/// subscription), forward its frames to the host as commands, and write the
+/// host's addressed frames back. Detaches on close.
 #[cfg(not(tarpaulin_include))] // socket I/O loop
 async fn run_client(relay: Arc<Relay>, session: String, owner: String, socket: WebSocket) {
     let (id, mut client_rx) = match relay.attach_client(&session, &owner) {
@@ -311,7 +363,11 @@ async fn run_client(relay: Arc<Relay>, session: String, owner: String, socket: W
     let (mut sink, mut stream) = socket.split();
     let mut writer = tokio::spawn(async move {
         while let Some(frame) = client_rx.recv().await {
-            if sink.send(into_msg(frame)).await.is_err() {
+            let msg = match frame {
+                Frame::Text(t) => Message::Text(t.into()),
+                Frame::Binary(b) => Message::Binary(b.into()),
+            };
+            if sink.send(msg).await.is_err() {
                 break;
             }
         }
@@ -319,15 +375,13 @@ async fn run_client(relay: Arc<Relay>, session: String, owner: String, socket: W
     loop {
         tokio::select! {
             incoming = stream.next() => match incoming {
-                Some(Ok(msg)) => {
-                    if let Some(frame) = from_msg(msg) {
-                        // Host gone → stop pumping this client.
-                        if !relay.from_client(&session, frame) {
-                            break;
-                        }
+                Some(Ok(Message::Text(t))) => {
+                    if !relay.from_client(&session, id, Frame::Text(t.to_string())) {
+                        break; // host gone
                     }
                 }
-                _ => break,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => { /* clients send text commands */ }
             },
             _ = &mut writer => break,
         }
@@ -348,58 +402,65 @@ mod tests {
     }
 
     #[test]
-    fn host_registers_once_and_clients_attach_to_their_owner() {
+    fn host_registers_once_and_attach_signals_join() {
         let relay = Relay::new();
         assert!(!relay.has_host("s1"));
 
-        let _host_rx = relay.register_host("s1", "acct-a").expect("first host registers");
+        let mut host_rx = relay.register_host("s1", "acct-a").expect("first host registers");
         assert!(relay.has_host("s1"));
-        // One host per session.
-        assert!(relay.register_host("s1", "acct-a").is_none());
+        assert!(relay.register_host("s1", "acct-a").is_none(), "one host per session");
 
-        // Owner match attaches; mismatch is forbidden.
+        // Owner match attaches AND the host is told a client joined.
         let (cid, _crx) = relay.attach_client("s1", "acct-a").expect("owner attaches");
+        assert_eq!(host_rx.try_recv().unwrap(), HostEvent::Join { client: cid });
         assert_eq!(relay.client_count("s1"), 1);
+
+        // Mismatched owner is forbidden; absent session is NoHost.
         assert!(matches!(
             relay.attach_client("s1", "acct-b"),
             Err(AttachError::Forbidden)
         ));
-
-        // No host → NoHost.
         assert!(matches!(
             relay.attach_client("ghost", "acct-a"),
             Err(AttachError::NoHost)
         ));
 
+        // Detach signals leave.
         relay.detach_client("s1", cid);
+        assert_eq!(host_rx.try_recv().unwrap(), HostEvent::Leave { client: cid });
         assert_eq!(relay.client_count("s1"), 0);
     }
 
     #[test]
-    fn host_frames_fan_out_to_all_clients() {
+    fn client_frames_reach_the_host_tagged_with_the_client_id() {
         let relay = Relay::new();
-        let _host_rx = relay.register_host("s", "acct").unwrap();
-        let (_c1, mut rx1) = relay.attach_client("s", "acct").unwrap();
-        let (_c2, mut rx2) = relay.attach_client("s", "acct").unwrap();
+        let mut host_rx = relay.register_host("s", "acct").unwrap();
+        let (cid, _crx) = relay.attach_client("s", "acct").unwrap();
+        assert_eq!(host_rx.try_recv().unwrap(), HostEvent::Join { client: cid });
 
-        relay.from_host("s", Frame::Text("hello".into()));
+        assert!(relay.from_client("s", cid, Frame::Text("answer".into())));
+        assert_eq!(
+            host_rx.try_recv().unwrap(),
+            HostEvent::Msg { client: cid, data: "answer".into() }
+        );
 
-        assert_eq!(rx1.try_recv().unwrap(), Frame::Text("hello".into()));
-        assert_eq!(rx2.try_recv().unwrap(), Frame::Text("hello".into()));
+        // No host → nowhere to go.
+        relay.drop_host("s");
+        assert!(!relay.from_client("s", cid, Frame::Text("late".into())));
     }
 
     #[test]
-    fn client_frames_forward_to_the_host() {
+    fn host_routes_a_frame_to_one_client_only() {
         let relay = Relay::new();
-        let mut host_rx = relay.register_host("s", "acct").unwrap();
-        let (_c, _crx) = relay.attach_client("s", "acct").unwrap();
+        let _host_rx = relay.register_host("s", "acct").unwrap();
+        let (c1, mut rx1) = relay.attach_client("s", "acct").unwrap();
+        let (_c2, mut rx2) = relay.attach_client("s", "acct").unwrap();
 
-        assert!(relay.from_client("s", Frame::Text("answer".into())));
-        assert_eq!(host_rx.try_recv().unwrap(), Frame::Text("answer".into()));
-
-        // After the host drops, a client frame has nowhere to go.
-        relay.drop_host("s");
-        assert!(!relay.from_client("s", Frame::Text("late".into())));
+        // A frame addressed to c1 reaches ONLY c1 — each client has its own
+        // subscription (snapshot-on-connect), not a broadcast.
+        relay.to_client("s", c1, Frame::Text("snapshot-for-1".into()));
+        assert_eq!(rx1.try_recv().unwrap(), Frame::Text("snapshot-for-1".into()));
+        assert!(rx2.try_recv().is_err());
     }
 
     #[test]
@@ -409,15 +470,15 @@ mod tests {
         let (_c, mut crx) = relay.attach_client("s", "acct").unwrap();
 
         relay.drop_host("s");
-        // The session (and thus the client's sender) is gone → recv ends.
         assert!(crx.try_recv().is_err());
         assert!(!relay.has_host("s"));
     }
 
-    // End-to-end over real sockets: prove the WS handlers + bridge, not just the
-    // hub. Host parks, client attaches, a frame crosses each way.
+    // End-to-end over real sockets: a client attach signals join to the host, the
+    // host addresses a snapshot back to that client, and a client command reaches
+    // the host tagged with the id.
     #[tokio::test]
-    async fn bridges_frames_end_to_end_over_websockets() {
+    async fn bridges_per_client_end_to_end_over_websockets() {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message as T;
 
@@ -429,12 +490,10 @@ mod tests {
             axum::serve(listener, relay_router(state)).await.unwrap();
         });
 
-        // Host parks its outbound socket.
         let (mut host, _) =
             tokio_tungstenite::connect_async(format!("ws://{addr}/relay/host/s1?token=acct"))
                 .await
                 .expect("host connects");
-        // Wait for the host's on_upgrade to actually register before attaching.
         for _ in 0..100 {
             if relay.has_host("s1") {
                 break;
@@ -448,15 +507,29 @@ mod tests {
                 .await
                 .expect("client attaches");
 
-        // host → client
-        host.send(T::Text("from-host".into())).await.unwrap();
-        let got = client.next().await.unwrap().unwrap();
-        assert_eq!(got.into_text().unwrap().as_str(), "from-host");
+        // The host receives a join event carrying the client id.
+        let join = host.next().await.unwrap().unwrap();
+        let evt: HostEvent = serde_json::from_str(join.to_text().unwrap()).unwrap();
+        let client_id = match evt {
+            HostEvent::Join { client } => client,
+            other => panic!("expected join, got {other:?}"),
+        };
 
-        // client → host
-        client.send(T::Text("from-client".into())).await.unwrap();
-        let got = host.next().await.unwrap().unwrap();
-        assert_eq!(got.into_text().unwrap().as_str(), "from-client");
+        // Host addresses a snapshot back to that client → only that client gets it.
+        let to = serde_json::to_string(&HostCmd::To {
+            client: client_id,
+            data: "snapshot".into(),
+        })
+        .unwrap();
+        host.send(T::Text(to.into())).await.unwrap();
+        let got = client.next().await.unwrap().unwrap();
+        assert_eq!(got.into_text().unwrap().as_str(), "snapshot");
+
+        // A client command reaches the host as a tagged msg.
+        client.send(T::Text("advance".into())).await.unwrap();
+        let msg = host.next().await.unwrap().unwrap();
+        let evt: HostEvent = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(evt, HostEvent::Msg { client: client_id, data: "advance".into() });
     }
 
     #[tokio::test]
@@ -480,8 +553,6 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
 
-        // A different owner upgrades, but run_client refuses the attach and closes
-        // the socket immediately — it never joins the session.
         let (_intruder, _) =
             tokio_tungstenite::connect_async(format!("ws://{addr}/relay/client/s1?token=owner-b"))
                 .await
