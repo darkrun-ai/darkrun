@@ -139,7 +139,7 @@ fn NoTarget() -> Element {
 /// every live update. `commands` forwards operator actions to the connection.
 fn session_view(payload: &ReviewSessionPayload, commands: Coroutine<ClientCommand>) -> Element {
     let run = payload.run_slug.clone().unwrap_or_else(|| "run".to_string());
-    let phase = active_phase(&payload);
+    let phase = active_phase(payload);
 
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:20px;",

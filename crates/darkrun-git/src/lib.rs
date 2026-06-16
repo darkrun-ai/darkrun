@@ -57,7 +57,7 @@ pub fn project_root_of(path: &std::path::Path) -> std::path::PathBuf {
         // (`…/worktrees/<name>/..`) — which registered every worktree as its
         // own project instead of grouping it under the repo.
         let git_dir = normalize_dots(repo.git_dir());
-        let common = normalize_dots(repo.common_dir().as_ref());
+        let common = normalize_dots(repo.common_dir());
         if git_dir != common {
             if let Some(main) = common.parent() {
                 return main.to_path_buf();

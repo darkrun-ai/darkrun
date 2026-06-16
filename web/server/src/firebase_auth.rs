@@ -91,7 +91,7 @@ impl FirebaseTokenAuth {
     fn validation(&self) -> Validation {
         let mut v = Validation::new(self.algorithm);
         v.set_issuer(&[self.issuer()]);
-        v.set_audience(&[self.project_id.clone()]);
+        v.set_audience(std::slice::from_ref(&self.project_id));
         v.validate_exp = true;
         v
     }

@@ -682,9 +682,7 @@ fn StatuslineDemo() -> Element {
     // toggled by the shared `.dr-themed-*` classes.
     let header_dark = cc_header_html(false);
     let header_light = cc_header_html(true);
-    let head = format!(
-        "display:flex;align-items:center;gap:7px;margin-bottom:10px;",
-    );
+    let head = "display:flex;align-items:center;gap:7px;margin-bottom:10px;".to_string();
     let dot = |c: &str| format!("width:10px;height:10px;border-radius:50%;background:{c};");
     let cap = format!(
         "display:flex;align-items:baseline;gap:10px;margin-top:10px;\

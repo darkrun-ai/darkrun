@@ -124,6 +124,25 @@ fn main() {
     dioxus::LaunchBuilder::desktop().with_cfg(cfg).launch(app);
 }
 
+/// Top-level app: reads the launch config from the environment and opens the
+/// full desktop **shell** (toolbar + sidebar + main pane) in every case.
+///
+/// When the engine launches us **pinned** (`DARKRUN_SESSION_ID` set), we open
+/// that run *inside* the shell — selected in the sidebar, its live Review in the
+/// main pane — rather than a bare, chrome-less Review. Unpinned, the shell opens
+/// on the project/run browser. Either way the user always gets the same native
+/// shell (sidebar of projects + runs, Mine/All, search, theme control).
+fn app() -> Element {
+    let (cfg, pinned) = ConnConfig::from_env_pinned();
+    // Pinned → pre-select that run so it opens immediately; unpinned → no
+    // pre-selection (the shell's welcome / browser).
+    let initial_session = pinned.then(|| cfg.session_id.clone());
+    rsx! {
+        style { "{darkrun_ui::tokens::THEME_CSS}" }
+        home::HomeApp { cfg, project_path: None, initial_session }
+    }
+}
+
 #[cfg(test)]
 mod stale_bundle_tests {
     use super::dev_bundle_sibling;
@@ -151,24 +170,5 @@ mod stale_bundle_tests {
             Path::new("/Applications/darkrun-desktop.app/Contents/MacOS/darkrun-desktop");
         assert_eq!(dev_bundle_sibling(dist), None);
         assert_eq!(dev_bundle_sibling(Path::new("/ws/target/debug/darkrun-desktop")), None);
-    }
-}
-
-/// Top-level app: reads the launch config from the environment and opens the
-/// full desktop **shell** (toolbar + sidebar + main pane) in every case.
-///
-/// When the engine launches us **pinned** (`DARKRUN_SESSION_ID` set), we open
-/// that run *inside* the shell — selected in the sidebar, its live Review in the
-/// main pane — rather than a bare, chrome-less Review. Unpinned, the shell opens
-/// on the project/run browser. Either way the user always gets the same native
-/// shell (sidebar of projects + runs, Mine/All, search, theme control).
-fn app() -> Element {
-    let (cfg, pinned) = ConnConfig::from_env_pinned();
-    // Pinned → pre-select that run so it opens immediately; unpinned → no
-    // pre-selection (the shell's welcome / browser).
-    let initial_session = pinned.then(|| cfg.session_id.clone());
-    rsx! {
-        style { "{darkrun_ui::tokens::THEME_CSS}" }
-        home::HomeApp { cfg, project_path: None, initial_session }
     }
 }

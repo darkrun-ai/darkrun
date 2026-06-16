@@ -4452,8 +4452,7 @@ mod handler_smoke {
         let store = s.store();
         run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
         // A unit that witnessed `frame/in.md` as one of its inputs.
-        let mut fm = UnitFrontmatter::default();
-        fm.station = Some("frame".into());
+        let mut fm = UnitFrontmatter { station: Some("frame".into()), ..Default::default() };
         fm.input_witnesses.insert("frame/in.md".into(), "oldhash".into());
         store.write_unit("r", &Unit { slug: "u".into(), frontmatter: fm, title: "u".into(), body: String::new() }).unwrap();
         // The artifact exists on disk so it re-witnesses to its current content.

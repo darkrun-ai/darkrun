@@ -4194,7 +4194,7 @@ fn every_tick_refreshes_the_live_session_payload() {
             other => panic!("expected a review session for the run, got {other:?}"),
         }
     };
-    let first = phase_of(&reg);
+    let first = phase_of(reg);
     assert!(!first.is_empty(), "tick 1 published a live phase");
 
     // Subscribe to the broadcast channel, then tick again: the refreshed
@@ -4206,7 +4206,7 @@ fn every_tick_refreshes_the_live_session_payload() {
     // And again — every tick pushes, continuously, gate or not.
     next(&server, "r");
     rx.try_recv().expect("the next tick pushed another frame");
-    let _ = phase_of(&reg); // payload stays well-formed across refreshes
+    let _ = phase_of(reg); // payload stays well-formed across refreshes
     let _ = first;
 }
 
@@ -6341,9 +6341,8 @@ fn a_raised_question_surfaces_on_the_run_channel() {
     // The focus pointer names the run (a review) so the home navigates there.
     let focus = reg.get("current").expect("current focus pointer");
     assert_eq!(focus.session_type(), "review");
-    assert_eq!(
+    assert!(
         focus.interactive().is_none(),
-        true,
         "the focus pointer is a review, not the interactive payload"
     );
 }

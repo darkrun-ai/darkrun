@@ -172,6 +172,122 @@ pub fn external_refs(
     Ok(run.frontmatter.external_refs)
 }
 
+/// Create a COMPOSITE run: a run spanning two or more factories with sync
+/// points (the predecessor's composite intent). A composite run is NOT
+/// single-walkable — the cursor surfaces its topology instead of walking, and
+/// each part is coordinated as its own work with progress stamped on the
+/// `composite_state` ledger.
+pub fn composite_start(
+    store: &StateStore,
+    slug: &str,
+    title: Option<String>,
+    parts: Vec<darkrun_core::domain::CompositePart>,
+    sync: Vec<darkrun_core::domain::SyncPoint>,
+) -> Result<darkrun_core::domain::Run> {
+    use darkrun_core::domain::{Run, RunFrontmatter};
+    if slug.trim().is_empty() {
+        return Err(McpError::InvalidInput("run slug must not be empty".into()));
+    }
+    if store.read_run(slug).is_ok() {
+        return Err(McpError::InvalidInput(format!("run '{slug}' already exists")));
+    }
+    if parts.len() < 2 {
+        return Err(McpError::InvalidInput(
+            "a composite run needs at least TWO parts — for one factory, use a normal run"
+                .into(),
+        ));
+    }
+    // Every part's factory must resolve, and its station subset must exist in
+    // that factory's line.
+    let repo_root = crate::position::cascade_repo_root(store);
+    for part in &parts {
+        let Some(f) = crate::factory::resolve_factory_at(&repo_root, &part.factory) else {
+            return Err(McpError::UnknownFactory(part.factory.clone()));
+        };
+        for st in &part.stations {
+            if f.station(st).is_none() {
+                return Err(McpError::InvalidInput(format!(
+                    "part '{}' names unknown station '{st}'",
+                    part.factory
+                )));
+            }
+        }
+    }
+    // Sync handles must reference declared parts (factory:station form).
+    let handle_ok = |h: &str| {
+        let Some((f, st)) = h.split_once(':') else { return false };
+        parts.iter().any(|p| {
+            p.factory == f && (p.stations.is_empty() || p.stations.iter().any(|s| s == st))
+        })
+    };
+    for sp in &sync {
+        for h in sp.wait.iter().chain(sp.then.iter()) {
+            if !handle_ok(h) {
+                return Err(McpError::InvalidInput(format!(
+                    "sync handle '{h}' does not match any declared part (use factory:station)"
+                )));
+            }
+        }
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let resolved_title = title.clone().unwrap_or_else(|| slug.to_string());
+    let run = Run {
+        slug: slug.to_string(),
+        frontmatter: RunFrontmatter {
+            title,
+            factory: "composite".into(),
+            status: Status::Active,
+            started_at: Some(now),
+            created_by: darkrun_git::current_identity_email(&repo_root).ok().flatten(),
+            composite: Some(parts),
+            sync,
+            ..Default::default()
+        },
+        title: resolved_title.clone(),
+        body: format!("# {resolved_title}\n"),
+    };
+    store.write_run(&run)?;
+    let _ = crate::commit::commit_state(store, &format!("darkrun: create composite run {slug}"));
+    crate::events::emit(
+        store,
+        slug,
+        "darkrun.run.created",
+        serde_json::json!({ "factory": "composite" }),
+    );
+    Ok(run)
+}
+
+/// Stamp one `factory:station` handle on a composite run's coordination
+/// ledger (`composite_state`) — e.g. `started`, `completed`, or a free-form
+/// progress note. Re-stamping a handle updates it.
+pub fn composite_stamp(
+    store: &StateStore,
+    slug: &str,
+    handle: &str,
+    note: &str,
+) -> Result<darkrun_core::domain::Run> {
+    let mut run = store.read_run(slug)?;
+    if run.frontmatter.composite.is_none() {
+        return Err(McpError::InvalidInput(format!(
+            "run '{slug}' is not composite — there is no ledger to stamp"
+        )));
+    }
+    if handle.trim().is_empty() || note.trim().is_empty() {
+        return Err(McpError::InvalidInput(
+            "composite stamp needs a handle (factory:station) and a note".into(),
+        ));
+    }
+    run.frontmatter
+        .composite_state
+        .insert(handle.to_string(), note.to_string());
+    store.write_run(&run)?;
+    let _ = crate::commit::commit_state(
+        store,
+        &format!("darkrun: composite stamp {handle} on {slug}"),
+    );
+    Ok(run)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,120 +555,4 @@ mod tests {
         assert!(composite_stamp(&store, "plain", "software:build", "x").is_err());
     }
 
-}
-
-/// Create a COMPOSITE run: a run spanning two or more factories with sync
-/// points (the predecessor's composite intent). A composite run is NOT
-/// single-walkable — the cursor surfaces its topology instead of walking, and
-/// each part is coordinated as its own work with progress stamped on the
-/// `composite_state` ledger.
-pub fn composite_start(
-    store: &StateStore,
-    slug: &str,
-    title: Option<String>,
-    parts: Vec<darkrun_core::domain::CompositePart>,
-    sync: Vec<darkrun_core::domain::SyncPoint>,
-) -> Result<darkrun_core::domain::Run> {
-    use darkrun_core::domain::{Run, RunFrontmatter};
-    if slug.trim().is_empty() {
-        return Err(McpError::InvalidInput("run slug must not be empty".into()));
-    }
-    if store.read_run(slug).is_ok() {
-        return Err(McpError::InvalidInput(format!("run '{slug}' already exists")));
-    }
-    if parts.len() < 2 {
-        return Err(McpError::InvalidInput(
-            "a composite run needs at least TWO parts — for one factory, use a normal run"
-                .into(),
-        ));
-    }
-    // Every part's factory must resolve, and its station subset must exist in
-    // that factory's line.
-    let repo_root = crate::position::cascade_repo_root(store);
-    for part in &parts {
-        let Some(f) = crate::factory::resolve_factory_at(&repo_root, &part.factory) else {
-            return Err(McpError::UnknownFactory(part.factory.clone()));
-        };
-        for st in &part.stations {
-            if f.station(st).is_none() {
-                return Err(McpError::InvalidInput(format!(
-                    "part '{}' names unknown station '{st}'",
-                    part.factory
-                )));
-            }
-        }
-    }
-    // Sync handles must reference declared parts (factory:station form).
-    let handle_ok = |h: &str| {
-        let Some((f, st)) = h.split_once(':') else { return false };
-        parts.iter().any(|p| {
-            p.factory == f && (p.stations.is_empty() || p.stations.iter().any(|s| s == st))
-        })
-    };
-    for sp in &sync {
-        for h in sp.wait.iter().chain(sp.then.iter()) {
-            if !handle_ok(h) {
-                return Err(McpError::InvalidInput(format!(
-                    "sync handle '{h}' does not match any declared part (use factory:station)"
-                )));
-            }
-        }
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    let resolved_title = title.clone().unwrap_or_else(|| slug.to_string());
-    let run = Run {
-        slug: slug.to_string(),
-        frontmatter: RunFrontmatter {
-            title,
-            factory: "composite".into(),
-            status: Status::Active,
-            started_at: Some(now),
-            created_by: darkrun_git::current_identity_email(&repo_root).ok().flatten(),
-            composite: Some(parts),
-            sync,
-            ..Default::default()
-        },
-        title: resolved_title.clone(),
-        body: format!("# {resolved_title}\n"),
-    };
-    store.write_run(&run)?;
-    let _ = crate::commit::commit_state(store, &format!("darkrun: create composite run {slug}"));
-    crate::events::emit(
-        store,
-        slug,
-        "darkrun.run.created",
-        serde_json::json!({ "factory": "composite" }),
-    );
-    Ok(run)
-}
-
-/// Stamp one `factory:station` handle on a composite run's coordination
-/// ledger (`composite_state`) — e.g. `started`, `completed`, or a free-form
-/// progress note. Re-stamping a handle updates it.
-pub fn composite_stamp(
-    store: &StateStore,
-    slug: &str,
-    handle: &str,
-    note: &str,
-) -> Result<darkrun_core::domain::Run> {
-    let mut run = store.read_run(slug)?;
-    if run.frontmatter.composite.is_none() {
-        return Err(McpError::InvalidInput(format!(
-            "run '{slug}' is not composite — there is no ledger to stamp"
-        )));
-    }
-    if handle.trim().is_empty() || note.trim().is_empty() {
-        return Err(McpError::InvalidInput(
-            "composite stamp needs a handle (factory:station) and a note".into(),
-        ));
-    }
-    run.frontmatter
-        .composite_state
-        .insert(handle.to_string(), note.to_string());
-    store.write_run(&run)?;
-    let _ = crate::commit::commit_state(
-        store,
-        &format!("darkrun: composite stamp {handle} on {slug}"),
-    );
-    Ok(run)
 }

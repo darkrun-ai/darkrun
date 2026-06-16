@@ -197,6 +197,60 @@ fn json_string(s: &str) -> String {
     out
 }
 
+// ── JSON-LD structured data (schema.org) ────────────────────────────────────
+
+/// The site-level JSON-LD: an `Organization` + a `WebSite` carrying a
+/// `SearchAction` (the docs search). Embedded statically in `index.html` and
+/// kept in sync by a unit test, so the crawler-facing block and the builder
+/// can't drift apart.
+pub fn json_ld_site() -> String {
+    serde_json::json!({
+        "@context": "https://schema.org",
+        "@graph": [
+            {
+                "@type": "Organization",
+                "@id": format!("{SITE_URL}/#org"),
+                "name": SITE_NAME,
+                "url": SITE_URL,
+                "logo": format!("{SITE_URL}/assets/favicon.png"),
+            },
+            {
+                "@type": "WebSite",
+                "@id": format!("{SITE_URL}/#website"),
+                "name": SITE_NAME,
+                "description": SITE_DESCRIPTION,
+                "url": SITE_URL,
+                "publisher": { "@id": format!("{SITE_URL}/#org") },
+                "potentialAction": {
+                    "@type": "SearchAction",
+                    "target": format!("{SITE_URL}/docs?q={{search_term_string}}"),
+                    "query-input": "required name=search_term_string",
+                },
+            },
+        ],
+    })
+    .to_string()
+}
+
+/// Per-document JSON-LD: a `BlogPosting` for dated posts, a `TechArticle` for
+/// docs/concepts/guides. Injected into `<head>` when the page mounts.
+pub fn json_ld_article(doc: &crate::content::Doc, path: &str) -> String {
+    let kind = if doc.date.is_empty() { "TechArticle" } else { "BlogPosting" };
+    let mut obj = serde_json::json!({
+        "@context": "https://schema.org",
+        "@type": kind,
+        "headline": doc.title,
+        "description": doc.summary,
+        "url": format!("{SITE_URL}{path}"),
+        "author": { "@id": format!("{SITE_URL}/#org") },
+        "publisher": { "@id": format!("{SITE_URL}/#org") },
+    });
+    if !doc.date.is_empty() {
+        obj["datePublished"] = serde_json::Value::String(doc.date.to_string());
+    }
+    obj.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,58 +440,4 @@ mod tests {
         assert!(atom.contains("T00:00:00Z"));
     }
 
-}
-
-// ── JSON-LD structured data (schema.org) ────────────────────────────────────
-
-/// The site-level JSON-LD: an `Organization` + a `WebSite` carrying a
-/// `SearchAction` (the docs search). Embedded statically in `index.html` and
-/// kept in sync by a unit test, so the crawler-facing block and the builder
-/// can't drift apart.
-pub fn json_ld_site() -> String {
-    serde_json::json!({
-        "@context": "https://schema.org",
-        "@graph": [
-            {
-                "@type": "Organization",
-                "@id": format!("{SITE_URL}/#org"),
-                "name": SITE_NAME,
-                "url": SITE_URL,
-                "logo": format!("{SITE_URL}/assets/favicon.png"),
-            },
-            {
-                "@type": "WebSite",
-                "@id": format!("{SITE_URL}/#website"),
-                "name": SITE_NAME,
-                "description": SITE_DESCRIPTION,
-                "url": SITE_URL,
-                "publisher": { "@id": format!("{SITE_URL}/#org") },
-                "potentialAction": {
-                    "@type": "SearchAction",
-                    "target": format!("{SITE_URL}/docs?q={{search_term_string}}"),
-                    "query-input": "required name=search_term_string",
-                },
-            },
-        ],
-    })
-    .to_string()
-}
-
-/// Per-document JSON-LD: a `BlogPosting` for dated posts, a `TechArticle` for
-/// docs/concepts/guides. Injected into `<head>` when the page mounts.
-pub fn json_ld_article(doc: &crate::content::Doc, path: &str) -> String {
-    let kind = if doc.date.is_empty() { "TechArticle" } else { "BlogPosting" };
-    let mut obj = serde_json::json!({
-        "@context": "https://schema.org",
-        "@type": kind,
-        "headline": doc.title,
-        "description": doc.summary,
-        "url": format!("{SITE_URL}{path}"),
-        "author": { "@id": format!("{SITE_URL}/#org") },
-        "publisher": { "@id": format!("{SITE_URL}/#org") },
-    });
-    if !doc.date.is_empty() {
-        obj["datePublished"] = serde_json::Value::String(doc.date.to_string());
-    }
-    obj.to_string()
 }

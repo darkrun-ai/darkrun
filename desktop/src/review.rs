@@ -21,6 +21,10 @@
 //! (question / direction / picker / view) show a compact placeholder so an
 //! unexpected payload never blanks the screen.
 
+// Dioxus components are PascalCase by convention (the `rsx!` macro expects it);
+// clippy's non_snake_case doesn't apply to them.
+#![allow(non_snake_case)]
+
 use darkrun_api::common::{FeedbackOrigin, FeedbackStatus};
 use darkrun_api::feedback::FeedbackItem;
 use darkrun_api::session::{
@@ -61,8 +65,6 @@ enum Decision {
     /// The POST failed.
     Failed(String),
 }
-
-/// The root review component: owns the feed and renders the active payload.
 
 /// The feedback button's color rules — theme-keyed, literal colors, no custom
 /// properties. Dark keeps the soft pink-on-red-tint pair the design settled
@@ -2972,13 +2974,15 @@ mod panel_render_tests {
     fn checkpoint_section_renders_clean_and_blocked() {
         fn Clean() -> Element {
             let decision = use_signal(|| Decision::Idle);
-            let mut review = ReviewSessionPayload::default();
-            review.gate_type = Some(GateType::Ask);
-            review.gate_context = Some("Approve the build?".into());
-            review.approve_action = Some(ApproveAction {
-                label: "Ship it".into(),
-                kind: ApproveActionKind::OpenPr,
-            });
+            let review = ReviewSessionPayload {
+                gate_type: Some(GateType::Ask),
+                gate_context: Some("Approve the build?".into()),
+                approve_action: Some(ApproveAction {
+                    label: "Ship it".into(),
+                    kind: ApproveActionKind::OpenPr,
+                }),
+                ..Default::default()
+            };
             checkpoint_section(ConnConfig::from_env(), review, decision, 0)
         }
         fn Blocked() -> Element {
@@ -3118,8 +3122,10 @@ mod panel_render_tests {
         fn Overview() -> Element {
             let at = use_signal(|| None::<AnnotateTarget>);
             let io = use_signal(|| false);
-            let mut review = ReviewSessionPayload::default();
-            review.reflection = Some("Shipped the limiter; revisit the retry budget.".into());
+            let mut review = ReviewSessionPayload {
+                reflection: Some("Shipped the limiter; revisit the retry budget.".into()),
+                ..Default::default()
+            };
             let st = |station: &str, phase: Option<&str>, merged: bool| {
                 darkrun_api::session::StationStateInfo {
                     station: station.into(),

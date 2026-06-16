@@ -160,10 +160,8 @@ pub fn SearchBox() -> Element {
                     for hit in hits {
                         {
                             let path = hit.path.clone();
-                            let row = format!(
-                                "display:flex;flex-direction:column;gap:1px;padding:6px 8px;\
-                                 border-radius:6px;cursor:pointer;",
-                            );
+                            let row = "display:flex;flex-direction:column;gap:1px;padding:6px 8px;\
+                                 border-radius:6px;cursor:pointer;".to_string();
                             let kicker = format!(
                                 "font-family:{mono};font-size:10px;text-transform:uppercase;\
                                  letter-spacing:0.08em;color:{faint};",
