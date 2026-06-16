@@ -24,6 +24,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use darkrun_api::notify::gate_message;
+use darkrun_api::session::SessionPayload;
 use darkrun_api::tunnel::{ClientCommand, ClientFrame, HostCmd, HostEvent, Seq, ServerFrame};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
@@ -111,6 +113,65 @@ fn route_to_client(client: u64, frame: &ServerFrame, out: &mpsc::UnboundedSender
     }
 }
 
+/// Queue a [`HostCmd::Notify`] for the relay to fan out to the owner's remote
+/// devices — the remote half of "notify as the engine ticks".
+fn route_notify(title: &str, body: &str, out: &mpsc::UnboundedSender<Message>) {
+    let cmd = HostCmd::Notify { title: title.to_string(), body: body.to_string() };
+    if let Ok(json) = serde_json::to_string(&cmd) {
+        let _ = out.send(Message::Text(json.into()));
+    }
+}
+
+/// The `(run, station)` a local session payload is parked at an operator gate
+/// on, or `None` when it isn't. A `Review` payload with a `gate_type` set is "at
+/// a gate"; the station is the one that entered its gate without an outcome yet
+/// (empty if none is pinpointable). Pure, so the gate signal is unit-tested.
+fn gate_target(raw: &str) -> Option<(String, String)> {
+    let SessionPayload::Review(review) = serde_json::from_str::<SessionPayload>(raw).ok()? else {
+        return None;
+    };
+    review.gate_type.as_ref()?; // not parked at a gate
+    let run = review.run_slug.unwrap_or_default();
+    let station = review
+        .station_states
+        .iter()
+        .find(|s| s.gate_entered_at.is_some() && s.gate_outcome.is_none())
+        .map(|s| s.station.clone())
+        .unwrap_or_default();
+    Some((run, station))
+}
+
+/// Edge-detects gate ENTRY across a stream of local payloads, so the connector
+/// pushes once when a gate opens — not on every update while parked at it, and
+/// not on a reconnect that merely observes an already-open gate.
+#[derive(Default)]
+struct GateWatcher {
+    /// The gate target last seen (`None` = not at a gate).
+    last: Option<(String, String)>,
+    /// Whether the first payload has been observed. The first is a SILENT
+    /// baseline: a fresh (re)connection that finds a gate already open does not
+    /// re-notify — only a transition INTO a gate during the session does.
+    primed: bool,
+}
+
+impl GateWatcher {
+    /// Feed one local payload; return the `(title, body)` to push if it's a
+    /// fresh gate entry.
+    fn observe(&mut self, raw: &str) -> Option<(String, String)> {
+        let target = gate_target(raw);
+        let message = if self.primed && target.is_some() && target != self.last {
+            target
+                .as_ref()
+                .map(|(run, station)| gate_message(run, station))
+        } else {
+            None
+        };
+        self.primed = true;
+        self.last = target;
+        message
+    }
+}
+
 /// Run the host connector forever: connect to the relay, serve until the
 /// connection drops, then reconnect after the configured backoff. Returns only
 /// if the task is cancelled by the caller.
@@ -157,6 +218,11 @@ async fn serve_once(cfg: &ConnectorConfig, http: &reqwest::Client) -> Result<(),
         }
     });
 
+    // A single monitor subscription edge-detects gate entry and pushes a
+    // notification — independent of clients, so a push fires even with nobody
+    // attached (the operator is away; that's the point).
+    let monitor = spawn_gate_monitor(cfg.local_ws_url(), out_tx.clone());
+
     let mut clients: HashMap<u64, JoinHandle<()>> = HashMap::new();
     let result = read_loop(cfg, http, &mut stream, &out_tx, &mut clients).await;
 
@@ -164,9 +230,30 @@ async fn serve_once(cfg: &ConnectorConfig, http: &reqwest::Client) -> Result<(),
     for (_, handle) in clients {
         handle.abort();
     }
+    monitor.abort();
     writer.abort();
     pinger.abort();
     result
+}
+
+/// Open a dedicated monitor subscription to the local session and push a
+/// [`HostCmd::Notify`] whenever the run ENTERS an operator gate. Runs for the
+/// relay connection's lifetime, independent of any client subscriptions.
+fn spawn_gate_monitor(local_ws_url: String, out: mpsc::UnboundedSender<Message>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok((ws, _)) = connect_async(&local_ws_url).await else {
+            return;
+        };
+        let (_sink, mut stream) = ws.split();
+        let mut watcher = GateWatcher::default();
+        while let Some(Ok(msg)) = stream.next().await {
+            if let Message::Text(t) = msg {
+                if let Some((title, body)) = watcher.observe(&t) {
+                    route_notify(&title, &body, &out);
+                }
+            }
+        }
+    })
 }
 
 /// Drive the relay event stream until it ends.
@@ -322,6 +409,75 @@ mod tests {
         });
         assert_eq!(fb.path, "/api/feedback/r/build");
         assert_eq!(fb.body, Some(serde_json::json!({"body": "fix"})));
+    }
+
+    use darkrun_api::common::GateType;
+    use darkrun_api::session::{ReviewSessionPayload, StationStateInfo};
+
+    /// A serialized `SessionPayload::Review` with the given gate + parked station.
+    fn payload(gate: Option<GateType>, parked: Option<&str>) -> String {
+        let station_states = parked
+            .map(|st| {
+                vec![StationStateInfo {
+                    station: st.into(),
+                    merged_into_main: false,
+                    status: None,
+                    phase: None,
+                    started_at: None,
+                    completed_at: None,
+                    gate_entered_at: Some("t".into()),
+                    gate_outcome: None,
+                }]
+            })
+            .unwrap_or_default();
+        let review = ReviewSessionPayload {
+            session_id: "s".into(),
+            run_slug: Some("quiet-canyon".into()),
+            gate_type: gate,
+            station_states,
+            ..Default::default()
+        };
+        serde_json::to_string(&SessionPayload::Review(review)).unwrap()
+    }
+
+    #[test]
+    fn gate_target_reads_a_parked_review_only() {
+        assert_eq!(
+            gate_target(&payload(Some(GateType::Ask), Some("build"))),
+            Some(("quiet-canyon".into(), "build".into()))
+        );
+        // No gate_type → not at a gate.
+        assert_eq!(gate_target(&payload(None, Some("build"))), None);
+        // Gated but no pinpointable parked station → empty station label.
+        assert_eq!(
+            gate_target(&payload(Some(GateType::Ask), None)),
+            Some(("quiet-canyon".into(), String::new()))
+        );
+        // Non-session JSON → None.
+        assert_eq!(gate_target("not json"), None);
+    }
+
+    #[test]
+    fn gate_watcher_notifies_on_entry_only() {
+        let mut w = GateWatcher::default();
+        // The first payload is a SILENT baseline, even when already gated.
+        assert_eq!(w.observe(&payload(Some(GateType::Ask), Some("build"))), None);
+        // Staying parked at the same gate → no repeat.
+        assert_eq!(w.observe(&payload(Some(GateType::Ask), Some("build"))), None);
+        // Gate clears...
+        assert_eq!(w.observe(&payload(None, None)), None);
+        // ...then a new gate opens → notify with that station.
+        assert_eq!(
+            w.observe(&payload(Some(GateType::Ask), Some("prove"))),
+            Some(("darkrun · quiet-canyon".into(), "Prove needs your decision.".into()))
+        );
+    }
+
+    #[test]
+    fn gate_watcher_notifies_entering_from_an_ungated_baseline() {
+        let mut w = GateWatcher::default();
+        assert_eq!(w.observe(&payload(None, None)), None); // baseline: ungated
+        assert!(w.observe(&payload(Some(GateType::Ask), Some("frame"))).is_some());
     }
 
     #[test]

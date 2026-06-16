@@ -17,21 +17,11 @@ pub fn enabled() -> bool {
     std::env::var("DARKRUN_NOTIFY").ok().as_deref() == Some("1")
 }
 
-/// The notification title + body for a run reaching an operator gate. Pure, so
-/// it's unit-tested without firing anything.
+/// The notification title + body for a run reaching an operator gate. Delegates
+/// to the shared [`darkrun_api::notify::gate_message`] so the LOCAL OS
+/// notification and the REMOTE push read identically.
 pub fn gate_message(run: &str, station: &str) -> (String, String) {
-    let title = format!("darkrun · {run}");
-    let body = if station.is_empty() {
-        "A checkpoint needs your decision.".to_string()
-    } else {
-        let mut chars = station.chars();
-        let station = chars
-            .next()
-            .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
-            .unwrap_or_default();
-        format!("{station} needs your decision.")
-    };
-    (title, body)
+    darkrun_api::notify::gate_message(run, station)
 }
 
 /// Fire a native OS notification, best-effort. A no-op unless [`enabled`].
