@@ -28,7 +28,7 @@ darkrun-api = { workspace = true }
 dioxus = { version = "0.7", default-features = false, features = ["lib", "web", "router", "launch", "devtools"] }
 
 # The browser WebSocket (web-sys under the hood) for the relay client connection.
-gloo-net = { version = "0.7", default-features = false, features = ["websocket", "json"] }
+gloo-net = { version = "0.7", default-features = false, features = ["websocket", "http", "json"] }
 # Reconnect backoff timer in wasm.
 gloo-timers = { version = "0.3", default-features = false, features = ["futures"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
@@ -38,3 +38,8 @@ serde_json = { workspace = true }
 
 # Read the relay endpoint + session + token from the page URL query string.
 web-sys = { version = "0.3", features = ["Window", "Location"] }
+
+# JS interop for the Firebase Auth sign-in glue (the SDK is JavaScript).
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
