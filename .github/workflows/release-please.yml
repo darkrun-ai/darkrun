@@ -3,19 +3,22 @@ name: release-please
 # Versioning by release PR (no release-on-every-push, no auto-majors). On each
 # push to main, release-please opens/updates a "chore: release X.Y.Z" PR with the
 # computed version + changelog from the Conventional Commits since the last
-# release. Merging THAT PR cuts the release: it tags vX.Y.Z and publishes a GitHub
-# Release, which triggers release.yml to build + publish.
+# release. Merging THAT PR cuts the release: it tags vX.Y.Z and creates a DRAFT
+# GitHub Release (`draft: true` in release-please-config.json). The TAG push then
+# triggers release.yml, which builds the binaries, publishes npm, attaches the
+# tarballs to the draft, and finally un-drafts the release. The release stays a
+# draft (mutable) until then so GitHub's immutable-release rule doesn't block the
+# tarball upload.
 #
 # Versioning policy (release-please-config.json):
 #   - Pre-1.0 (0.x): breaking changes bump the MINOR, features bump the MINOR,
 #     fixes bump the PATCH. NO automatic majors — 1.0 is a deliberate human call
 #     (cut it with a `Release-As: 1.0.0` commit when the API is stable).
 #
-# Uses a PAT (RELEASE_PLEASE_TOKEN) rather than the default GITHUB_TOKEN: a
-# release/PR created by GITHUB_TOKEN does NOT trigger other workflows, so the
-# published GitHub Release would never fire `release.yml` (the npm publish). With
-# a PAT, merging the release PR publishes a Release that triggers release.yml, and
-# CI also runs on the release PR itself.
+# Uses a PAT (RELEASE_PLEASE_TOKEN) rather than the default GITHUB_TOKEN: a tag
+# pushed by GITHUB_TOKEN does NOT trigger other workflows, so release.yml would
+# never fire. With a PAT, merging the release PR pushes a tag that triggers
+# release.yml, and CI also runs on the release PR itself.
 
 on:
   push:
