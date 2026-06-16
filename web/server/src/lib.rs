@@ -24,6 +24,7 @@
 
 mod broker;
 mod config;
+mod firebase_auth;
 mod oauth_routes;
 mod relay;
 mod state;
@@ -39,6 +40,7 @@ use tower_http::services::{ServeDir, ServeFile};
 pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
 pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
+pub use firebase_auth::{FirebaseTokenAuth, FIREBASE_CERTS_URL};
 pub use relay::{
     relay_router, AttachError, DevTokenAuth, Frame, HostCmd, HostEvent, Relay, RelayAuth,
     RelayState,
@@ -88,17 +90,46 @@ pub fn build_oauth_only(state: WebState) -> Router {
 
 /// Build the remote-tunnel relay router from the environment, or `None` when no
 /// token verifier is configured — in which case the relay endpoints are NOT
-/// exposed (safe default until the Firebase verifier is wired in the auth slice).
+/// exposed (safe default).
 ///
-/// Dev/local: `DARKRUN_RELAY_DEV_AUTH=1` mounts the relay with [`DevTokenAuth`],
-/// which trusts the token as the account id. Never set this in production.
-pub fn relay_router_from_env() -> Option<Router> {
+/// Verifier selection:
+/// - `DARKRUN_FIREBASE_PROJECT=<id>` → the production [`FirebaseTokenAuth`]: it
+///   verifies a Firebase ID token (from `/darkrun:darkrun-login`) and returns the
+///   account `uid`. Google's signing certs are fetched up front and refreshed
+///   hourly in the background.
+/// - else `DARKRUN_RELAY_DEV_AUTH=1` → [`DevTokenAuth`] (token == account id),
+///   for local/dev ONLY — never set this in production.
+/// - else `None` (relay closed).
+pub async fn relay_router_from_env() -> Option<Router> {
+    if let Some(project) = std::env::var("DARKRUN_FIREBASE_PROJECT")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+    {
+        let auth = Arc::new(FirebaseTokenAuth::new(project));
+        match auth.refresh_from_google().await {
+            Ok(n) => tracing::info!(keys = n, "loaded Firebase signing certs"),
+            Err(e) => tracing::warn!(error = %e, "could not load Firebase certs at startup"),
+        }
+        // Refresh the certs hourly (they rotate); best-effort.
+        let refresher = auth.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if let Err(e) = refresher.refresh_from_google().await {
+                    tracing::warn!(error = %e, "Firebase cert refresh failed");
+                }
+            }
+        });
+        let state = RelayState::new(Arc::new(Relay::new()), auth);
+        return Some(relay_router(state));
+    }
     if std::env::var("DARKRUN_RELAY_DEV_AUTH").ok().as_deref() == Some("1") {
         let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth));
-        Some(relay_router(state))
-    } else {
-        None
+        return Some(relay_router(state));
     }
+    None
 }
 
 /// Resolve the static site directory from `DARKRUN_SITE_DIR`, falling back to
@@ -133,8 +164,8 @@ pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
     let site_dir = site_dir_from_env();
     let mut router = build_router(state, &site_dir);
     // Mount the remote-tunnel relay when a verifier is configured (else the
-    // endpoints stay absent — safe until the Firebase verifier lands).
-    if let Some(relay) = relay_router_from_env() {
+    // endpoints stay absent — safe default).
+    if let Some(relay) = relay_router_from_env().await {
         router = router.merge(relay);
         tracing::info!("relay endpoints mounted (/relay/host, /relay/client)");
     }
