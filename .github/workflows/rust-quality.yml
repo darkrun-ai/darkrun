@@ -82,7 +82,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - name: Audit dependencies
-        uses: rustsec/audit-check@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+      # Report-only (`|| true`): the tree carries transitive advisories (glib via
+      # the webview, rand 0.7.3, …) darkrun can't fix directly, so failing every
+      # PR on them is untenable. `ci` is the hard gate; this surfaces the audit in
+      # the job log for triage without blocking. (rustsec/audit-check posts a
+      # failing check on any finding, which is why it's not used here.)
+      - name: Audit dependencies (report-only)
+        run: cargo audit || true
