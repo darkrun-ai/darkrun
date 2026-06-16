@@ -239,6 +239,16 @@ impl DarkrunServer {
         // Build/refresh the run's review session (carries the open gate) so a
         // connected desktop navigates to it and a freshly-launched one finds it.
         let _ = crate::sessions::create_show(&self.sessions, &store, run);
+        // Local notification: tell the operator a gate is waiting even if the
+        // desktop window isn't focused (opt-in via DARKRUN_NOTIFY; the remote FCM
+        // push is sent separately when Firebase is configured).
+        let station = store
+            .read_state(run)
+            .ok()
+            .flatten()
+            .map(|s| s.active_station)
+            .unwrap_or_default();
+        crate::notify::on_gate(run, &station);
         // Already connected (or within the presence grace window) → the desktop's
         // home poller navigates itself; don't spawn a second window.
         if self.sessions.presence().is_present() {

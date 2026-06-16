@@ -67,6 +67,7 @@ pub mod human_write;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod meta;
+pub mod notify;
 pub mod position;
 pub mod proof;
 pub mod reflection;
