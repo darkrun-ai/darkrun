@@ -76,6 +76,9 @@ module "web" {
   external_secret_ids = local.oauth_secret_ids
   manage_www          = var.manage_www
 
+  # Relay + FCM remote push run on this Firebase project. Empty disables both.
+  firebase_project = var.firebase_project
+
   manage_domain_mapping = var.manage_domain_mapping
 
   depends_on = [google_project_service.services]

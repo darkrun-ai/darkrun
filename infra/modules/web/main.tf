@@ -46,6 +46,26 @@ locals {
     { for s in var.external_secret_ids : s => s },
     var.enable_sentry ? { DARKRUN_SENTRY_DSN = "DARKRUN_SENTRY_DSN" } : {},
   )
+
+  # Relay + FCM remote push are enabled when a Firebase project is configured.
+  fcm_enabled = var.firebase_project != ""
+  # Where the Admin SDK key is mounted; GOOGLE_APPLICATION_CREDENTIALS points here.
+  fcm_mount_dir = "/secrets/fcm"
+  fcm_key_path  = "${local.fcm_mount_dir}/key.json"
+}
+
+# The FCM Admin SDK key (operator-managed; created by infra/set-fcm-env.sh). Like
+# the OAuth secrets, referenced not created — a missing one fails the plan loudly.
+data "google_secret_manager_secret" "fcm" {
+  count     = local.fcm_enabled ? 1 : 0
+  secret_id = var.fcm_secret_id
+}
+
+resource "google_secret_manager_secret_iam_member" "fcm_accessor" {
+  count     = local.fcm_enabled ? 1 : 0
+  secret_id = data.google_secret_manager_secret.fcm[0].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.web.email}"
 }
 
 # Grant the service account accessor on every secret it consumes.
@@ -93,6 +113,19 @@ resource "google_cloud_run_v2_service" "web" {
         value = "production"
       }
 
+      # Relay + FCM: turn the relay on and point the token source at the mounted
+      # Admin SDK key. Gated on firebase_project so non-relay deploys stay clean.
+      dynamic "env" {
+        for_each = local.fcm_enabled ? {
+          DARKRUN_FIREBASE_PROJECT       = var.firebase_project
+          GOOGLE_APPLICATION_CREDENTIALS = local.fcm_key_path
+        } : {}
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
       # Everything from Secret Manager (latest version): the OAuth id/secret pairs
       # and (when enabled) the web Sentry DSN.
       dynamic "env" {
@@ -107,10 +140,38 @@ resource "google_cloud_run_v2_service" "web" {
           }
         }
       }
+
+      # Mount the Admin SDK key as a FILE (the token source reads a path, so a
+      # secret env-value won't do). Paired with the `volumes` block below.
+      dynamic "volume_mounts" {
+        for_each = local.fcm_enabled ? [1] : []
+        content {
+          name       = "fcm-key"
+          mount_path = local.fcm_mount_dir
+        }
+      }
+    }
+
+    # The FCM key secret volume, surfaced as `key.json` under the mount dir.
+    dynamic "volumes" {
+      for_each = local.fcm_enabled ? [1] : []
+      content {
+        name = "fcm-key"
+        secret {
+          secret = data.google_secret_manager_secret.fcm[0].secret_id
+          items {
+            version = "latest"
+            path    = "key.json"
+          }
+        }
+      }
     }
   }
 
-  depends_on = [google_secret_manager_secret_iam_member.accessor]
+  depends_on = [
+    google_secret_manager_secret_iam_member.accessor,
+    google_secret_manager_secret_iam_member.fcm_accessor,
+  ]
 }
 
 # Public, unauthenticated invocations (a website + OAuth callbacks).
