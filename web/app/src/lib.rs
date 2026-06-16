@@ -36,7 +36,10 @@ fn is_login_path() -> bool {
 pub fn App() -> Element {
     // `/login` is the browser side of `darkrun login` — a distinct flow.
     if is_login_path() {
-        return rsx! { LoginPage {} };
+        return rsx! {
+            style { "{tokens::THEME_CSS}" }
+            LoginPage {}
+        };
     }
 
     let state = use_signal(|| RemoteState::Unconfigured);
@@ -58,6 +61,10 @@ pub fn App() -> Element {
     );
 
     rsx! {
+        // Mount the shared theme: the `--dr-*` custom properties the darkrun-ui
+        // session components resolve against, plus the html/body reset (dark
+        // surface, no default margin) — without it the body showed a white frame.
+        style { "{tokens::THEME_CSS}" }
         document::Title { "darkrun" }
         div { style: "{shell}",
             Header {}
