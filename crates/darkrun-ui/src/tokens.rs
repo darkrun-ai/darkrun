@@ -336,6 +336,8 @@ pub const THEME_CSS: &str = r#":root{
   color-scheme:light;
 }
 html,body{
+  margin:0;
+  padding:0;
   background:var(--dr-surface-base);
   color:var(--dr-text);
   font-family:var(--dr-font-sans);
