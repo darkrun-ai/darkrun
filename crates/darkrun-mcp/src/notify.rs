@@ -42,32 +42,34 @@ pub fn on_gate(run: &str, station: &str) {
 /// Spawn the platform notification command. Silent on platforms without one.
 #[cfg(not(tarpaulin_include))]
 fn spawn_notifier(title: &str, body: &str) -> std::io::Result<()> {
-    use std::process::{Command, Stdio};
-    let mut cmd;
-    #[cfg(target_os = "macos")]
-    {
-        // AppleScript: display a notification with our title.
-        let script = format!(
-            "display notification {} with title {}",
-            applescript_quote(body),
-            applescript_quote(title),
-        );
-        cmd = Command::new("osascript");
-        cmd.arg("-e").arg(script);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        cmd = Command::new("notify-send");
-        cmd.arg(title).arg(body);
-    }
+    // No supported notifier on this platform (e.g. Windows) — nothing to do.
+    // This returns BEFORE `cmd` is declared, so the unsupported target never
+    // sees an unassigned binding (which fails type inference, E0282).
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        // No supported notifier — nothing to do.
         let _ = (title, body);
         return Ok(());
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
+        use std::process::{Command, Stdio};
+        let mut cmd;
+        #[cfg(target_os = "macos")]
+        {
+            // AppleScript: display a notification with our title.
+            let script = format!(
+                "display notification {} with title {}",
+                applescript_quote(body),
+                applescript_quote(title),
+            );
+            cmd = Command::new("osascript");
+            cmd.arg("-e").arg(script);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            cmd = Command::new("notify-send");
+            cmd.arg(title).arg(body);
+        }
         cmd.stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
         Ok(())
     }
