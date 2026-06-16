@@ -1,0 +1,88 @@
+name: rust-quality
+
+# Rust code quality + security, scanning the repo's MAIN language — which the
+# default CodeQL setup doesn't cover. Deliberately NOT a CodeQL workflow (those
+# can't coexist with the default setup): instead it runs Rust-native tools and
+# uploads their results to the same Security tab as third-party SARIF, which DOES
+# coexist with default CodeQL.
+#
+#   - clippy  → SARIF → code scanning alerts (lint + correctness)
+#   - cargo-audit → RustSec advisory check (dependency vulnerabilities)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: rust-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  clippy:
+    name: clippy → code scanning
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload the SARIF
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install desktop GUI deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+
+      - name: Configure git identity (for fixture-touching builds)
+        run: |
+          git config --global user.email "ci@darkrun.ai"
+          git config --global user.name "darkrun ci"
+
+      - name: Install clippy-sarif + sarif-fmt
+        uses: taiki-e/install-action@v2
+        with:
+          tool: clippy-sarif,sarif-fmt
+
+      # Warnings don't fail clippy (no `-D`), so this produces SARIF for the
+      # Security tab without blocking — `ci` stays the hard gate.
+      - name: Run clippy → SARIF
+        run: |
+          cargo clippy --workspace --all-targets --message-format=json \
+            | clippy-sarif | tee rust-clippy.sarif | sarif-fmt
+        continue-on-error: true
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: rust-clippy.sarif
+          category: clippy
+
+  audit:
+    name: cargo-audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Audit dependencies
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
