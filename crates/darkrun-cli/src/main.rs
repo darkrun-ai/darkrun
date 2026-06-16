@@ -61,6 +61,12 @@ enum Command {
     /// Authenticate to a version-control provider (GitHub / GitLab).
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Sign in to enable REMOTE access to your runs (web app + mobile).
+    Login {
+        /// Which provider to sign in with (`github` or `gitlab`).
+        #[arg(value_name = "github|gitlab", default_value = "github")]
+        provider: String,
+    },
     /// Inspect embedded factory content.
     #[command(subcommand)]
     Factory(FactoryCommand),
@@ -343,6 +349,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Command::Serve(args) => serve_http(repo_root, args.addr),
                 Command::Run(cmd) => run_command(&repo_root, cmd),
                 Command::Auth(cmd) => auth_command(cmd),
+                Command::Login { provider } => {
+                    let provider = auth::parse_provider(&provider)?;
+                    auth::relay_login(provider)
+                }
                 Command::Factory(cmd) => factory_command(cmd),
                 Command::Statusline(_)
                 | Command::Hook { .. }

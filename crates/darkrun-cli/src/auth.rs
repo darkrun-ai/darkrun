@@ -277,6 +277,144 @@ pub fn login(
     Ok(())
 }
 
+// ─── Remote login (`darkrun login`) — the relay token ────────────────────────
+
+/// The default web-app base where Firebase sign-in happens.
+pub const DEFAULT_APP_BASE: &str = "https://app.darkrun.ai";
+/// Env override for the app base.
+pub const APP_BASE_ENV: &str = "DARKRUN_APP_BASE";
+
+/// Resolve the web-app base (`DARKRUN_APP_BASE`, trailing slash trimmed).
+pub fn app_base() -> String {
+    let raw = std::env::var(APP_BASE_ENV).unwrap_or_else(|_| DEFAULT_APP_BASE.to_string());
+    raw.trim_end_matches('/').to_string()
+}
+
+/// The browser URL where the user signs in with Firebase Auth:
+/// `<app>/login?provider=<p>&nonce=<n>`. After sign-in the web app deposits the
+/// minted ID token to the relay broker under this nonce.
+pub fn app_login_url(app_base: &str, provider: Provider, nonce: &str) -> String {
+    format!(
+        "{app}/login?provider={provider}&nonce={nonce}",
+        app = app_base,
+        provider = provider.key(),
+        nonce = darkrun_vcs::percent_encode(nonce),
+    )
+}
+
+/// The relay-broker claim URL the CLI polls: `<web>/auth/relay/claim/<nonce>`.
+pub fn relay_claim_url(web_base: &str, nonce: &str) -> String {
+    format!(
+        "{base}/auth/relay/claim/{nonce}",
+        base = web_base,
+        nonce = darkrun_vcs::percent_encode(nonce),
+    )
+}
+
+/// The one-time relay-token payload returned by the claim endpoint.
+#[derive(Debug, serde::Deserialize)]
+struct RelayClaim {
+    token: String,
+}
+
+/// Outcome of one relay-claim poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayPoll {
+    /// The token is parked — here it is.
+    Ready(String),
+    /// Not deposited yet; keep polling.
+    Pending,
+}
+
+/// Poll the relay broker once: a `200` with `{token}` is ready; anything else
+/// (typically `404`) is pending. Pure over the transport seam.
+pub fn poll_relay_claim(
+    transport: &dyn HttpTransport,
+    web_base: &str,
+    nonce: &str,
+) -> Result<RelayPoll, Box<dyn std::error::Error>> {
+    let url = relay_claim_url(web_base, nonce);
+    let response = transport.execute(HttpRequest::get(url))?;
+    if response.is_success() {
+        let claim: RelayClaim = response.json()?;
+        Ok(RelayPoll::Ready(claim.token))
+    } else {
+        Ok(RelayPoll::Pending)
+    }
+}
+
+/// Poll the relay broker until the token is deposited or `timeout` elapses.
+pub fn poll_relay_until_ready(
+    transport: &dyn HttpTransport,
+    sleeper: &dyn Sleeper,
+    web_base: &str,
+    nonce: &str,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<String, Box<dyn std::error::Error>> {
+    loop {
+        match poll_relay_claim(transport, web_base, nonce)? {
+            RelayPoll::Ready(token) => return Ok(token),
+            RelayPoll::Pending => {
+                if sleeper.elapsed() >= timeout {
+                    return Err(format!(
+                        "timed out after {}s waiting for the browser to finish signing in",
+                        timeout.as_secs()
+                    )
+                    .into());
+                }
+                sleeper.sleep(interval);
+            }
+        }
+    }
+}
+
+/// Where the relay token is stored — `~/.darkrun/relay-token`, the path the
+/// engine reads (`darkrun_mcp::server` resolve_relay_token).
+pub fn relay_token_path() -> Option<std::path::PathBuf> {
+    Some(darkrun_mcp::registry::default_root()?.join("relay-token"))
+}
+
+/// Persist the relay token to `~/.darkrun/relay-token` (`0600` on unix).
+pub fn store_relay_token(token: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let path = relay_token_path().ok_or("could not resolve the ~/.darkrun directory")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, token)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
+}
+
+/// `darkrun login [provider]` — enable REMOTE access. Generates a nonce, opens
+/// the browser to the web app's Firebase sign-in, polls the relay broker for the
+/// deposited token, and stores it where the engine dials the relay with it.
+#[cfg(not(tarpaulin_include))] // opens a browser + polls a live broker
+pub fn relay_login(provider: Provider) -> Result<(), Box<dyn std::error::Error>> {
+    let app = app_base();
+    let web = web_base();
+    let nonce = generate_nonce();
+    let url = app_login_url(&app, provider, &nonce);
+
+    println!("Opening your browser to sign in with {}…", provider.display_name());
+    println!("  {url}");
+    println!("If it doesn't open automatically, paste the URL above into your browser.");
+    open_browser(&url);
+
+    let transport = ReqwestTransport::new()?;
+    let sleeper = RealSleeper::new();
+    let token = poll_relay_until_ready(&transport, &sleeper, &web, &nonce, POLL_TIMEOUT, POLL_INTERVAL)?;
+
+    let path = store_relay_token(&token)?;
+    println!("Signed in — remote access enabled. Token saved to {}", path.display());
+    println!("Runs you start now are reachable from app.darkrun.ai and the mobile app.");
+    Ok(())
+}
+
 /// `darkrun auth status` — print which providers currently have a stored
 /// credential. Returns the lines printed (for testing).
 pub fn status_lines(store: &CredentialStore) -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -413,6 +551,43 @@ mod tests {
             }
             PollOutcome::Pending => panic!("expected ready"),
         }
+    }
+
+    #[test]
+    fn relay_login_urls_are_well_formed() {
+        assert_eq!(
+            app_login_url("https://app.darkrun.ai", Provider::GitLab, "n0"),
+            "https://app.darkrun.ai/login?provider=gitlab&nonce=n0"
+        );
+        assert_eq!(
+            relay_claim_url("https://darkrun.ai", "n0"),
+            "https://darkrun.ai/auth/relay/claim/n0"
+        );
+    }
+
+    #[test]
+    fn poll_relay_pending_on_404_then_reads_token() {
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Get,
+            "https://darkrun.ai/auth/relay/claim/n",
+            HttpResponse::new(404, b"not found".to_vec()),
+        );
+        assert_eq!(
+            poll_relay_claim(&mock, "https://darkrun.ai", "n").unwrap(),
+            RelayPoll::Pending
+        );
+
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Get,
+            "https://darkrun.ai/auth/relay/claim/n",
+            HttpResponse::new(200, br#"{"token":"fb-id-token"}"#.to_vec()),
+        );
+        assert_eq!(
+            poll_relay_claim(&mock, "https://darkrun.ai", "n").unwrap(),
+            RelayPoll::Ready("fb-id-token".to_string())
+        );
     }
 
     /// A test sleeper that counts ticks and reports a caller-controlled elapsed.
