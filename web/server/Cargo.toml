@@ -30,7 +30,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
 # Verify Firebase ID tokens (RS256 JWT) on the relay — the remote-session authz.
-jsonwebtoken = "10"
+# v10 makes the crypto backend a required choice; pick the pure-Rust one to match
+# our no-C stance (aws_lc_rs would pull in a C library).
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
