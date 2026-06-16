@@ -73,6 +73,17 @@ pub enum HostCmd {
         /// The raw text frame to deliver.
         data: String,
     },
+    /// Fan a push notification out to the session owner's registered remote
+    /// devices. The relay resolves the owner (fixed at host registration) and
+    /// pushes over FCM — the REMOTE half of "notify as the engine ticks",
+    /// complementary to the host's local OS notification. It carries no client
+    /// id: it targets the account's devices, not one attached client.
+    Notify {
+        /// The notification title.
+        title: String,
+        /// The notification body.
+        body: String,
+    },
 }
 
 // ─── Layer 2: app protocol (client ↔ host, inside the envelope `data`) ────────
@@ -277,6 +288,13 @@ mod tests {
         let to = HostCmd::To { client: 7, data: "frame".into() };
         let t = serde_json::to_string(&to).unwrap();
         assert_eq!(serde_json::from_str::<HostCmd>(&t).unwrap(), to);
+
+        // A notify command carries title/body and no client id.
+        let notify = HostCmd::Notify { title: "darkrun · r".into(), body: "Build needs you.".into() };
+        let n = serde_json::to_string(&notify).unwrap();
+        assert!(n.contains(r#""type":"notify""#));
+        assert!(!n.contains("client"));
+        assert_eq!(serde_json::from_str::<HostCmd>(&n).unwrap(), notify);
     }
 
     #[test]

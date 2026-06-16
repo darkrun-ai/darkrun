@@ -26,6 +26,7 @@ mod broker;
 mod config;
 mod firebase_auth;
 mod oauth_routes;
+mod push;
 mod relay;
 mod relay_broker;
 mod state;
@@ -43,9 +44,13 @@ pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
 pub use firebase_auth::{FirebaseTokenAuth, FIREBASE_CERTS_URL};
 pub use relay_broker::{relay_auth_router, ClaimPayload, RelayBroker};
+pub use push::{
+    fan_out, fcm_endpoint, fcm_message, AccessTokenSource, DeviceRegistry, DeviceToken,
+    FcmPushSender, InMemoryDeviceRegistry, NoopPushSender, PushSender, StaticTokenSource,
+};
 pub use relay::{
-    relay_router, AttachError, DevTokenAuth, Frame, HostCmd, HostEvent, Relay, RelayAuth,
-    RelayState,
+    device_router, relay_router, AttachError, DevTokenAuth, Frame, HostCmd, HostEvent,
+    RegisterDevice, Relay, RelayAuth, RelayState,
 };
 pub use state::{SharedTransport, WebState};
 pub use transport::ReqwestTransport;
@@ -125,11 +130,11 @@ pub async fn relay_router_from_env() -> Option<Router> {
             }
         });
         let state = RelayState::new(Arc::new(Relay::new()), auth);
-        return Some(relay_router(state));
+        return Some(relay_router(state.clone()).merge(device_router(state)));
     }
     if std::env::var("DARKRUN_RELAY_DEV_AUTH").ok().as_deref() == Some("1") {
         let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth));
-        return Some(relay_router(state));
+        return Some(relay_router(state.clone()).merge(device_router(state)));
     }
     None
 }

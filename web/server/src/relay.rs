@@ -45,6 +45,8 @@ use tokio::sync::mpsc;
 // in darkrun-api, spoken by the relay, the host connector, and every client.
 pub use darkrun_api::tunnel::{HostCmd, HostEvent};
 
+use crate::push::{DeviceRegistry, InMemoryDeviceRegistry, NoopPushSender, PushSender};
+
 /// One opaque review frame shuttled across the bridge. The relay never parses the
 /// payload — both kinds are carried verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,17 +222,51 @@ impl RelayAuth for DevTokenAuth {
     }
 }
 
-/// The relay router's shared state: the bridge hub + the token verifier.
+/// The relay router's shared state: the bridge hub, the token verifier, and the
+/// remote-push pair (device registry + sender).
 #[derive(Clone)]
 pub struct RelayState {
     relay: Arc<Relay>,
     auth: Arc<dyn RelayAuth>,
+    devices: Arc<dyn DeviceRegistry>,
+    push: Arc<dyn PushSender>,
 }
 
 impl RelayState {
-    /// Build relay state from a hub + a token verifier.
+    /// Build relay state from a hub + a token verifier, with remote push
+    /// **disabled** — an in-memory registry plus a no-op sender. The host's
+    /// local OS notification still fires; only the remote (FCM) half is dark
+    /// until [`with_push`](Self::with_push) wires it. Safe default for dev/tests.
     pub fn new(relay: Arc<Relay>, auth: Arc<dyn RelayAuth>) -> Self {
-        Self { relay, auth }
+        Self {
+            relay,
+            auth,
+            devices: Arc::new(InMemoryDeviceRegistry::new()),
+            push: Arc::new(NoopPushSender),
+        }
+    }
+
+    /// Wire the device registry + push sender for remote notifications (FCM in
+    /// production). Returns `self` for chaining off [`new`](Self::new).
+    pub fn with_push(
+        mut self,
+        devices: Arc<dyn DeviceRegistry>,
+        push: Arc<dyn PushSender>,
+    ) -> Self {
+        self.devices = devices;
+        self.push = push;
+        self
+    }
+
+    /// Fan a notification out to `owner`'s registered devices — the relay's
+    /// [`HostCmd::Notify`] handling. Returns how many devices were pushed.
+    pub async fn notify_owner(&self, owner: &str, title: &str, body: &str) -> usize {
+        crate::push::fan_out(&self.devices, &self.push, owner, title, body).await
+    }
+
+    /// Resolve a bearer token to its account via the configured verifier.
+    fn account_for(&self, token: &str) -> Option<String> {
+        self.auth.account_for(token)
     }
 }
 
@@ -249,6 +285,69 @@ pub fn relay_router(state: RelayState) -> Router {
         .with_state(state)
 }
 
+/// A device registering for remote push: its FCM token + platform. The owning
+/// account is taken from the verified bearer token, never the body.
+#[derive(Deserialize)]
+pub struct RegisterDevice {
+    /// The FCM registration token to push to.
+    pub token: String,
+    /// The platform (`ios`/`android`/`web`/`macos`).
+    pub platform: String,
+}
+
+/// Mount the device-registration endpoints, keyed off the same Firebase token
+/// the relay authenticates with:
+/// - `POST /devices` — register/refresh a device for the caller's account;
+/// - `DELETE /devices/{token}` — drop a device (logout / token rotation).
+pub fn device_router(state: RelayState) -> Router {
+    Router::new()
+        .route("/devices", axum::routing::post(register_device))
+        .route("/devices/{token}", axum::routing::delete(unregister_device))
+        .with_state(state)
+}
+
+/// Read the `Authorization: Bearer <token>` header, if present and well-formed.
+fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
+/// `POST /devices` — register the caller's device. The account comes from the
+/// verified bearer token; a missing/invalid token is `401`.
+async fn register_device(
+    State(state): State<RelayState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<RegisterDevice>,
+) -> Response {
+    let Some(account) = bearer(&headers).and_then(|t| state.account_for(t)) else {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    };
+    state.devices.register(
+        &account,
+        crate::push::DeviceToken { token: body.token, platform: body.platform },
+    );
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `DELETE /devices/{token}` — drop a device token. Requires a valid bearer
+/// token (only an authenticated caller, who alone knows their tokens, can ask).
+async fn unregister_device(
+    State(state): State<RelayState>,
+    headers: axum::http::HeaderMap,
+    Path(token): Path<String>,
+) -> Response {
+    if bearer(&headers).and_then(|t| state.account_for(t)).is_none() {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    }
+    state.devices.unregister(&token);
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// `GET /relay/host/{session}` — the host parks its outbound socket here.
 #[cfg(not(tarpaulin_include))] // WS upgrade + socket loop — the Relay hub is unit-tested
 async fn host_ws(
@@ -260,7 +359,7 @@ async fn host_ws(
     let Some(owner) = state.auth.account_for(&q.token) else {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     };
-    ws.on_upgrade(move |socket| run_host(state.relay, session, owner, socket))
+    ws.on_upgrade(move |socket| run_host(state, session, owner, socket))
 }
 
 /// `GET /relay/client/{session}` — a client attaches to a live session.
@@ -281,7 +380,8 @@ async fn client_ws(
 /// host's `to{client,data}` commands to the addressed client. Tears the session
 /// down when the socket closes.
 #[cfg(not(tarpaulin_include))] // socket I/O loop
-async fn run_host(relay: Arc<Relay>, session: String, owner: String, socket: WebSocket) {
+async fn run_host(state: RelayState, session: String, owner: String, socket: WebSocket) {
+    let relay = state.relay.clone();
     let Some(mut host_rx) = relay.register_host(&session, &owner) else {
         return; // a host already holds this session
     };
@@ -300,11 +400,18 @@ async fn run_host(relay: Arc<Relay>, session: String, owner: String, socket: Web
     loop {
         tokio::select! {
             incoming = stream.next() => match incoming {
-                Some(Ok(Message::Text(t))) => {
-                    if let Ok(HostCmd::To { client, data }) = serde_json::from_str::<HostCmd>(&t) {
+                Some(Ok(Message::Text(t))) => match serde_json::from_str::<HostCmd>(&t) {
+                    // Route a review frame to one client.
+                    Ok(HostCmd::To { client, data }) => {
                         relay.to_client(&session, client, Frame::Text(data));
                     }
-                }
+                    // Fan a notification out to the owner's remote devices.
+                    Ok(HostCmd::Notify { title, body }) => {
+                        let n = state.notify_owner(&owner, &title, &body).await;
+                        tracing::debug!(session = %session, devices = n, "relayed push");
+                    }
+                    Err(_) => { /* not a known envelope — ignore */ }
+                },
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => { /* host speaks JSON envelopes only */ }
             },
@@ -358,11 +465,102 @@ async fn run_client(relay: Arc<Relay>, session: String, owner: String, socket: W
 mod tests {
     use super::*;
 
+    use crate::push::{DeviceToken, InMemoryDeviceRegistry, PushSender};
+
     #[test]
     fn dev_token_auth_resolves_token_to_account() {
         assert_eq!(DevTokenAuth.account_for("acct-a"), Some("acct-a".to_string()));
         assert_eq!(DevTokenAuth.account_for("  acct-b "), Some("acct-b".to_string()));
         assert_eq!(DevTokenAuth.account_for(""), None);
+    }
+
+    /// A push sender that records the tokens it was handed, for the relay test.
+    #[derive(Default)]
+    struct RecordingSender {
+        pushed: Mutex<Vec<String>>,
+    }
+    impl PushSender for RecordingSender {
+        fn push<'a>(
+            &'a self,
+            devices: &'a [DeviceToken],
+            _title: &'a str,
+            _body: &'a str,
+        ) -> crate::push::PushFuture<'a> {
+            let toks: Vec<String> = devices.iter().map(|d| d.token.clone()).collect();
+            self.pushed.lock().unwrap().extend(toks.iter().cloned());
+            Box::pin(async move { toks.len() })
+        }
+    }
+
+    #[tokio::test]
+    async fn notify_owner_fans_out_to_the_owners_devices() {
+        let registry: Arc<dyn DeviceRegistry> = Arc::new(InMemoryDeviceRegistry::new());
+        registry.register("owner", DeviceToken { token: "t1".into(), platform: "ios".into() });
+        let sender = Arc::new(RecordingSender::default());
+        let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth))
+            .with_push(registry, sender.clone());
+
+        assert_eq!(state.notify_owner("owner", "T", "B").await, 1);
+        assert_eq!(*sender.pushed.lock().unwrap(), vec!["t1".to_string()]);
+        // An owner with no devices pushes nothing.
+        assert_eq!(state.notify_owner("ghost", "T", "B").await, 0);
+    }
+
+    #[tokio::test]
+    async fn device_endpoints_register_and_unregister_for_the_caller() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let registry: Arc<dyn DeviceRegistry> = Arc::new(InMemoryDeviceRegistry::new());
+        let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth))
+            .with_push(registry.clone(), Arc::new(NoopPushSender));
+        let app = device_router(state);
+
+        // No bearer token → 401, nothing registered.
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::post("/devices")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"token":"d1","platform":"ios"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert!(registry.devices_for("acct-a").is_empty());
+
+        // With a bearer token (DevTokenAuth: token == account) → registered.
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::post("/devices")
+                    .header("authorization", "Bearer acct-a")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"token":"d1","platform":"ios"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            registry.devices_for("acct-a"),
+            vec![DeviceToken { token: "d1".into(), platform: "ios".into() }]
+        );
+
+        // DELETE drops it (drains the body to satisfy the oneshot).
+        let res = app
+            .oneshot(
+                axum::http::Request::delete("/devices/d1")
+                    .header("authorization", "Bearer acct-a")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let _ = res.into_body().collect().await;
+        assert!(registry.devices_for("acct-a").is_empty());
     }
 
     #[test]
