@@ -39,11 +39,11 @@ jobs:
           sudo docker image prune --all --force || true
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install desktop GUI deps
         run: |
@@ -57,7 +57,7 @@ jobs:
           git config --global user.name "darkrun ci"
 
       - name: Install clippy-sarif + sarif-fmt
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2
         with:
           tool: clippy-sarif,sarif-fmt
 
@@ -82,9 +82,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2
         with:
           tool: cargo-audit
       # Report-only (`|| true`): the tree carries transitive advisories (glib via
