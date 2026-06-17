@@ -25,6 +25,12 @@ resource "google_project_service" "services" {
     "dns.googleapis.com",
     # Hosting deploy for app.darkrun.ai (the deploy-app workflow).
     "firebasehosting.googleapis.com",
+    # Firestore: the relay's persistent FCM device registry (the `devices`
+    # collection). The `(default)` database itself is OPERATOR-created (gcloud /
+    # console) in us-central1 — NOT a Terraform resource: its location is
+    # permanent and a stray `terraform destroy` must never be able to drop it,
+    # the same reason the OAuth secrets + the Hosting site are operator-managed.
+    "firestore.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false
