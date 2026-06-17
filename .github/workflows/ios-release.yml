@@ -84,9 +84,13 @@ jobs:
           echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo '?')"
 
       # --target aarch64-apple-ios forces a DEVICE build (dx defaults to the
-      # simulator triple, which App Store validation rejects).
+      # simulator triple, which App Store validation rejects). IPHONEOS_DEPLOYMENT
+      # _TARGET pins the link target off Rust's 10.0 default (which misses
+      # ___chkstk_darwin → undefined symbols).
       - name: Build the iOS app (Dioxus)
         run: dx build --package darkrun-desktop --platform ios --release --target aarch64-apple-ios
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
 
       - name: Sign + package the .ipa
         run: ./fastlane/package-ios-ipa.sh
