@@ -23,6 +23,9 @@
 #   APP_REPO=darkrun-ai/darkrun        # where the Actions secrets are set
 #   MATCH_PASSWORD=<generated>         # set to reuse an existing passphrase
 #   MATCH_CI_TOKEN=<gh auth token>     # token CI uses to READ the certs repo
+#   MATCH_NUKE=1                       # first revoke the account's App Store dist
+#                                      # certs to free a slot (ACCOUNT-WIDE — only
+#                                      # when darkrun is the sole app on this ID)
 set -euo pipefail
 
 ASC_KEY_ID="${ASC_KEY_ID:-VWYTA9334U}"
@@ -123,10 +126,20 @@ GH_USER="$(gh api user -q .login)"
 MATCH_GIT_BASIC_AUTHORIZATION="$(printf '%s' "${GH_USER}:${CI_TOKEN}" | base64 | tr -d '\n')"
 
 # ── 4. create + store the signing material via fastlane match ────────────────
-echo "▶ running fastlane match appstore (creates + pushes the cert + profile)…"
 ASC_KEY_P8="$(cat "$ASC_KEY_P8_FILE")"
 export ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8
 export MATCH_GIT_URL MATCH_PASSWORD MATCH_GIT_BASIC_AUTHORIZATION
+
+# Optional: MATCH_NUKE=1 first revokes the account's App Store distribution cert
+# + profiles (and clears the repo), to free a slot when you've hit Apple's
+# distribution-cert cap. ACCOUNT-WIDE — only safe when darkrun is the sole app.
+if [ -n "${MATCH_NUKE:-}" ]; then
+  echo "⚠ MATCH_NUKE=1 — revoking the account's App Store distribution certs first"
+  echo "  (account-wide; recreated below). Ctrl-C now if other apps share them."
+  ( cd "$ROOT/fastlane" && bundle exec fastlane ios nuke_certs )
+fi
+
+echo "▶ running fastlane match appstore (creates + pushes the cert + profile)…"
 ( cd "$ROOT/fastlane" && bundle exec fastlane ios certs )
 
 # ── 5. load the GitHub Actions secrets the workflows read ────────────────────
