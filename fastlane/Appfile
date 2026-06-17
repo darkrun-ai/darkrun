@@ -1,14 +1,14 @@
 # fastlane Appfile — the darkrun app's App Store Connect identity.
 #
-# The two account-specific values (apple_id, itc_team_id / team_id) come from
-# your Apple Developer + App Store Connect account, NOT the codebase — fill them
-# before running `deliver`. The bundle id matches desktop/Dioxus.toml.
+# The CI lanes authenticate with an App Store Connect API key (Fastfile), which
+# carries the team + account, so apple_id/team_id are normally unnecessary. They
+# default to empty (NOT a placeholder string — passing a literal "REPLACE_WITH_…"
+# to Apple is worse than passing nothing); set the env vars only if a lane asks
+# for them. The bundle id matches desktop/Dioxus.toml.
 
 app_identifier("ai.darkrun.app")
 
-# Your Apple ID email for App Store Connect.
-apple_id(ENV["DARKRUN_APPLE_ID"] || "REPLACE_WITH_APPLE_ID_EMAIL")
-
-# Developer Portal team id (10 chars) and App Store Connect team id.
-team_id(ENV["DARKRUN_APPLE_TEAM_ID"] || "REPLACE_WITH_TEAM_ID")
-itc_team_id(ENV["DARKRUN_ASC_TEAM_ID"] || "")
+# Optional overrides (the API key normally supplies these):
+apple_id(ENV["DARKRUN_APPLE_ID"]) if ENV["DARKRUN_APPLE_ID"]
+team_id(ENV["DARKRUN_APPLE_TEAM_ID"]) if ENV["DARKRUN_APPLE_TEAM_ID"]
+itc_team_id(ENV["DARKRUN_ASC_TEAM_ID"]) if ENV["DARKRUN_ASC_TEAM_ID"]
