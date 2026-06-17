@@ -58,7 +58,7 @@ platform :ios do
     upload_to_testflight(
       api_key: asc_api_key,
       app_identifier: APP_ID,
-      platform: "ios", # else pilot prompts for it and dies in non-interactive CI
+      app_platform: "ios", # pilot's option name; else it prompts + dies in CI
       ipa: ENV.fetch("DARKRUN_IPA"),
       skip_waiting_for_build_processing: true,
       distribute_external: false,
