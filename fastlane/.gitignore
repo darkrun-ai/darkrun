@@ -1,0 +1,10 @@
+# fastlane run artifacts (generated, never committed)
+report.xml
+Preview.html
+# Resolved by bundler per-environment; CI installs from the Gemfile.
+Gemfile.lock
+# Signing material must NEVER land in git — it lives encrypted in the match repo.
+*.p12
+*.cer
+*.mobileprovision
+*.p8
