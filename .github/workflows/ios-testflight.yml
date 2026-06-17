@@ -82,8 +82,15 @@ jobs:
       # the simulator triple (aarch64-apple-ios-sim), and App Store validation
       # rejects the simulator-platform slice ("Simulator platforms aren't permitted"
       # / missing LC_ENCRYPTION_INFO).
+      #
+      # IPHONEOS_DEPLOYMENT_TARGET: Rust's aarch64-apple-ios target spec defaults
+      # the deployment target to 10.0, which links against an old libSystem missing
+      # ___chkstk_darwin (iOS 12+) → "Undefined symbols". Pin it to match
+      # MinimumOSVersion so the C deps and the final link agree.
       - name: Build the iOS app (Dioxus)
         run: dx build --package darkrun-desktop --platform ios --release --target aarch64-apple-ios
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
 
       - name: Sign + package the .ipa
         run: ./fastlane/package-ios-ipa.sh
