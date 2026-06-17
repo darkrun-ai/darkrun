@@ -61,8 +61,22 @@ jobs:
         env:
           BUNDLE_GEMFILE: fastlane/Gemfile
 
-      - name: Build the iOS app (Dioxus → Xcode project)
+      - name: Install signing (match)
+        run: bundle exec fastlane ios install_signing
+        env:
+          BUNDLE_GEMFILE: fastlane/Gemfile
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+
+      - name: Build the iOS app (Dioxus)
         run: dx build --package darkrun-desktop --platform ios --release
+
+      - name: Sign + package the .ipa
+        run: ./fastlane/package-ios-ipa.sh
 
       - name: Upload to the App Store (no auto-submit)
         run: bundle exec fastlane ios release
@@ -72,6 +86,3 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
-          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
-          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
