@@ -9,6 +9,7 @@
 mod banner;
 mod firebase;
 mod login;
+mod register;
 mod remote;
 
 use darkrun_api::session::ReviewSessionPayload;
@@ -69,6 +70,7 @@ pub fn App() -> Element {
         div { style: "{shell}",
             Header {}
             InstallBanner {}
+            PushPrompt {}
             main { style: "max-width:880px;margin:0 auto;padding:24px 20px 64px;",
                 match state() {
                     RemoteState::Unconfigured => rsx! { NoTarget {} },
@@ -76,6 +78,81 @@ pub fn App() -> Element {
                     RemoteState::Reconnecting => rsx! { Status { text: "Reconnecting\u{2026}" } },
                     RemoteState::Live(payload) => session_view(&payload, commands),
                 }
+            }
+        }
+    }
+}
+
+/// The opt-in state for browser push notifications.
+#[derive(Clone, PartialEq)]
+enum PushStatus {
+    /// Not asked yet.
+    Idle,
+    /// Permission + registration in flight.
+    Asking,
+    /// Registered — this browser now receives gate pushes.
+    Enabled,
+    /// Dismissed for this visit.
+    Dismissed,
+    /// Failed (denied, unsupported, or the registration POST failed).
+    Failed(String),
+}
+
+/// A one-line opt-in to remote push, shown only when the app has a connection
+/// token (so there's an account to register the device against). It mints an FCM
+/// token for this browser and POSTs it to the relay's `/devices`; once enabled
+/// or dismissed it disappears. Absent entirely without a token.
+#[component]
+fn PushPrompt() -> Element {
+    let Some(token) = firebase::query_param("token") else {
+        return rsx! {};
+    };
+    let mut status = use_signal(|| PushStatus::Idle);
+    if matches!(status(), PushStatus::Enabled | PushStatus::Dismissed) {
+        return rsx! {};
+    }
+
+    let bar = format!(
+        "display:flex;align-items:center;gap:12px;padding:10px 20px;\
+         background:{};border-bottom:1px solid {};font-family:{};font-size:13px;",
+        tokens::SURFACE_RAISED, tokens::BORDER, tokens::FONT_SANS,
+    );
+    let asking = matches!(status(), PushStatus::Asking);
+
+    rsx! {
+        div { style: "{bar}",
+            span { style: format!("flex:1;color:{};", tokens::TEXT),
+                "Get notified when a gate needs you — even when this tab is in the background."
+            }
+            if let PushStatus::Failed(msg) = status() {
+                span { style: format!("color:{};", tokens::TEXT_FAINT), "{msg}" }
+            }
+            button {
+                disabled: asking,
+                style: format!(
+                    "padding:6px 14px;border:none;border-radius:6px;cursor:pointer;\
+                     background:{};color:{};font-family:{};font-size:13px;font-weight:600;",
+                    tokens::ACCENT, tokens::ON_ACCENT, tokens::FONT_SANS,
+                ),
+                onclick: move |_| {
+                    let token = token.clone();
+                    status.set(PushStatus::Asking);
+                    spawn(async move {
+                        match register::enable_push(&firebase::web_base(), &token).await {
+                            Ok(()) => status.set(PushStatus::Enabled),
+                            Err(e) => status.set(PushStatus::Failed(e)),
+                        }
+                    });
+                },
+                { if asking { "Enabling\u{2026}" } else { "Enable notifications" } }
+            }
+            button {
+                style: format!(
+                    "background:none;border:none;cursor:pointer;color:{};font-size:16px;line-height:1;padding:0 4px;",
+                    tokens::TEXT_FAINT,
+                ),
+                onclick: move |_| status.set(PushStatus::Dismissed),
+                "\u{2715}"
             }
         }
     }

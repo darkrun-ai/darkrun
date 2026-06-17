@@ -59,6 +59,9 @@ jobs:
           cp -r target/dx/darkrun-app/release/web/public/. web/app/dist/
           cp web/well-known/apple-app-site-association web/app/dist/.well-known/
           cp web/well-known/assetlinks.json web/app/dist/.well-known/
+          # The FCM background service worker must be served from the app ROOT
+          # (a service worker only controls its own path and below).
+          cp web/app/firebase-messaging-sw.js web/app/dist/
 
       # Keyless auth: federate the GitHub OIDC token to the cloudbuild-web SA.
       # Exports GOOGLE_APPLICATION_CREDENTIALS, which the firebase CLI uses.
