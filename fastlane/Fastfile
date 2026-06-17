@@ -39,6 +39,11 @@ platform :ios do
   # Xcode project), so packaging.sh signs that `.app` into the `.ipa` — there's
   # no `gym`/`build_app` step. Run this BEFORE the build.
   lane :install_signing do
+    # On CI, create an unlocked temporary keychain + add it to the search list.
+    # Without this, codesign/match block on a keychain UI prompt that never comes
+    # on a headless runner (the build hangs). No-op off CI. The keychain persists
+    # for later steps (dx build, then the codesign in package-ios-ipa.sh).
+    setup_ci
     sync_code_signing(
       type: "appstore",
       app_identifier: APP_ID,
