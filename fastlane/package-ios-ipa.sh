@@ -44,7 +44,24 @@ plist_set() { /usr/libexec/PlistBuddy -c "Set :$1 $2" "$PLIST" 2>/dev/null || /u
 plist_set CFBundlePackageType APPL string
 plist_set MinimumOSVersion 15.0 string
 plist_set LSRequiresIPhoneOS true bool
-echo "info.plist: CFBundlePackageType=$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$PLIST") MinimumOSVersion=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$PLIST")"
+
+# Xcode normally injects the "DT*" build-metadata keys; dx does not, and altool
+# rejects the binary for "Missing Info.plist value 'DTPlatformName'". Derive them
+# from the active toolchain so the bundle looks like a real Xcode build.
+SDK_VER="$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo 26.0)"
+SDK_BUILD="$(xcrun --sdk iphoneos --show-sdk-build-version 2>/dev/null || true)"
+XCODE_VER="$(xcodebuild -version 2>/dev/null | awk '/^Xcode/{print $2}')"
+XCODE_BUILD="$(xcodebuild -version 2>/dev/null | awk '/^Build version/{print $3}')"
+OS_BUILD="$(sw_vers -buildVersion 2>/dev/null || true)"
+plist_set DTPlatformName iphoneos string
+plist_set DTPlatformVersion "$SDK_VER" string
+plist_set DTSDKName "iphoneos${SDK_VER}" string
+[ -n "$SDK_BUILD" ] && { plist_set DTSDKBuild "$SDK_BUILD" string; plist_set DTPlatformBuild "$SDK_BUILD" string; }
+plist_set DTCompiler com.apple.compilers.llvm.clang.1_0 string
+[ -n "$XCODE_VER" ]   && plist_set DTXcode "$(echo "$XCODE_VER" | awk -F. '{printf "%02d%d%d", $1, $2, $3}')" string
+[ -n "$XCODE_BUILD" ] && plist_set DTXcodeBuild "$XCODE_BUILD" string
+[ -n "$OS_BUILD" ]    && plist_set BuildMachineOSBuild "$OS_BUILD" string
+echo "info.plist: CFBundlePackageType=$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$PLIST") MinimumOSVersion=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$PLIST") DTPlatformName=$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$PLIST") DTSDKName=$(/usr/libexec/PlistBuddy -c 'Print :DTSDKName' "$PLIST")"
 
 # Embed the profile and derive entitlements from it (so the signed app's
 # entitlements match what the profile authorizes — app id, team, etc.).

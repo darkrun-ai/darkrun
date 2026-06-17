@@ -66,11 +66,14 @@ jobs:
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
 
-      # Apple requires the iOS 26 SDK (Xcode 26) for App Store uploads. Select the
-      # newest Xcode on the runner so dx builds against that SDK.
-      - name: Select newest Xcode (iOS 26 SDK)
+      # Apple requires the iOS 26 SDK for App Store uploads, but REJECTS binaries
+      # built with a beta Xcode ("use the latest Release Candidate"). The newest
+      # Xcode on the runner can be a beta, so select the newest NON-beta one — its
+      # iOS 26 SDK satisfies the mandate.
+      - name: Select newest released Xcode (iOS 26 SDK, no betas)
         run: |
-          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          echo "Available Xcodes:"; ls -d /Applications/Xcode*.app 2>/dev/null || true
+          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)"
           [ -n "$latest" ] && sudo xcode-select -s "$latest/Contents/Developer" || true
           xcodebuild -version
           echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo '?')"
