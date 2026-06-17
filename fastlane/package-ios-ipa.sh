@@ -17,9 +17,15 @@ APP="$(find target/dx -path '*/ios/*.app' -type d -maxdepth 6 2>/dev/null | head
 [ -n "$APP" ] || { echo "error: no .app found under target/dx (did 'dx build --platform ios' run?)" >&2; exit 1; }
 echo "app:      $APP"
 
-# The provisioning profile match installed (most-recent .mobileprovision).
-PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-PROFILE="$(ls -t "$PROFILES_DIR"/*.mobileprovision 2>/dev/null | head -1)"
+# The provisioning profile match installed (most-recent .mobileprovision). Search
+# both install locations: the legacy ~/Library/MobileDevice path (older Xcode) and
+# ~/Library/Developer/Xcode/UserData (Xcode 16+/26, where match now installs it).
+# `|| true` so a missing dir doesn't trip set -e/pipefail before the check below.
+PROFILE="$(find \
+  "$HOME/Library/MobileDevice/Provisioning Profiles" \
+  "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" \
+  -name '*.mobileprovision' -type f -print0 2>/dev/null \
+  | xargs -0 ls -t 2>/dev/null | head -1 || true)"
 [ -n "${PROFILE:-}" ] || { echo "error: no provisioning profile installed (run 'fastlane ios install_signing' first)" >&2; exit 1; }
 echo "profile:  $PROFILE"
 
