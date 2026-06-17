@@ -73,9 +73,12 @@ jobs:
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
 
-      - name: Select newest Xcode (iOS 26 SDK)
+      # Newest NON-beta Xcode: Apple needs the iOS 26 SDK but rejects beta-built
+      # binaries ("use the latest Release Candidate").
+      - name: Select newest released Xcode (iOS 26 SDK, no betas)
         run: |
-          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          echo "Available Xcodes:"; ls -d /Applications/Xcode*.app 2>/dev/null || true
+          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)"
           [ -n "$latest" ] && sudo xcode-select -s "$latest/Contents/Developer" || true
           xcodebuild -version
           echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo '?')"
