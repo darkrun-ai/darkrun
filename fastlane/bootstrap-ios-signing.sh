@@ -55,10 +55,27 @@ echo "▶ p8 file    : $ASC_KEY_P8_FILE"
 echo "▶ certs repo : $CERTS_REPO"
 echo "▶ app repo   : $APP_REPO"
 
-# ── Real OpenSSL on PATH ─────────────────────────────────────────────────────
-# `match` encrypts the certs by shelling out to `openssl enc`. macOS's
-# /usr/bin/openssl is LibreSSL, which is incompatible with match's encryption and
-# fails with "Error encrypting …p12". Put a real OpenSSL (Homebrew) first on PATH.
+# ── A modern Ruby ────────────────────────────────────────────────────────────
+# macOS system Ruby (2.6) is EOL, links LibreSSL, and breaks match's cert
+# encryption ("Error encrypting …p12"); fastlane 2.235+ also requires Ruby 3.0+.
+# Prefer a Homebrew Ruby if one is installed; bail with guidance otherwise.
+ruby_old() { ruby -e 'exit(Gem::Version.new(RUBY_VERSION) < Gem::Version.new("3.0"))' 2>/dev/null; }
+if ruby_old; then
+  if command -v brew >/dev/null 2>&1 && [ -x "$(brew --prefix ruby 2>/dev/null)/bin/ruby" ]; then
+    export PATH="$(brew --prefix ruby)/bin:$PATH"
+    gem list -i bundler >/dev/null 2>&1 || gem install bundler --no-document >/dev/null 2>&1 || true
+  fi
+fi
+if ruby_old; then
+  die "Ruby $(ruby -e 'print RUBY_VERSION') is too old — match's encryption needs 3.0+
+  (macOS system Ruby links LibreSSL and fails). Install a current Ruby and re-run:
+      brew install ruby"
+fi
+echo "▶ ruby       : $(ruby -e 'print RUBY_VERSION')"
+
+# ── Real OpenSSL on PATH (belt + suspenders) ─────────────────────────────────
+# match also shells out to `openssl enc`; keep a real OpenSSL ahead of Apple's
+# LibreSSL on PATH.
 if openssl version 2>/dev/null | grep -qi libressl; then
   if command -v brew >/dev/null 2>&1; then
     for f in openssl@3 openssl@1.1; do
@@ -76,10 +93,6 @@ fi
 echo "▶ openssl    : $(openssl version)"
 
 # ── fastlane deps ────────────────────────────────────────────────────────────
-case "$(ruby -e 'print RUBY_VERSION' 2>/dev/null)" in
-  2.*) echo "⚠ using Ruby $(ruby -e 'print RUBY_VERSION') (macOS system Ruby is EOL).
-  If anything else misbehaves, install a current Ruby: brew install ruby" ;;
-esac
 echo "▶ installing fastlane (bundler)…"
 ( cd "$ROOT/fastlane" && bundle install --quiet )
 
