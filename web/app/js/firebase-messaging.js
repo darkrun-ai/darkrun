@@ -10,10 +10,10 @@
 // `firebase-messaging-sw.js` (served from the app origin ROOT) to receive
 // background pushes.
 //
-// Config: the PUBLIC web-app config (same project as firebase-login.js) plus the
-// Web Push VAPID key (Firebase console → Project settings → Cloud Messaging →
-// "Web Push certificates"). All public, safe to ship — fill the REPLACE_WITH_*
-// values from the console.
+// Config: the PUBLIC web-app config (same project as firebase-login.js) is set
+// below. The one value still to fill is the Web Push VAPID key (Firebase console
+// → Project settings → Cloud Messaging → "Web Push certificates" → the public
+// "Key pair"); it has no fetch API, so it's pasted in by hand. All public.
 
 import {
   initializeApp,
@@ -25,11 +25,11 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-messaging.js";
 
 const firebaseConfig = {
-  apiKey: "REPLACE_WITH_FIREBASE_WEB_API_KEY",
+  apiKey: "AIzaSyDhYi2DQAkbancuR71x3tqQhQ9AE3U29d8",
   authDomain: "darkrun.firebaseapp.com",
   projectId: "darkrun",
-  messagingSenderId: "REPLACE_WITH_FIREBASE_MESSAGING_SENDER_ID",
-  appId: "REPLACE_WITH_FIREBASE_WEB_APP_ID",
+  messagingSenderId: "32118591905",
+  appId: "1:32118591905:web:987db3ba09d6991b837be0",
 };
 
 // The Web Push VAPID public key (Cloud Messaging → Web Push certificates).

@@ -20,10 +20,10 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
 
 const firebaseConfig = {
-  apiKey: "REPLACE_WITH_FIREBASE_WEB_API_KEY",
+  apiKey: "AIzaSyDhYi2DQAkbancuR71x3tqQhQ9AE3U29d8",
   authDomain: "darkrun.firebaseapp.com",
   projectId: "darkrun",
-  appId: "REPLACE_WITH_FIREBASE_WEB_APP_ID",
+  appId: "1:32118591905:web:987db3ba09d6991b837be0",
 };
 
 const app = initializeApp(firebaseConfig);
