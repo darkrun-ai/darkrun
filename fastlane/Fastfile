@@ -1,15 +1,101 @@
-# fastlane lanes for darkrun App Store screenshots.
+# fastlane lanes for the darkrun iOS app: TestFlight (`beta`), App Store
+# (`release`), and the App Store screenshots (`screenshots`/`upload_screenshots`).
 #
-# darkrun's app is built with Dioxus (`dx`), not an Xcode UI-test target, so we
-# DON'T use `capture_screenshots` (that drives XCUITest). Instead: capture raw
-# screens however you like (the web build at app.darkrun.ai rendered at each
-# device size, or the simulator), drop the PNGs in fastlane/screenshots/<locale>/,
-# then `frameit` wraps them in device bezels + the dark-brand caption, and
-# `deliver` uploads them to App Store Connect.
+# darkrun's app is built with Dioxus (`dx`), not Xcode directly — CI runs
+# `dx build --platform ios --release` first, which generates the Xcode project
+# this Fastfile then signs (fastlane match) and packages (gym) into an .ipa.
+# Screenshots don't use `capture_screenshots` (XCUITest); they're captured
+# externally and framed with `frameit` — see the screenshots lanes below.
+#
+# CI auth uses an App Store Connect API key (no Apple ID 2FA); signing uses
+# `match` (certs in a private git repo). Required env / GitHub secrets:
+#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8   — App Store Connect API key (.p8 body)
+#   MATCH_GIT_URL, MATCH_PASSWORD           — the match certs repo + passphrase
+#   MATCH_GIT_BASIC_AUTHORIZATION           — base64 "user:token" to read that repo
+# One-time, locally: `bundle exec fastlane match appstore` populates the repo.
 
 default_platform(:ios)
 
+# App Store Connect API key for auth (TestFlight + deliver), from CI secrets.
+def asc_api_key
+  app_store_connect_api_key(
+    key_id: ENV.fetch("ASC_KEY_ID"),
+    issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+    key_content: ENV.fetch("ASC_KEY_P8"),
+    is_key_content_base64: false,
+    in_house: false,
+  )
+end
+
+# The Xcode project dx generates for the iOS target, and its scheme. dx writes it
+# under target/dx/<app>/<profile>/ios; override via env if your dx version emits
+# a different path/name (verify with `dx build --platform ios` locally).
+IOS_PROJECT = ENV["DARKRUN_IOS_PROJECT"] || "target/dx/darkrun/release/ios/darkrun.xcodeproj"
+IOS_SCHEME = ENV["DARKRUN_IOS_SCHEME"] || "darkrun"
+APP_ID = "ai.darkrun.app"
+
 platform :ios do
+  # Sign + package the dx-generated Xcode project into an App Store .ipa. Assumes
+  # `dx build --platform ios --release` already ran (CI does this first). `match`
+  # is readonly here — CI never mints certs; run `fastlane match appstore` once
+  # locally to populate the repo.
+  private_lane :build_ipa do |options|
+    sync_code_signing(
+      type: "appstore",
+      app_identifier: APP_ID,
+      api_key: asc_api_key,
+      readonly: true,
+    )
+    build_app(
+      project: IOS_PROJECT,
+      scheme: IOS_SCHEME,
+      configuration: "Release",
+      export_method: "app-store",
+      output_directory: "build",
+      output_name: "darkrun.ipa",
+      # Stamp a unique, monotonic build number (the CI run number) so every
+      # TestFlight upload for a given version is distinct; the release lane also
+      # pins the marketing version from the tag.
+      xcargs: [
+        "CURRENT_PROJECT_VERSION=#{options[:build_number]}",
+        options[:version] ? "MARKETING_VERSION=#{options[:version]}" : nil,
+      ].compact.join(" "),
+    )
+  end
+
+  desc "TestFlight build — CI runs this on every push to main."
+  lane :beta do
+    key = asc_api_key
+    build_ipa(build_number: ENV["GITHUB_RUN_NUMBER"] || "0")
+    sha = (ENV["GITHUB_SHA"] || "")[0, 7]
+    upload_to_testflight(
+      api_key: key,
+      app_identifier: APP_ID,
+      skip_waiting_for_build_processing: true,
+      distribute_external: false,
+      changelog: "Automated build from main#{sha.empty? ? '' : " (#{sha})"}.",
+    )
+  end
+
+  desc "App Store release — CI runs this on a version tag. Uploads the binary +"
+  desc "metadata but does NOT submit for review (a human hits submit in ASC)."
+  lane :release do
+    key = asc_api_key
+    version = ENV["DARKRUN_RELEASE_VERSION"] # set from the tag by the workflow
+    build_ipa(build_number: ENV["GITHUB_RUN_NUMBER"] || "0", version: version)
+    upload_to_app_store(
+      api_key: key,
+      app_identifier: APP_ID,
+      submit_for_review: false,
+      automatic_release: false,
+      force: true, # skip the HTML metadata-preview confirmation (non-interactive)
+      skip_screenshots: true, # screenshots have their own lane
+      skip_metadata: false,
+      precheck_include_in_app_purchases: false,
+      run_precheck_before_submit: false,
+    )
+  end
+
   desc "Frame raw screenshots with device bezels + dark-brand captions"
   desc "Input:  fastlane/screenshots/<locale>/*.png  (raw, named <device>-<screen>.png)"
   desc "Output: …_framed.png beside each, ready for `deliver`"
