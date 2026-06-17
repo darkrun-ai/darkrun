@@ -295,14 +295,37 @@ pub struct RegisterDevice {
     pub platform: String,
 }
 
+/// Origins allowed to call `/devices` cross-origin. The web app lives on
+/// `app.darkrun.ai` but the relay (and `/devices`) is served from the website
+/// host (`darkrun.ai`), so the browser does a CORS preflight; `localhost` covers
+/// local `dx serve`.
+const APP_ORIGINS: &[&str] = &["https://app.darkrun.ai", "http://localhost:8080"];
+
 /// Mount the device-registration endpoints, keyed off the same Firebase token
 /// the relay authenticates with:
 /// - `POST /devices` — register/refresh a device for the caller's account;
 /// - `DELETE /devices/{token}` — drop a device (logout / token rotation).
+///
+/// CORS is allowed for the web-app origins (cross-origin: app.darkrun.ai →
+/// darkrun.ai), permitting the `Authorization` + `Content-Type` headers the
+/// registration request carries.
 pub fn device_router(state: RelayState) -> Router {
+    use axum::http::{header, HeaderValue, Method};
+    use tower_http::cors::CorsLayer;
+
+    let origins: Vec<HeaderValue> = APP_ORIGINS
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
+    let cors = CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::POST, Method::DELETE])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
     Router::new()
         .route("/devices", axum::routing::post(register_device))
         .route("/devices/{token}", axum::routing::delete(unregister_device))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -566,6 +589,38 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let _ = res.into_body().collect().await;
         assert!(registry.devices_for("acct-a").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn devices_cors_preflight_allows_the_app_origin() {
+        use tower::ServiceExt;
+
+        let registry: Arc<dyn DeviceRegistry> = Arc::new(InMemoryDeviceRegistry::new());
+        let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth))
+            .with_push(registry, Arc::new(NoopPushSender));
+        let app = device_router(state);
+
+        // A browser preflight from app.darkrun.ai gets the allow-origin back.
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/devices")
+                    .header("origin", "https://app.darkrun.ai")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "authorization,content-type")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(res.status().is_success());
+        assert_eq!(
+            res.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://app.darkrun.ai"),
+        );
     }
 
     #[test]

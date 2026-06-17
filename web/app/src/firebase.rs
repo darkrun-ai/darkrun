@@ -76,8 +76,8 @@ pub fn query_param(key: &str) -> Option<String> {
     None
 }
 
-/// Render a JS error value to a readable string.
-fn js_error(e: &JsValue) -> String {
+/// Render a JS error value to a readable string. Shared with [`crate::register`].
+pub(crate) fn js_error(e: &JsValue) -> String {
     e.as_string()
         .or_else(|| js_sys::Reflect::get(e, &JsValue::from_str("message")).ok()?.as_string())
         .unwrap_or_else(|| "sign-in failed or was cancelled".to_string())
