@@ -2,6 +2,21 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.7.0](https://github.com/darkrun-ai/darkrun/compare/v0.6.0...v0.7.0) (2026-06-17)
+
+
+### Features
+
+* **app:** web push registration — the client half of notify-on-tick ([72a5365](https://github.com/darkrun-ai/darkrun/commit/72a5365b259f80462946ecacb2fd16dfbe3bbd24))
+* **app:** wire the Firebase web config (login now functional) ([2af84d6](https://github.com/darkrun-ai/darkrun/commit/2af84d6ba4f3dc5b88c77b95dee9da5fbbce48d4))
+* **app:** wire the Web Push VAPID key — remote push fully configured ([9d0750c](https://github.com/darkrun-ai/darkrun/commit/9d0750caa4920646d2d984aa3dbe4eae9470d4f6))
+* **web:** Firestore-backed device registry — push survives restarts ([5411693](https://github.com/darkrun-ai/darkrun/commit/5411693ebf54408fe73696906ac05c66180fc4f2))
+
+
+### Bug Fixes
+
+* **mcp:** unbreak the Windows release build (notify.rs E0282) ([1106f18](https://github.com/darkrun-ai/darkrun/commit/1106f1878b21be24fad1e15e844557b7755e56d7))
+
 ## [0.6.0](https://github.com/darkrun-ai/darkrun/compare/v0.5.0...v0.6.0) (2026-06-16)
 
 
