@@ -13,6 +13,12 @@ name = "darkrun"
 # overrides exist but we deliberately use one stable id everywhere.
 identifier = "ai.darkrun.app"
 publisher = "darkrun"
+# The app icon — the darkrun brand mark (the `dr` wordmark + station pipeline on
+# the dark gradient), rendered 1024×1024 opaque from mockups/icons/darkrun-icon.svg.
+# dx generates each platform's icon set from this source, so it lands in the iOS
+# asset catalog → in the .ipa → on TestFlight + the App Store (Apple no longer
+# takes a separately-uploaded iOS icon; it comes from the binary).
+icon = ["assets/icon.png"]
 
 # Universal Links (iOS) / App Links (Android) / web deep links.
 #
