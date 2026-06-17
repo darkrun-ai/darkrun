@@ -28,6 +28,18 @@ IDENTITY="$(security find-identity -v -p codesigning | grep -oE 'Apple Distribut
 [ -n "${IDENTITY:-}" ] || { echo "error: no 'Apple Distribution' identity in the keychain" >&2; exit 1; }
 echo "identity: $IDENTITY"
 
+# Patch the Info.plist for App Store validity BEFORE signing (editing after would
+# break the signature). dx's iOS bundle omits/empties these, which altool rejects:
+#   - CFBundlePackageType must be APPL
+#   - MinimumOSVersion must be a real deployment target (>= 12.0 for arm64)
+#   - LSRequiresIPhoneOS marks it an iOS app
+PLIST="$APP/Info.plist"
+plist_set() { /usr/libexec/PlistBuddy -c "Set :$1 $2" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :$1 $3 $2" "$PLIST"; }
+plist_set CFBundlePackageType APPL string
+plist_set MinimumOSVersion 15.0 string
+plist_set LSRequiresIPhoneOS true bool
+echo "info.plist: CFBundlePackageType=$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$PLIST") MinimumOSVersion=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$PLIST")"
+
 # Embed the profile and derive entitlements from it (so the signed app's
 # entitlements match what the profile authorizes — app id, team, etc.).
 cp "$PROFILE" "$APP/embedded.mobileprovision"
@@ -47,7 +59,9 @@ codesign --verify --deep --strict "$APP" && echo "codesign verified"
 rm -rf /tmp/dr-payload "$ROOT/darkrun.ipa"
 mkdir -p /tmp/dr-payload/Payload
 cp -R "$APP" /tmp/dr-payload/Payload/
-( cd /tmp/dr-payload && zip -qr "$ROOT/darkrun.ipa" Payload )
+# --symlinks preserves the bundle's symlinks; without it the _CodeSignature/
+# CodeResources symlink is dereferenced and altool rejects the bundle.
+( cd /tmp/dr-payload && zip -qr --symlinks "$ROOT/darkrun.ipa" Payload )
 
 echo "ipa:      $ROOT/darkrun.ipa"
 echo "DARKRUN_IPA=$ROOT/darkrun.ipa" >> "${GITHUB_ENV:-/dev/stdout}"

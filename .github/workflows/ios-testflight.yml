@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   testflight:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -65,6 +65,15 @@ jobs:
           MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+
+      # Apple requires the iOS 26 SDK (Xcode 26) for App Store uploads. Select the
+      # newest Xcode on the runner so dx builds against that SDK.
+      - name: Select newest Xcode (iOS 26 SDK)
+        run: |
+          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$latest" ] && sudo xcode-select -s "$latest/Contents/Developer" || true
+          xcodebuild -version
+          echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo '?')"
 
       - name: Build the iOS app (Dioxus)
         run: dx build --package darkrun-desktop --platform ios --release
