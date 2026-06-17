@@ -7,8 +7,8 @@
 //
 // Service workers can't use ES module imports reliably across browsers, so this
 // uses the Firebase compat SDK via importScripts (the standard FCM SW shape).
-// The config is the same PUBLIC web-app config as firebase-messaging.js — fill
-// the REPLACE_WITH_* values from the Firebase console.
+// The config is the project's PUBLIC web-app config (same as
+// firebase-messaging.js); the SW needs no VAPID key.
 
 importScripts(
   "https://www.gstatic.com/firebasejs/11.1.0/firebase-app-compat.js",
@@ -18,11 +18,11 @@ importScripts(
 );
 
 firebase.initializeApp({
-  apiKey: "REPLACE_WITH_FIREBASE_WEB_API_KEY",
+  apiKey: "AIzaSyDhYi2DQAkbancuR71x3tqQhQ9AE3U29d8",
   authDomain: "darkrun.firebaseapp.com",
   projectId: "darkrun",
-  messagingSenderId: "REPLACE_WITH_FIREBASE_MESSAGING_SENDER_ID",
-  appId: "REPLACE_WITH_FIREBASE_WEB_APP_ID",
+  messagingSenderId: "32118591905",
+  appId: "1:32118591905:web:987db3ba09d6991b837be0",
 });
 
 const messaging = firebase.messaging();
