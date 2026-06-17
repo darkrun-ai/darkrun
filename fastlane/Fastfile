@@ -96,6 +96,18 @@ platform :ios do
     )
   end
 
+  desc "One-time setup: create the App Store distribution cert + provisioning"
+  desc "profile and store them (encrypted) in the match repo. Run by"
+  desc "fastlane/bootstrap-ios-signing.sh; needs the ASC API key + MATCH_* env."
+  lane :certs do
+    sync_code_signing(
+      type: "appstore",
+      app_identifier: APP_ID,
+      api_key: asc_api_key,
+      readonly: false, # create + push if absent (the only lane that may write)
+    )
+  end
+
   desc "Frame raw screenshots with device bezels + dark-brand captions"
   desc "Input:  fastlane/screenshots/<locale>/*.png  (raw, named <device>-<screen>.png)"
   desc "Output: …_framed.png beside each, ready for `deliver`"
