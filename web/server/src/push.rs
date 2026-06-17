@@ -32,18 +32,25 @@ pub struct DeviceToken {
     pub platform: String,
 }
 
+/// The future a [`DeviceRegistry`] method returns — boxed so the trait stays
+/// object-safe (`dyn DeviceRegistry`) while a network-backed impl (Firestore)
+/// does async I/O, without pulling in an async-trait dependency.
+pub type RegistryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 /// Maps each account to its registered devices, so a push fans out to all of an
 /// owner's devices at once. Behind a trait so the in-memory impl tests offline
-/// and a persistent (Firestore) impl can wire in for production unchanged.
+/// and a persistent (Firestore) impl can wire in for production unchanged. The
+/// methods are async (boxed futures) because the production impl talks to
+/// Firestore over HTTP.
 pub trait DeviceRegistry: Send + Sync {
     /// Register (or refresh) `device` for `account`. Idempotent on the token:
     /// re-registering an existing token updates its platform, never duplicates.
-    fn register(&self, account: &str, device: DeviceToken);
+    fn register<'a>(&'a self, account: &'a str, device: DeviceToken) -> RegistryFuture<'a, ()>;
     /// Drop a device token (logout / token rotation / uninstall). Idempotent —
     /// an unknown token is a silent no-op.
-    fn unregister(&self, token: &str);
+    fn unregister<'a>(&'a self, token: &'a str) -> RegistryFuture<'a, ()>;
     /// Every device currently registered to `account` (empty if none).
-    fn devices_for(&self, account: &str) -> Vec<DeviceToken>;
+    fn devices_for<'a>(&'a self, account: &'a str) -> RegistryFuture<'a, Vec<DeviceToken>>;
 }
 
 /// An in-memory registry: `account -> {token -> platform}`. Stateless across
@@ -62,27 +69,29 @@ impl InMemoryDeviceRegistry {
 }
 
 impl DeviceRegistry for InMemoryDeviceRegistry {
-    fn register(&self, account: &str, device: DeviceToken) {
+    fn register<'a>(&'a self, account: &'a str, device: DeviceToken) -> RegistryFuture<'a, ()> {
         self.by_account
             .lock()
             .unwrap()
             .entry(account.to_string())
             .or_default()
             .insert(device.token, device.platform);
+        Box::pin(async {})
     }
 
-    fn unregister(&self, token: &str) {
+    fn unregister<'a>(&'a self, token: &'a str) -> RegistryFuture<'a, ()> {
         // A token belongs to exactly one account, but we don't index by token,
         // so sweep — registries are small (a person's handful of devices).
-        let mut by_account = self.by_account.lock().unwrap();
-        by_account.retain(|_, devices| {
+        self.by_account.lock().unwrap().retain(|_, devices| {
             devices.remove(token);
             !devices.is_empty()
         });
+        Box::pin(async {})
     }
 
-    fn devices_for(&self, account: &str) -> Vec<DeviceToken> {
-        self.by_account
+    fn devices_for<'a>(&'a self, account: &'a str) -> RegistryFuture<'a, Vec<DeviceToken>> {
+        let out = self
+            .by_account
             .lock()
             .unwrap()
             .get(account)
@@ -95,7 +104,8 @@ impl DeviceRegistry for InMemoryDeviceRegistry {
                     })
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        Box::pin(async move { out })
     }
 }
 
@@ -239,7 +249,7 @@ pub async fn fan_out(
     title: &str,
     body: &str,
 ) -> usize {
-    let devices = registry.devices_for(account);
+    let devices = registry.devices_for(account).await;
     if devices.is_empty() {
         return 0;
     }
@@ -276,32 +286,32 @@ mod tests {
         }
     }
 
-    #[test]
-    fn registry_registers_refreshes_and_unregisters() {
+    #[tokio::test]
+    async fn registry_registers_refreshes_and_unregisters() {
         let reg = InMemoryDeviceRegistry::new();
-        reg.register("acct-a", dev("t1", "ios"));
-        reg.register("acct-a", dev("t2", "web"));
-        reg.register("acct-b", dev("t3", "android"));
+        reg.register("acct-a", dev("t1", "ios")).await;
+        reg.register("acct-a", dev("t2", "web")).await;
+        reg.register("acct-b", dev("t3", "android")).await;
 
-        let mut a = reg.devices_for("acct-a");
+        let mut a = reg.devices_for("acct-a").await;
         a.sort_by(|x, y| x.token.cmp(&y.token));
         assert_eq!(a, vec![dev("t1", "ios"), dev("t2", "web")]);
-        assert_eq!(reg.devices_for("acct-b"), vec![dev("t3", "android")]);
+        assert_eq!(reg.devices_for("acct-b").await, vec![dev("t3", "android")]);
 
         // Re-registering a token refreshes its platform, never duplicates.
-        reg.register("acct-a", dev("t1", "macos"));
-        assert_eq!(reg.devices_for("acct-a").len(), 2);
-        assert!(reg.devices_for("acct-a").contains(&dev("t1", "macos")));
+        reg.register("acct-a", dev("t1", "macos")).await;
+        assert_eq!(reg.devices_for("acct-a").await.len(), 2);
+        assert!(reg.devices_for("acct-a").await.contains(&dev("t1", "macos")));
 
         // Unregister drops just that token; emptying an account removes it.
-        reg.unregister("t3");
-        assert!(reg.devices_for("acct-b").is_empty());
-        reg.unregister("t1");
-        assert_eq!(reg.devices_for("acct-a"), vec![dev("t2", "web")]);
+        reg.unregister("t3").await;
+        assert!(reg.devices_for("acct-b").await.is_empty());
+        reg.unregister("t1").await;
+        assert_eq!(reg.devices_for("acct-a").await, vec![dev("t2", "web")]);
 
         // Unknown token is a no-op.
-        reg.unregister("nope");
-        assert_eq!(reg.devices_for("acct-a").len(), 1);
+        reg.unregister("nope").await;
+        assert_eq!(reg.devices_for("acct-a").await.len(), 1);
     }
 
     #[test]
@@ -323,9 +333,9 @@ mod tests {
     #[tokio::test]
     async fn fan_out_pushes_to_an_accounts_devices_only() {
         let registry: Arc<dyn DeviceRegistry> = Arc::new(InMemoryDeviceRegistry::new());
-        registry.register("owner", dev("t1", "ios"));
-        registry.register("owner", dev("t2", "web"));
-        registry.register("other", dev("t3", "android"));
+        registry.register("owner", dev("t1", "ios")).await;
+        registry.register("owner", dev("t2", "web")).await;
+        registry.register("other", dev("t3", "android")).await;
         let recorder = Arc::new(RecordingPushSender::default());
         let sender: Arc<dyn PushSender> = recorder.clone();
 

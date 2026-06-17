@@ -25,6 +25,7 @@
 mod broker;
 mod config;
 mod firebase_auth;
+mod firestore;
 mod gcp_auth;
 mod oauth_routes;
 mod push;
@@ -44,7 +45,8 @@ pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
 pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
 pub use firebase_auth::{FirebaseTokenAuth, FIREBASE_CERTS_URL};
-pub use gcp_auth::{ServiceAccount, ServiceAccountTokenSource, FCM_SCOPE};
+pub use firestore::FirestoreDeviceRegistry;
+pub use gcp_auth::{ServiceAccount, ServiceAccountTokenSource, DATASTORE_SCOPE, FCM_SCOPE};
 pub use relay_broker::{relay_auth_router, ClaimPayload, RelayBroker};
 pub use push::{
     fan_out, fcm_endpoint, fcm_message, AccessTokenSource, DeviceRegistry, DeviceToken,
@@ -133,13 +135,18 @@ pub async fn relay_router_from_env() -> Option<Router> {
         });
         // Wire FCM remote push when service-account credentials are present
         // (GOOGLE_APPLICATION_CREDENTIALS). Absent → push stays disabled; the
-        // host's LOCAL OS notification still fires.
+        // host's LOCAL OS notification still fires. The one key mints two
+        // scope-specific token sources: FCM `messages:send` for the sender,
+        // `datastore` for the Firestore-persisted device registry.
         let mut state = RelayState::new(Arc::new(Relay::new()), auth);
-        if let Some(tokens) = ServiceAccountTokenSource::from_env() {
+        if let Some(account) = ServiceAccount::from_env() {
             tracing::info!("FCM remote push enabled (service-account credentials loaded)");
+            let fcm_tokens = ServiceAccountTokenSource::new(account.clone());
+            let store_tokens =
+                ServiceAccountTokenSource::new(account).with_scope(DATASTORE_SCOPE);
             state = state.with_push(
-                Arc::new(InMemoryDeviceRegistry::new()),
-                Arc::new(FcmPushSender::new(project, tokens)),
+                Arc::new(FirestoreDeviceRegistry::new(project.clone(), store_tokens)),
+                Arc::new(FcmPushSender::new(project, fcm_tokens)),
             );
         } else {
             tracing::info!(

@@ -20,6 +20,8 @@ darkrun-vcs.workspace = true
 darkrun-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Hash FCM tokens into stable Firestore document ids (the persistent registry).
+sha2.workspace = true
 tokio.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
