@@ -108,6 +108,19 @@ platform :ios do
     )
   end
 
+  desc "DANGER: revoke the account's App Store distribution cert + profiles and"
+  desc "clear them from the match repo (they're recreated on the next `certs`"
+  desc "run). Distribution certs are ACCOUNT-WIDE, so only when darkrun is the"
+  desc "sole app. Run via MATCH_NUKE=1 ./fastlane/bootstrap-ios-signing.sh."
+  lane :nuke_certs do
+    match_nuke(
+      type: "appstore",
+      app_identifier: APP_ID,
+      api_key: asc_api_key,
+      skip_confirmation: true,
+    )
+  end
+
   desc "Frame raw screenshots with device bezels + dark-brand captions"
   desc "Input:  fastlane/screenshots/<locale>/*.png  (raw, named <device>-<screen>.png)"
   desc "Output: …_framed.png beside each, ready for `deliver`"
