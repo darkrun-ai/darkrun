@@ -60,7 +60,7 @@ echo "▶ app repo   : $APP_REPO"
 
 # ── A modern Ruby ────────────────────────────────────────────────────────────
 # macOS system Ruby (2.6) is EOL, links LibreSSL, and breaks match's cert
-# encryption ("Error encrypting …p12"); fastlane 2.235+ also requires Ruby 3.0+.
+# encryption ("Error encrypting ...p12"); fastlane 2.235+ also requires Ruby 3.0+.
 # Prefer a Homebrew Ruby if one is installed; bail with guidance otherwise.
 ruby_old() { ruby -e 'exit(Gem::Version.new(RUBY_VERSION) < Gem::Version.new("3.0"))' 2>/dev/null; }
 if ruby_old; then
@@ -102,7 +102,7 @@ echo "▶ openssl    : $(openssl version)"
 # the current bundler. Also make sure a modern bundler is present.
 rm -f "$ROOT/fastlane/Gemfile.lock"
 gem install bundler --no-document --conservative >/dev/null 2>&1 || true
-echo "▶ installing fastlane (bundler)…"
+echo "▶ installing fastlane (bundler)..."
 ( cd "$ROOT/fastlane" && bundle install --quiet )
 
 # ── 1. ensure the private certs repo exists ──────────────────────────────────
@@ -119,6 +119,12 @@ if [ -z "${MATCH_PASSWORD:-}" ]; then
   MATCH_PASSWORD="$(openssl rand -base64 24)"
   GENERATED=1
 fi
+# Print it NOW, before any step that could fail. The certs repo is encrypted with
+# this passphrase, so losing it means re-nuking; it's also set as MATCH_PASSWORD
+# below. (Pass MATCH_PASSWORD=... to reuse a known one.)
+echo "+-- match passphrase (SAVE THIS - it encrypts the certs repo) --"
+echo "|   $MATCH_PASSWORD"
+echo "+---------------------------------------------------------------"
 
 # ── 3. CI token + basic-auth blob so CI can READ the certs repo over HTTPS ────
 CI_TOKEN="${MATCH_CI_TOKEN:-$(gh auth token)}"
@@ -139,11 +145,11 @@ if [ -n "${MATCH_NUKE:-}" ]; then
   ( cd "$ROOT/fastlane" && bundle exec fastlane ios nuke_certs )
 fi
 
-echo "▶ running fastlane match appstore (creates + pushes the cert + profile)…"
+echo "▶ running fastlane match appstore (creates + pushes the cert + profile)..."
 ( cd "$ROOT/fastlane" && bundle exec fastlane ios certs )
 
 # ── 5. load the GitHub Actions secrets the workflows read ────────────────────
-echo "▶ setting Actions secrets on $APP_REPO…"
+echo "▶ setting Actions secrets on ${APP_REPO}..."
 gh secret set ASC_KEY_ID --repo "$APP_REPO" --body "$ASC_KEY_ID"
 gh secret set ASC_ISSUER_ID --repo "$APP_REPO" --body "$ASC_ISSUER_ID"
 gh secret set ASC_KEY_P8 --repo "$APP_REPO" < "$ASC_KEY_P8_FILE"
