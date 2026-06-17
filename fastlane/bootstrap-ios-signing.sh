@@ -93,6 +93,12 @@ fi
 echo "▶ openssl    : $(openssl version)"
 
 # ── fastlane deps ────────────────────────────────────────────────────────────
+# Drop any stale Gemfile.lock — one written by an older Ruby/bundler (e.g. macOS
+# system Ruby 2.6 pins bundler 1.17.2, which crashes on Ruby 3.2+ with
+# "undefined method 'untaint'"). It's gitignored, so it regenerates cleanly under
+# the current bundler. Also make sure a modern bundler is present.
+rm -f "$ROOT/fastlane/Gemfile.lock"
+gem install bundler --no-document --conservative >/dev/null 2>&1 || true
 echo "▶ installing fastlane (bundler)…"
 ( cd "$ROOT/fastlane" && bundle install --quiet )
 
