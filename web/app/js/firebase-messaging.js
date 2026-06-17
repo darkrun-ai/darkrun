@@ -33,7 +33,7 @@ const firebaseConfig = {
 };
 
 // The Web Push VAPID public key (Cloud Messaging → Web Push certificates).
-const VAPID_KEY = "REPLACE_WITH_FIREBASE_WEB_PUSH_VAPID_KEY";
+const VAPID_KEY = "BFxSAhVFAvO5fRDcIpTw3fAbVl7WPnjy4x9S-Pd9r8_zowSZ6FNE40r7svQcLcMdEZ-PvplfaT60Kq5TPjXTjwI";
 
 // Reuse the already-initialized app if firebase-login.js created one.
 function firebaseApp() {
