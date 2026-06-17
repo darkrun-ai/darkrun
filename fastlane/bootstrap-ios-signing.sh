@@ -35,6 +35,10 @@ MATCH_GIT_URL="https://github.com/${CERTS_REPO}.git"
 # Resolve to the repo root regardless of where this is invoked from.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Don't let fastlane regenerate fastlane/README.md (it would clobber the
+# hand-written docs with an auto lanes table).
+export FASTLANE_SKIP_DOCS=1
+
 die() { echo "error: $*" >&2; exit 1; }
 
 # ── Preconditions ────────────────────────────────────────────────────────────
@@ -51,7 +55,31 @@ echo "▶ p8 file    : $ASC_KEY_P8_FILE"
 echo "▶ certs repo : $CERTS_REPO"
 echo "▶ app repo   : $APP_REPO"
 
+# ── Real OpenSSL on PATH ─────────────────────────────────────────────────────
+# `match` encrypts the certs by shelling out to `openssl enc`. macOS's
+# /usr/bin/openssl is LibreSSL, which is incompatible with match's encryption and
+# fails with "Error encrypting …p12". Put a real OpenSSL (Homebrew) first on PATH.
+if openssl version 2>/dev/null | grep -qi libressl; then
+  if command -v brew >/dev/null 2>&1; then
+    for f in openssl@3 openssl@1.1; do
+      if brew --prefix "$f" >/dev/null 2>&1; then
+        export PATH="$(brew --prefix "$f")/bin:$PATH"
+        break
+      fi
+    done
+  fi
+  if openssl version 2>/dev/null | grep -qi libressl; then
+    die "openssl is LibreSSL ($(openssl version)); match's encryption needs real OpenSSL.
+  Install it and re-run:  brew install openssl@3"
+  fi
+fi
+echo "▶ openssl    : $(openssl version)"
+
 # ── fastlane deps ────────────────────────────────────────────────────────────
+case "$(ruby -e 'print RUBY_VERSION' 2>/dev/null)" in
+  2.*) echo "⚠ using Ruby $(ruby -e 'print RUBY_VERSION') (macOS system Ruby is EOL).
+  If anything else misbehaves, install a current Ruby: brew install ruby" ;;
+esac
 echo "▶ installing fastlane (bundler)…"
 ( cd "$ROOT/fastlane" && bundle install --quiet )
 
