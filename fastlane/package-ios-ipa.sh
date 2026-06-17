@@ -63,6 +63,62 @@ plist_set DTCompiler com.apple.compilers.llvm.clang.1_0 string
 [ -n "$OS_BUILD" ]    && plist_set BuildMachineOSBuild "$OS_BUILD" string
 echo "info.plist: CFBundlePackageType=$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$PLIST") MinimumOSVersion=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$PLIST") DTPlatformName=$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$PLIST") DTSDKName=$(/usr/libexec/PlistBuddy -c 'Print :DTSDKName' "$PLIST")"
 
+# Force a single supported platform + iPhone-only device family. dx writes
+# CFBundleSupportedPlatforms=[iPhoneOS, iPadOS] (altool wants ONE value) and a
+# UIDeviceFamily that includes iPad — which then demands an iPad icon + iPad
+# multitasking launch storyboard. iPhone-only sidesteps both.
+/usr/libexec/PlistBuddy -c "Delete :CFBundleSupportedPlatforms" "$PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms array" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms:0 string iPhoneOS" "$PLIST"
+/usr/libexec/PlistBuddy -c "Delete :UIDeviceFamily" "$PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :UIDeviceFamily array" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:0 integer 1" "$PLIST"
+# Modern launch screen (no storyboard needed at MinimumOSVersion >= 14).
+/usr/libexec/PlistBuddy -c "Add :UILaunchScreen dict" "$PLIST" 2>/dev/null || true
+
+# Build + compile the app-icon asset catalog. dx doesn't produce one, so altool
+# rejects the bundle for a missing CFBundleIconName + missing 120/152px icons.
+# actool compiles Assets.car into the app and emits the CFBundleIcons keys.
+ICON_SRC="$ROOT/desktop/assets/icon.png"
+if [ -f "$ICON_SRC" ]; then
+  ICONSET="/tmp/dr-assets.xcassets/AppIcon.appiconset"
+  rm -rf /tmp/dr-assets.xcassets; mkdir -p "$ICONSET"
+  for spec in 40:icon-20@2x 60:icon-20@3x 58:icon-29@2x 87:icon-29@3x \
+              80:icon-40@2x 120:icon-40@3x 120:icon-60@2x 180:icon-60@3x 1024:icon-1024; do
+    px="${spec%%:*}"; name="${spec##*:}"
+    sips -z "$px" "$px" "$ICON_SRC" --out "$ICONSET/${name}.png" >/dev/null
+  done
+  cat > "$ICONSET/Contents.json" <<'JSON'
+{
+  "images": [
+    {"idiom":"iphone","size":"20x20","scale":"2x","filename":"icon-20@2x.png"},
+    {"idiom":"iphone","size":"20x20","scale":"3x","filename":"icon-20@3x.png"},
+    {"idiom":"iphone","size":"29x29","scale":"2x","filename":"icon-29@2x.png"},
+    {"idiom":"iphone","size":"29x29","scale":"3x","filename":"icon-29@3x.png"},
+    {"idiom":"iphone","size":"40x40","scale":"2x","filename":"icon-40@2x.png"},
+    {"idiom":"iphone","size":"40x40","scale":"3x","filename":"icon-40@3x.png"},
+    {"idiom":"iphone","size":"60x60","scale":"2x","filename":"icon-60@2x.png"},
+    {"idiom":"iphone","size":"60x60","scale":"3x","filename":"icon-60@3x.png"},
+    {"idiom":"ios-marketing","size":"1024x1024","scale":"1x","filename":"icon-1024.png"}
+  ],
+  "info": {"version":1,"author":"xcode"}
+}
+JSON
+  xcrun actool /tmp/dr-assets.xcassets \
+    --compile "$APP" \
+    --app-icon AppIcon \
+    --platform iphoneos \
+    --target-device iphone \
+    --minimum-deployment-target 15.0 \
+    --output-partial-info-plist /tmp/dr-actool.plist \
+    --output-format human-readable-text >/dev/null
+  plist_set CFBundleIconName AppIcon string
+  /usr/libexec/PlistBuddy -c "Merge /tmp/dr-actool.plist" "$PLIST" 2>/dev/null || true
+  echo "icons:    Assets.car compiled, CFBundleIconName=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$PLIST")"
+else
+  echo "warning: $ICON_SRC not found — skipping icon catalog (upload will fail icon validation)" >&2
+fi
+
 # Embed the profile and derive entitlements from it (so the signed app's
 # entitlements match what the profile authorizes — app id, team, etc.).
 cp "$PROFILE" "$APP/embedded.mobileprovision"

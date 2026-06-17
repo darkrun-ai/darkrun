@@ -78,8 +78,12 @@ jobs:
           xcodebuild -version
           echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo '?')"
 
+      # --target aarch64-apple-ios forces a DEVICE build. Without it dx defaults to
+      # the simulator triple (aarch64-apple-ios-sim), and App Store validation
+      # rejects the simulator-platform slice ("Simulator platforms aren't permitted"
+      # / missing LC_ENCRYPTION_INFO).
       - name: Build the iOS app (Dioxus)
-        run: dx build --package darkrun-desktop --platform ios --release
+        run: dx build --package darkrun-desktop --platform ios --release --target aarch64-apple-ios
 
       - name: Sign + package the .ipa
         run: ./fastlane/package-ios-ipa.sh
