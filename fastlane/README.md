@@ -61,6 +61,46 @@ Tracked (the config): `Framefile.json`, `screenshots/<locale>/title.strings`,
 
 Generated (git-ignored): the raw `*.png` captures and the `*_framed.png` output.
 
+## CI: TestFlight + App Store
+
+Two GitHub workflows build the Dioxus app to iOS, sign it (`match`), and ship it:
+
+- **`.github/workflows/ios-testflight.yml`** → `fastlane ios beta` — TestFlight,
+  intended to run **on every push to main**.
+- **`.github/workflows/ios-release.yml`** → `fastlane ios release` — App Store,
+  on the **version tag** (`vX.Y.Z`, same tag release-please pushes). Uploads the
+  binary + metadata but does **not** submit for review — a human hits Submit.
+
+Both are **manual-only (`workflow_dispatch`) until set up** — the `push:`
+triggers are commented out so they don't fail on every push before the
+credentials exist. Enable them once the steps below are done.
+
+### One-time setup
+
+1. **App Store Connect API key** (Users and Access → Integrations → App Store
+   Connect API → generate a key with App Manager access). Set repo secrets:
+   - `ASC_KEY_ID`, `ASC_ISSUER_ID`, and `ASC_KEY_P8` (the `.p8` file's contents).
+2. **Signing via `match`** — a private git repo holding the encrypted dist cert +
+   App Store provisioning profile for `ai.darkrun.app`:
+   ```bash
+   cd fastlane
+   bundle exec fastlane match init           # point it at a private repo
+   bundle exec fastlane match appstore        # creates + stores the cert + profile
+   ```
+   Set repo secrets: `MATCH_GIT_URL`, `MATCH_PASSWORD`, and
+   `MATCH_GIT_BASIC_AUTHORIZATION` (base64 of `user:personal-access-token` so CI
+   can read the repo).
+3. **Enable the triggers** — uncomment the `push:` blocks in both workflows.
+
+### dx → Xcode build
+
+CI runs `dx build --package darkrun-desktop --platform ios --release`, then the
+`build_ipa` lane signs + packages the generated Xcode project. The project path
+(`DARKRUN_IOS_PROJECT`) and scheme (`DARKRUN_IOS_SCHEME`) default to dx's output
+layout; if your dx version emits a different path, override those env vars (verify
+with `dx build --platform ios` locally) — this is the one spot to validate on the
+first CI run.
+
 ## Captions
 
 Edit `screenshots/<locale>/keyword.strings` (the small accent line) and

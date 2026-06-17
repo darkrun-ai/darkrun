@@ -1,0 +1,77 @@
+name: ios-release
+
+# Build the darkrun iOS app and upload it to the App Store on a version tag
+# (release-please pushes `vX.Y.Z` when its release PR merges — the same trigger as
+# release.yml). The binary + metadata are uploaded but NOT submitted for review;
+# a human hits "Submit" in App Store Connect. Auth + signing as in ios-testflight.
+#
+# Manual-only (workflow_dispatch) until the secrets exist + `match` is populated.
+# Enable the `push: tags` trigger once the ASC_* + MATCH_* secrets are set.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Marketing version (e.g. 0.7.0). Defaults to the tag."
+        required: false
+  # push:
+  #   tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+concurrency:
+  group: ios-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: v
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ver="${GITHUB_REF_NAME#v}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            ver="${{ inputs.version }}"
+          else
+            ver=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust (+ iOS target)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install dx (Dioxus CLI)
+        run: cargo install dioxus-cli --version "^0.7" --locked
+
+      - name: Set up Ruby + fastlane (bundler)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+        env:
+          BUNDLE_GEMFILE: fastlane/Gemfile
+
+      - name: Build the iOS app (Dioxus → Xcode project)
+        run: dx build --package darkrun-desktop --platform ios --release
+
+      - name: Upload to the App Store (no auto-submit)
+        run: bundle exec fastlane ios release
+        env:
+          BUNDLE_GEMFILE: fastlane/Gemfile
+          DARKRUN_RELEASE_VERSION: ${{ steps.v.outputs.version }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}

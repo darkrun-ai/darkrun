@@ -1,0 +1,67 @@
+name: ios-testflight
+
+# Build the darkrun iOS app (Dioxus → Xcode → signed .ipa) and upload it to
+# TestFlight on every push to main. Auth is an App Store Connect API key; signing
+# is fastlane `match`. See fastlane/Fastfile for the required secrets.
+#
+# Manual-only (workflow_dispatch) until the secrets below exist + `match` is
+# populated. Enable the `push:` trigger once these repo secrets are set:
+#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8,
+#   MATCH_GIT_URL, MATCH_PASSWORD, MATCH_GIT_BASIC_AUTHORIZATION
+
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - "desktop/**"
+  #     - "crates/**"
+  #     - "Cargo.toml"
+  #     - "Cargo.lock"
+  #     - "fastlane/**"
+  #     - ".github/workflows/ios-testflight.yml"
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  testflight:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust (+ iOS target)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install dx (Dioxus CLI)
+        run: cargo install dioxus-cli --version "^0.7" --locked
+
+      - name: Set up Ruby + fastlane (bundler)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+        env:
+          BUNDLE_GEMFILE: fastlane/Gemfile
+
+      - name: Build the iOS app (Dioxus → Xcode project)
+        run: dx build --package darkrun-desktop --platform ios --release
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane ios beta
+        env:
+          BUNDLE_GEMFILE: fastlane/Gemfile
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
