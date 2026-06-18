@@ -30,6 +30,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history so `git rev-list --count` is the real build number
 
       - name: Resolve version
         id: v
@@ -43,6 +45,9 @@ jobs:
             ver=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/')
           fi
           echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          # Same monotonic build number as the RC stream (commit count), so the GA
+          # build number is higher than every RC that preceded it.
+          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust (+ iOS target)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -94,6 +99,9 @@ jobs:
 
       - name: Sign + package the .ipa
         run: ./fastlane/package-ios-ipa.sh
+        env:
+          DARKRUN_MARKETING_VERSION: ${{ steps.v.outputs.version }}
+          DARKRUN_BUILD_NUMBER: ${{ steps.v.outputs.build }}
 
       - name: Upload to the App Store (no auto-submit)
         run: bundle exec fastlane ios release

@@ -45,6 +45,14 @@ plist_set CFBundlePackageType APPL string
 plist_set MinimumOSVersion 15.0 string
 plist_set LSRequiresIPhoneOS true bool
 
+# Marketing version + build number. CI passes these (DARKRUN_MARKETING_VERSION =
+# the in-dev/tag version, DARKRUN_BUILD_NUMBER = the monotonic commit count) so
+# every TestFlight build is a uniquely-numbered RC; both default to the dx-stamped
+# plist values when unset, so a local package run still produces a valid bundle.
+[ -n "${DARKRUN_MARKETING_VERSION:-}" ] && plist_set CFBundleShortVersionString "$DARKRUN_MARKETING_VERSION" string
+[ -n "${DARKRUN_BUILD_NUMBER:-}" ] && plist_set CFBundleVersion "$DARKRUN_BUILD_NUMBER" string
+echo "version:  CFBundleShortVersionString=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST") CFBundleVersion=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")"
+
 # Xcode normally injects the "DT*" build-metadata keys; dx does not, and altool
 # rejects the binary for "Missing Info.plist value 'DTPlatformName'". Derive them
 # from the active toolchain so the bundle looks like a real Xcode build.
