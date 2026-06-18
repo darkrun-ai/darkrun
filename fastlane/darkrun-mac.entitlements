@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mac App Store entitlements for the native darkrun desktop app.
+
+  The Mac App Store mandates the App Sandbox. darkrun-desktop needs only:
+    - app-sandbox        : required for MAS.
+    - network.client     : connect to the local engine over ws://127.0.0.1 (and
+                           HTTPS to GitHub/GitLab/relay). NOT network.server —
+                           the desktop is a client; the engine (a separate,
+                           unsandboxed CLI) hosts.
+    - application-groups : the shared container the engine + this sandboxed app
+                           meet at (see darkrun-mcp `data_home()` — the macOS
+                           data home IS this group's container). Must match the
+                           App Group registered in the portal AND the group id
+                           used by data_home(): group.ai.darkrun.
+
+  No files.user-selected entitlement: projects live INSIDE the group container
+  (cloned there by the engine/desktop), which the app-group grants access to —
+  so there's no need to prompt for arbitrary folders. Add user-selected.read-write
+  later only if we let users point at repos outside the container.
+
+  This file is applied by fastlane/package-macos-pkg.sh at codesign time; the
+  group id must match the Mac App Store provisioning profile's App Group.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.ai.darkrun</string>
+    </array>
+</dict>
+</plist>
