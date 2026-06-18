@@ -359,8 +359,9 @@ pre, code, textarea, input, .dr-annotate-text,
 fn Toolbar(drawer_open: Signal<bool>, selection: Signal<Selection>) -> Element {
     // On macOS the title bar is transparent + fullsize-content, so this toolbar
     // sits at the very top with the traffic lights floating over its left — pad
-    // left to clear them. The bar is a window drag region (`-webkit-app-region`);
-    // the interactive controls opt back out with `no-drag`.
+    // left to clear them. The bar acts as the window drag handle via tao's
+    // `drag_window()` on mousedown (wry ignores CSS `-webkit-app-region`); the
+    // buttons stop propagation so a press on them doesn't start a drag.
     let left_pad = if cfg!(target_os = "macos") { 78 } else { 14 };
     // Edge-to-edge: the bar's BACKGROUND bleeds into the top (status bar / notch)
     // and side safe areas, but its content is padded clear of them via
@@ -399,12 +400,21 @@ fn Toolbar(drawer_open: Signal<bool>, selection: Signal<Selection>) -> Element {
 
     let mut drawer_open = drawer_open;
     let mut selection = selection;
+    // Drag the window by the toolbar. wry does NOT honor `-webkit-app-region:drag`
+    // (that's an Electron/Chromium feature), and on macOS the native title bar is
+    // hidden (transparent + fullsize-content), so without this the window can't be
+    // moved at all. tao's `drag_window()` starts a native window drag on mousedown.
+    let window = dioxus::desktop::use_window();
     rsx! {
-        header { style: "{bar}",
+        header {
+            style: "{bar}",
+            onmousedown: move |_| { let _ = window.drag_window(); },
             button {
                 class: "dr-shell-burger",
                 style: "{burger}",
                 "aria-label": "Toggle projects",
+                // Don't start a window drag when pressing the control.
+                onmousedown: move |e| e.stop_propagation(),
                 onclick: move |_| {
                     let now = *drawer_open.peek();
                     drawer_open.set(!now);
@@ -413,12 +423,12 @@ fn Toolbar(drawer_open: Signal<bool>, selection: Signal<Selection>) -> Element {
             }
             Wordmark { variant: WordmarkVariant::OutlinedSolidRun, size: 22.0 }
             span { style: "flex:1;" }
-            // The gear opts out of the drag region so it stays clickable.
             button {
                 class: "dr-shell-settings",
                 style: "{gear}",
                 "aria-label": "Settings",
                 title: "Settings",
+                onmousedown: move |e| e.stop_propagation(),
                 onclick: move |_| selection.set(Selection::Settings),
                 "\u{2699}"
             }
