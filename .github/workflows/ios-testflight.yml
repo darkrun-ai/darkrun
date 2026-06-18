@@ -34,6 +34,23 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history so `git rev-list --count` is the real build number
+
+      # RC versioning: every main build is a release candidate of the in-dev
+      # version (CFBundleShortVersionString = the workspace Cargo.toml version),
+      # with a monotonically-increasing build number (CFBundleVersion = the commit
+      # count on main). The real release (ios-release.yml) ships the same numbering
+      # at the tagged version, so RC and GA build numbers never collide.
+      - name: Resolve RC version
+        id: ver
+        shell: bash
+        run: |
+          marketing=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/')
+          build=$(git rev-list --count HEAD)
+          echo "marketing=${marketing}" >> "$GITHUB_OUTPUT"
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+          echo "RC v${marketing} build ${build}"
 
       - name: Install Rust (+ iOS target)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -94,11 +111,16 @@ jobs:
 
       - name: Sign + package the .ipa
         run: ./fastlane/package-ios-ipa.sh
+        env:
+          DARKRUN_MARKETING_VERSION: ${{ steps.ver.outputs.marketing }}
+          DARKRUN_BUILD_NUMBER: ${{ steps.ver.outputs.build }}
 
       - name: Upload to TestFlight
         run: bundle exec fastlane ios beta
         env:
           BUNDLE_GEMFILE: fastlane/Gemfile
+          DARKRUN_MARKETING_VERSION: ${{ steps.ver.outputs.marketing }}
+          DARKRUN_BUILD_NUMBER: ${{ steps.ver.outputs.build }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
