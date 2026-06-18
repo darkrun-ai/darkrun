@@ -337,9 +337,13 @@ pre, code, textarea, input, .dr-annotate-text,
    slides over the content. Mirrors the mockup's mobile frame. */
 @media (max-width: 720px){
   .dr-shell-burger{ display:inline-flex; }
+  /* The drawer slides over from the top-left, so its content would sit under the
+     status bar / notch. Pad it clear of the top + left safe-area insets (the
+     background still fills behind them, matching the toolbar's edge-to-edge bleed). */
   .dr-shell-side{ position:fixed; top:0; left:0; bottom:0; z-index:50;
     transform:translateX(-100%); transition:transform .18s ease;
-    box-shadow:0 0 40px rgba(0,0,0,.5); }
+    box-shadow:0 0 40px rgba(0,0,0,.5);
+    padding-top:env(safe-area-inset-top); padding-left:env(safe-area-inset-left); }
   .dr-shell-side[data-open="true"]{ transform:translateX(0); }
   .dr-shell-drawer-scrim[data-open="true"]{ display:block; position:fixed;
     inset:0; z-index:40; background:rgba(0,0,0,.45); }
@@ -358,9 +362,17 @@ fn Toolbar(drawer_open: Signal<bool>, selection: Signal<Selection>) -> Element {
     // left to clear them. The bar is a window drag region (`-webkit-app-region`);
     // the interactive controls opt back out with `no-drag`.
     let left_pad = if cfg!(target_os = "macos") { 78 } else { 14 };
+    // Edge-to-edge: the bar's BACKGROUND bleeds into the top (status bar / notch)
+    // and side safe areas, but its content is padded clear of them via
+    // env(safe-area-inset-*) so nothing is obstructed. The height grows by the top
+    // inset so the 44px content row still sits fully below the status bar. On
+    // desktop every inset is 0, so this is identical to the old
+    // `height:44px; padding:0 14px 0 {left_pad}px`.
     let bar = format!(
-        "height:44px;flex:none;display:flex;align-items:center;gap:12px;\
-         padding:0 14px 0 {left_pad}px;background:{overlay};\
+        "height:calc(44px + env(safe-area-inset-top));flex:none;display:flex;\
+         align-items:center;gap:12px;\
+         padding:env(safe-area-inset-top) max(14px,env(safe-area-inset-right)) 0 \
+         max({left_pad}px,env(safe-area-inset-left));background:{overlay};\
          border-bottom:1px solid {border};-webkit-app-region:drag;user-select:none;",
         overlay = tokens::var::SURFACE_OVERLAY,
         border = tokens::var::BORDER,
