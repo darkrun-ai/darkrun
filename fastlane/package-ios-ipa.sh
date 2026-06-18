@@ -44,6 +44,10 @@ plist_set() { /usr/libexec/PlistBuddy -c "Set :$1 $2" "$PLIST" 2>/dev/null || /u
 plist_set CFBundlePackageType APPL string
 plist_set MinimumOSVersion 15.0 string
 plist_set LSRequiresIPhoneOS true bool
+# Home-screen / App Store display name. dx names it from the package
+# (DarkrunDesktop); the product is "Darkrun AI".
+plist_set CFBundleDisplayName "Darkrun AI" string
+plist_set CFBundleName "Darkrun AI" string
 # Export-compliance self-classification. Without this key App Store Connect
 # prompts for the encryption declaration on EVERY build. darkrun's only crypto is
 # standard HTTPS/TLS (rustls/aws-lc for GitHub/GitLab/relay/git-over-HTTPS), which
