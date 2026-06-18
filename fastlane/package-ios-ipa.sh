@@ -71,17 +71,37 @@ plist_set DTCompiler com.apple.compilers.llvm.clang.1_0 string
 [ -n "$OS_BUILD" ]    && plist_set BuildMachineOSBuild "$OS_BUILD" string
 echo "info.plist: CFBundlePackageType=$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$PLIST") MinimumOSVersion=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$PLIST") DTPlatformName=$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$PLIST") DTSDKName=$(/usr/libexec/PlistBuddy -c 'Print :DTSDKName' "$PLIST")"
 
-# Force a single supported platform + iPhone-only device family. dx writes
-# CFBundleSupportedPlatforms=[iPhoneOS, iPadOS] (altool wants ONE value) and a
-# UIDeviceFamily that includes iPad — which then demands an iPad icon + iPad
-# multitasking launch storyboard. iPhone-only sidesteps both.
+# Universal app: iPhone + iPad (UIDeviceFamily [1,2]). Supporting iPad also makes
+# the app available on Apple-Silicon Macs ("Designed for iPad"), so one binary
+# covers all three. CFBundleSupportedPlatforms stays a SINGLE value (iPhoneOS —
+# the platform value covers iPad too; altool rejects the multi-value list dx
+# emits). The iPad icon + UILaunchScreen below satisfy the iPad/multitasking
+# requirements this unlocks.
 /usr/libexec/PlistBuddy -c "Delete :CFBundleSupportedPlatforms" "$PLIST" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms array" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms:0 string iPhoneOS" "$PLIST"
 /usr/libexec/PlistBuddy -c "Delete :UIDeviceFamily" "$PLIST" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily array" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:0 integer 1" "$PLIST"
-# Modern launch screen (no storyboard needed at MinimumOSVersion >= 14).
+/usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:1 integer 2" "$PLIST"
+# Resizable on iPad/Mac: don't require full screen, and support all orientations
+# so Split View / Stage Manager / a Mac window can size freely.
+/usr/libexec/PlistBuddy -c "Delete :UIRequiresFullScreen" "$PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :UIRequiresFullScreen bool false" "$PLIST"
+set_orientations() { # rebuild $1 as the full 4-orientation array
+  /usr/libexec/PlistBuddy -c "Delete :$1" "$PLIST" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :$1 array" "$PLIST"
+  local i=0
+  for orient in UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown \
+                UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight; do
+    /usr/libexec/PlistBuddy -c "Add :$1:$i string $orient" "$PLIST"
+    i=$((i+1))
+  done
+}
+set_orientations UISupportedInterfaceOrientations
+set_orientations "UISupportedInterfaceOrientations~ipad"
+# Modern launch screen (no storyboard needed at MinimumOSVersion >= 14). REQUIRED
+# for iPad multitasking / resizable windows.
 /usr/libexec/PlistBuddy -c "Add :UILaunchScreen dict" "$PLIST" 2>/dev/null || true
 
 # Build + compile the app-icon asset catalog. dx doesn't produce one, so altool
@@ -92,7 +112,10 @@ if [ -f "$ICON_SRC" ]; then
   ICONSET="/tmp/dr-assets.xcassets/AppIcon.appiconset"
   rm -rf /tmp/dr-assets.xcassets; mkdir -p "$ICONSET"
   for spec in 40:icon-20@2x 60:icon-20@3x 58:icon-29@2x 87:icon-29@3x \
-              80:icon-40@2x 120:icon-40@3x 120:icon-60@2x 180:icon-60@3x 1024:icon-1024; do
+              80:icon-40@2x 120:icon-40@3x 120:icon-60@2x 180:icon-60@3x 1024:icon-1024 \
+              20:icon-ipad-20@1x 40:icon-ipad-20@2x 29:icon-ipad-29@1x 58:icon-ipad-29@2x \
+              40:icon-ipad-40@1x 80:icon-ipad-40@2x 76:icon-ipad-76@1x 152:icon-ipad-76@2x \
+              167:icon-ipad-83.5@2x; do
     px="${spec%%:*}"; name="${spec##*:}"
     sips -z "$px" "$px" "$ICON_SRC" --out "$ICONSET/${name}.png" >/dev/null
   done
@@ -107,6 +130,15 @@ if [ -f "$ICON_SRC" ]; then
     {"idiom":"iphone","size":"40x40","scale":"3x","filename":"icon-40@3x.png"},
     {"idiom":"iphone","size":"60x60","scale":"2x","filename":"icon-60@2x.png"},
     {"idiom":"iphone","size":"60x60","scale":"3x","filename":"icon-60@3x.png"},
+    {"idiom":"ipad","size":"20x20","scale":"1x","filename":"icon-ipad-20@1x.png"},
+    {"idiom":"ipad","size":"20x20","scale":"2x","filename":"icon-ipad-20@2x.png"},
+    {"idiom":"ipad","size":"29x29","scale":"1x","filename":"icon-ipad-29@1x.png"},
+    {"idiom":"ipad","size":"29x29","scale":"2x","filename":"icon-ipad-29@2x.png"},
+    {"idiom":"ipad","size":"40x40","scale":"1x","filename":"icon-ipad-40@1x.png"},
+    {"idiom":"ipad","size":"40x40","scale":"2x","filename":"icon-ipad-40@2x.png"},
+    {"idiom":"ipad","size":"76x76","scale":"1x","filename":"icon-ipad-76@1x.png"},
+    {"idiom":"ipad","size":"76x76","scale":"2x","filename":"icon-ipad-76@2x.png"},
+    {"idiom":"ipad","size":"83.5x83.5","scale":"2x","filename":"icon-ipad-83.5@2x.png"},
     {"idiom":"ios-marketing","size":"1024x1024","scale":"1x","filename":"icon-1024.png"}
   ],
   "info": {"version":1,"author":"xcode"}
@@ -117,6 +149,7 @@ JSON
     --app-icon AppIcon \
     --platform iphoneos \
     --target-device iphone \
+    --target-device ipad \
     --minimum-deployment-target 15.0 \
     --output-partial-info-plist /tmp/dr-actool.plist \
     --output-format human-readable-text >/dev/null

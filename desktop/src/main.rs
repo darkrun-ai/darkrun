@@ -159,9 +159,53 @@ fn app() -> Element {
     // Pinned → pre-select that run so it opens immediately; unpinned → no
     // pre-selection (the shell's welcome / browser).
     let initial_session = pinned.then(|| cfg.session_id.clone());
+    // iOS/iPadOS/Mac: force the WKWebView into MOBILE content mode once the
+    // webview exists, so the layout viewport tracks the WINDOW size (see
+    // `force_mobile_content_mode`). Without it the layout viewport is a fixed
+    // ~980px desktop width that ignores `width=device-width`, clipping the UI.
+    #[cfg(target_os = "ios")]
+    {
+        let window = dioxus::desktop::use_window();
+        use_hook(move || force_mobile_content_mode(&window));
+    }
     rsx! {
         style { "{darkrun_ui::tokens::THEME_CSS}" }
         home::HomeApp { cfg, project_path: None, initial_session }
+    }
+}
+
+/// Force the WKWebView into **mobile** content mode so the CSS layout viewport
+/// tracks the window width.
+///
+/// WKWebView's default is `WKContentMode.recommended`, which resolves to DESKTOP
+/// on regular iPads (and rendered wide on iPhone here too): a ~980px layout
+/// viewport that ignores `<meta viewport width=device-width>`, so the responsive
+/// shell renders at desktop width and clips off-screen. `.mobile` makes the
+/// layout viewport equal the window width, so the UI reflows correctly at every
+/// size — iPhone, iPad (incl. Split View), and a desktop-sized Mac window.
+///
+/// Content mode only takes effect on a fresh navigation, so we set it and reload.
+/// A process-wide guard makes that happen exactly once (a reload re-runs `app()`,
+/// which would otherwise re-enter here and loop).
+#[cfg(target_os = "ios")]
+fn force_mobile_content_mode(window: &dioxus::desktop::DesktopContext) {
+    use dioxus::desktop::wry::WebViewExtIOS;
+    use objc2_web_kit::WKContentMode;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // `window.webview` is wry's `WebView`; `.webview()` (WebViewExtIOS) returns
+    // the underlying WKWebView. All WebKit calls are main-thread only — `app()`
+    // (and thus this hook) runs on the UI thread, so that holds.
+    let wk = window.webview.webview();
+    unsafe {
+        wk.configuration()
+            .defaultWebpagePreferences()
+            .setPreferredContentMode(WKContentMode::Mobile);
+        let _ = wk.reload();
     }
 }
 
