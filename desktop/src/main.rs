@@ -118,18 +118,23 @@ fn main() {
         .with_window(window)
         // Clear backing so nothing shows behind the theme-painted body.
         .with_background_color((0, 0, 0, 0));
-    // Mobile webview: force a device-width layout viewport. Without this the iOS
-    // WKWebView lays out at a wide (desktop) viewport, so the shell's responsive
-    // `@media (max-width:720px)` drawer collapse never fires and the two-pane
-    // desktop layout renders full-size, clipped off the right edge of the phone.
-    // The default index ships a viewport meta, but appending an explicit one (the
-    // last meta wins) guarantees device-width; viewport-fit=cover handles the
-    // notch / safe areas. No-op on desktop, where the window size drives layout.
+    // Mobile webview: own the entire index so the viewport is a single clean
+    // signal. Dioxus's built-in index ships
+    //   width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no
+    // and the maximum-scale / user-scalable locks disable WKWebView's shrink-to-
+    // fit, so the page renders at a wide desktop width, full-size and clipped off
+    // the phone — the shell's responsive `@media (max-width:720px)` drawer never
+    // fires. A lone `width=device-width, initial-scale=1` (no scale locks, no
+    // viewport-fit) makes the layout track the device so the drawer collapses,
+    // and lets the webview auto-inset below the status bar (restores the safe
+    // area that viewport-fit=cover had eaten). No-op on desktop.
     #[cfg(any(target_os = "ios", target_os = "android"))]
     {
-        cfg = cfg.with_custom_head(
-            "<meta name=\"viewport\" content=\"width=device-width, \
-             initial-scale=1, viewport-fit=cover\">"
+        cfg = cfg.with_custom_index(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
+             <title>darkrun</title>\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             </head><body><div id=\"main\"></div></body></html>"
                 .to_string(),
         );
     }
