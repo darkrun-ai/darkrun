@@ -121,19 +121,21 @@ fn main() {
     // Mobile webview: own the entire index so the viewport is a single clean
     // signal. Dioxus's built-in index ships
     //   width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no
-    // and the maximum-scale / user-scalable locks disable WKWebView's shrink-to-
-    // fit, so the page renders at a wide desktop width, full-size and clipped off
-    // the phone — the shell's responsive `@media (max-width:720px)` drawer never
-    // fires. A lone `width=device-width, initial-scale=1` (no scale locks, no
-    // viewport-fit) makes the layout track the device so the drawer collapses,
-    // and lets the webview auto-inset below the status bar (restores the safe
-    // area that viewport-fit=cover had eaten). No-op on desktop.
+    // whose scale locks were fighting the layout. Use a lone
+    //   width=device-width, initial-scale=1, user-scalable=no
+    // — `width=device-width` makes the layout track the device so the shell's
+    // responsive `@media (max-width:720px)` drawer collapses; dropping
+    // `viewport-fit` lets the webview auto-inset below the status bar (restores
+    // the safe area); `user-scalable=no` keeps it feeling like an app (no pinch /
+    // double-tap zoom), and only governs zoom — not the layout width. No-op on
+    // desktop, where the window size drives layout.
     #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         cfg = cfg.with_custom_index(
             "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
              <title>darkrun</title>\
-             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <meta name=\"viewport\" content=\"width=device-width, \
+             initial-scale=1, user-scalable=no\">\
              </head><body><div id=\"main\"></div></body></html>"
                 .to_string(),
         );
