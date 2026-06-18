@@ -44,6 +44,12 @@ plist_set() { /usr/libexec/PlistBuddy -c "Set :$1 $2" "$PLIST" 2>/dev/null || /u
 plist_set CFBundlePackageType APPL string
 plist_set MinimumOSVersion 15.0 string
 plist_set LSRequiresIPhoneOS true bool
+# Export-compliance self-classification. Without this key App Store Connect
+# prompts for the encryption declaration on EVERY build. darkrun's only crypto is
+# standard HTTPS/TLS (rustls/aws-lc for GitHub/GitLab/relay/git-over-HTTPS), which
+# is exempt under the secure-channel exemption — so declare it false once and the
+# prompt stops for good.
+plist_set ITSAppUsesNonExemptEncryption false bool
 
 # Marketing version + build number. CI passes these (DARKRUN_MARKETING_VERSION =
 # the in-dev/tag version, DARKRUN_BUILD_NUMBER = the monotonic commit count) so
