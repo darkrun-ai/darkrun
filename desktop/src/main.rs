@@ -20,7 +20,7 @@ use darkrun_desktop::{map, wire};
 mod home;
 mod review;
 
-use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
+use dioxus::desktop::{Config, WindowBuilder};
 use wire::ConnConfig;
 
 /// When running as the inner executable of the dev-checkout launch bundle
@@ -85,11 +85,21 @@ fn main() {
     // A titled, focused window so a launched app is recognizable and comes to
     // the front (the engine spawns this from the MCP server, not Finder, so it
     // must request focus or it opens hidden behind the terminal).
-    let window = WindowBuilder::new()
+    #[allow(unused_mut)]
+    let mut window = WindowBuilder::new()
         .with_title("darkrun")
-        .with_inner_size(LogicalSize::new(1040.0, 760.0))
         .with_focused(true)
         .with_visible(true);
+    // Desktop only: a sensible initial window size. On iOS/Android the window IS
+    // the screen — setting a 1040pt inner size there leaks straight into the
+    // webview's layout viewport (window.innerWidth=1040), so the responsive
+    // `@media (max-width:720px)` never matches and the phone shows the clipped
+    // desktop two-pane layout. Omitting it lets the webview track the device.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        use dioxus::desktop::LogicalSize;
+        window = window.with_inner_size(LogicalSize::new(1040.0, 760.0));
+    }
     // macOS: drop the separate title bar and let the content fill up to the top,
     // so the shell toolbar (the wordmark + theme control) IS the title bar, with
     // the traffic lights floating over its left. The toolbar carries an
@@ -136,21 +146,7 @@ fn main() {
              <title>darkrun</title>\
              <meta name=\"viewport\" content=\"width=device-width, \
              initial-scale=1, user-scalable=no\">\
-             </head><body><div id=\"main\"></div>\
-             <div id=\"dr-vp-debug\" style=\"position:fixed;top:0;left:0;right:0;\
-             z-index:2147483647;background:#e11;color:#fff;\
-             font:bold 13px monospace;padding:5px 6px;text-align:center;\
-             pointer-events:none\">vp?</div>\
-             <script>(function(){var d=document.getElementById('dr-vp-debug');\
-             function u(){var v=window.visualViewport;d.textContent=\
-             'iw='+window.innerWidth+' cw='+document.documentElement.clientWidth+\
-             ' sw='+screen.width+' dpr='+window.devicePixelRatio+\
-             ' vv='+(v?Math.round(v.width):'-')+\
-             ' mq720='+window.matchMedia('(max-width:720px)').matches;}\
-             u();window.addEventListener('resize',u);\
-             if(window.visualViewport)window.visualViewport.addEventListener('resize',u);\
-             setInterval(u,1000);})();</script>\
-             </body></html>"
+             </head><body><div id=\"main\"></div></body></html>"
                 .to_string(),
         );
     }
