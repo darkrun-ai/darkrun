@@ -136,7 +136,21 @@ fn main() {
              <title>darkrun</title>\
              <meta name=\"viewport\" content=\"width=device-width, \
              initial-scale=1, user-scalable=no\">\
-             </head><body><div id=\"main\"></div></body></html>"
+             </head><body><div id=\"main\"></div>\
+             <div id=\"dr-vp-debug\" style=\"position:fixed;top:0;left:0;right:0;\
+             z-index:2147483647;background:#e11;color:#fff;\
+             font:bold 13px monospace;padding:5px 6px;text-align:center;\
+             pointer-events:none\">vp?</div>\
+             <script>(function(){var d=document.getElementById('dr-vp-debug');\
+             function u(){var v=window.visualViewport;d.textContent=\
+             'iw='+window.innerWidth+' cw='+document.documentElement.clientWidth+\
+             ' sw='+screen.width+' dpr='+window.devicePixelRatio+\
+             ' vv='+(v?Math.round(v.width):'-')+\
+             ' mq720='+window.matchMedia('(max-width:720px)').matches;}\
+             u();window.addEventListener('resize',u);\
+             if(window.visualViewport)window.visualViewport.addEventListener('resize',u);\
+             setInterval(u,1000);})();</script>\
+             </body></html>"
                 .to_string(),
         );
     }
