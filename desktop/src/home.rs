@@ -1389,8 +1389,10 @@ fn add_project(mode: AddMode, raw: &str, dest_override: Option<&str>) -> Result<
                     }
                 }
                 None => {
-                    let base = dirs::home_dir()
-                        .map(|h| h.join("darkrun"))
+                    // The shared clone root (`~/darkrun`, or the app-group
+                    // container on macOS so the sandboxed Mac App Store build and
+                    // the engine operate on the same repos).
+                    let base = darkrun_mcp::registry::default_clone_root()
                         .unwrap_or_else(|| PathBuf::from("darkrun"));
                     darkrun_git::default_clone_dest(&base, raw)
                 }

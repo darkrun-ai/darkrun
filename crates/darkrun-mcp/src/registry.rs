@@ -166,14 +166,46 @@ impl EngineRegistry {
     }
 }
 
-/// Resolve the default discovery root `~/.darkrun`.
+/// The app-group identifier shared by the engine CLI and the Mac App Store
+/// desktop app — the macOS data home (see [`data_home`]) is its container.
+#[cfg(target_os = "macos")]
+pub const APP_GROUP: &str = "group.ai.darkrun";
+
+/// The base directory under which darkrun keeps its cross-process state: the
+/// engine-discovery registry ([`default_root`]) and cloned projects
+/// ([`default_clone_root`]).
 ///
-/// Uses the `dirs` crate's home-directory resolution, falling back to the same
-/// `$HOME` / `$USERPROFILE` env vars the rest of darkrun relies on.
+/// On **macOS** this is the app-group container
+/// `~/Library/Group Containers/group.ai.darkrun/`, the one place both the
+/// UNSANDBOXED engine CLI and the SANDBOXED Mac App Store desktop app can meet:
+/// any process may write that path, but only a sandboxed app needs the
+/// `com.apple.security.application-groups` entitlement to reach it. Sharing it
+/// means the App Store app discovers engines the CLI started (and operates on the
+/// same cloned repos). Everywhere else it's the home directory, preserving the
+/// historical `~/.darkrun` + `~/darkrun` layout exactly.
+fn data_home() -> Option<PathBuf> {
+    let home = dirs::home_dir().or_else(home_dir_env)?;
+    #[cfg(target_os = "macos")]
+    {
+        Some(home.join("Library").join("Group Containers").join(APP_GROUP))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(home)
+    }
+}
+
+/// Resolve the default discovery root (`~/.darkrun`, or the app-group container's
+/// `.darkrun` on macOS — see [`data_home`]).
 pub fn default_root() -> Option<PathBuf> {
-    dirs::home_dir()
-        .or_else(home_dir_env)
-        .map(|home| home.join(".darkrun"))
+    data_home().map(|base| base.join(".darkrun"))
+}
+
+/// Resolve the default root for CLONED projects (`~/darkrun`, or the app-group
+/// container's `darkrun` on macOS). Lives beside the discovery registry so the
+/// sandboxed Mac App Store app can read/write the repos the engine operates on.
+pub fn default_clone_root() -> Option<PathBuf> {
+    data_home().map(|base| base.join("darkrun"))
 }
 
 /// Env-var fallback mirroring the resolution used elsewhere in darkrun.
@@ -835,6 +867,34 @@ mod tests {
         let rec = register_project(widget.path(), Some("Widget".into())).unwrap();
         assert_eq!(rec.name.as_deref(), Some("Widget"));
         assert!(list_projects().unwrap().iter().any(|p| p.slug == rec.slug));
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn registry_and_clone_roots_share_a_base() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let reg = default_root().expect("home resolves");
+        let clones = default_clone_root().expect("home resolves");
+        // Discovery registry (`.darkrun`) and clones (`darkrun`) are siblings,
+        // so they sit in one shared data home (the app-group container on macOS).
+        assert!(reg.ends_with(".darkrun"));
+        assert!(clones.ends_with("darkrun"));
+        assert_eq!(reg.parent(), clones.parent());
+        #[cfg(target_os = "macos")]
+        assert!(
+            reg.to_string_lossy().contains("Group Containers/group.ai.darkrun"),
+            "macOS roots live in the app-group container: {reg:?}"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(reg.parent(), Some(home.path()));
 
         match prev {
             Some(v) => std::env::set_var("HOME", v),
