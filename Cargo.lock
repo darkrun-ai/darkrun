@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-api"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "schemars",
  "serde",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-app"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "darkrun-api",
  "darkrun-ui",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "clap",
  "darkrun-api",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-content"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "darkrun-core",
  "rust-embed",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "darkrun-api",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-desktop"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "darkrun-api",
  "darkrun-core",
@@ -1537,6 +1537,8 @@ dependencies = [
  "dioxus-ssr",
  "dirs",
  "futures-util",
+ "objc2",
+ "objc2-web-kit",
  "serde",
  "serde_json",
  "tempfile",
@@ -1546,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-e2e"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "darkrun-api",
@@ -1565,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-git"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "gix",
  "gix-imara-diff",
@@ -1576,14 +1578,14 @@ dependencies = [
 
 [[package]]
 name = "darkrun-harness"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "darkrun-http"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "darkrun-api",
@@ -1603,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "darkrun-api",
@@ -1634,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-prompts"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "filetime",
  "minijinja",
@@ -1647,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-site"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "darkrun-api",
  "darkrun-content",
@@ -1663,14 +1665,14 @@ dependencies = [
 
 [[package]]
 name = "darkrun-telemetry"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "sentry",
 ]
 
 [[package]]
 name = "darkrun-tunnel"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "darkrun-api",
@@ -1687,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-ui"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dioxus",
  "dioxus-ssr",
@@ -1695,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-vcs"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1705,7 +1707,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-verify"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "chromiumoxide",
@@ -1722,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "darkrun-web"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "darkrun-api",
@@ -6111,6 +6113,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-javascript-core"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a1e6550c4caed348956ce3370c9ffeca70bb1dbed4fa96112e7c6170e074586"
+dependencies = [
+ "objc2",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-quartz-core"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6120,6 +6132,17 @@ dependencies = [
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-security"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "709fe137109bd1e8b5a99390f77a7d8b2961dafc1a1c5db8f2e60329ad6d895a"
+dependencies = [
+ "bitflags 2.11.1",
+ "objc2",
+ "objc2-core-foundation",
 ]
 
 [[package]]
@@ -6165,6 +6188,8 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-foundation",
+ "objc2-javascript-core",
+ "objc2-security",
 ]
 
 [[package]]
