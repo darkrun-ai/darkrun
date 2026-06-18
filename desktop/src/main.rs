@@ -118,6 +118,21 @@ fn main() {
         .with_window(window)
         // Clear backing so nothing shows behind the theme-painted body.
         .with_background_color((0, 0, 0, 0));
+    // Mobile webview: force a device-width layout viewport. Without this the iOS
+    // WKWebView lays out at a wide (desktop) viewport, so the shell's responsive
+    // `@media (max-width:720px)` drawer collapse never fires and the two-pane
+    // desktop layout renders full-size, clipped off the right edge of the phone.
+    // The default index ships a viewport meta, but appending an explicit one (the
+    // last meta wins) guarantees device-width; viewport-fit=cover handles the
+    // notch / safe areas. No-op on desktop, where the window size drives layout.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        cfg = cfg.with_custom_head(
+            "<meta name=\"viewport\" content=\"width=device-width, \
+             initial-scale=1, viewport-fit=cover\">"
+                .to_string(),
+        );
+    }
     if let Some(data_dir) = dirs::data_dir() {
         cfg = cfg.with_data_directory(data_dir.join("darkrun").join("webview"));
     }
