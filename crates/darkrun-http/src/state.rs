@@ -104,6 +104,20 @@ struct SessionEntry {
     tx: broadcast::Sender<String>,
 }
 
+/// The result of [`SessionRegistry::await_decision`].
+#[derive(Debug, Clone)]
+pub enum AwaitOutcome {
+    /// The operator acted; carries the resolved payload (the decision/answer).
+    Resolved(SessionPayload),
+    /// The timeout elapsed before a decision (the caller should re-await or fall
+    /// back to elicitation).
+    TimedOut,
+    /// No session with that id exists.
+    Unknown,
+    /// The session was removed while awaiting (channel closed).
+    Gone,
+}
+
 /// In-memory registry of interactive sessions, keyed by `session_id`.
 ///
 /// Clonable and `Send + Sync`: every clone shares the same backing map, so the
@@ -256,6 +270,54 @@ impl SessionRegistry {
     pub fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<String>> {
         let guard = self.inner.lock().expect("session registry poisoned");
         guard.get(id).map(|e| e.tx.subscribe())
+    }
+
+    /// Block until session `id` is RESOLVED (the operator decided/answered — see
+    /// [`SessionPayload::resolved`]), or `timeout` elapses. The server half of
+    /// the notify-and-await gate model: surface the gate (push / URL elicitation /
+    /// local launch) elsewhere, then hold here until the `/review/:id/decide`
+    /// POST flips the session and broadcasts the frame. Transport-agnostic — the
+    /// decision lands the same whether the operator is local (loopback) or remote
+    /// (relay). Re-reads the authoritative payload on every frame, so a missed/
+    /// lagged broadcast can't strand the waiter.
+    pub async fn await_decision(&self, id: &str, timeout: std::time::Duration) -> AwaitOutcome {
+        match self.get(id) {
+            Some(p) if p.resolved() => return AwaitOutcome::Resolved(p),
+            Some(_) => {}
+            None => return AwaitOutcome::Unknown,
+        }
+        let Some(mut rx) = self.subscribe(id) else {
+            return AwaitOutcome::Unknown;
+        };
+        // Re-check after subscribing: a decision that landed between the get()
+        // above and this subscribe() would not arrive on `rx`.
+        if let Some(p) = self.get(id) {
+            if p.resolved() {
+                return AwaitOutcome::Resolved(p);
+            }
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return AwaitOutcome::TimedOut;
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                // A frame (or a lag, meaning we missed frames) — re-read the
+                // authoritative payload and check whether it resolved.
+                Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                    if let Some(p) = self.get(id) {
+                        if p.resolved() {
+                            return AwaitOutcome::Resolved(p);
+                        }
+                    } else {
+                        return AwaitOutcome::Gone;
+                    }
+                }
+                Ok(Err(broadcast::error::RecvError::Closed)) => return AwaitOutcome::Gone,
+                Err(_) => return AwaitOutcome::TimedOut,
+            }
+        }
     }
 
     /// Try to reserve a WebSocket slot, honouring `max_ws_sessions`. Returns a
@@ -424,6 +486,56 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn question(id: &str, status: &str) -> SessionPayload {
+        serde_json::from_value(serde_json::json!({
+            "session_type": "question", "session_id": id, "status": status
+        }))
+        .expect("minimal question payload")
+    }
+
+    #[tokio::test]
+    async fn await_decision_unblocks_when_the_session_resolves() {
+        let reg = SessionRegistry::new();
+        reg.upsert(question("q-01", "pending"));
+
+        let r = reg.clone();
+        let waiter =
+            tokio::spawn(async move { r.await_decision("q-01", Duration::from_secs(5)).await });
+        // Give the awaiter time to subscribe, then resolve from this task.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        reg.upsert(question("q-01", "answered"));
+
+        match waiter.await.unwrap() {
+            AwaitOutcome::Resolved(p) => assert_eq!(p.session_id(), "q-01"),
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn await_decision_returns_immediately_when_already_resolved() {
+        let reg = SessionRegistry::new();
+        reg.upsert(question("q-01", "answered"));
+        assert!(matches!(
+            reg.await_decision("q-01", Duration::from_secs(5)).await,
+            AwaitOutcome::Resolved(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn await_decision_unknown_then_times_out() {
+        let reg = SessionRegistry::new();
+        assert!(matches!(
+            reg.await_decision("nope", Duration::from_millis(10)).await,
+            AwaitOutcome::Unknown
+        ));
+        reg.upsert(question("q-02", "pending"));
+        assert!(matches!(
+            reg.await_decision("q-02", Duration::from_millis(30)).await,
+            AwaitOutcome::TimedOut
+        ));
+    }
 
     #[test]
     fn presence_starts_never_attached() {
