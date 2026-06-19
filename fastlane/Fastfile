@@ -1,5 +1,8 @@
-# fastlane lanes for the darkrun iOS app: TestFlight (`beta`), App Store
-# (`release`), and the App Store screenshots (`screenshots`/`upload_screenshots`).
+# fastlane lanes for the darkrun apps:
+#   iOS  (platform :ios) — TestFlight (`beta`), App Store (`release`), and the
+#         App Store screenshots (`screenshots`/`upload_screenshots`).
+#   macOS (platform :mac) — Mac App Store: `install_signing_macos`, `mac_release`,
+#         `certs`, `nuke_certs` (see the `platform :mac` block at the bottom).
 #
 # darkrun's app is built with Dioxus (`dx`), not Xcode directly — CI runs
 # `dx build --platform ios --release` first, which generates the Xcode project
@@ -140,6 +143,102 @@ platform :ios do
       overwrite_screenshots: true,
       run_precheck_before_submit: false,
       force: true
+    )
+  end
+end
+
+# Mac App Store (MAS) lanes. Mirror the iOS lanes, adapted to macOS: the dx-built
+# `.app` is signed + wrapped into an installer `.pkg` by package-macos-pkg.sh,
+# then uploaded to App Store Connect. Two signing types instead of one — a Mac
+# App Distribution cert (signs the app) AND a Mac Installer Distribution cert
+# (signs the .pkg) — both pulled from the SAME match repo as iOS. The Mac App
+# Store provisioning profile carries the App Group group.ai.darkrun + Associated
+# Domains capabilities (see fastlane/darkrun-mac.entitlements). Same ASC API key,
+# same APP_ID, same MATCH_* secrets. One-time, locally:
+# `MATCH_PASSWORD=<iOS passphrase> ./fastlane/bootstrap-macos-signing.sh`.
+platform :mac do
+  # Install the Mac App Store signing identities (the app-distribution cert, the
+  # installer cert, and the provisioning profile) read-only, so the subsequent
+  # codesign / productbuild in package-macos-pkg.sh uses them. dx emits a built
+  # `.app` (not an Xcode project), so there's no `gym`/`build_app` step — run
+  # this BEFORE the build. setup_ci creates an unlocked temporary keychain on CI
+  # (no-op off CI) so codesign/match don't block on a keychain UI prompt that
+  # never comes on a headless runner.
+  lane :install_signing_macos do
+    setup_ci
+    sync_code_signing(
+      type: "mac_installer_distribution",
+      platform: "macos",
+      app_identifier: APP_ID,
+      api_key: asc_api_key,
+      readonly: true,
+    )
+    sync_code_signing(
+      type: "appstore",
+      platform: "macos",
+      app_identifier: APP_ID,
+      api_key: asc_api_key,
+      readonly: true,
+    )
+  end
+
+  desc "Mac App Store upload (no auto-submit). CI builds + signs the .pkg first"
+  desc "(path in DARKRUN_PKG)."
+  lane :mac_release do
+    upload_to_app_store(
+      api_key: asc_api_key,
+      app_identifier: APP_ID,
+      platform: "osx", # else deliver prompts for it and dies in non-interactive CI
+      pkg: ENV.fetch("DARKRUN_PKG"),
+      submit_for_review: false,
+      automatic_release: false,
+      force: true, # skip the HTML metadata-preview confirmation (non-interactive)
+      skip_screenshots: true, # screenshots have their own lane
+      skip_metadata: false,
+      precheck_include_in_app_purchases: false,
+      run_precheck_before_submit: false,
+    )
+  end
+
+  desc "One-time setup: create the Mac App Distribution cert, Mac Installer"
+  desc "Distribution cert, and the Mac App Store provisioning profile, and store"
+  desc "them (encrypted) in the match repo. Run by"
+  desc "fastlane/bootstrap-macos-signing.sh; needs the ASC API key + MATCH_* env."
+  lane :certs do
+    sync_code_signing(
+      type: "mac_installer_distribution",
+      platform: "macos",
+      app_identifier: APP_ID,
+      api_key: asc_api_key,
+      readonly: false, # create + push if absent
+    )
+    sync_code_signing(
+      type: "appstore",
+      platform: "macos",
+      app_identifier: APP_ID,
+      api_key: asc_api_key,
+      readonly: false, # create + push if absent
+    )
+  end
+
+  desc "DANGER: revoke the account's Mac App Store distribution + installer certs"
+  desc "and profiles and clear them from the match repo (recreated on the next"
+  desc "`mac certs` run). Distribution certs are ACCOUNT-WIDE, so only when"
+  desc "darkrun is the sole app. Run via MATCH_NUKE=1 ./fastlane/bootstrap-macos-signing.sh."
+  lane :nuke_certs do
+    match_nuke(
+      type: "mac_installer_distribution",
+      platform: "macos",
+      app_identifier: APP_ID,
+      api_key: asc_api_key,
+      skip_confirmation: true,
+    )
+    match_nuke(
+      type: "appstore",
+      platform: "macos",
+      app_identifier: APP_ID,
+      api_key: asc_api_key,
+      skip_confirmation: true,
     )
   end
 end
