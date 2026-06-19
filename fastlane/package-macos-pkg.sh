@@ -41,10 +41,17 @@ echo "profile:  $PROFILE"
 # distribution cert, the .pkg with the installer cert. Newer certs are named
 # "Apple Distribution" / older "3rd Party Mac Developer Application"; the
 # installer is "3rd Party Mac Developer Installer" (a.k.a. "Apple Installer").
-APP_IDENTITY="${DARKRUN_MAC_APP_IDENTITY:-$(security find-identity -v -p codesigning | grep -oE '3rd Party Mac Developer Application[^"]*|Apple Distribution[^"]*' | head -1)}"
-INSTALLER_IDENTITY="${DARKRUN_MAC_INSTALLER_IDENTITY:-$(security find-identity -v | grep -oE '3rd Party Mac Developer Installer[^"]*|Apple Distribution[^"]*' | grep -i installer | head -1)}"
-[ -n "${APP_IDENTITY:-}" ] || { echo "error: no Mac App distribution identity in the keychain" >&2; exit 1; }
-[ -n "${INSTALLER_IDENTITY:-}" ] || { echo "error: no Mac Installer distribution identity in the keychain" >&2; exit 1; }
+# `|| true` so a no-match grep doesn't trip set -o pipefail and abort BEFORE the
+# `[ -n ]` checks below can report which identity is missing. Dump the available
+# identities first so a failure shows exactly what's in the keychain.
+ALL_CODESIGN="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+ALL_IDENTITIES="$(security find-identity -v 2>/dev/null || true)"
+echo "codesigning identities:"; printf '%s\n' "$ALL_CODESIGN" | sed 's/^/  /'
+echo "all identities:"; printf '%s\n' "$ALL_IDENTITIES" | sed 's/^/  /'
+APP_IDENTITY="${DARKRUN_MAC_APP_IDENTITY:-$(printf '%s\n' "$ALL_CODESIGN" | grep -oE '3rd Party Mac Developer Application[^"]*|Apple Distribution[^"]*' | head -1 || true)}"
+INSTALLER_IDENTITY="${DARKRUN_MAC_INSTALLER_IDENTITY:-$(printf '%s\n' "$ALL_IDENTITIES" | grep -oE '3rd Party Mac Developer Installer[^"]*|Mac Installer Distribution[^"]*' | head -1 || true)}"
+[ -n "${APP_IDENTITY:-}" ] || { echo "error: no Mac App distribution identity in the keychain (see list above)" >&2; exit 1; }
+[ -n "${INSTALLER_IDENTITY:-}" ] || { echo "error: no Mac Installer distribution identity in the keychain (see list above) — the Mac Installer Distribution cert may not exist; the macOS signing bootstrap must create it" >&2; exit 1; }
 echo "app id:   $APP_IDENTITY"
 echo "pkg id:   $INSTALLER_IDENTITY"
 
