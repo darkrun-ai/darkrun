@@ -662,3 +662,162 @@ async fn repos_surfaces_a_provider_failure_as_bad_gateway() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
+
+// ---- /api/repos/sessions ----------------------------------------------------
+
+/// A state whose tree call (at `method_url`) returns `status` + `body`.
+fn sessions_state(method_url: &str, status: u16, body: serde_json::Value) -> WebState {
+    let mock = MockTransport::new();
+    mock.expect(
+        Method::Get,
+        method_url,
+        HttpResponse::new(status, serde_json::to_vec(&body).unwrap()),
+    );
+    state_with(Arc::new(SyncMock::new(mock)), Broker::new())
+}
+
+#[tokio::test]
+async fn sessions_lists_github_runs_from_the_tree() {
+    let state = sessions_state(
+        "https://api.github.com/repos/jwaldrip/darkrun/git/trees/HEAD?recursive=1",
+        200,
+        serde_json::json!({
+            "tree": [
+                { "path": ".darkrun/settings.yml", "type": "blob" },
+                { "path": ".darkrun/run-abc/run.md", "type": "blob" },
+                { "path": ".darkrun/run-xyz/state.json", "type": "blob" },
+                { "path": "src/main.rs", "type": "blob" },
+            ]
+        }),
+    );
+    let app = build_router(state, std::env::temp_dir());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/sessions?provider=github&full_name=jwaldrip/darkrun")
+                .header("Authorization", "Bearer gho_token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let sessions: Vec<crate::sessions::DiscoveredSession> = serde_json::from_str(&body).unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].run_id, "run-abc");
+    assert_eq!(sessions[0].repo, "jwaldrip/darkrun");
+    assert_eq!(sessions[0].provider, Provider::GitHub);
+    assert_eq!(sessions[1].run_id, "run-xyz");
+}
+
+#[tokio::test]
+async fn sessions_lists_gitlab_runs_from_the_subtree() {
+    let state = sessions_state(
+        "https://gitlab.com/api/v4/projects/jwaldrip%2Fdarkrun/repository/tree?path=.darkrun&recursive=true&per_page=100",
+        200,
+        serde_json::json!([
+            { "path": ".darkrun/run-1/run.md", "type": "blob" },
+            { "path": ".darkrun/run-2/state.json", "type": "blob" },
+        ]),
+    );
+    let app = build_router(state, std::env::temp_dir());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/sessions?provider=gitlab&full_name=jwaldrip/darkrun")
+                .header("Authorization", "Bearer glpat_token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let sessions: Vec<crate::sessions::DiscoveredSession> = serde_json::from_str(&body).unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].run_id, "run-1");
+    assert_eq!(sessions[0].provider, Provider::GitLab);
+}
+
+#[tokio::test]
+async fn sessions_for_a_repo_without_darkrun_are_empty_not_an_error() {
+    // A `404` from the tree call (no `.darkrun/`, or an empty repo) is a clean
+    // empty result, never a failure.
+    let state = sessions_state(
+        "https://api.github.com/repos/acme/empty/git/trees/HEAD?recursive=1",
+        404,
+        serde_json::json!({ "message": "Not Found" }),
+    );
+    let app = build_router(state, std::env::temp_dir());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/sessions?provider=github&full_name=acme/empty")
+                .header("Authorization", "Bearer t")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let sessions: Vec<crate::sessions::DiscoveredSession> = serde_json::from_str(&body).unwrap();
+    assert!(sessions.is_empty());
+}
+
+#[tokio::test]
+async fn sessions_require_a_bearer_token() {
+    let state = github_exchange_state("unused", Broker::new());
+    let app = build_router(state, std::env::temp_dir());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/sessions?provider=github&full_name=a/b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sessions_reject_an_unknown_provider() {
+    let state = github_exchange_state("unused", Broker::new());
+    let app = build_router(state, std::env::temp_dir());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/sessions?provider=bitbucket&full_name=a/b")
+                .header("Authorization", "Bearer t")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn sessions_surface_a_provider_failure_as_bad_gateway() {
+    let state = WebState::new(test_config(), Broker::new(), Arc::new(FailingTransport));
+    let app = build_router(state, std::env::temp_dir());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/sessions?provider=github&full_name=a/b")
+                .header("Authorization", "Bearer t")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}

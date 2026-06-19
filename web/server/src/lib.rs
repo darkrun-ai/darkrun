@@ -31,6 +31,7 @@ mod oauth_routes;
 mod push;
 mod relay;
 mod repos;
+mod sessions;
 mod relay_broker;
 mod state;
 mod transport;
@@ -46,6 +47,7 @@ pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
 pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
 pub use repos::Repo;
+pub use sessions::DiscoveredSession;
 pub use firebase_auth::{FirebaseTokenAuth, FIREBASE_CERTS_URL};
 pub use firestore::FirestoreDeviceRegistry;
 pub use gcp_auth::{ServiceAccount, ServiceAccountTokenSource, DATASTORE_SCOPE, FCM_SCOPE};
@@ -79,11 +81,14 @@ pub fn oauth_router(state: WebState) -> Router {
 /// Build the standalone web-app API sub-router (the `/api/...` endpoints the
 /// app.darkrun.ai dashboard calls).
 ///
-/// Today this is just `GET /api/repos` — the signed-in user's repository
-/// portfolio, listed from their provider with the access token they present.
+/// Two read-only endpoints, both authenticated by the access token the caller
+/// presents: `GET /api/repos` (the signed-in user's repository portfolio) and
+/// `GET /api/repos/sessions` (a single repo's darkrun runs, read from its
+/// committed `.darkrun/` tree — no live engine, no state sync).
 pub fn api_router(state: WebState) -> Router {
     Router::new()
         .route("/api/repos", get(repos::list_repos))
+        .route("/api/repos/sessions", get(sessions::list_sessions))
         .with_state(state)
 }
 

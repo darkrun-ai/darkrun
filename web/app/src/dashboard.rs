@@ -7,10 +7,10 @@
 //! accounts can reach. The list comes from `darkrun-web`'s `GET /api/repos`,
 //! which the browser calls with the provider OAuth access token from sign-in.
 //!
-//! TODO(session-discovery): a later PR reads each repo's committed `.darkrun/`
-//! state to surface the runs inside the portfolio (live via the relay, else
-//! read-only from git — see the access model). For now a repo is just a link
-//! out to the provider.
+//! Each repo also surfaces its **darkrun runs**, discovered read-only from the
+//! repo's committed `.darkrun/` tree via `GET /api/repos/sessions` (no live
+//! engine, no state sync — see the access model). Reaching a *live* run (the
+//! relay attach / write path) is a later PR; for now the rows are read-only.
 
 use darkrun_ui::prelude::*;
 use darkrun_ui::tokens;
@@ -33,6 +33,18 @@ pub struct Repo {
     pub provider: String,
 }
 
+/// One darkrun run discovered in a repo's committed `.darkrun/` tree, as
+/// `/api/repos/sessions` returns it (mirrors the server's `DiscoveredSession`).
+#[derive(Clone, PartialEq, Deserialize)]
+pub struct DiscoveredSession {
+    /// The run identifier — the `.darkrun/<run_id>/` directory name.
+    pub run_id: String,
+    /// The owner-qualified repository the run was discovered in.
+    pub repo: String,
+    /// The provider key (`github` | `gitlab`).
+    pub provider: String,
+}
+
 /// The loading state of the repository list.
 #[derive(Clone, PartialEq)]
 enum Repos {
@@ -50,9 +62,11 @@ enum Repos {
 pub fn Dashboard(session: Session) -> Element {
     let mut repos = use_signal(|| Repos::Loading);
 
-    // Fetch the portfolio once, on first render.
+    // Fetch the portfolio once, on first render. Clone for the closure so the
+    // prop stays available to hand each `RepoRow` its own copy below.
+    let portfolio_session = session.clone();
     use_effect(move || {
-        let session = session.clone();
+        let session = portfolio_session.clone();
         repos.set(Repos::Loading);
         spawn(async move {
             match fetch_repos(&firebase::web_base(), &session).await {
@@ -77,7 +91,7 @@ pub fn Dashboard(session: Session) -> Element {
                         "font-family:{};font-size:13px;color:{};margin:0 0 20px;",
                         tokens::FONT_SANS, tokens::TEXT_MUTED,
                     ),
-                    "The repos your linked accounts can reach. Runs inside them land here next."
+                    "The repos your linked accounts can reach, with the darkrun runs committed in each."
                 }
                 match repos() {
                     Repos::Loading => rsx! { Note { text: "Loading your repositories\u{2026}".to_string() } },
@@ -88,7 +102,7 @@ pub fn Dashboard(session: Session) -> Element {
                     Repos::Loaded(list) => rsx! {
                         div { style: "display:flex;flex-direction:column;gap:8px;",
                             for repo in list.iter() {
-                                RepoRow { repo: repo.clone() }
+                                RepoRow { repo: repo.clone(), session: session.clone() }
                             }
                         }
                     },
@@ -119,29 +133,138 @@ async fn fetch_repos(web_base: &str, session: &Session) -> Result<Vec<Repo>, Str
     resp.json::<Vec<Repo>>().await.map_err(|e| e.to_string())
 }
 
-/// One repository row — a link out to the provider. (Session discovery TODO.)
+/// Discover a repo's darkrun runs from its committed `.darkrun/` tree via
+/// `/api/repos/sessions`. Read-only: never reaches a live engine.
+async fn fetch_sessions(
+    web_base: &str,
+    session: &Session,
+    full_name: &str,
+) -> Result<Vec<DiscoveredSession>, String> {
+    if session.access_token.is_empty() {
+        return Err("no provider access token to read runs with".to_string());
+    }
+    let url = format!(
+        "{}/api/repos/sessions?provider={}&full_name={}",
+        web_base.trim_end_matches('/'),
+        session.provider,
+        full_name,
+    );
+    let resp = Request::get(&url)
+        .header("Authorization", &format!("Bearer {}", session.access_token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("server returned {}", resp.status()));
+    }
+    resp.json::<Vec<DiscoveredSession>>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The loading state of a repo's discovered runs.
+#[derive(Clone, PartialEq)]
+enum Sessions {
+    /// The discovery fetch is in flight.
+    Loading,
+    /// The runs loaded (possibly empty).
+    Loaded(Vec<DiscoveredSession>),
+    /// The discovery fetch failed (a single repo failing is tolerated — the
+    /// row stays, the runs just don't render).
+    Failed(String),
+}
+
+/// One repository: a link out to the provider, plus the darkrun runs discovered
+/// read-only in its committed `.darkrun/` tree. Reaching a *live* run is a
+/// later PR — these rows are read-only.
 #[component]
-fn RepoRow(repo: Repo) -> Element {
-    let row = format!(
-        "display:flex;align-items:center;gap:12px;padding:12px 14px;text-decoration:none;\
+fn RepoRow(repo: Repo, session: Session) -> Element {
+    let mut sessions = use_signal(|| Sessions::Loading);
+
+    // Discover this repo's runs once, on first render. Clone the inputs the
+    // closure captures so `repo`/`session` stay available to the rsx below.
+    let discover_session = session.clone();
+    let discover_full_name = repo.full_name.clone();
+    use_effect(move || {
+        let session = discover_session.clone();
+        let full_name = discover_full_name.clone();
+        sessions.set(Sessions::Loading);
+        spawn(async move {
+            match fetch_sessions(&firebase::web_base(), &session, &full_name).await {
+                Ok(list) => sessions.set(Sessions::Loaded(list)),
+                Err(e) => sessions.set(Sessions::Failed(e)),
+            }
+        });
+    });
+
+    let card = format!(
+        "display:flex;flex-direction:column;gap:8px;padding:12px 14px;\
          border:1px solid {};border-radius:8px;background:{};",
         tokens::BORDER, tokens::SURFACE_RAISED,
     );
     rsx! {
-        a { href: "{repo.url}", target: "_blank", rel: "noreferrer", style: "{row}",
+        div { style: "{card}",
+            a {
+                href: "{repo.url}",
+                target: "_blank",
+                rel: "noreferrer",
+                style: "display:flex;align-items:center;gap:12px;text-decoration:none;",
+                span {
+                    style: format!(
+                        "flex:1;font-family:{};font-size:14px;color:{};",
+                        tokens::FONT_SANS, tokens::TEXT,
+                    ),
+                    "{repo.full_name}"
+                }
+                span {
+                    style: format!(
+                        "font-family:{};font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:{};",
+                        tokens::FONT_MONO, tokens::TEXT_FAINT,
+                    ),
+                    "{repo.provider}"
+                }
+            }
+            match sessions() {
+                // While discovering — or on a failed/empty discovery — keep the
+                // row quiet: a repo with no runs is the common case.
+                Sessions::Loading => rsx! {},
+                Sessions::Failed(_) => rsx! {},
+                Sessions::Loaded(list) if list.is_empty() => rsx! {},
+                Sessions::Loaded(list) => rsx! {
+                    div {
+                        style: format!(
+                            "display:flex;flex-direction:column;gap:4px;border-top:1px solid {};padding-top:8px;",
+                            tokens::BORDER,
+                        ),
+                        for run in list.iter() {
+                            SessionRow { run: run.clone() }
+                        }
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// One discovered run — a read-only line. (Live attach is a later PR.)
+#[component]
+fn SessionRow(run: DiscoveredSession) -> Element {
+    rsx! {
+        div {
+            style: "display:flex;align-items:center;gap:10px;padding:4px 0;",
             span {
                 style: format!(
-                    "flex:1;font-family:{};font-size:14px;color:{};",
-                    tokens::FONT_SANS, tokens::TEXT,
+                    "flex:1;font-family:{};font-size:12px;color:{};",
+                    tokens::FONT_MONO, tokens::TEXT_MUTED,
                 ),
-                "{repo.full_name}"
+                "{run.run_id}"
             }
             span {
                 style: format!(
-                    "font-family:{};font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:{};",
+                    "font-family:{};font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:{};",
                     tokens::FONT_MONO, tokens::TEXT_FAINT,
                 ),
-                "{repo.provider}"
+                "from git"
             }
         }
     }
