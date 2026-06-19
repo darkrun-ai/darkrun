@@ -588,6 +588,105 @@ pub fn find_engine_for_project(engines: &[DiscoveredEngine], project_path: &Path
         .map(|e| e.port)
 }
 
+/// The host the Universal Link / App Link carries (see `desktop/Dioxus.toml`
+/// `[deep_links] hosts`). Only `/review/<id>` on THIS host is ours.
+const DEEPLINK_HOST: &str = "app.darkrun.ai";
+/// The custom URL scheme the app registers (`darkrun://…`) — the fallback for
+/// environments without Universal-Link support (see `[deep_links] schemes`).
+const DEEPLINK_SCHEME: &str = "darkrun";
+
+/// Parse a darkrun deep link into the review/session id it points at.
+///
+/// Pure over the URL string, so it is exhaustively unit-tested. Recognizes the
+/// shapes the OS hands us when a darkrun link is opened (see `Dioxus.toml`
+/// `[deep_links]`):
+///
+///   - Universal Link — `https://app.darkrun.ai/review/<id>` (only this host,
+///     only the `/review/` path). Any other host or path is not ours.
+///   - Custom scheme — `darkrun://review/<id>` and `darkrun://session/<id>`
+///     (the `//` makes `review`/`session` the URL *authority*, so we read both
+///     the authority and the first path segment to be tolerant of either form,
+///     e.g. `darkrun:review/<id>`).
+///
+/// Returns the (URL-decoded, non-empty) id, or `None` for any unrecognized
+/// shape, the wrong host/scheme, or a missing id.
+pub fn parse_review_deeplink(url: &str) -> Option<String> {
+    let parsed = ::url::Url::parse(url.trim()).ok()?;
+    match parsed.scheme() {
+        // Universal Link: https://app.darkrun.ai/review/<id>
+        "https" | "http" => {
+            if parsed.host_str()? != DEEPLINK_HOST {
+                return None;
+            }
+            let mut segs = parsed.path_segments()?;
+            if segs.next()? != "review" {
+                return None;
+            }
+            non_empty_decoded(segs.next()?)
+        }
+        // Custom scheme: darkrun://review/<id> | darkrun://session/<id>.
+        // With `//`, the kind lands in the authority and the id is the first
+        // path segment; without it, both sit in the path — handle both.
+        DEEPLINK_SCHEME => {
+            let (kind, id) = match parsed.host_str() {
+                // `darkrun://review/<id>` — `review` is the authority, `<id>`
+                // the first path segment.
+                Some(host) => (host.to_string(), parsed.path_segments()?.next()?.to_string()),
+                // `darkrun:review/<id>` (no `//`) — a cannot-be-a-base URL whose
+                // whole `path()` is `review/<id>`; split it ourselves.
+                None => {
+                    let mut segs = parsed.path().split('/').filter(|s| !s.is_empty());
+                    (segs.next()?.to_string(), segs.next()?.to_string())
+                }
+            };
+            if kind != "review" && kind != "session" {
+                return None;
+            }
+            non_empty_decoded(&id)
+        }
+        _ => None,
+    }
+}
+
+/// URL-decode a path segment and keep it only when non-empty after trimming.
+fn non_empty_decoded(seg: &str) -> Option<String> {
+    let decoded = ::url::form_urlencoded::parse(format!("x={seg}").as_bytes())
+        .next()
+        .map(|(_, v)| v.into_owned())
+        .unwrap_or_else(|| seg.to_string());
+    let trimmed = decoded.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// A process-global one-slot mailbox for a deep-link review id that arrived at
+/// **runtime** (the OS handed the already-running app an `app.darkrun.ai/review`
+/// Universal Link or a `darkrun://review/<id>` URL).
+///
+/// The tao event handler (see `main.rs`) runs OUTSIDE the Dioxus runtime, so it
+/// can't touch a `Signal` directly. It deposits the parsed id here; the shell's
+/// poller ([`take_pending_deeplink`]) drains it on its next tick and navigates —
+/// the same loop that already handles discovery + current-focus.
+static PENDING_DEEPLINK: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+fn pending_deeplink_slot() -> &'static std::sync::Mutex<Option<String>> {
+    PENDING_DEEPLINK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Deposit a runtime-delivered deep-link review id for the shell to pick up.
+/// Last writer wins (the operator opened the most recent link).
+pub fn set_pending_deeplink(id: String) {
+    if let Ok(mut slot) = pending_deeplink_slot().lock() {
+        *slot = Some(id);
+    }
+}
+
+/// Take (and clear) any pending runtime deep-link review id. Returns `None` when
+/// none is queued — the common case every poll tick.
+pub fn take_pending_deeplink() -> Option<String> {
+    pending_deeplink_slot().lock().ok().and_then(|mut slot| slot.take())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,6 +739,108 @@ mod tests {
         assert_eq!(pinned.session_id, "alpha");
         assert_eq!(pinned.authority(), "127.0.0.1:7878");
         assert_eq!(pinned.ws_url(), "ws://127.0.0.1:7878/ws/session/alpha");
+    }
+
+    // --- Deep-link parsing ------------------------------------------------
+
+    #[test]
+    fn universal_link_review_path_yields_id() {
+        assert_eq!(
+            parse_review_deeplink("https://app.darkrun.ai/review/abc123"),
+            Some("abc123".to_string())
+        );
+        // A trailing slash, query, and fragment don't change the id.
+        assert_eq!(
+            parse_review_deeplink("https://app.darkrun.ai/review/abc123/"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            parse_review_deeplink("https://app.darkrun.ai/review/abc123?x=1#frag"),
+            Some("abc123".to_string())
+        );
+        // Surrounding whitespace is tolerated (argv/handoff can carry it).
+        assert_eq!(
+            parse_review_deeplink("  https://app.darkrun.ai/review/abc123  "),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn custom_scheme_review_and_session_yield_id() {
+        assert_eq!(
+            parse_review_deeplink("darkrun://review/run-42"),
+            Some("run-42".to_string())
+        );
+        assert_eq!(
+            parse_review_deeplink("darkrun://session/run-42"),
+            Some("run-42".to_string())
+        );
+        // Authority-less form (`darkrun:review/<id>`, no `//`) also works.
+        assert_eq!(
+            parse_review_deeplink("darkrun:review/run-42"),
+            Some("run-42".to_string())
+        );
+    }
+
+    #[test]
+    fn url_encoded_id_is_decoded() {
+        assert_eq!(
+            parse_review_deeplink("https://app.darkrun.ai/review/run%2042"),
+            Some("run 42".to_string())
+        );
+        assert_eq!(
+            parse_review_deeplink("darkrun://review/run%2042"),
+            Some("run 42".to_string())
+        );
+    }
+
+    #[test]
+    fn wrong_host_is_rejected() {
+        assert_eq!(parse_review_deeplink("https://example.com/review/abc"), None);
+        // The fallback web host is NOT the app host.
+        assert_eq!(parse_review_deeplink("https://darkrun.ai/review/abc"), None);
+    }
+
+    #[test]
+    fn wrong_path_or_kind_is_rejected() {
+        // Right host, not the review path.
+        assert_eq!(parse_review_deeplink("https://app.darkrun.ai/runs/abc"), None);
+        assert_eq!(parse_review_deeplink("https://app.darkrun.ai/"), None);
+        // Custom scheme, unrecognized kind.
+        assert_eq!(parse_review_deeplink("darkrun://run/abc"), None);
+    }
+
+    #[test]
+    fn wrong_scheme_is_rejected() {
+        assert_eq!(parse_review_deeplink("ftp://app.darkrun.ai/review/abc"), None);
+        assert_eq!(parse_review_deeplink("other://review/abc"), None);
+    }
+
+    #[test]
+    fn missing_id_is_rejected() {
+        assert_eq!(parse_review_deeplink("https://app.darkrun.ai/review/"), None);
+        assert_eq!(parse_review_deeplink("https://app.darkrun.ai/review"), None);
+        assert_eq!(parse_review_deeplink("darkrun://review/"), None);
+        assert_eq!(parse_review_deeplink("darkrun://review"), None);
+        // Whitespace-only id (encoded) collapses to empty → rejected.
+        assert_eq!(parse_review_deeplink("https://app.darkrun.ai/review/%20"), None);
+    }
+
+    #[test]
+    fn garbage_is_rejected() {
+        assert_eq!(parse_review_deeplink(""), None);
+        assert_eq!(parse_review_deeplink("not a url"), None);
+    }
+
+    #[test]
+    fn pending_deeplink_mailbox_round_trips() {
+        // Drain any residue first (the slot is process-global).
+        let _ = take_pending_deeplink();
+        assert_eq!(take_pending_deeplink(), None);
+        set_pending_deeplink("run-77".to_string());
+        assert_eq!(take_pending_deeplink(), Some("run-77".to_string()));
+        // Taking again clears it.
+        assert_eq!(take_pending_deeplink(), None);
     }
 
     #[test]

@@ -153,7 +153,43 @@ fn main() {
     if let Some(data_dir) = dirs::data_dir() {
         cfg = cfg.with_data_directory(data_dir.join("darkrun").join("webview"));
     }
+    // Deep-link routing — RUNTIME delivery. When the OS hands the
+    // already-running app a darkrun link (a `https://app.darkrun.ai/review/<id>`
+    // Universal Link / App Link, or a `darkrun://review|session/<id>`
+    // custom-scheme URL — see `Dioxus.toml [deep_links]`), tao surfaces it as
+    // `Event::Opened { urls }`. dioxus-desktop forwards every raw tao event to
+    // this handler BEFORE its own dispatch, and tao queues any `Opened` that
+    // arrives before the event loop is ready (a cold launch via the link) and
+    // replays it here once it starts — so this covers both warm and cold opens
+    // on macOS/iOS. The handler runs OUTSIDE the Dioxus runtime, so it can't
+    // touch a Signal; it parses the id and drops it in the process-global
+    // mailbox the shell's poller drains ([`wire::take_pending_deeplink`]).
+    cfg = cfg.with_custom_event_handler(|event, _target| {
+        if let dioxus::desktop::tao::event::Event::Opened { urls } = event {
+            for url in urls {
+                if let Some(id) = wire::parse_review_deeplink(url.as_str()) {
+                    wire::set_pending_deeplink(id);
+                }
+            }
+        }
+    });
     dioxus::LaunchBuilder::desktop().with_cfg(cfg).launch(app);
+}
+
+/// The review/session id a deep-link URL passed as a launch ARGUMENT points at,
+/// if any. Some platforms (and the dev `darkrun://` handler) deliver the opening
+/// URL on argv rather than (or in addition to) tao's `Event::Opened`; scanning
+/// argv lets a cold launch land directly on the linked review even there. Pure
+/// over an arg iterator, so it's unit-tested without spawning a process.
+fn deeplink_id_from_args<I, S>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    // Skip argv[0] (the executable path); the URL is the first arg that parses.
+    args.into_iter()
+        .skip(1)
+        .find_map(|a| wire::parse_review_deeplink(a.as_ref()))
 }
 
 /// Top-level app: reads the launch config from the environment and opens the
@@ -166,9 +202,12 @@ fn main() {
 /// shell (sidebar of projects + runs, Mine/All, search, theme control).
 fn app() -> Element {
     let (cfg, pinned) = ConnConfig::from_env_pinned();
-    // Pinned → pre-select that run so it opens immediately; unpinned → no
-    // pre-selection (the shell's welcome / browser).
-    let initial_session = pinned.then(|| cfg.session_id.clone());
+    // A deep-link URL passed on argv (cold launch via the link on platforms that
+    // hand it over on argv) wins over env-pinning; else the env-pinned session;
+    // else no pre-selection (the shell's welcome / browser). Runtime-delivered
+    // links (tao `Event::Opened`) flow through the poller's mailbox instead.
+    let initial_session = deeplink_id_from_args(std::env::args())
+        .or_else(|| pinned.then(|| cfg.session_id.clone()));
     // iOS/iPadOS/Mac: force the WKWebView into MOBILE content mode once the
     // webview exists, so the layout viewport tracks the WINDOW size (see
     // `force_mobile_content_mode`). Without it the layout viewport is a fixed
@@ -216,6 +255,31 @@ fn force_mobile_content_mode(window: &dioxus::desktop::DesktopContext) {
             .defaultWebpagePreferences()
             .setPreferredContentMode(WKContentMode::Mobile);
         let _ = wk.reload();
+    }
+}
+
+#[cfg(test)]
+mod deeplink_arg_tests {
+    use super::deeplink_id_from_args;
+
+    #[test]
+    fn picks_review_url_from_argv_skipping_exe() {
+        let argv = ["/path/to/darkrun-desktop", "darkrun://review/run-9"];
+        assert_eq!(deeplink_id_from_args(argv), Some("run-9".to_string()));
+    }
+
+    #[test]
+    fn picks_universal_link_from_argv() {
+        let argv = ["darkrun-desktop", "https://app.darkrun.ai/review/abc"];
+        assert_eq!(deeplink_id_from_args(argv), Some("abc".to_string()));
+    }
+
+    #[test]
+    fn no_url_in_argv_is_none() {
+        let argv = ["darkrun-desktop", "--flag", "value"];
+        assert_eq!(deeplink_id_from_args(argv), None);
+        // argv[0] alone (a URL-shaped exe path won't be one) — nothing to pick.
+        assert_eq!(deeplink_id_from_args(["darkrun://review/x"]), None);
     }
 }
 

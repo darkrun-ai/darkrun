@@ -33,6 +33,9 @@ wait-timeout = "0.2"
 # (cropping the version-pinned image to the marked normalized rect). Default
 # features are trimmed to the raster codecs we actually emit/consume.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# URL parsing for deep-link routing (the desktop app's review Universal Links /
+# `darkrun://` custom-scheme handler). Already in the graph via tao.
+url = "2"
 
 # Internal crates — referenced by path so downstream members can depend on them.
 darkrun-core = { path = "crates/darkrun-core" }
