@@ -7,7 +7,7 @@
 //! stack already implements (broker → engine → relay verifier).
 
 use gloo_net::http::Request;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 // The broker that carries the token to the CLI lives in `darkrun-web` (served at
@@ -20,6 +20,12 @@ extern "C" {
     /// ID token. Defined in the JS glue.
     #[wasm_bindgen(catch)]
     async fn signInAndGetToken(provider: &str) -> Result<JsValue, JsValue>;
+
+    /// Sign in with `provider` and resolve to a JSON `{ idToken, accessToken,
+    /// provider }` — the standalone dashboard needs the provider OAuth access
+    /// token too, not just the Firebase ID token. Defined in the JS glue.
+    #[wasm_bindgen(catch)]
+    async fn signInForDashboard(provider: &str) -> Result<JsValue, JsValue>;
 }
 
 /// Sign in with `provider` and return the Firebase ID token.
@@ -28,6 +34,35 @@ pub async fn sign_in(provider: &str) -> Result<String, String> {
         Ok(v) => v
             .as_string()
             .ok_or_else(|| "Firebase returned no ID token".to_string()),
+        Err(e) => Err(js_error(&e)),
+    }
+}
+
+/// The signed-in identity the standalone dashboard works with: the Firebase ID
+/// token (account identity) plus the provider OAuth access token (the key that
+/// lists the user's repos through `darkrun-web`'s `/api/repos` proxy).
+#[derive(Clone, PartialEq, Deserialize)]
+pub struct Session {
+    /// The Firebase ID token (the account `uid` after verification).
+    #[serde(rename = "idToken")]
+    pub id_token: String,
+    /// The provider OAuth access token (may be empty if the provider returned none).
+    #[serde(rename = "accessToken")]
+    pub access_token: String,
+    /// The provider key (`github` | `gitlab`).
+    pub provider: String,
+}
+
+/// Sign in with `provider` for the standalone dashboard, returning both tokens.
+pub async fn sign_in_for_dashboard(provider: &str) -> Result<Session, String> {
+    match signInForDashboard(provider).await {
+        Ok(v) => {
+            let json = v
+                .as_string()
+                .ok_or_else(|| "Firebase returned no sign-in result".to_string())?;
+            serde_json::from_str::<Session>(&json)
+                .map_err(|e| format!("couldn't read the sign-in result: {e}"))
+        }
         Err(e) => Err(js_error(&e)),
     }
 }

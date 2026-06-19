@@ -7,6 +7,7 @@
 //! banner points at the native apps, which take over via the universal link.
 
 mod banner;
+mod dashboard;
 mod firebase;
 mod login;
 mod register;

@@ -1,14 +1,20 @@
-//! The `/login` page — the browser-side of `/darkrun:darkrun-login`.
+//! The `/login` page — two flows behind one route.
 //!
-//! `darkrun login` opens this with `?provider=&nonce=`. The user signs in with
-//! Firebase Auth ([`firebase::sign_in`]), and the minted ID token is deposited
-//! to the relay broker under the nonce ([`firebase::deposit`]), where the waiting
-//! CLI claims it. After that, the user closes the tab and the CLI is logged in.
+//! 1. **CLI-login bridge** (`?provider=&nonce=`): `darkrun login` opens this with
+//!    a nonce. The user signs in with Firebase Auth ([`firebase::sign_in`]) and
+//!    the minted ID token is deposited to the relay broker under the nonce
+//!    ([`firebase::deposit`]), where the waiting CLI claims it. The user then
+//!    closes the tab and the CLI is logged in. This path is unchanged.
+//!
+//! 2. **Standalone login** (no nonce): visiting app.darkrun.ai's login directly
+//!    signs in for the web app itself and lands on the [`Dashboard`] — the start
+//!    of the standalone web experience, not a "close the tab" dead end.
 
 use darkrun_ui::prelude::*;
 use darkrun_ui::tokens;
 
-use crate::firebase;
+use crate::dashboard::Dashboard;
+use crate::firebase::{self, Session};
 
 /// The step the page is on — drives what's shown.
 #[derive(Clone, PartialEq)]
@@ -32,11 +38,11 @@ pub fn LoginPage() -> Element {
 
     let provider_label = if provider == "gitlab" { "GitLab" } else { "GitHub" };
 
-    // No nonce → this wasn't opened by `darkrun login`; explain rather than sign in.
-    if nonce.is_none() {
-        return rsx! { Shell { NoNonce {} } };
-    }
-    let nonce = nonce.unwrap();
+    // No nonce → the standalone web flow: sign in for the web app and land on the
+    // dashboard (not the CLI-bridge "close the tab" path).
+    let Some(nonce) = nonce else {
+        return rsx! { StandaloneLogin { provider, provider_label: provider_label.to_string() } };
+    };
 
     let start = move |_| {
         let provider = provider.clone();
@@ -128,13 +134,52 @@ fn SignInButton(label: String, onclick: EventHandler<MouseEvent>) -> Element {
     }
 }
 
-/// Shown when `/login` is opened without a nonce (not via `darkrun login`).
+/// The standalone web login (no CLI nonce): sign in for the web app itself and,
+/// on success, render the [`Dashboard`] in place. Failure shows why and offers a
+/// retry; the CLI-bridge path is untouched.
 #[component]
-fn NoNonce() -> Element {
+fn StandaloneLogin(provider: String, provider_label: String) -> Element {
+    let mut session = use_signal(|| None::<Session>);
+    let mut step = use_signal(|| Step::Idle);
+
+    // Signed in → hand off to the dashboard.
+    if let Some(session) = session() {
+        return rsx! { Dashboard { session } };
+    }
+
+    let start = move |_| {
+        let provider = provider.clone();
+        step.set(Step::Working);
+        spawn(async move {
+            match firebase::sign_in_for_dashboard(&provider).await {
+                Ok(s) => session.set(Some(s)),
+                Err(e) => step.set(Step::Failed(e)),
+            }
+        });
+    };
+
     rsx! {
-        Centered {
-            title: "Nothing to sign in for".to_string(),
-            body: "Start the login from your terminal with `darkrun login` — it opens this page with the right link.".to_string(),
+        Shell {
+            match step() {
+                Step::Working => rsx! { Centered { title: "Signing in\u{2026}".to_string(), body: String::new() } },
+                Step::Failed(msg) => rsx! {
+                    div { style: "text-align:center;",
+                        Centered { title: "Sign-in didn't finish".to_string(), body: msg }
+                        SignInButton { label: format!("Try again with {provider_label}"), onclick: start }
+                    }
+                },
+                // `Idle` and the unreachable `Done` (the dashboard takes over on
+                // success) both show the sign-in prompt.
+                _ => rsx! {
+                    div { style: "text-align:center;",
+                        Centered {
+                            title: "Sign in to darkrun".to_string(),
+                            body: format!("Sign in with {provider_label} to see your repositories and runs."),
+                        }
+                        SignInButton { label: format!("Sign in with {provider_label}"), onclick: start }
+                    }
+                },
+            }
         }
     }
 }
