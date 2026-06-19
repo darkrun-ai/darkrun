@@ -35,7 +35,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 pub use ratelimit::RateLimiter;
 pub use state::{
-    AppState, Limits, Presence, ProofRegistry, SessionRegistry, DEFAULT_BODY_MAX_BYTES,
+    AppState, AwaitOutcome, Limits, Presence, ProofRegistry, SessionRegistry, DEFAULT_BODY_MAX_BYTES,
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_WS_SESSIONS, DEFAULT_RATE_LIMIT_PER_MIN, PRESENCE_GRACE_MS,
 };
 
@@ -118,6 +118,7 @@ pub fn build_router(app: AppState) -> Router {
             get(handlers::get_proof).post(handlers::attach_proof),
         )
         .route("/api/advance/{id}", post(handlers::advance))
+        .route("/api/push/ack", post(handlers::push_ack))
         .route(
             "/api/unit/{run}/{unit}/reset",
             post(handlers::request_unit_reset),

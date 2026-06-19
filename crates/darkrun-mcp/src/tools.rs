@@ -23,7 +23,7 @@ use darkrun_core::domain::{FeedbackStatus, Mode, Status};
 use darkrun_core::StateStore;
 use darkrun_git::GitBackend;
 
-use darkrun_http::SessionRegistry;
+use darkrun_http::{AwaitOutcome, SessionRegistry};
 
 use crate::factory::{list_factories, resolve_factory};
 use crate::position::{checkpoint_decide, run_create_pending, run_start, run_tick};
@@ -1231,6 +1231,25 @@ pub struct SessionResultInput {
     /// The session id minted when the session was created.
     pub session_id: String,
 }
+
+/// Input for `darkrun_await` — block until an operator decides a gate/session.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AwaitInput {
+    /// The session id to await — a run slug's review session, or an interactive
+    /// session id (`q-NN`/`d-NN`/`p-NN`) minted by a visual prompt.
+    pub session_id: String,
+    /// How long to block before returning `pending` (bounded long-poll, so the
+    /// MCP client doesn't time out the call). Defaults to ~30s; re-call to keep
+    /// waiting.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Default await block window (ms) — a bounded long-poll: short enough that the
+/// MCP client won't time the request out, long enough to catch most decisions
+/// in one call. The agent re-calls on `pending` to keep waiting.
+const DEFAULT_AWAIT_TIMEOUT_MS: u64 = 30_000;
 
 /// Input for `darkrun_run_surface` — classify or read a run's verification
 /// surface. With `surface` set, the run is classified (and persisted onto the
@@ -3057,6 +3076,48 @@ impl DarkrunServer {
             Err(e) => Ok(err_text(e)),
         }
     }
+
+    /// BLOCK until the operator decides a gate/session, then return the decision.
+    /// The agent-facing half of the notify-and-await gate model: the gate is
+    /// surfaced elsewhere (push / presence / URL), and this call holds — over the
+    /// `state.rs` broadcast channel — until the authoritative `/review/:id/decide`
+    /// (or question/direction/picker answer) lands, whether the operator acts
+    /// locally or remotely via the relay. A bounded long-poll: on `timeout_ms`
+    /// elapsing it returns `{ "status": "pending" }` so the MCP client can't time
+    /// the request out — the agent simply re-calls to keep waiting. Resolved
+    /// returns the decided session payload; an unknown/removed session returns an
+    /// error.
+    #[tool(
+        name = "darkrun_await",
+        description = "Block until the operator decides a gate/session, then return the decision; returns {status:pending} on timeout (re-call to keep waiting)."
+    )]
+    pub async fn darkrun_await(
+        &self,
+        Parameters(input): Parameters<AwaitInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let timeout = std::time::Duration::from_millis(
+            input.timeout_ms.unwrap_or(DEFAULT_AWAIT_TIMEOUT_MS),
+        );
+        match self.sessions.await_decision(&input.session_id, timeout).await {
+            // The operator acted — hand back the resolved payload (the decision).
+            AwaitOutcome::Resolved(payload) => ok_json(&payload),
+            // The window elapsed with no decision — a bounded long-poll keepalive;
+            // the agent re-calls to keep blocking.
+            AwaitOutcome::TimedOut => ok_json(&serde_json::json!({ "status": "pending" })),
+            // No session under that id — the gate was never surfaced (or names a
+            // typo); the agent must raise it before awaiting.
+            AwaitOutcome::Unknown => Ok(err_text(format!(
+                "no session '{}' to await — surface the gate (darkrun_run_inspect / a visual prompt) before awaiting it",
+                input.session_id
+            ))),
+            // The session was removed mid-await (run reset/archived) — there is
+            // nothing left to decide.
+            AwaitOutcome::Gone => Ok(err_text(format!(
+                "session '{}' was removed while awaiting — nothing left to decide",
+                input.session_id
+            ))),
+        }
+    }
 }
 
 /// Tools that require the browser/desktop review UI. Dropped on harnesses
@@ -3474,6 +3535,64 @@ mod tests {
         let v = res.structured_content.unwrap();
         assert_eq!(v["action"]["action"], "spec");
         assert_eq!(v["action"]["station"], "frame");
+    }
+
+    #[tokio::test]
+    async fn await_tool_returns_pending_on_timeout_then_the_decision() {
+        use darkrun_api::{ReviewSessionPayload, SessionPayload, SessionStatus};
+        let dir = tempdir().unwrap();
+        let sessions = SessionRegistry::new();
+        let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
+
+        // A pending review session — nothing decided yet.
+        sessions.upsert(SessionPayload::Review(ReviewSessionPayload {
+            session_id: "r".into(),
+            status: SessionStatus::Pending,
+            ..Default::default()
+        }));
+
+        // A short await times out → {status: pending} (the long-poll keepalive).
+        let res = server
+            .darkrun_await(Parameters(AwaitInput {
+                session_id: "r".into(),
+                timeout_ms: Some(20),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(res.structured_content.unwrap()["status"], "pending");
+
+        // Decide it, then await returns the resolved payload immediately.
+        sessions.upsert(SessionPayload::Review(ReviewSessionPayload {
+            session_id: "r".into(),
+            status: SessionStatus::Approved,
+            ..Default::default()
+        }));
+        let res = server
+            .darkrun_await(Parameters(AwaitInput {
+                session_id: "r".into(),
+                timeout_ms: Some(5_000),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(false));
+        let v = res.structured_content.unwrap();
+        assert_eq!(v["session_id"], "r");
+        assert_eq!(v["status"], "approved");
+    }
+
+    #[tokio::test]
+    async fn await_tool_errors_on_unknown_session() {
+        let dir = tempdir().unwrap();
+        let server = DarkrunServer::new(dir.path());
+        let res = server
+            .darkrun_await(Parameters(AwaitInput {
+                session_id: "never".into(),
+                timeout_ms: Some(10),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(true));
     }
 
     #[test]

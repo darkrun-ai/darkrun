@@ -1507,6 +1507,91 @@ async fn unit_reset_route_sets_the_flag_then_404s_unknown() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// POST /api/push/ack — a device confirms a gate push landed
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn push_ack_status_200_and_ok_body() {
+    let state = test_state();
+    let app = build_router(state);
+    let resp = send(
+        app,
+        post_json(
+            "/api/push/ack",
+            &json!({ "session_id": "quiet-canyon", "token": "tok-a" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["ok"], true);
+}
+
+#[tokio::test]
+async fn push_ack_records_into_the_shared_store() {
+    let state = test_state();
+    let app = build_router(state.clone());
+    // No ack yet.
+    assert!(!state.sessions.has_ack("quiet-canyon"));
+
+    let resp = send(
+        app,
+        post_json(
+            "/api/push/ack",
+            &json!({ "session_id": "quiet-canyon", "token": "device-1" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // The handler clone shares the same registry — the ack is observable here.
+    assert!(state.sessions.has_ack("quiet-canyon"));
+    assert_eq!(state.sessions.ack_count("quiet-canyon"), 1);
+}
+
+#[tokio::test]
+async fn push_ack_is_idempotent_per_device() {
+    let state = test_state();
+    let app = build_router(state.clone());
+    let body = json!({ "session_id": "r", "token": "same-device" });
+    for _ in 0..3 {
+        let resp = send(app.clone(), post_json("/api/push/ack", &body)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    // Three acks from one device collapse to a single distinct ack.
+    assert_eq!(state.sessions.ack_count("r"), 1);
+}
+
+#[tokio::test]
+async fn push_ack_for_unknown_session_still_200() {
+    // The ack store is keyed by id with no session lookup — a device should
+    // never be told its confirmation failed.
+    let state = test_state();
+    let resp = send(
+        build_router(state),
+        post_json("/api/push/ack", &json!({ "session_id": "never-registered", "token": "t" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn push_ack_missing_token_is_422() {
+    let state = test_state();
+    let resp = send(
+        build_router(state),
+        post_json("/api/push/ack", &json!({ "session_id": "r" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn push_ack_get_method_is_405() {
+    let resp = send(build_router(test_state()), get("/api/push/ack")).await;
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
 // ── Run asset serving ────────────────────────────────────────────────────────
 
 #[tokio::test]

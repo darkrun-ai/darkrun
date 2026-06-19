@@ -21,6 +21,7 @@ pub mod notify;
 pub mod openapi;
 pub mod output_review;
 pub mod proof;
+pub mod push;
 pub mod question;
 pub mod review;
 pub mod review_current;
@@ -59,6 +60,7 @@ pub use proof::{
     AuditResult, BenchProof, Proof, ProofAttachRequest, ProofAttachResponse, ProofGetResponse,
     Surface, WebProof,
 };
+pub use push::{PushAckRequest, PushAckResponse};
 pub use question::{QuestionAnswerRequest, QuestionAnswerResponse};
 pub use review::{ReviewDecision, ReviewDecisionRequest, ReviewDecisionResponse};
 pub use review_current::{
