@@ -102,6 +102,10 @@ platform :ios do
       app_identifier: APP_ID,
       api_key: asc_api_key,
       readonly: false, # create + push if absent (the only lane that may write)
+      # force-regenerate the PROFILE (not the cert) so newly-enabled App ID
+      # capabilities — App Group, Associated Domains — land in it. Profiles are
+      # immutable snapshots; without this, an existing profile is reused as-is.
+      force: true,
     )
   end
 
@@ -218,6 +222,9 @@ platform :mac do
       app_identifier: APP_ID,
       api_key: asc_api_key,
       readonly: false, # create + push if absent
+      # force-regenerate the PROFILE so the App Group + Associated Domains
+      # capabilities (newly enabled on the App ID) land in it (see ios :certs).
+      force: true,
     )
   end
 
