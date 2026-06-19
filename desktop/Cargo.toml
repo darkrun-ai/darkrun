@@ -53,6 +53,10 @@ futures-util = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Parse incoming deep links (`https://app.darkrun.ai/review/<id>` Universal Links
+# and `darkrun://review/<id>` custom-scheme URLs) into a review/session id.
+url = { workspace = true }
+
 # iOS: reach the live WKWebView (via wry's WebViewExtIOS) to force MOBILE content
 # mode, so the layout viewport tracks the window width instead of WKWebView's
 # default ~980px desktop viewport (which ignores width=device-width and clips the

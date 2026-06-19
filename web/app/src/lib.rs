@@ -31,6 +31,22 @@ fn is_login_path() -> bool {
         .unwrap_or(false)
 }
 
+/// The review id in the current `/review/:id` path, if that's where we are.
+///
+/// This is the route a darkrun review link points at — the same
+/// `https://app.darkrun.ai/review/<id>` Universal Link the native apps claim
+/// (see `desktop/Dioxus.toml [deep_links]`). On the web (the fallback when the
+/// native app isn't installed) it renders the review by id below.
+fn review_id_from_path() -> Option<String> {
+    let path = web_sys::window()?.location().pathname().ok()?;
+    let rest = path.trim_end_matches('/').strip_prefix("/review/")?;
+    // Only a single, non-empty segment is a review id.
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
 /// The app root: the `/login` page, or the dark shell + install banner + the
 /// live session view.
 #[component]
@@ -44,6 +60,13 @@ pub fn App() -> Element {
     }
 
     let state = use_signal(|| RemoteState::Unconfigured);
+
+    // `/review/:id` — the route a darkrun review link opens (the Universal Link
+    // the native apps claim; the web app is the fallback). When the link also
+    // carries a live `?relay&session&token` target it reads straight into the
+    // live session below (the normal shell handles that); with only the bare
+    // path we render the review id with a path back into a live view.
+    let review_id = review_id_from_path();
 
     // The connection runs as a coroutine so its handle doubles as the command
     // channel: the UI sends a `ClientCommand` (approve a gate, file feedback) and
@@ -73,7 +96,13 @@ pub fn App() -> Element {
             PushPrompt {}
             main { style: "max-width:880px;margin:0 auto;padding:24px 20px 64px;",
                 match state() {
-                    RemoteState::Unconfigured => rsx! { NoTarget {} },
+                    // On `/review/:id` with no live target, name the review and
+                    // point the operator at a live view; otherwise the bare
+                    // "open a run" landing.
+                    RemoteState::Unconfigured => match &review_id {
+                        Some(id) => rsx! { ReviewLanding { id: id.clone() } },
+                        None => rsx! { NoTarget {} },
+                    },
                     RemoteState::Connecting => rsx! { Status { text: "Connecting to your run\u{2026}" } },
                     RemoteState::Reconnecting => rsx! { Status { text: "Reconnecting\u{2026}" } },
                     RemoteState::Live(payload) => session_view(&payload, commands),
@@ -211,6 +240,45 @@ fn NoTarget() -> Element {
                     tokens::FONT_SANS, tokens::TEXT_MUTED,
                 ),
                 "Sign in on your machine with /darkrun:darkrun-login, then open the run's link."
+            }
+        }
+    }
+}
+
+/// The `/review/:id` landing shown when the link carried no live relay target.
+///
+/// The full review link also carries `?relay&session&token`, which drives the
+/// live connection (the `Live` view). Opened with only the bare path — e.g. a
+/// shared `app.darkrun.ai/review/<id>` link without a token — there's nothing to
+/// connect to, so this names the review and points back at a live entry point
+/// (the install banner above already offers the native app).
+#[component]
+fn ReviewLanding(id: String) -> Element {
+    rsx! {
+        div { style: "text-align:center;padding:48px 0;",
+            p {
+                style: format!(
+                    "font-family:{};font-size:12px;color:{};letter-spacing:.06em;\
+                     text-transform:uppercase;margin:0 0 6px;",
+                    tokens::FONT_MONO, tokens::TEXT_FAINT,
+                ),
+                "review"
+            }
+            p {
+                style: format!(
+                    "font-family:{};font-size:18px;color:{};margin:0 0 12px;word-break:break-all;",
+                    tokens::FONT_SANS, tokens::TEXT,
+                ),
+                "{id}"
+            }
+            p {
+                style: format!(
+                    "font-family:{};font-size:13px;color:{};margin:0;max-width:520px;\
+                     margin-left:auto;margin-right:auto;line-height:1.5;",
+                    tokens::FONT_SANS, tokens::TEXT_MUTED,
+                ),
+                "Open this review live from the darkrun app, or sign in on your machine \
+                 with /darkrun:darkrun-login and follow the run's link to watch it here."
             }
         }
     }

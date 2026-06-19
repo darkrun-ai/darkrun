@@ -210,6 +210,26 @@ pub fn HomeApp(
                         runs_by_project.set(map);
                     }
 
+                    // 2b. Deep link delivered at RUNTIME — the OS handed the
+                    //     already-running app a darkrun review link, which the
+                    //     tao event handler parsed into the mailbox (see
+                    //     `main.rs`). Drain it and open that review against the
+                    //     launch engine's port (the same authority the pinned
+                    //     launch + focus poller use). Cold-launch links land via
+                    //     `initial_session` instead, so this is the warm path.
+                    if let Some(slug) = wire::take_pending_deeplink() {
+                        let project = found
+                            .iter()
+                            .find(|e| e.port == base.port)
+                            .map(engine_display_name)
+                            .unwrap_or_default();
+                        selection.set(Selection::Run {
+                            port: base.port,
+                            slug,
+                            project,
+                        });
+                    }
+
                     // 3. Current-focus on the launch engine's port.
                     let mut probe = base.clone();
                     let focus = wire::fetch_current_focus(&probe).await;
