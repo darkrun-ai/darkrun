@@ -30,6 +30,7 @@ mod gcp_auth;
 mod oauth_routes;
 mod push;
 mod relay;
+mod repos;
 mod relay_broker;
 mod state;
 mod transport;
@@ -44,6 +45,7 @@ use tower_http::services::{ServeDir, ServeFile};
 pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
 pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
+pub use repos::Repo;
 pub use firebase_auth::{FirebaseTokenAuth, FIREBASE_CERTS_URL};
 pub use firestore::FirestoreDeviceRegistry;
 pub use gcp_auth::{ServiceAccount, ServiceAccountTokenSource, DATASTORE_SCOPE, FCM_SCOPE};
@@ -74,6 +76,17 @@ pub fn oauth_router(state: WebState) -> Router {
         .with_state(state)
 }
 
+/// Build the standalone web-app API sub-router (the `/api/...` endpoints the
+/// app.darkrun.ai dashboard calls).
+///
+/// Today this is just `GET /api/repos` — the signed-in user's repository
+/// portfolio, listed from their provider with the access token they present.
+pub fn api_router(state: WebState) -> Router {
+    Router::new()
+        .route("/api/repos", get(repos::list_repos))
+        .with_state(state)
+}
+
 /// Build a [`ServeDir`] for `site_dir` with an SPA fallback to its
 /// `index.html`.
 ///
@@ -89,7 +102,9 @@ fn site_service(site_dir: &Path) -> ServeDir<ServeFile> {
 /// fallback. The site directory need not exist yet (requests 404 until built).
 pub fn build_router(state: WebState, site_dir: impl AsRef<Path>) -> Router {
     let site_dir = site_dir.as_ref();
-    oauth_router(state).fallback_service(site_service(site_dir))
+    oauth_router(state.clone())
+        .merge(api_router(state))
+        .fallback_service(site_service(site_dir))
 }
 
 /// Build the router with the OAuth surface only (no static site).

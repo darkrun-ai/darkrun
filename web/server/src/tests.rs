@@ -542,3 +542,123 @@ async fn callback_for_an_unconfigured_provider_is_unavailable() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+// ---- /api/repos -------------------------------------------------------------
+
+/// A state whose GitHub list-repos call returns the given JSON array body.
+fn repos_state(method_url: &str, body: serde_json::Value) -> WebState {
+    let mock = MockTransport::new();
+    mock.expect(
+        Method::Get,
+        method_url,
+        HttpResponse::new(200, serde_json::to_vec(&body).unwrap()),
+    );
+    state_with(Arc::new(SyncMock::new(mock)), Broker::new())
+}
+
+#[tokio::test]
+async fn repos_lists_github_normalized() {
+    let state = repos_state(
+        "https://api.github.com/user/repos?per_page=100&sort=updated",
+        serde_json::json!([
+            { "name": "darkrun", "full_name": "jwaldrip/darkrun", "html_url": "https://github.com/jwaldrip/darkrun" },
+        ]),
+    );
+    let app = build_router(state, std::env::temp_dir());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos?provider=github")
+                .header("Authorization", "Bearer gho_token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let repos: Vec<crate::repos::Repo> = serde_json::from_str(&body).unwrap();
+    assert_eq!(repos.len(), 1);
+    assert_eq!(repos[0].full_name, "jwaldrip/darkrun");
+    assert_eq!(repos[0].provider, Provider::GitHub);
+}
+
+#[tokio::test]
+async fn repos_lists_gitlab_normalized() {
+    let state = repos_state(
+        "https://gitlab.com/api/v4/projects?membership=true&per_page=100&order_by=last_activity_at",
+        serde_json::json!([
+            { "name": "darkrun", "path_with_namespace": "jwaldrip/darkrun", "web_url": "https://gitlab.com/jwaldrip/darkrun" },
+        ]),
+    );
+    let app = build_router(state, std::env::temp_dir());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos?provider=gitlab")
+                .header("Authorization", "Bearer glpat_token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let repos: Vec<crate::repos::Repo> = serde_json::from_str(&body).unwrap();
+    assert_eq!(repos[0].provider, Provider::GitLab);
+    assert_eq!(repos[0].url, "https://gitlab.com/jwaldrip/darkrun");
+}
+
+#[tokio::test]
+async fn repos_requires_a_bearer_token() {
+    let state = github_exchange_state("unused", Broker::new());
+    let app = build_router(state, std::env::temp_dir());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos?provider=github")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn repos_rejects_an_unknown_provider() {
+    let state = github_exchange_state("unused", Broker::new());
+    let app = build_router(state, std::env::temp_dir());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos?provider=bitbucket")
+                .header("Authorization", "Bearer t")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn repos_surfaces_a_provider_failure_as_bad_gateway() {
+    let state = WebState::new(test_config(), Broker::new(), Arc::new(FailingTransport));
+    let app = build_router(state, std::env::temp_dir());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos?provider=github")
+                .header("Authorization", "Bearer t")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}

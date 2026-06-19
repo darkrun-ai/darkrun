@@ -29,17 +29,47 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 
-// Sign in with `providerKey` ("github" | "gitlab") and resolve to the Firebase
-// ID token string. Rejects (→ Err on the Rust side) on cancel/failure.
-export async function signInAndGetToken(providerKey) {
-  let provider;
+// Build the Firebase Auth provider for `providerKey` ("github" | "gitlab").
+function providerFor(providerKey) {
   if (providerKey === "gitlab") {
     // GitLab via Firebase generic OIDC — the provider id configured in console.
-    provider = new OAuthProvider("oidc.gitlab");
-  } else {
-    provider = new GithubAuthProvider();
-    provider.addScope("read:user");
+    const provider = new OAuthProvider("oidc.gitlab");
+    // `api` scope so the resulting OAuth token can list the user's projects.
+    provider.addScope("api");
+    return provider;
   }
-  const result = await signInWithPopup(auth, provider);
+  const provider = new GithubAuthProvider();
+  provider.addScope("read:user");
+  // `repo` scope so the OAuth token can list the user's repositories.
+  provider.addScope("repo");
+  return provider;
+}
+
+// Sign in with `providerKey` ("github" | "gitlab") and resolve to the Firebase
+// ID token string. Rejects (→ Err on the Rust side) on cancel/failure.
+//
+// This is the CLI-login bridge path: the CLI only needs the Firebase ID token
+// (deposited under its nonce), so this returns just that — unchanged.
+export async function signInAndGetToken(providerKey) {
+  const result = await signInWithPopup(auth, providerFor(providerKey));
   return await result.user.getIdToken();
+}
+
+// Sign in and resolve to BOTH tokens, JSON-encoded:
+//   { "idToken": "...", "accessToken": "...", "provider": "github" }
+//
+// The standalone dashboard needs the **provider OAuth access token** (not the
+// Firebase ID token) to list repos through the darkrun-web `/api/repos` proxy.
+// Firebase surfaces it on the sign-in result's credential. `accessToken` is the
+// empty string if the provider didn't return one (the dashboard then degrades
+// to "no repos to show" rather than failing the sign-in).
+export async function signInForDashboard(providerKey) {
+  const result = await signInWithPopup(auth, providerFor(providerKey));
+  const idToken = await result.user.getIdToken();
+  const credential =
+    providerKey === "gitlab"
+      ? OAuthProvider.credentialFromResult(result)
+      : GithubAuthProvider.credentialFromResult(result);
+  const accessToken = (credential && credential.accessToken) || "";
+  return JSON.stringify({ idToken, accessToken, provider: providerKey });
 }
