@@ -249,13 +249,26 @@ impl DarkrunServer {
             .map(|s| s.active_station)
             .unwrap_or_default();
         crate::notify::on_gate(run, &station);
-        // Already connected (or within the presence grace window) → the desktop's
-        // home poller navigates itself; don't spawn a second window.
-        if self.sessions.presence().is_present() {
-            return;
-        }
-        if let Some(addr) = self.announced_addr {
-            let _ = self.launch_desktop(addr.port(), run);
+        // Gate-surfacing decision (notify-and-await): only open a window when we
+        // have no confident live human surface. A connected client (or one within
+        // the presence grace window), or a device that ACKed the gate push, means
+        // hold via the await loop — the live mirror / push carries the raised
+        // session there, so a second window would be redundant.
+        match crate::desktop::surface_mode(
+            self.sessions.presence(),
+            self.sessions.has_ack(run),
+        ) {
+            crate::desktop::SurfaceMode::Await => {
+                eprintln!(
+                    "darkrun: gate '{run}': human surface live (present or push-acked) — holding via await, not relaunching"
+                );
+            }
+            crate::desktop::SurfaceMode::Launch => {
+                eprintln!("darkrun: gate '{run}': no live human surface — launching desktop app");
+                if let Some(addr) = self.announced_addr {
+                    let _ = self.launch_desktop(addr.port(), run);
+                }
+            }
         }
     }
 }
@@ -1670,11 +1683,19 @@ impl DarkrunServer {
         // Any surfacing counts toward the once-per-process tick launch.
         self.desktop_surfaced
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        if self.sessions.presence().is_present() {
-            // A desktop is connected (or within the grace window); the live
-            // mirror pushes the raised session to it.
+        // Gate-surfacing decision (notify-and-await): hold when a human surface is
+        // already live — a connected desktop (or one within the grace window) gets
+        // the raised session from the live mirror, and a push-acked device proved
+        // it received the gate notification. Only launch when neither holds.
+        if let crate::desktop::SurfaceMode::Await =
+            crate::desktop::surface_mode(self.sessions.presence(), self.sessions.has_ack(slug))
+        {
+            eprintln!(
+                "darkrun: surface_desktop '{slug}': human surface live (present or push-acked) — holding, not relaunching"
+            );
             return serde_json::json!({ "status": "connected" });
         }
+        eprintln!("darkrun: surface_desktop '{slug}': no live human surface — launching desktop app");
         let mut result = if let Some(addr) = self.announced_addr {
             self.launch_desktop(addr.port(), slug)
         } else {
