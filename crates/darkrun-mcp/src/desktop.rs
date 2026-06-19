@@ -24,8 +24,46 @@
 //! the binary on demand. `open --stdout/--stderr` captures the app's output to a
 //! log so a launch is never silent again.
 
+use darkrun_http::Presence;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+/// How a human review gate should be SURFACED — the notify-and-await decision.
+///
+/// Picks between holding (the human surface is already live, so just `await` the
+/// decision over the broadcast channel) and launching (no confident live surface,
+/// so open the desktop app as before). See [`surface_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceMode {
+    /// A human surface is already live (or strongly believed to be) — do NOT
+    /// relaunch the app; hold the gate via the await loop and let the live mirror
+    /// / push carry the raised session to the connected client.
+    Await,
+    /// No confident live surface — open the desktop app (the historical behavior).
+    Launch,
+}
+
+/// The gate-surfacing decision: given how confident we are that a human surface
+/// is already live, choose whether to hold (`Await`) or open the app (`Launch`).
+///
+/// Pure, so the policy is exhaustively testable in isolation from the launch
+/// machinery:
+/// - `presence.is_present()` (a review client is connected, or within the
+///   [`darkrun_http::Presence::Lost`] grace window) → [`SurfaceMode::Await`].
+///   A connected client gets the raised session pushed to it; relaunching would
+///   only spawn a redundant window.
+/// - else if `acked` (a device confirmed a push receipt for this session) →
+///   [`SurfaceMode::Await`]. A device proved it received the gate notification,
+///   so hold for the decision rather than opening a local window.
+/// - else → [`SurfaceMode::Launch`]: no live client and no acked device, so open
+///   the desktop app — the original behavior.
+pub fn surface_mode(presence: Presence, acked: bool) -> SurfaceMode {
+    if presence.is_present() || acked {
+        SurfaceMode::Await
+    } else {
+        SurfaceMode::Launch
+    }
+}
 
 /// Where a launched app's stdout/stderr is captured, so a failed launch leaves a
 /// trace instead of vanishing silently. Lives under the project's state dir.
@@ -427,6 +465,35 @@ pub fn spawn(repo_root: &Path, port: u16, session: Option<&str>) -> Launch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_mode_awaits_when_a_client_is_present() {
+        // Live and Lost(in-grace) both read as present → never relaunch.
+        assert_eq!(surface_mode(Presence::Live, false), SurfaceMode::Await);
+        assert_eq!(surface_mode(Presence::Live, true), SurfaceMode::Await);
+        assert_eq!(surface_mode(Presence::Lost, false), SurfaceMode::Await);
+        assert_eq!(surface_mode(Presence::Lost, true), SurfaceMode::Await);
+    }
+
+    #[test]
+    fn surface_mode_awaits_when_not_present_but_a_device_acked() {
+        // No live client, but a device confirmed the push receipt → hold.
+        assert_eq!(surface_mode(Presence::Closed, true), SurfaceMode::Await);
+        assert_eq!(
+            surface_mode(Presence::NeverAttached, true),
+            SurfaceMode::Await
+        );
+    }
+
+    #[test]
+    fn surface_mode_launches_when_not_present_and_not_acked() {
+        // No live client and no acked device → open the app (historical behavior).
+        assert_eq!(surface_mode(Presence::Closed, false), SurfaceMode::Launch);
+        assert_eq!(
+            surface_mode(Presence::NeverAttached, false),
+            SurfaceMode::Launch
+        );
+    }
 
     fn touch(path: &Path) {
         if let Some(p) = path.parent() {
