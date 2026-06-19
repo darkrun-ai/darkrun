@@ -1,0 +1,112 @@
+name: macos-appstore
+
+# Build the darkrun macOS app (Dioxus → .app → signed .pkg) and upload it to the
+# Mac App Store. The .pkg + metadata are uploaded but NOT submitted for review; a
+# human hits "Submit" in App Store Connect. Auth is an App Store Connect API key;
+# signing is fastlane `match` (the macOS MAS cert types). Mirrors ios-release.yml.
+#
+# Manual-only (workflow_dispatch) until the secrets exist + `match macos` is
+# populated. Enable the `push: tags` trigger once these repo secrets are set
+# (the SAME set iOS uses — bootstrap-macos-signing.sh reuses the iOS match repo):
+#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8,
+#   MATCH_GIT_URL, MATCH_PASSWORD, MATCH_GIT_BASIC_AUTHORIZATION
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Marketing version (e.g. 0.7.0). Defaults to Cargo.toml."
+        required: false
+  # push:
+  #   tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+concurrency:
+  group: macos-appstore
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  appstore:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history so `git rev-list --count` is the real build number
+
+      - name: Resolve version
+        id: v
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ver="${GITHUB_REF_NAME#v}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            ver="${{ inputs.version }}"
+          else
+            ver=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          # Same monotonic build number as the RC stream (commit count), so the GA
+          # build number is higher than every RC that preceded it.
+          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install dx (Dioxus CLI)
+        run: cargo install dioxus-cli --version "^0.7" --locked
+
+      - name: Set up Ruby + fastlane (bundler)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+        env:
+          BUNDLE_GEMFILE: fastlane/Gemfile
+
+      # Install the Mac App Store certs + provisioning profile (match) BEFORE the
+      # build, so codesign/productbuild have them.
+      - name: Install signing (match macos)
+        run: bundle exec fastlane mac install_signing_macos
+        env:
+          BUNDLE_GEMFILE: fastlane/Gemfile
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+
+      # Newest NON-beta Xcode: Apple needs the current SDK but rejects beta-built
+      # binaries ("use the latest Release Candidate").
+      - name: Select newest released Xcode (no betas)
+        run: |
+          echo "Available Xcodes:"; ls -d /Applications/Xcode*.app 2>/dev/null || true
+          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)"
+          [ -n "$latest" ] && sudo xcode-select -s "$latest/Contents/Developer" || true
+          xcodebuild -version
+          echo "macosx SDK: $(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo '?')"
+
+      # dx bundle emits the macOS `.app` (no Xcode project); package-macos-pkg.sh
+      # then signs it for the App Store and wraps it in a signed installer .pkg.
+      - name: Bundle the macOS app (Dioxus)
+        run: dx bundle --package darkrun-desktop --platform macos --release
+
+      - name: Sign + package the .pkg
+        run: ./fastlane/package-macos-pkg.sh
+        env:
+          DARKRUN_MARKETING_VERSION: ${{ steps.v.outputs.version }}
+          DARKRUN_BUILD_NUMBER: ${{ steps.v.outputs.build }}
+
+      - name: Upload to the Mac App Store (no auto-submit)
+        run: bundle exec fastlane mac mac_release
+        env:
+          BUNDLE_GEMFILE: fastlane/Gemfile
+          DARKRUN_PKG: ${{ env.DARKRUN_PKG }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
