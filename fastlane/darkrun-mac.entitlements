@@ -33,5 +33,15 @@
     <array>
         <string>group.ai.darkrun</string>
     </array>
+    <!-- Universal Links: open app.darkrun.ai links in the app instead of the
+         browser (the web app is the fallback when the app isn't installed).
+         Requires the Associated Domains capability on the ai.darkrun.app App ID
+         + the matching apple-app-site-association at app.darkrun.ai/.well-known/.
+         webcredentials enables Password AutoFill / Sign-in association. -->
+    <key>com.apple.developer.associated-domains</key>
+    <array>
+        <string>applinks:app.darkrun.ai</string>
+        <string>webcredentials:app.darkrun.ai</string>
+    </array>
 </dict>
 </plist>

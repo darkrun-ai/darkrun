@@ -2,7 +2,7 @@
   "applinks": {
     "details": [
       {
-        "appIDs": ["TEAMID.ai.darkrun.app"],
+        "appIDs": ["8H7HVPHS87.ai.darkrun.app"],
         "components": [
           {
             "/": "/*",
@@ -13,6 +13,6 @@
     ]
   },
   "webcredentials": {
-    "apps": ["TEAMID.ai.darkrun.app"]
+    "apps": ["8H7HVPHS87.ai.darkrun.app"]
   }
 }

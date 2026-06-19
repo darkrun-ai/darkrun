@@ -176,6 +176,18 @@ cp "$PROFILE" "$APP/embedded.mobileprovision"
 security cms -D -i "$PROFILE" > /tmp/dr-profile.plist
 /usr/libexec/PlistBuddy -x -c 'Print :Entitlements' /tmp/dr-profile.plist > /tmp/dr-entitlements.plist
 
+# Universal Links: declare the Associated Domains so a tapped app.darkrun.ai link
+# opens the app (web app is the fallback). The Associated Domains capability is
+# enabled on the ai.darkrun.app App ID; the profile must be REGENERATED to carry
+# it (match profiles are immutable snapshots) — if upload fails with "entitlement
+# not in profile", run `bundle exec fastlane match appstore --force`.
+ENT="/tmp/dr-entitlements.plist"
+/usr/libexec/PlistBuddy -c "Delete :com.apple.developer.associated-domains" "$ENT" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :com.apple.developer.associated-domains array" "$ENT"
+/usr/libexec/PlistBuddy -c "Add :com.apple.developer.associated-domains:0 string applinks:app.darkrun.ai" "$ENT"
+/usr/libexec/PlistBuddy -c "Add :com.apple.developer.associated-domains:1 string webcredentials:app.darkrun.ai" "$ENT"
+echo "entitlements: associated-domains=$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.associated-domains:0' "$ENT")"
+
 # Sign nested code first (frameworks/dylibs/extensions, if any), then the app.
 find "$APP" \( -name '*.framework' -o -name '*.dylib' -o -name '*.appex' \) -print0 |
   while IFS= read -r -d '' nested; do
