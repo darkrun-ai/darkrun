@@ -8,7 +8,7 @@
 //! memory (rather than re-deriving it from disk on every request) keeps the
 //! live-update WebSocket cheap.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -108,7 +108,10 @@ struct SessionEntry {
 #[derive(Debug, Clone)]
 pub enum AwaitOutcome {
     /// The operator acted; carries the resolved payload (the decision/answer).
-    Resolved(SessionPayload),
+    /// Boxed: a [`SessionPayload`] is large (~1.3 KiB), and every other variant
+    /// is data-free, so boxing keeps the enum small for the common no-payload
+    /// outcomes (`TimedOut`/`Unknown`/`Gone`).
+    Resolved(Box<SessionPayload>),
     /// The timeout elapsed before a decision (the caller should re-await or fall
     /// back to elicitation).
     TimedOut,
@@ -128,6 +131,15 @@ pub struct SessionRegistry {
     inner: Arc<Mutex<HashMap<String, SessionEntry>>>,
     ws_session_count: Arc<AtomicU64>,
     presence: Arc<PresenceTracker>,
+    /// Per-session set of device tokens that have ACKed a gate push for it. A
+    /// device woken by a push POSTs `/api/push/ack` to confirm receipt, which
+    /// lands here. The gate logic reads it as the "high-confidence live surface"
+    /// signal — push delivered AND the app answered — so `await_decision` can
+    /// block knowing a human can act, rather than guessing from a fire-and-forget
+    /// push. Held behind the same Arc-shared posture as `inner` so the HTTP ack
+    /// handler and the await tool observe the same acks. iOS acks are best-effort
+    /// (silent-push throttling), so presence remains the stronger signal.
+    acks: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     /// Optional durability hook the engine installs: invoked on every upsert
     /// (raise AND answer) with the payload, so interactive sessions persist to
     /// disk without the HTTP answer handlers needing to know how. Shared across
@@ -272,6 +284,32 @@ impl SessionRegistry {
         guard.get(id).map(|e| e.tx.subscribe())
     }
 
+    /// Record that `token` (an FCM device token) ACKed the gate push for session
+    /// `id` — the device confirming, on receipt, that the push landed. Idempotent:
+    /// the same device re-acking is a no-op (it's a set membership). Drives the
+    /// "high-confidence live surface" branch of the notify-and-await decision.
+    pub fn record_ack(&self, id: &str, token: &str) {
+        let mut guard = self.acks.lock().expect("session registry poisoned");
+        guard
+            .entry(id.to_string())
+            .or_default()
+            .insert(token.to_string());
+    }
+
+    /// How many distinct devices have ACKed a gate push for session `id`. `0`
+    /// means no device confirmed receipt (fall back to presence / the URL).
+    pub fn ack_count(&self, id: &str) -> usize {
+        let guard = self.acks.lock().expect("session registry poisoned");
+        guard.get(id).map_or(0, HashSet::len)
+    }
+
+    /// Whether at least one device has ACKed a gate push for session `id` — the
+    /// boolean the gate logic reads when deciding whether a push reached a live
+    /// surface it can confidently `await` against.
+    pub fn has_ack(&self, id: &str) -> bool {
+        self.ack_count(id) > 0
+    }
+
     /// Block until session `id` is RESOLVED (the operator decided/answered — see
     /// [`SessionPayload::resolved`]), or `timeout` elapses. The server half of
     /// the notify-and-await gate model: surface the gate (push / URL elicitation /
@@ -282,7 +320,7 @@ impl SessionRegistry {
     /// lagged broadcast can't strand the waiter.
     pub async fn await_decision(&self, id: &str, timeout: std::time::Duration) -> AwaitOutcome {
         match self.get(id) {
-            Some(p) if p.resolved() => return AwaitOutcome::Resolved(p),
+            Some(p) if p.resolved() => return AwaitOutcome::Resolved(Box::new(p)),
             Some(_) => {}
             None => return AwaitOutcome::Unknown,
         }
@@ -293,7 +331,7 @@ impl SessionRegistry {
         // above and this subscribe() would not arrive on `rx`.
         if let Some(p) = self.get(id) {
             if p.resolved() {
-                return AwaitOutcome::Resolved(p);
+                return AwaitOutcome::Resolved(Box::new(p));
             }
         }
         let deadline = tokio::time::Instant::now() + timeout;
@@ -308,7 +346,7 @@ impl SessionRegistry {
                 Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
                     if let Some(p) = self.get(id) {
                         if p.resolved() {
-                            return AwaitOutcome::Resolved(p);
+                            return AwaitOutcome::Resolved(Box::new(p));
                         }
                     } else {
                         return AwaitOutcome::Gone;
@@ -535,6 +573,34 @@ mod tests {
             reg.await_decision("q-02", Duration::from_millis(30)).await,
             AwaitOutcome::TimedOut
         ));
+    }
+
+    #[test]
+    fn record_ack_is_idempotent_per_device_and_counts_distinct_devices() {
+        let reg = SessionRegistry::new();
+        assert_eq!(reg.ack_count("q-01"), 0);
+        assert!(!reg.has_ack("q-01"));
+
+        // The same device acking twice is one ack (set membership).
+        reg.record_ack("q-01", "tok-a");
+        reg.record_ack("q-01", "tok-a");
+        assert_eq!(reg.ack_count("q-01"), 1);
+        assert!(reg.has_ack("q-01"));
+
+        // A second device adds a distinct ack; acks are scoped per session.
+        reg.record_ack("q-01", "tok-b");
+        assert_eq!(reg.ack_count("q-01"), 2);
+        assert_eq!(reg.ack_count("q-02"), 0);
+    }
+
+    #[test]
+    fn acks_are_shared_across_clones() {
+        // The HTTP ack handler holds a clone of the registry; the await tool
+        // holds another — both must observe the same acks.
+        let reg = SessionRegistry::new();
+        let clone = reg.clone();
+        clone.record_ack("d-07", "tok");
+        assert!(reg.has_ack("d-07"));
     }
 
     #[test]

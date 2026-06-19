@@ -10,6 +10,7 @@
 //!   - `POST   /api/proof/:run`                       — attach a run's proof.
 //!   - `GET    /api/proof/:run`                       — read a run's proof.
 //!   - `POST   /api/advance/:id`                     — SPA wake signal past a gate.
+//!   - `POST   /api/push/ack`                         — device confirms a gate push landed.
 //!   - `GET    /api/feedback/:run/:station`          — list feedback for a station.
 //!   - `POST   /api/feedback/:run/:station`          — create a feedback item.
 //!   - `PUT    /api/feedback/:run/:station/:id`      — update status / closed_by.
@@ -27,7 +28,8 @@ use darkrun_api::{
     FeedbackDeleteResponse, FeedbackItem, FeedbackListResponse, FeedbackReplyCreateRequest,
     FeedbackReplyCreateResponse, FeedbackStatus, FeedbackUpdateRequest, FeedbackUpdateResponse,
     OutputReviewRequest, OutputReviewResponse, PickerSelectRequest, PickerSelectResponse,
-    ProofAttachRequest, ProofAttachResponse, ProofGetResponse, QuestionAnswerRequest,
+    ProofAttachRequest, ProofAttachResponse, ProofGetResponse, PushAckRequest, PushAckResponse,
+    QuestionAnswerRequest,
     QuestionAnswerResponse, ReviewDecision, ReviewDecisionRequest, ReviewDecisionResponse,
     SessionPayload, SessionStatus,
 };
@@ -178,6 +180,22 @@ pub async fn advance(State(state): State<AppState>, Path(id): Path<String>) -> R
         state.sessions.upsert(SessionPayload::Review(review));
     }
     (StatusCode::OK, Json(json!({ "ok": true, "advanced": true }))).into_response()
+}
+
+/// `POST /api/push/ack` — a device, woken by a gate push, confirms receipt.
+///
+/// Records the device token against the session in the in-memory ack store so
+/// the notify-and-await gate logic can read a confirmed live surface (push
+/// delivered AND the app answered) and `await` the decision with confidence.
+/// Always `200 { "ok": true }`: an ack for an unknown/since-removed session is
+/// harmless (the store is keyed by id, no session lookup), and a device should
+/// never be told its confirmation failed.
+pub async fn push_ack(
+    State(state): State<AppState>,
+    Json(req): Json<PushAckRequest>,
+) -> Response {
+    state.sessions.record_ack(&req.session_id, &req.token);
+    (StatusCode::OK, Json(PushAckResponse { ok: true })).into_response()
 }
 
 /// `POST /api/unit/:run/:unit/reset` — request a reset of a wedged unit from the
