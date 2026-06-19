@@ -951,6 +951,26 @@ impl SessionPayload {
         };
         Some(InteractiveSession { run, open })
     }
+
+    /// The session's runtime status, for the decision-bearing variants
+    /// (review/question/direction/picker). Display-only variants
+    /// (view/visual_review/proof) have nothing to decide → `None`.
+    pub fn status(&self) -> Option<SessionStatus> {
+        match self {
+            SessionPayload::Review(p) => Some(p.status),
+            SessionPayload::Question(p) => Some(p.status),
+            SessionPayload::Direction(p) => Some(p.status),
+            SessionPayload::Picker(p) => Some(p.status),
+            _ => None,
+        }
+    }
+
+    /// Whether a decision-bearing session has left `Pending` — i.e. the operator
+    /// has acted (decided/answered/approved/changes-requested). The await
+    /// primitive ([`darkrun_http`]'s `await_decision`) blocks until this is true.
+    pub fn resolved(&self) -> bool {
+        matches!(self.status(), Some(s) if s != SessionStatus::Pending)
+    }
 }
 
 /// The run + open-state of an [`SessionPayload::interactive`] session.
