@@ -1085,8 +1085,9 @@ fn MainHeader(name: String, crumb: String) -> Element {
 /// add-a-project form.
 #[component]
 fn Welcome(projects: Vec<Project>, refresh: Signal<u32>) -> Element {
-    let shell = "padding:24px;display:flex;flex-direction:column;gap:16px;\
-                 max-width:920px;margin:0 auto;";
+    // Fill the whole main pane — no max-width/centering. The inner content
+    // (projects grid + add-project form) should use the full available width.
+    let shell = "padding:24px;display:flex;flex-direction:column;gap:16px;";
     let lead = format!(
         "font-size:13.5px;line-height:1.55;color:{muted};margin:0;max-width:640px;",
         muted = tokens::var::TEXT_MUTED,
