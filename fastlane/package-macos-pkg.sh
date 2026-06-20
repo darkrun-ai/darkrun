@@ -45,9 +45,13 @@ echo "profile:  $PROFILE"
 # `[ -n ]` checks below can report which identity is missing. Dump the available
 # identities first so a failure shows exactly what's in the keychain.
 ALL_CODESIGN="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-ALL_IDENTITIES="$(security find-identity -v 2>/dev/null || true)"
+# The installer cert ("3rd Party Mac Developer Installer") is NOT a code-signing
+# identity, so `find-identity -v` (no policy / codesigning default) does NOT list
+# it. Enumerate under the `basic` X.509 policy, which DOES include installer
+# certs, so the INSTALLER_IDENTITY lookup below can find it.
+ALL_IDENTITIES="$(security find-identity -v -p basic 2>/dev/null || true)"
 echo "codesigning identities:"; printf '%s\n' "$ALL_CODESIGN" | sed 's/^/  /'
-echo "all identities:"; printf '%s\n' "$ALL_IDENTITIES" | sed 's/^/  /'
+echo "all identities (basic policy):"; printf '%s\n' "$ALL_IDENTITIES" | sed 's/^/  /'
 APP_IDENTITY="${DARKRUN_MAC_APP_IDENTITY:-$(printf '%s\n' "$ALL_CODESIGN" | grep -oE '3rd Party Mac Developer Application[^"]*|Apple Distribution[^"]*' | head -1 || true)}"
 INSTALLER_IDENTITY="${DARKRUN_MAC_INSTALLER_IDENTITY:-$(printf '%s\n' "$ALL_IDENTITIES" | grep -oE '3rd Party Mac Developer Installer[^"]*|Mac Installer Distribution[^"]*' | head -1 || true)}"
 [ -n "${APP_IDENTITY:-}" ] || { echo "error: no Mac App distribution identity in the keychain (see list above)" >&2; exit 1; }
@@ -62,6 +66,10 @@ plist_set CFBundleDisplayName "Darkrun AI" string
 plist_set CFBundleName "Darkrun AI" string
 # Required by the Mac App Store; darkrun is a developer tool.
 plist_set LSApplicationCategoryType "public.app-category.developer-tools" string
+# The app ships an arm64-only binary; Apple only accepts arm64-only Mac apps
+# when they target macOS 12.0+. Match the build's MACOSX_DEPLOYMENT_TARGET=12.0
+# (set in the workflow) so the plist minimum agrees with the Mach-O minos.
+plist_set LSMinimumSystemVersion "12.0" string
 # Export compliance: standard HTTPS/TLS only (see package-ios-ipa.sh) — exempt.
 plist_set ITSAppUsesNonExemptEncryption false bool
 # Marketing version + build number (CI passes the RC values; default to whatever
