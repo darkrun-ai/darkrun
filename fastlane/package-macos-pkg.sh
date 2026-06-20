@@ -81,6 +81,25 @@ echo "version:  CFBundleShortVersionString=$(/usr/libexec/PlistBuddy -c 'Print :
 # Embed the Mac App Store provisioning profile.
 cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
 
+# The signed bundle MUST carry the same application-identifier (and team
+# identifier) the embedded provisioning profile declares, or App Store Connect
+# rejects the upload with ITMS-90886 ("signature … is missing an application
+# identifier but has [one] in the provisioning profile"). Xcode injects these
+# automatically; signing by hand we must add them. Derive them from the profile
+# so they always match (no hardcoded team/bundle id), and write a signing copy
+# of the entitlements with them merged in.
+SIGN_ENTITLEMENTS="$(mktemp -t darkrun-mac-entitlements).plist"
+cp "$ENTITLEMENTS" "$SIGN_ENTITLEMENTS"
+PROFILE_PLIST="$(mktemp -t darkrun-mac-profile).plist"
+security cms -D -i "$PROFILE" > "$PROFILE_PLIST" 2>/dev/null || true
+for k in com.apple.application-identifier com.apple.developer.team-identifier; do
+  v="$(/usr/libexec/PlistBuddy -c "Print :Entitlements:$k" "$PROFILE_PLIST" 2>/dev/null || true)"
+  [ -n "$v" ] || continue
+  /usr/libexec/PlistBuddy -c "Add :$k string $v" "$SIGN_ENTITLEMENTS" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Set :$k $v" "$SIGN_ENTITLEMENTS"
+  echo "  entitlement $k = $v"
+done
+
 # Sign nested code first (frameworks/dylibs/helpers), then the app with the
 # sandbox entitlements. --options runtime is harmless for MAS and future-proofs.
 find "$APP/Contents" \( -name '*.framework' -o -name '*.dylib' \) -print0 2>/dev/null |
@@ -89,7 +108,7 @@ find "$APP/Contents" \( -name '*.framework' -o -name '*.dylib' \) -print0 2>/dev
     codesign --force --timestamp -o runtime -s "$APP_IDENTITY" "$nested"
   done
 codesign --force --timestamp -o runtime \
-  --entitlements "$ENTITLEMENTS" -s "$APP_IDENTITY" "$APP"
+  --entitlements "$SIGN_ENTITLEMENTS" -s "$APP_IDENTITY" "$APP"
 codesign --verify --deep --strict "$APP" && echo "codesign verified"
 
 # Build the signed installer .pkg (installs into /Applications).
