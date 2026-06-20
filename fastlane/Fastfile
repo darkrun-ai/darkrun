@@ -207,7 +207,12 @@ platform :mac do
       automatic_release: false,
       force: true, # skip the HTML metadata-preview confirmation (non-interactive)
       skip_screenshots: true, # screenshots have their own lane
-      skip_metadata: false,
+      # Upload the BINARY only. deliver's first-version metadata upload throws
+      # "No data" from App Store Connect (fastlane#20538) when there's no
+      # ./fastlane/metadata tree for macOS; metadata is curated by hand in ASC
+      # ("Prepare for Submission"), so skip it here and just push the .pkg.
+      skip_metadata: true,
+      skip_app_version_update: true,
       precheck_include_in_app_purchases: false,
       run_precheck_before_submit: false,
     )
