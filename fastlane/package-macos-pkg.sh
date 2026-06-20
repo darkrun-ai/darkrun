@@ -66,6 +66,10 @@ plist_set CFBundleDisplayName "Darkrun AI" string
 plist_set CFBundleName "Darkrun AI" string
 # Required by the Mac App Store; darkrun is a developer tool.
 plist_set LSApplicationCategoryType "public.app-category.developer-tools" string
+# The app ships an arm64-only binary; Apple only accepts arm64-only Mac apps
+# when they target macOS 12.0+. Match the build's MACOSX_DEPLOYMENT_TARGET=12.0
+# (set in the workflow) so the plist minimum agrees with the Mach-O minos.
+plist_set LSMinimumSystemVersion "12.0" string
 # Export compliance: standard HTTPS/TLS only (see package-ios-ipa.sh) — exempt.
 plist_set ITSAppUsesNonExemptEncryption false bool
 # Marketing version + build number (CI passes the RC values; default to whatever
