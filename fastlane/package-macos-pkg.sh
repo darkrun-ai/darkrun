@@ -19,6 +19,20 @@ cd "$ROOT"
 # The dx output: target/dx/<package>/<profile>/macos/<App>.app
 APP="$(find target/dx -path '*/macos/*.app' -type d -maxdepth 6 2>/dev/null | head -1)"
 [ -n "$APP" ] || { echo "error: no .app found under target/dx (did 'dx bundle --platform macos' run?)" >&2; exit 1; }
+
+# dx names the bundle after the binary ("DarkrunDesktop.app"); the product is
+# "Darkrun AI" on every platform. Rename the bundle BEFORE signing so the
+# on-disk / Finder / Launchpad / installer name matches CFBundle{,Display}Name
+# (set below) — the .pkg installs whatever this bundle is called into
+# /Applications. (CFBundleExecutable stays the binary name; that's fine — the
+# bundle name and executable name need not match.)
+APP_DIR="$(dirname "$APP")"
+DESIRED_APP="$APP_DIR/Darkrun AI.app"
+if [ "$APP" != "$DESIRED_APP" ]; then
+  rm -rf "$DESIRED_APP"
+  mv "$APP" "$DESIRED_APP"
+  APP="$DESIRED_APP"
+fi
 echo "app:      $APP"
 
 ENTITLEMENTS="$ROOT/fastlane/darkrun-mac.entitlements"
