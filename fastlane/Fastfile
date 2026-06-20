@@ -180,6 +180,11 @@ platform :mac do
       # profile, so don't look for one (else match fails "No matching
       # provisioning profiles found for ...mac_installer_distribution").
       skip_provisioning_profiles: true,
+      # The Mac Installer Distribution cert is NOT part of the unified "Apple
+      # Distribution" scheme, so match's default generate_apple_certs:true wrongly
+      # installs the app cert here. false → the legacy installer cert (the one
+      # productbuild needs to sign the .pkg).
+      generate_apple_certs: false,
     )
     sync_code_signing(
       type: "appstore",
@@ -220,6 +225,9 @@ platform :mac do
       api_key: asc_api_key,
       readonly: false, # create + push if absent
       skip_provisioning_profiles: true, # installer = cert only, no profile
+      # false → the legacy Mac Installer Distribution cert (productbuild needs it);
+      # the default true installs the app "Apple Distribution" cert by mistake.
+      generate_apple_certs: false,
     )
     sync_code_signing(
       type: "appstore",
