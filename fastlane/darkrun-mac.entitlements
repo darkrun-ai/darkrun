@@ -6,9 +6,14 @@
   The Mac App Store mandates the App Sandbox. darkrun-desktop needs only:
     - app-sandbox        : required for MAS.
     - network.client     : connect to the local engine over ws://127.0.0.1 (and
-                           HTTPS to GitHub/GitLab/relay). NOT network.server —
-                           the desktop is a client; the engine (a separate,
-                           unsandboxed CLI) hosts.
+                           HTTPS to GitHub/GitLab/relay).
+    - network.server     : Dioxus 0.7 binds a localhost TCP listener (its "edit
+                           socket" that streams DOM edits to the embedded
+                           webview) at startup — even in release builds. Under
+                           the App Sandbox, *listening* needs network.server;
+                           without it the app panics on launch ("Failed to bind
+                           local TCP listener for edit socket: Operation not
+                           permitted") and never boots.
     - application-groups : the shared container the engine + this sandboxed app
                            meet at (see darkrun-mcp `data_home()` — the macOS
                            data home IS this group's container). Must match the
@@ -28,6 +33,8 @@
     <key>com.apple.security.app-sandbox</key>
     <true/>
     <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
     <true/>
     <key>com.apple.security.application-groups</key>
     <array>
