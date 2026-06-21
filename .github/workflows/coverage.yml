@@ -22,7 +22,7 @@ jobs:
     # Hard cap so a wedged instrumentation run fails fast instead of hanging.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The workspace compiles a heavy dep graph twice under instrumentation;
       # reclaim disk first (same cleanup as the `ci` workflow).
@@ -54,7 +54,7 @@ jobs:
           git config --global init.defaultBranch main
 
       - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2
+        uses: taiki-e/install-action@8b3c737da4b541bf0fb5a3e0488ff20535badac9 # v2
         with:
           tool: cargo-tarpaulin
 
@@ -81,7 +81,7 @@ jobs:
             --timeout 180 --skip-clean
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: target/tarpaulin/cobertura.xml
