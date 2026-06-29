@@ -14,7 +14,7 @@ use darkrun_ui::prelude::*;
 use darkrun_ui::tokens;
 
 use crate::dashboard::Dashboard;
-use crate::firebase::{self, Session};
+use crate::firebase::{self, Account};
 
 /// The step the page is on — drives what's shown.
 #[derive(Clone, PartialEq)]
@@ -139,12 +139,20 @@ fn SignInButton(label: String, onclick: EventHandler<MouseEvent>) -> Element {
 /// retry; the CLI-bridge path is untouched.
 #[component]
 fn StandaloneLogin(provider: String, provider_label: String) -> Element {
-    let mut session = use_signal(|| None::<Session>);
+    let mut account = use_signal(|| None::<Account>);
     let mut step = use_signal(|| Step::Idle);
 
-    // Signed in → hand off to the dashboard.
-    if let Some(session) = session() {
-        return rsx! { Dashboard { session } };
+    // Signed in → hand off to the dashboard. `on_link` lets the dashboard add the
+    // second provider to the SAME account (one Firebase uid spanning both).
+    if account().is_some() {
+        return rsx! {
+            Dashboard {
+                account: account().unwrap(),
+                on_link: move |identity| account.with_mut(|a| {
+                    if let Some(a) = a { a.link(identity); }
+                }),
+            }
+        };
     }
 
     let start = move |_| {
@@ -152,7 +160,7 @@ fn StandaloneLogin(provider: String, provider_label: String) -> Element {
         step.set(Step::Working);
         spawn(async move {
             match firebase::sign_in_for_dashboard(&provider).await {
-                Ok(s) => session.set(Some(s)),
+                Ok(s) => account.set(Some(Account::new(s))),
                 Err(e) => step.set(Step::Failed(e)),
             }
         });

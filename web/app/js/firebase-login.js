@@ -15,6 +15,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebas
 import {
   getAuth,
   signInWithPopup,
+  linkWithPopup,
   GithubAuthProvider,
   OAuthProvider,
 } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
@@ -65,6 +66,29 @@ export async function signInAndGetToken(providerKey) {
 // to "no repos to show" rather than failing the sign-in).
 export async function signInForDashboard(providerKey) {
   const result = await signInWithPopup(auth, providerFor(providerKey));
+  return credentialJson(result, providerKey);
+}
+
+// LINK a second provider ("github" | "gitlab") to the CURRENTLY signed-in
+// Firebase account, so ONE darkrun account spans both GitHub and GitLab. Resolves
+// to the same `{ idToken, accessToken, provider }` JSON as signInForDashboard —
+// the dashboard then lists the newly-linked provider's repos alongside the first.
+//
+// Rejects (→ Err on the Rust side) if no one is signed in, the popup is
+// cancelled, the provider is already linked (`auth/provider-already-linked`), or
+// that provider identity already belongs to a DIFFERENT darkrun account
+// (`auth/credential-already-in-use`) — the message is surfaced to the user.
+export async function linkProvider(providerKey) {
+  const user = auth.currentUser;
+  if (!user) throw new Error("Sign in before linking another account.");
+  const result = await linkWithPopup(user, providerFor(providerKey));
+  return credentialJson(result, providerKey);
+}
+
+// Extract { idToken, accessToken, provider } from a sign-in / link result.
+// `accessToken` is the empty string if the provider returned none (the dashboard
+// then degrades to "no repos to show" for that identity rather than failing).
+async function credentialJson(result, providerKey) {
   const idToken = await result.user.getIdToken();
   const credential =
     providerKey === "gitlab"
