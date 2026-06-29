@@ -411,7 +411,7 @@ fn Shell(children: Element) -> Element {
     rsx! {
         div { style: "{shell}",
             header { style: format!("padding:16px 20px;border-bottom:1px solid {};", tokens::BORDER),
-                Wordmark { variant: WordmarkVariant::Outlined }
+                Wordmark { variant: WordmarkVariant::OutlinedSolidRun }
             }
             main { style: "flex:1;display:flex;justify-content:center;padding:32px 24px;",
                 {children}

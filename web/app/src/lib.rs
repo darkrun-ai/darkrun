@@ -197,7 +197,7 @@ fn Header() -> Element {
     );
     rsx! {
         header { style: "{bar}",
-            Wordmark { variant: WordmarkVariant::Outlined }
+            Wordmark { variant: WordmarkVariant::OutlinedSolidRun }
             span {
                 style: format!(
                     "font-family:{};font-size:12px;color:{};letter-spacing:.06em;text-transform:uppercase;",

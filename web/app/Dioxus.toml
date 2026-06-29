@@ -1,0 +1,13 @@
+# dx (Dioxus CLI) config for the darkrun web app (app.darkrun.ai).
+#
+# Without this, dx falls back to its default index shell — whose <title> is
+# "dioxus", which then shows in the browser tab before wasm boots (the app sets
+# `document::Title { "darkrun" }` at runtime, but the static shell wins until
+# then). Setting the title here fixes the pre-boot tab title.
+
+[application]
+name = "darkrun-app"
+default_platform = "web"
+
+[web.app]
+title = "darkrun"
