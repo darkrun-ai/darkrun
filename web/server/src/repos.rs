@@ -14,9 +14,8 @@
 //! - GitHub: `GET /user/repos?per_page=100&sort=updated`
 //! - GitLab: `GET /api/v4/projects?membership=true&per_page=100`
 //!
-//! TODO(session-discovery): a later PR reads each repo's committed `.darkrun/`
-//! state (via the provider's contents API given repo access) to surface the
-//! sessions inside the portfolio. This endpoint is only the repo list.
+//! This endpoint is only the repo list; a repo's committed `.darkrun/` runs are
+//! discovered separately by `GET /api/repos/sessions` (see `sessions.rs`).
 
 use axum::{
     extract::{Query, State},

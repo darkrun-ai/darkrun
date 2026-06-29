@@ -26,6 +26,12 @@ extern "C" {
     /// token too, not just the Firebase ID token. Defined in the JS glue.
     #[wasm_bindgen(catch)]
     async fn signInForDashboard(provider: &str) -> Result<JsValue, JsValue>;
+
+    /// Link `provider` to the currently signed-in Firebase account and resolve to
+    /// the same `{ idToken, accessToken, provider }` JSON — one darkrun account
+    /// spanning both GitHub and GitLab. Defined in the JS glue.
+    #[wasm_bindgen(catch)]
+    async fn linkProvider(provider: &str) -> Result<JsValue, JsValue>;
 }
 
 /// Sign in with `provider` and return the Firebase ID token.
@@ -55,7 +61,19 @@ pub struct Session {
 
 /// Sign in with `provider` for the standalone dashboard, returning both tokens.
 pub async fn sign_in_for_dashboard(provider: &str) -> Result<Session, String> {
-    match signInForDashboard(provider).await {
+    parse_session(signInForDashboard(provider).await)
+}
+
+/// Link `provider` to the already-signed-in account, returning the newly-linked
+/// identity (same `Session` shape). The dashboard appends it to the [`Account`].
+pub async fn link_provider(provider: &str) -> Result<Session, String> {
+    parse_session(linkProvider(provider).await)
+}
+
+/// Shared decode for the sign-in / link JS results (`{ idToken, accessToken,
+/// provider }`).
+fn parse_session(res: Result<JsValue, JsValue>) -> Result<Session, String> {
+    match res {
         Ok(v) => {
             let json = v
                 .as_string()
@@ -64,6 +82,61 @@ pub async fn sign_in_for_dashboard(provider: &str) -> Result<Session, String> {
                 .map_err(|e| format!("couldn't read the sign-in result: {e}"))
         }
         Err(e) => Err(js_error(&e)),
+    }
+}
+
+/// The two providers a darkrun account can link. Order is the display order.
+pub const PROVIDERS: [&str; 2] = ["github", "gitlab"];
+
+/// Human label for a provider key.
+pub fn provider_label(provider: &str) -> &'static str {
+    if provider == "gitlab" { "GitLab" } else { "GitHub" }
+}
+
+/// A signed-in account: one Firebase identity (uid) that may link BOTH GitHub and
+/// GitLab. Each linked provider keeps its own OAuth access token (Firebase only
+/// vends those at sign-in/link time, so they live for the session). The dashboard
+/// lists every linked provider's repos as one combined portfolio.
+#[derive(Clone, PartialEq)]
+pub struct Account {
+    /// One [`Session`] per linked provider, all under the same Firebase uid.
+    pub identities: Vec<Session>,
+}
+
+impl Account {
+    /// A fresh account from the first sign-in.
+    pub fn new(first: Session) -> Self {
+        Self { identities: vec![first] }
+    }
+
+    /// Add (or replace, by provider) a linked identity — e.g. after linking the
+    /// second provider, or re-linking to refresh an access token.
+    pub fn link(&mut self, identity: Session) {
+        if let Some(existing) = self
+            .identities
+            .iter_mut()
+            .find(|s| s.provider == identity.provider)
+        {
+            *existing = identity;
+        } else {
+            self.identities.push(identity);
+        }
+    }
+
+    /// Is `provider` already linked to this account?
+    pub fn has(&self, provider: &str) -> bool {
+        self.identities.iter().any(|s| s.provider == provider)
+    }
+
+    /// The identity (token) for `provider`, if linked.
+    pub fn identity_for(&self, provider: &str) -> Option<&Session> {
+        self.identities.iter().find(|s| s.provider == provider)
+    }
+
+    /// The provider not yet linked (`github`/`gitlab`), if exactly one is missing
+    /// — what the "Link …" button offers. `None` once both are linked.
+    pub fn missing_provider(&self) -> Option<&'static str> {
+        PROVIDERS.into_iter().find(|p| !self.has(p))
     }
 }
 

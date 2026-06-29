@@ -17,7 +17,7 @@ use darkrun_ui::tokens;
 use gloo_net::http::Request;
 use serde::Deserialize;
 
-use crate::firebase::{self, Session};
+use crate::firebase::{self, Account, Session};
 
 /// One repository in the portfolio, as `/api/repos` returns it (mirrors the
 /// server's `Repo`).
@@ -56,25 +56,45 @@ enum Repos {
     Failed(String),
 }
 
-/// The signed-in dashboard for `session`. Fetches the portfolio on mount and
-/// renders the user's repositories.
-#[component]
-pub fn Dashboard(session: Session) -> Element {
-    let mut repos = use_signal(|| Repos::Loading);
+/// The in-flight state of linking a second provider.
+#[derive(Clone, PartialEq)]
+enum Linking {
+    /// No link in progress.
+    Idle,
+    /// A `linkWithPopup` round-trip is open.
+    Working,
+    /// The link failed (popup cancelled, already linked, or the identity belongs
+    /// to a different darkrun account) — shown inline so the user can retry.
+    Failed(String),
+}
 
-    // Fetch the portfolio once, on first render. Clone for the closure so the
-    // prop stays available to hand each `RepoRow` its own copy below.
-    let portfolio_session = session.clone();
+/// The signed-in dashboard for `account`. Fetches the COMBINED portfolio (every
+/// linked provider's repos) and lets the user link the other provider so one
+/// darkrun account spans both GitHub and GitLab. `on_link` hands the newly-linked
+/// identity back to the owner of the account signal.
+///
+/// `account` is a `ReadOnlySignal` so linking a provider (which appends an
+/// identity upstream) re-runs the portfolio fetch automatically.
+#[component]
+pub fn Dashboard(account: ReadSignal<Account>, on_link: EventHandler<Session>) -> Element {
+    let mut repos = use_signal(|| Repos::Loading);
+    let linking = use_signal(|| Linking::Idle);
+
+    // Re-fetch whenever the set of linked identities changes (reading `account()`
+    // makes this effect reactive to the link above).
     use_effect(move || {
-        let session = portfolio_session.clone();
+        let acc = account();
         repos.set(Repos::Loading);
         spawn(async move {
-            match fetch_repos(&firebase::web_base(), &session).await {
+            match fetch_portfolio(&firebase::web_base(), &acc).await {
                 Ok(list) => repos.set(Repos::Loaded(list)),
                 Err(e) => repos.set(Repos::Failed(e)),
             }
         });
     });
+
+    // The provider not yet linked, if any — what the "Link …" button offers.
+    let missing = account().missing_provider();
 
     rsx! {
         Shell {
@@ -88,11 +108,12 @@ pub fn Dashboard(session: Session) -> Element {
                 }
                 p {
                     style: format!(
-                        "font-family:{};font-size:13px;color:{};margin:0 0 20px;",
+                        "font-family:{};font-size:13px;color:{};margin:0 0 16px;",
                         tokens::FONT_SANS, tokens::TEXT_MUTED,
                     ),
                     "The repos your linked accounts can reach, with the darkrun runs committed in each."
                 }
+                LinkedAccounts { account, missing, linking, on_link }
                 match repos() {
                     Repos::Loading => rsx! { Note { text: "Loading your repositories\u{2026}".to_string() } },
                     Repos::Failed(msg) => rsx! { Note { text: format!("Couldn't load your repositories: {msg}") } },
@@ -102,7 +123,11 @@ pub fn Dashboard(session: Session) -> Element {
                     Repos::Loaded(list) => rsx! {
                         div { style: "display:flex;flex-direction:column;gap:8px;",
                             for repo in list.iter() {
-                                RepoRow { repo: repo.clone(), session: session.clone() }
+                                // Hand each row the identity (token) for ITS provider,
+                                // so session discovery uses the matching account.
+                                if let Some(identity) = account().identity_for(&repo.provider) {
+                                    RepoRow { repo: repo.clone(), session: identity.clone() }
+                                }
                             }
                         }
                     },
@@ -112,7 +137,98 @@ pub fn Dashboard(session: Session) -> Element {
     }
 }
 
-/// Fetch the signed-in user's repository portfolio from `/api/repos`.
+/// The linked-accounts strip: a chip per linked provider, plus a "Link …" button
+/// for the other provider so one account can span both GitHub and GitLab.
+#[component]
+fn LinkedAccounts(
+    account: ReadSignal<Account>,
+    missing: Option<&'static str>,
+    linking: Signal<Linking>,
+    on_link: EventHandler<Session>,
+) -> Element {
+    // `Signal`/`EventHandler` are `Copy`, so this is `Fn` — fine for an onclick.
+    let link = move |provider: &'static str| {
+        let mut linking = linking;
+        linking.set(Linking::Working);
+        spawn(async move {
+            match firebase::link_provider(provider).await {
+                Ok(identity) => {
+                    on_link.call(identity);
+                    linking.set(Linking::Idle);
+                }
+                Err(e) => linking.set(Linking::Failed(e)),
+            }
+        });
+    };
+
+    let chip = format!(
+        "font-family:{};font-size:11px;letter-spacing:.06em;text-transform:uppercase;\
+         color:{};border:1px solid {};border-radius:999px;padding:3px 10px;",
+        tokens::FONT_MONO, tokens::TEXT_MUTED, tokens::BORDER,
+    );
+    let link_btn = format!(
+        "font-family:{};font-size:12px;color:{};background:transparent;cursor:pointer;\
+         border:1px dashed {};border-radius:999px;padding:3px 10px;",
+        tokens::FONT_SANS, tokens::ACCENT, tokens::ACCENT,
+    );
+
+    rsx! {
+        div { style: "display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 20px;",
+            for id in account().identities.iter() {
+                span { style: "{chip}", "{firebase::provider_label(&id.provider)}" }
+            }
+            match (missing, linking()) {
+                (_, Linking::Working) => rsx! {
+                    span {
+                        style: format!("font-family:{};font-size:12px;color:{};", tokens::FONT_SANS, tokens::TEXT_MUTED),
+                        "Linking\u{2026}"
+                    }
+                },
+                (Some(provider), _) => rsx! {
+                    button {
+                        style: "{link_btn}",
+                        onclick: move |_| link(provider),
+                        "+ Link {firebase::provider_label(provider)}"
+                    }
+                },
+                (None, _) => rsx! {},
+            }
+            if let Linking::Failed(msg) = linking() {
+                span {
+                    style: format!("font-family:{};font-size:12px;color:{};", tokens::FONT_SANS, tokens::TEXT_MUTED),
+                    "Couldn't link: {msg}"
+                }
+            }
+        }
+    }
+}
+
+/// Fetch the COMBINED portfolio across every linked identity. A single provider
+/// failing (e.g. an expired token) is tolerated — the others still render; only
+/// if EVERY identity fails is the whole fetch an error.
+async fn fetch_portfolio(web_base: &str, account: &Account) -> Result<Vec<Repo>, String> {
+    let mut all = Vec::new();
+    let mut last_err = None;
+    let mut any_ok = false;
+    for identity in &account.identities {
+        match fetch_repos(web_base, identity).await {
+            Ok(mut list) => {
+                any_ok = true;
+                all.append(&mut list);
+            }
+            Err(e) => {
+                last_err = Some(format!("{}: {e}", firebase::provider_label(&identity.provider)));
+            }
+        }
+    }
+    if any_ok || account.identities.is_empty() {
+        Ok(all)
+    } else {
+        Err(last_err.unwrap_or_else(|| "no linked accounts".to_string()))
+    }
+}
+
+/// Fetch one identity's repository list from `/api/repos`.
 async fn fetch_repos(web_base: &str, session: &Session) -> Result<Vec<Repo>, String> {
     if session.access_token.is_empty() {
         return Err("the provider didn't return an access token to list repos with".to_string());
