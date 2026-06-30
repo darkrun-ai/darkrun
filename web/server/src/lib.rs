@@ -85,10 +85,29 @@ pub fn oauth_router(state: WebState) -> Router {
 /// presents: `GET /api/repos` (the signed-in user's repository portfolio) and
 /// `GET /api/repos/sessions` (a single repo's darkrun runs, read from its
 /// committed `.darkrun/` tree — no live engine, no state sync).
+///
+/// The dashboard runs on `app.darkrun.ai` but this API is served from the website
+/// host (`darkrun.ai`), so the browser does a CORS preflight on the `GET` (the
+/// `Authorization` header makes it non-simple). Allow the web-app origins +
+/// `Authorization`, matching `device_router` — without it the call fails with
+/// "TypeError: Failed to fetch" even though the endpoint exists.
 pub fn api_router(state: WebState) -> Router {
+    use axum::http::{header, HeaderValue, Method};
+    use tower_http::cors::CorsLayer;
+
+    let origins: Vec<HeaderValue> = relay::APP_ORIGINS
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
+    let cors = CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
     Router::new()
         .route("/api/repos", get(repos::list_repos))
         .route("/api/repos/sessions", get(sessions::list_sessions))
+        .layer(cors)
         .with_state(state)
 }
 
