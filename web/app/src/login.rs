@@ -99,7 +99,7 @@ fn Shell(children: Element) -> Element {
     rsx! {
         div { style: "{shell}",
             header { style: format!("padding:16px 20px;border-bottom:1px solid {};", tokens::BORDER),
-                Wordmark { variant: WordmarkVariant::OutlinedSolidRun }
+                Wordmark { variant: WordmarkVariant::OutlinedSolidRun, size: 22.0, interactive: true }
             }
             main { style: "flex:1;display:flex;align-items:center;justify-content:center;padding:24px;",
                 {children}
