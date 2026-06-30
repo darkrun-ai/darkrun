@@ -1,22 +1,24 @@
 name: build-web-image
 
-# Build the darkrun-web container (OAuth broker + static site) and push it to
-# Artifact Registry. That's CI's ONLY job here — the `darkrun-infra` HCP Terraform
-# workspace is VCS-driven, so Terraform plans/applies run on TFC when you push to
-# this repo, not from CI. CI just supplies the image the Cloud Run service runs.
+# Build the darkrun-web container (OAuth broker + static site), push it to
+# Artifact Registry, AND roll a new Cloud Run revision onto it. Terraform
+# (`darkrun-infra`, VCS-driven on TFC) still owns the service's SHAPE — env vars,
+# Secret Manager mounts, scaling, domain mapping; `gcloud run services update
+# --image` swaps ONLY the image and leaves everything Terraform set intact.
+# (TFC's web_image stays `:latest`; the revision below pins the exact `:sha` just
+# built — reconcile by setting web_image to that tag if you want strict parity.)
 #
-# Auth (GitHub Actions -> GCP) is Workload Identity Federation, no static key.
-# Enable it by setting these repo secrets (see infra/bootstrap-gha.sh):
-#   secrets.GCP_WORKLOAD_IDENTITY_PROVIDER
-#   secrets.GCP_BUILD_SA
-# Until those exist this workflow is manual-only (workflow_dispatch). Add the
-# `push:` trigger below once the secrets are configured.
+# Auth (GitHub Actions -> GCP) is Workload Identity Federation, no static key:
+#   secrets.GCP_WORKLOAD_IDENTITY_PROVIDER, secrets.GCP_BUILD_SA.
+# The build SA needs roles/run.developer + roles/iam.serviceAccountUser on the
+# darkrun-web runtime SA to deploy the revision (it already has Artifact Registry
+# writer + firebasehosting.admin).
 
 on:
   workflow_dispatch:
-  # push:
-  #   branches: [main]
-  #   paths: ["web/**", "crates/**", "Cargo.toml", "Cargo.lock", "Dockerfile"]
+  push:
+    branches: [main]
+    paths: ["web/**", "crates/**", "Cargo.toml", "Cargo.lock", "Dockerfile"]
 
 permissions:
   contents: read
@@ -59,3 +61,15 @@ jobs:
           docker build -t "${{ steps.tag.outputs.image }}" -t "${{ steps.tag.outputs.latest }}" .
           docker push "${{ steps.tag.outputs.image }}"
           docker push "${{ steps.tag.outputs.latest }}"
+
+      # Roll a new Cloud Run revision onto the freshly-pushed image. `--image`
+      # is a partial update: it swaps the container image and leaves the env,
+      # secrets, scaling, and domain mapping Terraform manages untouched. Without
+      # this the service keeps running the previous revision (a `:latest` push
+      # alone never rolls a new revision).
+      - name: Deploy the new image to Cloud Run
+        run: |
+          gcloud run services update "${IMAGE}" \
+            --project "${GCP_PROJECT}" --region "${GCP_REGION}" \
+            --image "${{ steps.tag.outputs.image }}" \
+            --quiet
