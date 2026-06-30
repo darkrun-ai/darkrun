@@ -50,6 +50,25 @@ resource "google_project_iam_member" "app_hosting_deployer" {
   depends_on = [google_project_service.services]
 }
 
+# Let the same CI SA roll a new darkrun-web Cloud Run revision (the deploy-web
+# workflow runs `gcloud run services update --image` after pushing the image).
+# run.developer covers services.get/update; deploying a service that RUNS AS the
+# darkrun-web runtime SA also needs actAs on that SA (iam.serviceAccountUser),
+# scoped to just that SA rather than project-wide.
+resource "google_project_iam_member" "web_run_deployer" {
+  project = var.gcp_project
+  role    = "roles/run.developer"
+  member  = "serviceAccount:cloudbuild-web@${var.gcp_project}.iam.gserviceaccount.com"
+
+  depends_on = [google_project_service.services]
+}
+
+resource "google_service_account_iam_member" "build_sa_actas_web_runtime" {
+  service_account_id = "projects/${var.gcp_project}/serviceAccounts/${module.web.service_account}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:cloudbuild-web@${var.gcp_project}.iam.gserviceaccount.com"
+}
+
 module "sentry" {
   source = "./modules/sentry"
 
