@@ -64,19 +64,58 @@ jobs:
           cp web/app/firebase-messaging-sw.js web/app/dist/
 
       # Keyless auth: federate the GitHub OIDC token to the cloudbuild-web SA.
-      # Exports GOOGLE_APPLICATION_CREDENTIALS, which the firebase CLI uses.
+      # Exports GOOGLE_APPLICATION_CREDENTIALS (the impersonated external_account).
       - name: Authenticate to GCP (WIF)
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_BUILD_SA }}
 
-      - name: Deploy to Firebase Hosting
-        # Pin firebase-tools: 15.22.1–15.22.3 (Jun 2026) regressed Workload
-        # Identity Federation auth — the CLI stopped reading the external_account
-        # ADC that `google-github-actions/auth` exports and fails with
-        # "Failed to authenticate, have you run firebase login?". 15.22.0 (the
-        # version the last green deploy used) handles WIF fine. Bump deliberately.
+      # firebase-tools can't reliably resolve the WIF external_account ADC on its
+      # own (it fails "Failed to authenticate, have you run firebase login?").
+      # gcloud handles external_account natively (this is why deploy-web is fine);
+      # installing the SDK gives firebase the working ADC the auth step wrote.
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      # firebase-tools can't authenticate with the WIF external_account credential
+      # (verified: gcloud mints a token fine; firebase-tools rejects the ADC and
+      # treats access tokens as invalid refresh tokens). Deploy via the Hosting
+      # REST API with a gcloud-minted access token — fully keyless. The version
+      # config mirrors firebase.json (SPA rewrite + .well-known content types).
+      - name: Deploy to Firebase Hosting (REST, keyless)
         run: |
-          npm install -g firebase-tools@15.22.0
-          firebase deploy --only hosting:darkrun-app --project darkrun --non-interactive
+          set -euo pipefail
+          SITE=darkrun-app
+          DIST=web/app/dist
+          API=https://firebasehosting.googleapis.com/v1beta1
+          TOKEN="$(gcloud auth print-access-token)"
+          auth=(-H "Authorization: Bearer $TOKEN")
+
+          cfg='{"config":{"rewrites":[{"glob":"**","path":"/index.html"}],"headers":[{"glob":"/.well-known/apple-app-site-association","headers":{"Content-Type":"application/json"}},{"glob":"/.well-known/assetlinks.json","headers":{"Content-Type":"application/json"}}]}}'
+          VER=$(curl -fsS -X POST "$API/sites/$SITE/versions" "${auth[@]}" -H "Content-Type: application/json" -d "$cfg" | jq -r .name)
+          echo "version=$VER"; test -n "$VER" -a "$VER" != null
+
+          work=$(mktemp -d); manifest=$(mktemp); echo '{}' > "$manifest"
+          declare -A GZ
+          while IFS= read -r -d '' f; do
+            rel="/${f#"$DIST"/}"
+            gz="$work/$(printf '%s' "$rel" | sha256sum | cut -c1-40).gz"
+            gzip -n -c "$f" > "$gz"
+            h=$(sha256sum "$gz" | cut -d' ' -f1)
+            GZ[$h]="$gz"
+            jq --arg p "$rel" --arg h "$h" '. + {($p):$h}' "$manifest" > "$manifest.t" && mv "$manifest.t" "$manifest"
+          done < <(find "$DIST" -type f -print0)
+          echo "files=$(jq 'length' "$manifest")"
+
+          pop=$(curl -fsS -X POST "$API/$VER:populateFiles" "${auth[@]}" -H "Content-Type: application/json" -d "{\"files\":$(cat "$manifest")}")
+          uurl=$(echo "$pop" | jq -r .uploadUrl)
+          req=$(echo "$pop" | jq -r '.uploadRequiredHashes[]? // empty')
+          echo "upload_required=$(echo "$req" | grep -c . || true)"
+          for h in $req; do
+            curl -fsS -X POST "$uurl/$h" "${auth[@]}" -H "Content-Type: application/octet-stream" --data-binary "@${GZ[$h]}" >/dev/null
+          done
+
+          curl -fsS -X PATCH "$API/$VER?updateMask=status" "${auth[@]}" -H "Content-Type: application/json" -d '{"status":"FINALIZED"}' >/dev/null
+          curl -fsS -X POST "$API/sites/$SITE/releases?versionName=$VER" "${auth[@]}" >/dev/null
+          echo "released $VER"
