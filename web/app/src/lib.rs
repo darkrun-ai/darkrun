@@ -21,7 +21,7 @@ use banner::InstallBanner;
 use darkrun_api::tunnel::ClientCommand;
 use futures::channel::mpsc::UnboundedReceiver;
 
-use login::LoginPage;
+use login::{LoginPage, StandaloneLogin};
 use remote::{run_connection, target_from_url, RemoteState};
 
 /// Whether the current page path is the login route.
@@ -60,14 +60,26 @@ pub fn App() -> Element {
         };
     }
 
-    let state = use_signal(|| RemoteState::Unconfigured);
-
     // `/review/:id` — the route a darkrun review link opens (the Universal Link
     // the native apps claim; the web app is the fallback). When the link also
     // carries a live `?relay&session&token` target it reads straight into the
     // live session below (the normal shell handles that); with only the bare
     // path we render the review id with a path back into a live view.
     let review_id = review_id_from_path();
+
+    // The bare app root — no review link, no live run target — is the standalone
+    // DASHBOARD (sign in, see your repos + the runs already in them), not the
+    // "open a run to watch it live" remote-control landing. That landing is only
+    // for an actual run link that can't reach a live host. (Both branches depend
+    // only on the URL, which is fixed for the page, so the hook order is stable.)
+    if review_id.is_none() && target_from_url().is_none() {
+        return rsx! {
+            style { "{tokens::THEME_CSS}" }
+            StandaloneLogin {}
+        };
+    }
+
+    let state = use_signal(|| RemoteState::Unconfigured);
 
     // The connection runs as a coroutine so its handle doubles as the command
     // channel: the UI sends a `ClientCommand` (approve a gate, file feedback) and

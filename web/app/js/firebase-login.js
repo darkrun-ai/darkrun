@@ -34,9 +34,12 @@ const auth = getAuth(app);
 function providerFor(providerKey) {
   if (providerKey === "gitlab") {
     // GitLab via Firebase generic OIDC — the provider id configured in console.
+    // (Firebase requests `openid` itself.) The darkrun GitLab application must
+    // ALLOW the exact scopes requested, else GitLab errors "requested scope is
+    // invalid". Keep it minimal: `openid` (auto) + `read_api` (list projects,
+    // read-only — NOT full `api`). So enable just those two on the GitLab app.
     const provider = new OAuthProvider("oidc.gitlab");
-    // `api` scope so the resulting OAuth token can list the user's projects.
-    provider.addScope("api");
+    provider.addScope("read_api");
     return provider;
   }
   const provider = new GithubAuthProvider();

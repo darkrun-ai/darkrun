@@ -38,10 +38,10 @@ pub fn LoginPage() -> Element {
 
     let provider_label = if provider == "gitlab" { "GitLab" } else { "GitHub" };
 
-    // No nonce → the standalone web flow: sign in for the web app and land on the
-    // dashboard (not the CLI-bridge "close the tab" path).
+    // No nonce → the standalone web flow: sign in (GitHub or GitLab) and land on
+    // the dashboard (not the CLI-bridge "close the tab" path).
     let Some(nonce) = nonce else {
-        return rsx! { StandaloneLogin { provider, provider_label: provider_label.to_string() } };
+        return rsx! { StandaloneLogin {} };
     };
 
     let start = move |_| {
@@ -134,13 +134,14 @@ fn SignInButton(label: String, onclick: EventHandler<MouseEvent>) -> Element {
     }
 }
 
-/// The standalone web login (no CLI nonce): sign in for the web app itself and,
-/// on success, render the [`Dashboard`] in place. Failure shows why and offers a
-/// retry; the CLI-bridge path is untouched.
+/// The standalone web experience (no CLI nonce) — also the default at the bare
+/// app root. Offers BOTH GitHub and GitLab sign-in (no single-provider default);
+/// on success it renders the [`Dashboard`] in place. Failure shows why and
+/// re-offers both providers. The CLI-bridge path is untouched.
 #[component]
-fn StandaloneLogin(provider: String, provider_label: String) -> Element {
+pub(crate) fn StandaloneLogin() -> Element {
     let mut account = use_signal(|| None::<Account>);
-    let mut step = use_signal(|| Step::Idle);
+    let step = use_signal(|| Step::Idle);
 
     // Signed in → hand off to the dashboard. `on_link` lets the dashboard add the
     // second provider to the SAME account (one Firebase uid spanning both).
@@ -155,17 +156,6 @@ fn StandaloneLogin(provider: String, provider_label: String) -> Element {
         };
     }
 
-    let start = move |_| {
-        let provider = provider.clone();
-        step.set(Step::Working);
-        spawn(async move {
-            match firebase::sign_in_for_dashboard(&provider).await {
-                Ok(s) => account.set(Some(Account::new(s))),
-                Err(e) => step.set(Step::Failed(e)),
-            }
-        });
-    };
-
     rsx! {
         Shell {
             match step() {
@@ -173,21 +163,45 @@ fn StandaloneLogin(provider: String, provider_label: String) -> Element {
                 Step::Failed(msg) => rsx! {
                     div { style: "text-align:center;",
                         Centered { title: "Sign-in didn't finish".to_string(), body: msg }
-                        SignInButton { label: format!("Try again with {provider_label}"), onclick: start }
+                        ProviderButtons { account, step }
                     }
                 },
-                // `Idle` and the unreachable `Done` (the dashboard takes over on
+                // `Idle` / the unreachable `Done` (the dashboard takes over on
                 // success) both show the sign-in prompt.
                 _ => rsx! {
                     div { style: "text-align:center;",
                         Centered {
                             title: "Sign in to darkrun".to_string(),
-                            body: format!("Sign in with {provider_label} to see your repositories and runs."),
+                            body: "Sign in to see your repositories and the darkrun runs in them.".to_string(),
                         }
-                        SignInButton { label: format!("Sign in with {provider_label}"), onclick: start }
+                        ProviderButtons { account, step }
                     }
                 },
             }
         }
     }
+}
+
+/// GitHub + GitLab sign-in buttons, side by side — the user picks; neither is a
+/// default.
+#[component]
+fn ProviderButtons(account: Signal<Option<Account>>, step: Signal<Step>) -> Element {
+    rsx! {
+        div { style: "display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:20px;",
+            SignInButton { label: "Sign in with GitHub".to_string(), onclick: move |_| start_sign_in("github", account, step) }
+            SignInButton { label: "Sign in with GitLab".to_string(), onclick: move |_| start_sign_in("gitlab", account, step) }
+        }
+    }
+}
+
+/// Kick off Firebase sign-in for `provider`; on success set the account (which
+/// swaps [`StandaloneLogin`] over to the [`Dashboard`]).
+fn start_sign_in(provider: &'static str, mut account: Signal<Option<Account>>, mut step: Signal<Step>) {
+    step.set(Step::Working);
+    spawn(async move {
+        match firebase::sign_in_for_dashboard(provider).await {
+            Ok(s) => account.set(Some(Account::new(s))),
+            Err(e) => step.set(Step::Failed(e)),
+        }
+    });
 }
