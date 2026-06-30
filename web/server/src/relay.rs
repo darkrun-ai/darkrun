@@ -299,7 +299,7 @@ pub struct RegisterDevice {
 /// `app.darkrun.ai` but the relay (and `/devices`) is served from the website
 /// host (`darkrun.ai`), so the browser does a CORS preflight; `localhost` covers
 /// local `dx serve`.
-const APP_ORIGINS: &[&str] = &["https://app.darkrun.ai", "http://localhost:8080"];
+pub(crate) const APP_ORIGINS: &[&str] = &["https://app.darkrun.ai", "http://localhost:8080"];
 
 /// Mount the device-registration endpoints, keyed off the same Firebase token
 /// the relay authenticates with:
