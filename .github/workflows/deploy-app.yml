@@ -78,6 +78,16 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
 
+      - name: Debug auth (temporary)
+        run: |
+          echo "--- gcloud accounts ---"; gcloud auth list 2>&1 || true
+          echo "--- ADC type ---"
+          python3 -c "import json,os; d=json.load(open(os.environ['GOOGLE_APPLICATION_CREDENTIALS'])); print('type=',d.get('type')); print('keys=',list(d.keys())); print('impersonation=', 'service_account_impersonation_url' in d)" 2>&1 || true
+          echo "--- gcloud ADC token? ---"; gcloud auth application-default print-access-token >/dev/null 2>&1 && echo "ADC token OK" || echo "ADC token FAILED"
+          echo "--- firebase projects:list ---"
+          npm install -g firebase-tools@15.22.0 >/dev/null 2>&1
+          firebase projects:list 2>&1 | head -25 || true
+
       - name: Deploy to Firebase Hosting
         # firebase-tools is pinned: 15.22.1+ (Jun 2026) further regressed WIF ADC
         # handling. 15.22.0 + the gcloud SDK above authenticates reliably.
