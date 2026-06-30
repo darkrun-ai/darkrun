@@ -15,9 +15,9 @@ name: deploy-app
 
 on:
   workflow_dispatch:
-  # push:
-  #   branches: [main]
-  #   paths: ["web/app/**", "crates/darkrun-ui/**", "crates/darkrun-api/**", "firebase.json", "web/well-known/**"]
+  push:
+    branches: [main]
+    paths: ["web/app/**", "crates/darkrun-ui/**", "crates/darkrun-api/**", "firebase.json", "web/well-known/**"]
 
 concurrency:
   group: deploy-app-${{ github.ref }}
