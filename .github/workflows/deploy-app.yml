@@ -72,6 +72,11 @@ jobs:
           service_account: ${{ secrets.GCP_BUILD_SA }}
 
       - name: Deploy to Firebase Hosting
+        # Pin firebase-tools: 15.22.1–15.22.3 (Jun 2026) regressed Workload
+        # Identity Federation auth — the CLI stopped reading the external_account
+        # ADC that `google-github-actions/auth` exports and fails with
+        # "Failed to authenticate, have you run firebase login?". 15.22.0 (the
+        # version the last green deploy used) handles WIF fine. Bump deliberately.
         run: |
-          npm install -g firebase-tools
+          npm install -g firebase-tools@15.22.0
           firebase deploy --only hosting:darkrun-app --project darkrun --non-interactive
