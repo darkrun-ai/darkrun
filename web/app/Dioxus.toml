@@ -11,3 +11,9 @@ default_platform = "web"
 
 [web.app]
 title = "darkrun"
+
+# Font Awesome kit — brand + solid icons used across the app (GitHub/GitLab
+# sign-in, repo/provider chips, banner platforms). Injected into <head> for
+# every route so `fa-*` classes render.
+[web.resource]
+script = ["https://kit.fontawesome.com/eb25c25e8d.js"]

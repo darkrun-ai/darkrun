@@ -175,7 +175,10 @@ fn LinkedAccounts(
     rsx! {
         div { style: "display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 20px;",
             for id in account().identities.iter() {
-                span { style: "{chip}", "{firebase::provider_label(&id.provider)}" }
+                span { style: "{chip}",
+                    i { class: "fa-brands fa-{id.provider}", style: "margin-right:6px;" }
+                    "{firebase::provider_label(&id.provider)}"
+                }
             }
             match (missing, linking()) {
                 (_, Linking::Working) => rsx! {
@@ -325,6 +328,10 @@ fn RepoRow(repo: Repo, session: Session) -> Element {
                 target: "_blank",
                 rel: "noreferrer",
                 style: "display:flex;align-items:center;gap:12px;text-decoration:none;",
+                i {
+                    class: "fa-brands fa-{repo.provider}",
+                    style: format!("color:{};font-size:16px;", tokens::TEXT_MUTED),
+                }
                 span {
                     style: format!(
                         "flex:1;font-family:{};font-size:14px;color:{};",
@@ -332,12 +339,9 @@ fn RepoRow(repo: Repo, session: Session) -> Element {
                     ),
                     "{repo.full_name}"
                 }
-                span {
-                    style: format!(
-                        "font-family:{};font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:{};",
-                        tokens::FONT_MONO, tokens::TEXT_FAINT,
-                    ),
-                    "{repo.provider}"
+                i {
+                    class: "fa-solid fa-arrow-up-right-from-square",
+                    style: format!("color:{};font-size:11px;", tokens::TEXT_FAINT),
                 }
             }
             match sessions() {
@@ -367,7 +371,11 @@ fn RepoRow(repo: Repo, session: Session) -> Element {
 fn SessionRow(run: DiscoveredSession) -> Element {
     rsx! {
         div {
-            style: "display:flex;align-items:center;gap:10px;padding:4px 0;",
+            style: "display:flex;align-items:center;gap:8px;padding:4px 0;",
+            i {
+                class: "fa-solid fa-diagram-project",
+                style: format!("color:{};font-size:11px;", tokens::TEXT_FAINT),
+            }
             span {
                 style: format!(
                     "flex:1;font-family:{};font-size:12px;color:{};",
@@ -376,11 +384,13 @@ fn SessionRow(run: DiscoveredSession) -> Element {
                 "{run.run_id}"
             }
             span {
+                title: "read-only, from the committed .darkrun/ tree",
                 style: format!(
                     "font-family:{};font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:{};",
                     tokens::FONT_MONO, tokens::TEXT_FAINT,
                 ),
-                "from git"
+                i { class: "fa-solid fa-code-branch", style: "margin-right:5px;" }
+                "git"
             }
         }
     }
