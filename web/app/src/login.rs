@@ -121,16 +121,27 @@ fn Centered(title: String, body: String) -> Element {
     }
 }
 
-/// The accent sign-in button.
+/// The accent sign-in button, with an optional leading Font Awesome icon
+/// (`icon` = an `fa-*` class string, e.g. `fa-brands fa-github`).
 #[component]
-fn SignInButton(label: String, onclick: EventHandler<MouseEvent>) -> Element {
+fn SignInButton(
+    #[props(default = String::new())] icon: String,
+    label: String,
+    onclick: EventHandler<MouseEvent>,
+) -> Element {
     let style = format!(
-        "margin-top:20px;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;\
+        "margin-top:20px;display:inline-flex;align-items:center;gap:8px;\
+         padding:10px 20px;border:none;border-radius:8px;cursor:pointer;\
          background:{};color:{};font-family:{};font-size:14px;font-weight:600;",
         tokens::ACCENT, tokens::ON_ACCENT, tokens::FONT_SANS,
     );
     rsx! {
-        button { style: "{style}", onclick: move |e| onclick.call(e), "{label}" }
+        button { style: "{style}", onclick: move |e| onclick.call(e),
+            if !icon.is_empty() {
+                i { class: "{icon}", style: "font-size:16px;" }
+            }
+            "{label}"
+        }
     }
 }
 
@@ -187,9 +198,9 @@ pub(crate) fn StandaloneLogin() -> Element {
 #[component]
 fn ProviderButtons(account: Signal<Option<Account>>, step: Signal<Step>) -> Element {
     rsx! {
-        div { style: "display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:20px;",
-            SignInButton { label: "Sign in with GitHub".to_string(), onclick: move |_| start_sign_in("github", account, step) }
-            SignInButton { label: "Sign in with GitLab".to_string(), onclick: move |_| start_sign_in("gitlab", account, step) }
+        div { style: "display:flex;gap:10px;justify-content:center;flex-wrap:wrap;",
+            SignInButton { icon: "fa-brands fa-github".to_string(), label: "Sign in with GitHub".to_string(), onclick: move |_| start_sign_in("github", account, step) }
+            SignInButton { icon: "fa-brands fa-gitlab".to_string(), label: "Sign in with GitLab".to_string(), onclick: move |_| start_sign_in("gitlab", account, step) }
         }
     }
 }

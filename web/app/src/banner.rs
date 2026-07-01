@@ -28,14 +28,23 @@ pub fn InstallBanner() -> Element {
         tokens::ACCENT,
     );
 
+    let dl = format!("{link}display:inline-flex;align-items:center;gap:6px;");
+
     rsx! {
         div { style: "{bar}",
+            i { class: "fa-solid fa-arrow-down-to-bracket", style: format!("color:{};", tokens::TEXT) }
             span { style: format!("color:{};", tokens::TEXT), "Get the darkrun app" }
             span { "\u{2014} faster, with notifications and Handoff." }
             span { style: "flex:1;" }
-            a { style: "{link}", href: "https://apps.apple.com/app/darkrun", "App Store" }
-            a { style: "{link}", href: "https://play.google.com/store/apps/details?id=ai.darkrun.app", "Google Play" }
-            a { style: "{link}", href: "https://darkrun.ai/download", "Desktop" }
+            a { style: "{dl}", href: "https://apps.apple.com/app/darkrun",
+                i { class: "fa-brands fa-apple" } "App Store"
+            }
+            a { style: "{dl}", href: "https://play.google.com/store/apps/details?id=ai.darkrun.app",
+                i { class: "fa-brands fa-google-play" } "Google Play"
+            }
+            a { style: "{dl}", href: "https://darkrun.ai/download",
+                i { class: "fa-solid fa-desktop" } "Desktop"
+            }
             button {
                 style: format!(
                     "background:none;border:none;cursor:pointer;color:{};font-size:16px;line-height:1;padding:0 4px;",
@@ -43,7 +52,7 @@ pub fn InstallBanner() -> Element {
                 ),
                 "aria-label": "Dismiss",
                 onclick: move |_| dismissed.set(true),
-                "\u{00d7}"
+                i { class: "fa-solid fa-xmark" }
             }
         }
     }
