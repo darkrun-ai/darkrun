@@ -14,8 +14,9 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
 import {
   getAuth,
-  signInWithPopup,
-  linkWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  linkWithRedirect,
   GithubAuthProvider,
   OAuthProvider,
 } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
@@ -23,14 +24,14 @@ import {
 const firebaseConfig = {
   apiKey: "AIzaSyDhYi2DQAkbancuR71x3tqQhQ9AE3U29d8",
   // authDomain MUST be the app's own origin (app.darkrun.ai), not the default
-  // darkrun.firebaseapp.com. signInWithPopup opens the handler at authDomain and
-  // relays the result back to the opener via the browser; when authDomain is a
-  // DIFFERENT origin than the app, Chrome's storage partitioning severs that
-  // channel and the popup promise never settles (both GitHub and GitLab hang on
-  // "Signing in…" forever). app.darkrun.ai is a Firebase Hosting site for this
-  // project, so it serves /__/auth/handler natively → same-origin popup → the
-  // handshake works. (Requires app.darkrun.ai's /__/auth/handler in each OAuth
-  // provider's callback/redirect list, alongside the firebaseapp.com one.)
+  // darkrun.firebaseapp.com. The app signs in via signInWithRedirect (see below),
+  // and getRedirectResult on return reads the outcome from the authDomain's
+  // storage; when authDomain is a DIFFERENT origin than the app, Chrome's storage
+  // partitioning hides that state and the result is lost. app.darkrun.ai is a
+  // Firebase Hosting site for this project, so it serves /__/auth/handler natively
+  // → same-origin → the redirect round-trip works. (Requires app.darkrun.ai's
+  // /__/auth/handler in each OAuth provider's callback/redirect list, alongside
+  // the firebaseapp.com one.)
   authDomain: "app.darkrun.ai",
   projectId: "darkrun",
   appId: "1:32118591905:web:987db3ba09d6991b837be0",
@@ -58,19 +59,6 @@ function providerFor(providerKey) {
   return provider;
 }
 
-// Reject `promise` after `ms` if it hasn't settled. signInWithPopup can hang
-// forever when the popup completes but never hands a result back (e.g. the OIDC
-// token exchange stalling in Firebase's auth handler after the user authorizes),
-// which otherwise strands the app on "Signing in…" with no recovery. This turns
-// that into a clear, retryable failure.
-function withTimeout(promise, ms, message) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
 // Map a Firebase auth error to a short, actionable message; falls back to the
 // raw message. `providerKey` names the provider the user picked.
 function friendlyAuthError(e, providerKey) {
@@ -89,79 +77,75 @@ function friendlyAuthError(e, providerKey) {
   return (e && e.message) || `${label} sign-in failed.`;
 }
 
-// Open the sign-in popup for `providerKey`, guarded by a timeout and mapped to a
-// friendly error. Shared by every sign-in entry point below.
-async function signInPopup(providerKey) {
-  const label = providerKey === "gitlab" ? "GitLab" : "GitHub";
-  const other = providerKey === "gitlab" ? "GitHub" : "GitLab";
+// Start a full-page redirect sign-in for `providerKey` ("github" | "gitlab").
+// The page navigates to the provider and returns to THIS url; the outcome is
+// picked up by consumeRedirect() on the next load.
+//
+// We use redirect, NOT popup: the app fires sign-in from an async task (a Dioxus
+// spawn), so signInWithPopup's window.open lands outside the user gesture and the
+// browser blocks it (auth/popup-blocked) — and worse, its handler-iframe init can
+// stall before window.open is even reached, stranding the app on "Signing in…"
+// forever. A redirect is a top-level navigation, always allowed, no popup. This
+// call does NOT resolve on success (the page unloads); it only rejects if it
+// fails before navigating.
+export async function startSignInRedirect(providerKey) {
   try {
-    return await withTimeout(
-      signInWithPopup(auth, providerFor(providerKey)),
-      120000,
-      `${label} sign-in didn't finish. Close the popup and try again; if ${label} keeps stalling, sign in with ${other} instead.`,
-    );
+    await signInWithRedirect(auth, providerFor(providerKey));
   } catch (e) {
     throw new Error(friendlyAuthError(e, providerKey));
   }
 }
 
-// Sign in with `providerKey` ("github" | "gitlab") and resolve to the Firebase
-// ID token string. Rejects (→ Err on the Rust side) on cancel/failure.
-//
-// This is the CLI-login bridge path: the CLI only needs the Firebase ID token
-// (deposited under its nonce), so this returns just that.
-export async function signInAndGetToken(providerKey) {
-  const result = await signInPopup(providerKey);
-  return await result.user.getIdToken();
-}
-
-// Sign in and resolve to BOTH tokens, JSON-encoded:
-//   { "idToken": "...", "accessToken": "...", "provider": "github" }
-//
-// The standalone dashboard needs the **provider OAuth access token** (not the
-// Firebase ID token) to list repos through the darkrun-web `/api/repos` proxy.
-// Firebase surfaces it on the sign-in result's credential. `accessToken` is the
-// empty string if the provider didn't return one (the dashboard then degrades
-// to "no repos to show" rather than failing the sign-in).
-export async function signInForDashboard(providerKey) {
-  const result = await signInPopup(providerKey);
-  return credentialJson(result, providerKey);
-}
-
-// LINK a second provider ("github" | "gitlab") to the CURRENTLY signed-in
-// Firebase account, so ONE darkrun account spans both GitHub and GitLab. Resolves
-// to the same `{ idToken, accessToken, provider }` JSON as signInForDashboard —
-// the dashboard then lists the newly-linked provider's repos alongside the first.
-//
-// Rejects (→ Err on the Rust side) if no one is signed in, the popup is
-// cancelled, the provider is already linked (`auth/provider-already-linked`), or
-// that provider identity already belongs to a DIFFERENT darkrun account
-// (`auth/credential-already-in-use`); the message is surfaced to the user.
-export async function linkProvider(providerKey) {
+// Start a full-page redirect to LINK `providerKey` to the currently signed-in
+// account, so ONE darkrun account spans both GitHub and GitLab. Same return path
+// as startSignInRedirect; consumeRedirect() reports it with mode "link".
+export async function startLinkRedirect(providerKey) {
   const user = auth.currentUser;
   if (!user) throw new Error("Sign in before linking another account.");
-  const label = providerKey === "gitlab" ? "GitLab" : "GitHub";
   try {
-    const result = await withTimeout(
-      linkWithPopup(user, providerFor(providerKey)),
-      120000,
-      `Linking ${label} didn't finish. Close the popup and try again.`,
-    );
-    return credentialJson(result, providerKey);
+    await linkWithRedirect(user, providerFor(providerKey));
   } catch (e) {
     throw new Error(friendlyAuthError(e, providerKey));
   }
 }
 
-// Extract { idToken, accessToken, provider } from a sign-in / link result.
-// `accessToken` is the empty string if the provider returned none (the dashboard
-// then degrades to "no repos to show" for that identity rather than failing).
-async function credentialJson(result, providerKey) {
+// On app load, consume a pending redirect result (present only right after we
+// return from a provider). Resolves to JSON:
+//   { mode: "signIn" | "link", idToken, accessToken, provider }
+// or "" when there is no pending redirect. The dashboard needs the provider OAuth
+// access token (to list repos through darkrun-web's /api/repos proxy), which
+// Firebase vends only here, on the sign-in/link result's credential.
+export async function consumeRedirect() {
+  let result;
+  try {
+    result = await getRedirectResult(auth);
+  } catch (e) {
+    const code = (e && e.code) || "";
+    if (code === "auth/account-exists-with-different-credential") {
+      throw new Error(
+        "That email is already on darkrun through the other provider. " +
+          "Sign in with that one, then add this provider from your dashboard.",
+      );
+    }
+    throw new Error((e && e.message) || "Sign-in didn't complete.");
+  }
+  if (!result) return "";
+  const providerKey = providerKeyOf(result);
   const idToken = await result.user.getIdToken();
   const credential =
     providerKey === "gitlab"
       ? OAuthProvider.credentialFromResult(result)
       : GithubAuthProvider.credentialFromResult(result);
   const accessToken = (credential && credential.accessToken) || "";
-  return JSON.stringify({ idToken, accessToken, provider: providerKey });
+  const mode = result.operationType === "link" ? "link" : "signIn";
+  return JSON.stringify({ mode, idToken, accessToken, provider: providerKey });
+}
+
+// Determine "github" | "gitlab" from a redirect UserCredential.
+function providerKeyOf(result) {
+  const pid = ((result && result.providerId) || "").toLowerCase();
+  if (pid.includes("gitlab")) return "gitlab";
+  if (pid.includes("github")) return "github";
+  const data = (result.user && result.user.providerData) || [];
+  return data.some((p) => (p.providerId || "").includes("gitlab")) ? "gitlab" : "github";
 }

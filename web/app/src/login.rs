@@ -1,13 +1,13 @@
 //! The `/login` page — two flows behind one route.
 //!
 //! 1. **CLI-login bridge** (`?provider=&nonce=`): `darkrun login` opens this with
-//!    a nonce. The user signs in with Firebase Auth ([`firebase::sign_in`]) and
-//!    the minted ID token is deposited to the relay broker under the nonce
-//!    ([`firebase::deposit`]), where the waiting CLI claims it. The user then
-//!    closes the tab and the CLI is logged in. This path is unchanged.
+//!    a nonce. The user signs in via a full-page provider redirect
+//!    ([`firebase::start_sign_in_redirect`]); on return the minted ID token is
+//!    read ([`firebase::consume_redirect`]) and deposited to the relay broker
+//!    under the nonce ([`firebase::deposit`]), where the waiting CLI claims it.
 //!
 //! 2. **Standalone login** (no nonce): visiting app.darkrun.ai's login directly
-//!    signs in for the web app itself and lands on the [`Dashboard`] — the start
+//!    signs in for the web app itself and lands on the [`Dashboard`], the start
 //!    of the standalone web experience, not a "close the tab" dead end.
 
 use darkrun_ui::prelude::*;
@@ -44,17 +44,36 @@ pub fn LoginPage() -> Element {
         return rsx! { StandaloneLogin {} };
     };
 
+    // Sign-in is a full-page redirect: on return, consume the result and hand the
+    // minted ID token to the CLI under its nonce. No pending redirect (a normal
+    // load) is a no-op, leaving the sign-in prompt showing.
+    {
+        let nonce = nonce.clone();
+        use_effect(move || {
+            let nonce = nonce.clone();
+            spawn(async move {
+                match firebase::consume_redirect().await {
+                    Ok(Some(outcome)) => {
+                        match firebase::deposit(&firebase::web_base(), &nonce, &outcome.id_token).await {
+                            Ok(()) => step.set(Step::Done),
+                            Err(e) => step.set(Step::Failed(format!("Couldn't hand the token to the CLI: {e}"))),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => step.set(Step::Failed(e)),
+                }
+            });
+        });
+    }
+
     let start = move |_| {
         let provider = provider.clone();
-        let nonce = nonce.clone();
         step.set(Step::Working);
         spawn(async move {
-            match firebase::sign_in(&provider).await {
-                Ok(token) => match firebase::deposit(&firebase::web_base(), &nonce, &token).await {
-                    Ok(()) => step.set(Step::Done),
-                    Err(e) => step.set(Step::Failed(format!("Couldn't hand the token to the CLI: {e}"))),
-                },
-                Err(e) => step.set(Step::Failed(e)),
+            // On success the page navigates to the provider; it only returns here
+            // (with an error) if it failed before navigating.
+            if let Err(e) = firebase::start_sign_in_redirect(&provider).await {
+                step.set(Step::Failed(e));
             }
         });
     };
@@ -152,17 +171,36 @@ fn SignInButton(
 #[component]
 pub(crate) fn StandaloneLogin() -> Element {
     let mut account = use_signal(|| None::<Account>);
-    let step = use_signal(|| Step::Idle);
+    // Start in "working": on mount we consume any pending redirect result (we may
+    // have just returned from a provider). No pending result flips us to Idle,
+    // which shows the sign-in buttons.
+    let mut step = use_signal(|| Step::Working);
 
-    // Signed in → hand off to the dashboard. `on_link` lets the dashboard add the
-    // second provider to the SAME account (one Firebase uid spanning both).
+    use_effect(move || {
+        spawn(async move {
+            match firebase::consume_redirect().await {
+                Ok(Some(outcome)) => account.set(Some(Account::new(outcome.session()))),
+                Ok(None) => step.set(Step::Idle),
+                Err(e) => step.set(Step::Failed(e)),
+            }
+        });
+    });
+
+    // Signed in → hand off to the dashboard. `on_link` starts a full-page redirect
+    // to link the second provider to the SAME account; the linked identity comes
+    // back through the redirect on the next load.
     if account().is_some() {
         return rsx! {
             Dashboard {
                 account: account().unwrap(),
-                on_link: move |identity| account.with_mut(|a| {
-                    if let Some(a) = a { a.link(identity); }
-                }),
+                on_link: move |provider: String| {
+                    step.set(Step::Working);
+                    spawn(async move {
+                        if let Err(e) = firebase::start_link_redirect(&provider).await {
+                            step.set(Step::Failed(e));
+                        }
+                    });
+                },
             }
         };
     }
@@ -174,7 +212,7 @@ pub(crate) fn StandaloneLogin() -> Element {
                 Step::Failed(msg) => rsx! {
                     div { style: "text-align:center;",
                         Centered { title: "Sign-in didn't finish".to_string(), body: msg }
-                        ProviderButtons { account, step }
+                        ProviderButtons { step }
                     }
                 },
                 // `Idle` / the unreachable `Done` (the dashboard takes over on
@@ -185,7 +223,7 @@ pub(crate) fn StandaloneLogin() -> Element {
                             title: "Sign in to darkrun".to_string(),
                             body: "Sign in to see your repositories and the darkrun runs in them.".to_string(),
                         }
-                        ProviderButtons { account, step }
+                        ProviderButtons { step }
                     }
                 },
             }
@@ -196,23 +234,23 @@ pub(crate) fn StandaloneLogin() -> Element {
 /// GitHub + GitLab sign-in buttons, side by side — the user picks; neither is a
 /// default.
 #[component]
-fn ProviderButtons(account: Signal<Option<Account>>, step: Signal<Step>) -> Element {
+fn ProviderButtons(step: Signal<Step>) -> Element {
     rsx! {
         div { style: "display:flex;gap:10px;justify-content:center;flex-wrap:wrap;",
-            SignInButton { icon: "fa-brands fa-github".to_string(), label: "Sign in with GitHub".to_string(), onclick: move |_| start_sign_in("github", account, step) }
-            SignInButton { icon: "fa-brands fa-gitlab".to_string(), label: "Sign in with GitLab".to_string(), onclick: move |_| start_sign_in("gitlab", account, step) }
+            SignInButton { icon: "fa-brands fa-github".to_string(), label: "Sign in with GitHub".to_string(), onclick: move |_| start_sign_in("github", step) }
+            SignInButton { icon: "fa-brands fa-gitlab".to_string(), label: "Sign in with GitLab".to_string(), onclick: move |_| start_sign_in("gitlab", step) }
         }
     }
 }
 
-/// Kick off Firebase sign-in for `provider`; on success set the account (which
-/// swaps [`StandaloneLogin`] over to the [`Dashboard`]).
-fn start_sign_in(provider: &'static str, mut account: Signal<Option<Account>>, mut step: Signal<Step>) {
+/// Kick off a full-page redirect sign-in for `provider`. On success the page
+/// navigates to the provider and returns to be picked up by the mount-time
+/// `consume_redirect`; only a pre-navigation failure sets [`Step::Failed`].
+fn start_sign_in(provider: &'static str, mut step: Signal<Step>) {
     step.set(Step::Working);
     spawn(async move {
-        match firebase::sign_in_for_dashboard(provider).await {
-            Ok(s) => account.set(Some(Account::new(s))),
-            Err(e) => step.set(Step::Failed(e)),
+        if let Err(e) = firebase::start_sign_in_redirect(provider).await {
+            step.set(Step::Failed(e));
         }
     });
 }
