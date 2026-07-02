@@ -86,15 +86,19 @@ function friendlyAuthError(e, providerKey) {
 // browser blocks it (auth/popup-blocked). A redirect is a top-level navigation,
 // always allowed, no popup.
 //
-// CRITICAL: do NOT `await` signInWithRedirect here. Its promise never resolves
-// (the page unloads), and — verified in-browser — awaiting it from the wasm
-// async runtime prevents the navigation from ever running, leaving the app stuck
-// on "Signing in…". Firing it (fire-and-forget) lets the navigation proceed. A
-// rare pre-navigation failure (bad config) is logged; there's nowhere to go.
+// CRITICAL: run signInWithRedirect in a fresh macrotask via setTimeout(0), NOT
+// synchronously here. Invoked synchronously inside the wasm-bindgen call frame,
+// signInWithRedirect's internal chain stalls before it navigates (verified
+// in-browser: no navigation, no error, no network). Deferred to a clean macrotask
+// (outside the wasm call stack) it navigates normally — matching a direct
+// page-context call, which works. Do not await it either (the page unloads).
 export async function startSignInRedirect(providerKey) {
-  signInWithRedirect(auth, providerFor(providerKey)).catch((e) => {
-    console.error("darkrun: sign-in redirect failed to start:", e);
-  });
+  const provider = providerFor(providerKey);
+  setTimeout(() => {
+    signInWithRedirect(auth, provider).catch((e) => {
+      console.error("darkrun: sign-in redirect failed to start:", e);
+    });
+  }, 0);
 }
 
 // Start a full-page redirect to LINK `providerKey` to the currently signed-in
@@ -104,9 +108,12 @@ export async function startSignInRedirect(providerKey) {
 export async function startLinkRedirect(providerKey) {
   const user = auth.currentUser;
   if (!user) throw new Error("Sign in before linking another account.");
-  linkWithRedirect(user, providerFor(providerKey)).catch((e) => {
-    console.error("darkrun: link redirect failed to start:", e);
-  });
+  const provider = providerFor(providerKey);
+  setTimeout(() => {
+    linkWithRedirect(user, provider).catch((e) => {
+      console.error("darkrun: link redirect failed to start:", e);
+    });
+  }, 0);
 }
 
 // On app load, consume a pending redirect result (present only right after we
