@@ -20,7 +20,7 @@ jobs:
     name: rust
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Reclaim disk before building. This job compiles the whole workspace TWICE
       # (release + debug test artifacts) over a heavy dep graph (dioxus + the full

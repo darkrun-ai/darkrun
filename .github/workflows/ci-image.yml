@@ -26,6 +26,6 @@ jobs:
     name: docker build (validate only)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build image (no push)
         run: docker build -t darkrun-web:ci .
