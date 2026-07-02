@@ -175,15 +175,37 @@ pub(crate) fn StandaloneLogin() -> Element {
     // have just returned from a provider). No pending result flips us to Idle,
     // which shows the sign-in buttons.
     let mut step = use_signal(|| Step::Working);
+    // The provider the user picked, if any. A button only SETS this; the redirect
+    // is spawned by the effect below, in THIS component's scope. Spawning from the
+    // button's own scope would cancel the future the instant step→Working unmounts
+    // the buttons — which is exactly why sign-in never reached the JS before.
+    let pending = use_signal(|| None::<&'static str>);
 
     use_effect(move || {
         spawn(async move {
             match firebase::consume_redirect().await {
                 Ok(Some(session)) => account.set(Some(Account::new(session))),
-                Ok(None) => step.set(Step::Idle),
+                Ok(None) => {
+                    if pending.peek().is_none() {
+                        step.set(Step::Idle);
+                    }
+                }
                 Err(e) => step.set(Step::Failed(e)),
             }
         });
+    });
+
+    // Picked a provider → start the full-page redirect. Spawned HERE, in
+    // StandaloneLogin's persistent scope, so it survives the buttons unmounting on
+    // Working and actually reaches Firebase.
+    use_effect(move || {
+        if let Some(provider) = pending() {
+            spawn(async move {
+                if let Err(e) = firebase::start_sign_in_redirect(provider).await {
+                    step.set(Step::Failed(e));
+                }
+            });
+        }
     });
 
     // Signed in → hand off to the dashboard. `on_link` starts a full-page redirect
@@ -212,7 +234,7 @@ pub(crate) fn StandaloneLogin() -> Element {
                 Step::Failed(msg) => rsx! {
                     div { style: "text-align:center;",
                         Centered { title: "Sign-in didn't finish".to_string(), body: msg }
-                        ProviderButtons { step }
+                        ProviderButtons { step, pending }
                     }
                 },
                 // `Idle` / the unreachable `Done` (the dashboard takes over on
@@ -223,7 +245,7 @@ pub(crate) fn StandaloneLogin() -> Element {
                             title: "Sign in to darkrun".to_string(),
                             body: "Sign in to see your repositories and the darkrun runs in them.".to_string(),
                         }
-                        ProviderButtons { step }
+                        ProviderButtons { step, pending }
                     }
                 },
             }
@@ -234,23 +256,19 @@ pub(crate) fn StandaloneLogin() -> Element {
 /// GitHub + GitLab sign-in buttons, side by side — the user picks; neither is a
 /// default.
 #[component]
-fn ProviderButtons(step: Signal<Step>) -> Element {
+fn ProviderButtons(step: Signal<Step>, pending: Signal<Option<&'static str>>) -> Element {
     rsx! {
         div { style: "display:flex;gap:10px;justify-content:center;flex-wrap:wrap;",
-            SignInButton { icon: "fa-brands fa-github".to_string(), label: "Sign in with GitHub".to_string(), onclick: move |_| start_sign_in("github", step) }
-            SignInButton { icon: "fa-brands fa-gitlab".to_string(), label: "Sign in with GitLab".to_string(), onclick: move |_| start_sign_in("gitlab", step) }
+            SignInButton { icon: "fa-brands fa-github".to_string(), label: "Sign in with GitHub".to_string(), onclick: move |_| start_sign_in("github", step, pending) }
+            SignInButton { icon: "fa-brands fa-gitlab".to_string(), label: "Sign in with GitLab".to_string(), onclick: move |_| start_sign_in("gitlab", step, pending) }
         }
     }
 }
 
-/// Kick off a full-page redirect sign-in for `provider`. On success the page
-/// navigates to the provider and returns to be picked up by the mount-time
-/// `consume_redirect`; only a pre-navigation failure sets [`Step::Failed`].
-fn start_sign_in(provider: &'static str, mut step: Signal<Step>) {
+/// Handle a provider pick: mark us busy and record the choice. The actual
+/// full-page redirect is spawned by [`StandaloneLogin`]'s effect, in a scope that
+/// survives these buttons unmounting (spawning it here would cancel it).
+fn start_sign_in(provider: &'static str, mut step: Signal<Step>, mut pending: Signal<Option<&'static str>>) {
     step.set(Step::Working);
-    spawn(async move {
-        if let Err(e) = firebase::start_sign_in_redirect(provider).await {
-            step.set(Step::Failed(e));
-        }
-    });
+    pending.set(Some(provider));
 }
