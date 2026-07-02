@@ -22,7 +22,16 @@ import {
 
 const firebaseConfig = {
   apiKey: "AIzaSyDhYi2DQAkbancuR71x3tqQhQ9AE3U29d8",
-  authDomain: "darkrun.firebaseapp.com",
+  // authDomain MUST be the app's own origin (app.darkrun.ai), not the default
+  // darkrun.firebaseapp.com. signInWithPopup opens the handler at authDomain and
+  // relays the result back to the opener via the browser; when authDomain is a
+  // DIFFERENT origin than the app, Chrome's storage partitioning severs that
+  // channel and the popup promise never settles (both GitHub and GitLab hang on
+  // "Signing in…" forever). app.darkrun.ai is a Firebase Hosting site for this
+  // project, so it serves /__/auth/handler natively → same-origin popup → the
+  // handshake works. (Requires app.darkrun.ai's /__/auth/handler in each OAuth
+  // provider's callback/redirect list, alongside the firebaseapp.com one.)
+  authDomain: "app.darkrun.ai",
   projectId: "darkrun",
   appId: "1:32118591905:web:987db3ba09d6991b837be0",
 };
