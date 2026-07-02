@@ -59,6 +59,7 @@ pub fn Shell() -> Element {
                     NavLink { to: Route::Blog {}, label: "Blog" }
                     GithubLink {}
                     ThemeToggle {}
+                    AppLink {}
                 }
             }
             main { style: "{main}", Outlet::<Route> {} }
@@ -79,6 +80,33 @@ pub fn Shell() -> Element {
 
 /// The repository URL, linked from the header GitHub mark.
 const REPO_URL: &str = "https://github.com/darkrun-ai/darkrun";
+
+/// The web app (sign in, see your repos and their runs).
+const APP_URL: &str = "https://app.darkrun.ai";
+
+/// The primary "Open app" CTA in the header: an accent button linking out to the
+/// web app. External, so a plain anchor (not the router).
+#[component]
+fn AppLink() -> Element {
+    let style = format!(
+        "display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:8px;\
+         background:{accent};color:{on_accent};font-family:{sans};font-size:14px;font-weight:600;\
+         text-decoration:none;",
+        accent = theme::ACCENT,
+        on_accent = theme::ON_ACCENT,
+        sans = tokens::FONT_SANS,
+    );
+    rsx! {
+        a {
+            href: APP_URL,
+            style: "{style}",
+            "aria-label": "Open the darkrun web app",
+            title: "Open the darkrun web app",
+            "Open app"
+            span { style: "font-size:13px;line-height:1;", "\u{2197}" }
+        }
+    }
+}
 
 /// The GitHub mark in the header, linking out to the repo. External link, so a
 /// plain anchor (not the router) with `target=_blank` + `rel=noopener`.
