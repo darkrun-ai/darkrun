@@ -1,0 +1,6 @@
+---
+topic: sim-prompt-surface-contract
+created_at: 2026-07-02T23:52:09.054510+00:00
+updated_at: 2026-07-02T23:52:09.054510+00:00
+---
+The engine's followability surface for a zero-knowledge (sim) agent is `TickResult { run, position, action, prompt }` from darkrun-mcp's position module. `.prompt` is the rendered markdown the agent reads; `.action` is the structured variant the privileged e2e driver reads (`crates/darkrun-e2e/tests/common/mod.rs::run_to_seal` never touches `.prompt` — exactly why e2e green proves cursor termination, not followability). A protocol-fidelity consumer must act on `.prompt` only. darkrun-mcp is a lib crate (binary lives in darkrun-cli), so drive ticks in-process: `StateStore::new(dir)` → `run_start(...)` → loop `run_tick_with_hosting(store, slug, &NoopHosting)` — plain `run_tick` resolves ApiHosting and can touch network in discrete mode. For a Claude-Code-modeled agent the raw rendered prompt is byte-identical to production (`darkrun_harness::adapt_instructions` is the identity for the Claude Code cap set); other cap sets append harness notes. Every tick also persists the rendered prompt under `.darkrun/<slug>/prompts/<scope>/<tag>.md` (`StateStore::write_prompt`/`read_prompts`), alongside `action-log.jsonl` and `events.jsonl` — a ready-made transcript/replay substrate.
