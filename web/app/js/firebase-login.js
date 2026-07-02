@@ -49,13 +49,60 @@ function providerFor(providerKey) {
   return provider;
 }
 
+// Reject `promise` after `ms` if it hasn't settled. signInWithPopup can hang
+// forever when the popup completes but never hands a result back (e.g. the OIDC
+// token exchange stalling in Firebase's auth handler after the user authorizes),
+// which otherwise strands the app on "Signing in…" with no recovery. This turns
+// that into a clear, retryable failure.
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// Map a Firebase auth error to a short, actionable message; falls back to the
+// raw message. `providerKey` names the provider the user picked.
+function friendlyAuthError(e, providerKey) {
+  const label = providerKey === "gitlab" ? "GitLab" : "GitHub";
+  const other = providerKey === "gitlab" ? "GitHub" : "GitLab";
+  const code = (e && e.code) || "";
+  if (code === "auth/account-exists-with-different-credential") {
+    return `Your email is already on darkrun through ${other}. Sign in with ${other}, then add ${label} from your dashboard.`;
+  }
+  if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") {
+    return `${label} sign-in was cancelled.`;
+  }
+  if (code === "auth/popup-blocked") {
+    return "Your browser blocked the sign-in popup. Allow popups for this site, then try again.";
+  }
+  return (e && e.message) || `${label} sign-in failed.`;
+}
+
+// Open the sign-in popup for `providerKey`, guarded by a timeout and mapped to a
+// friendly error. Shared by every sign-in entry point below.
+async function signInPopup(providerKey) {
+  const label = providerKey === "gitlab" ? "GitLab" : "GitHub";
+  const other = providerKey === "gitlab" ? "GitHub" : "GitLab";
+  try {
+    return await withTimeout(
+      signInWithPopup(auth, providerFor(providerKey)),
+      120000,
+      `${label} sign-in didn't finish. Close the popup and try again; if ${label} keeps stalling, sign in with ${other} instead.`,
+    );
+  } catch (e) {
+    throw new Error(friendlyAuthError(e, providerKey));
+  }
+}
+
 // Sign in with `providerKey` ("github" | "gitlab") and resolve to the Firebase
 // ID token string. Rejects (→ Err on the Rust side) on cancel/failure.
 //
 // This is the CLI-login bridge path: the CLI only needs the Firebase ID token
-// (deposited under its nonce), so this returns just that — unchanged.
+// (deposited under its nonce), so this returns just that.
 export async function signInAndGetToken(providerKey) {
-  const result = await signInWithPopup(auth, providerFor(providerKey));
+  const result = await signInPopup(providerKey);
   return await result.user.getIdToken();
 }
 
@@ -68,7 +115,7 @@ export async function signInAndGetToken(providerKey) {
 // empty string if the provider didn't return one (the dashboard then degrades
 // to "no repos to show" rather than failing the sign-in).
 export async function signInForDashboard(providerKey) {
-  const result = await signInWithPopup(auth, providerFor(providerKey));
+  const result = await signInPopup(providerKey);
   return credentialJson(result, providerKey);
 }
 
@@ -80,12 +127,21 @@ export async function signInForDashboard(providerKey) {
 // Rejects (→ Err on the Rust side) if no one is signed in, the popup is
 // cancelled, the provider is already linked (`auth/provider-already-linked`), or
 // that provider identity already belongs to a DIFFERENT darkrun account
-// (`auth/credential-already-in-use`) — the message is surfaced to the user.
+// (`auth/credential-already-in-use`); the message is surfaced to the user.
 export async function linkProvider(providerKey) {
   const user = auth.currentUser;
   if (!user) throw new Error("Sign in before linking another account.");
-  const result = await linkWithPopup(user, providerFor(providerKey));
-  return credentialJson(result, providerKey);
+  const label = providerKey === "gitlab" ? "GitLab" : "GitHub";
+  try {
+    const result = await withTimeout(
+      linkWithPopup(user, providerFor(providerKey)),
+      120000,
+      `Linking ${label} didn't finish. Close the popup and try again.`,
+    );
+    return credentialJson(result, providerKey);
+  } catch (e) {
+    throw new Error(friendlyAuthError(e, providerKey));
+  }
 }
 
 // Extract { idToken, accessToken, provider } from a sign-in / link result.
