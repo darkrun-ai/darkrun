@@ -16,32 +16,40 @@ const DEFAULT_WEB_BASE: &str = "https://darkrun.ai";
 
 #[wasm_bindgen(module = "/js/firebase-login.js")]
 extern "C" {
-    /// Sign in with `provider` ("github" | "gitlab") and resolve to the Firebase
-    /// ID token. Defined in the JS glue.
+    /// Start a full-page redirect sign-in for `provider` ("github" | "gitlab").
+    /// The page navigates away; on return, `consumeRedirect` reports the outcome.
+    /// Defined in the JS glue.
     #[wasm_bindgen(catch)]
-    async fn signInAndGetToken(provider: &str) -> Result<JsValue, JsValue>;
+    async fn startSignInRedirect(provider: &str) -> Result<JsValue, JsValue>;
 
-    /// Sign in with `provider` and resolve to a JSON `{ idToken, accessToken,
-    /// provider }` — the standalone dashboard needs the provider OAuth access
-    /// token too, not just the Firebase ID token. Defined in the JS glue.
+    /// Start a full-page redirect to link `provider` to the signed-in account.
+    /// Defined in the JS glue.
     #[wasm_bindgen(catch)]
-    async fn signInForDashboard(provider: &str) -> Result<JsValue, JsValue>;
+    async fn startLinkRedirect(provider: &str) -> Result<JsValue, JsValue>;
 
-    /// Link `provider` to the currently signed-in Firebase account and resolve to
-    /// the same `{ idToken, accessToken, provider }` JSON — one darkrun account
-    /// spanning both GitHub and GitLab. Defined in the JS glue.
+    /// Consume a pending redirect result on load — resolves to the outcome JSON
+    /// `{ mode, idToken, accessToken, provider }`, or "" if there is no pending
+    /// redirect. Defined in the JS glue.
     #[wasm_bindgen(catch)]
-    async fn linkProvider(provider: &str) -> Result<JsValue, JsValue>;
+    async fn consumeRedirect() -> Result<JsValue, JsValue>;
 }
 
-/// Sign in with `provider` and return the Firebase ID token.
-pub async fn sign_in(provider: &str) -> Result<String, String> {
-    match signInAndGetToken(provider).await {
-        Ok(v) => v
-            .as_string()
-            .ok_or_else(|| "Firebase returned no ID token".to_string()),
-        Err(e) => Err(js_error(&e)),
-    }
+/// Start a full-page redirect sign-in for `provider`. On success the page
+/// navigates away (this future may not return); `Err` means it failed before
+/// navigating. The outcome is picked up by [`consume_redirect`] on the next load.
+pub async fn start_sign_in_redirect(provider: &str) -> Result<(), String> {
+    startSignInRedirect(provider)
+        .await
+        .map(|_| ())
+        .map_err(|e| js_error(&e))
+}
+
+/// Start a full-page redirect to link `provider` to the signed-in account.
+pub async fn start_link_redirect(provider: &str) -> Result<(), String> {
+    startLinkRedirect(provider)
+        .await
+        .map(|_| ())
+        .map_err(|e| js_error(&e))
 }
 
 /// The signed-in identity the standalone dashboard works with: the Firebase ID
@@ -59,26 +67,20 @@ pub struct Session {
     pub provider: String,
 }
 
-/// Sign in with `provider` for the standalone dashboard, returning both tokens.
-pub async fn sign_in_for_dashboard(provider: &str) -> Result<Session, String> {
-    parse_session(signInForDashboard(provider).await)
-}
-
-/// Link `provider` to the already-signed-in account, returning the newly-linked
-/// identity (same `Session` shape). The dashboard appends it to the [`Account`].
-pub async fn link_provider(provider: &str) -> Result<Session, String> {
-    parse_session(linkProvider(provider).await)
-}
-
-/// Shared decode for the sign-in / link JS results (`{ idToken, accessToken,
-/// provider }`).
-fn parse_session(res: Result<JsValue, JsValue>) -> Result<Session, String> {
-    match res {
+/// Consume a pending redirect result on load. `Ok(None)` means there is no
+/// pending redirect (a normal page load); `Ok(Some(session))` means we just
+/// returned from a provider and the sign-in / link completed. (The JS also
+/// reports a `mode` field; the app treats sign-in and link the same on return,
+/// so [`Session`] simply ignores it.)
+pub async fn consume_redirect() -> Result<Option<Session>, String> {
+    match consumeRedirect().await {
         Ok(v) => {
-            let json = v
-                .as_string()
-                .ok_or_else(|| "Firebase returned no sign-in result".to_string())?;
+            let json = v.as_string().unwrap_or_default();
+            if json.is_empty() {
+                return Ok(None);
+            }
             serde_json::from_str::<Session>(&json)
+                .map(Some)
                 .map_err(|e| format!("couldn't read the sign-in result: {e}"))
         }
         Err(e) => Err(js_error(&e)),
@@ -107,20 +109,6 @@ impl Account {
     /// A fresh account from the first sign-in.
     pub fn new(first: Session) -> Self {
         Self { identities: vec![first] }
-    }
-
-    /// Add (or replace, by provider) a linked identity — e.g. after linking the
-    /// second provider, or re-linking to refresh an access token.
-    pub fn link(&mut self, identity: Session) {
-        if let Some(existing) = self
-            .identities
-            .iter_mut()
-            .find(|s| s.provider == identity.provider)
-        {
-            *existing = identity;
-        } else {
-            self.identities.push(identity);
-        }
     }
 
     /// Is `provider` already linked to this account?

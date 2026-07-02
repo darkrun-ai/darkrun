@@ -61,22 +61,20 @@ enum Repos {
 enum Linking {
     /// No link in progress.
     Idle,
-    /// A `linkWithPopup` round-trip is open.
+    /// A link redirect has been kicked off (the page is navigating away).
     Working,
-    /// The link failed (popup cancelled, already linked, or the identity belongs
-    /// to a different darkrun account) — shown inline so the user can retry.
-    Failed(String),
 }
 
 /// The signed-in dashboard for `account`. Fetches the COMBINED portfolio (every
 /// linked provider's repos) and lets the user link the other provider so one
-/// darkrun account spans both GitHub and GitLab. `on_link` hands the newly-linked
-/// identity back to the owner of the account signal.
+/// darkrun account spans both GitHub and GitLab. `on_link` is called with the
+/// provider key to link (`"github"`/`"gitlab"`); the owner starts a full-page
+/// redirect, and the linked identity returns on the next load.
 ///
-/// `account` is a `ReadOnlySignal` so linking a provider (which appends an
-/// identity upstream) re-runs the portfolio fetch automatically.
+/// `account` is a `ReadOnlySignal` so a changed set of linked identities re-runs
+/// the portfolio fetch automatically.
 #[component]
-pub fn Dashboard(account: ReadSignal<Account>, on_link: EventHandler<Session>) -> Element {
+pub fn Dashboard(account: ReadSignal<Account>, on_link: EventHandler<String>) -> Element {
     let mut repos = use_signal(|| Repos::Loading);
     let linking = use_signal(|| Linking::Idle);
 
@@ -144,21 +142,15 @@ fn LinkedAccounts(
     account: ReadSignal<Account>,
     missing: Option<&'static str>,
     linking: Signal<Linking>,
-    on_link: EventHandler<Session>,
+    on_link: EventHandler<String>,
 ) -> Element {
     // `Signal`/`EventHandler` are `Copy`, so this is `Fn` — fine for an onclick.
+    // Linking is a full-page redirect (owned by StandaloneLogin::on_link); the
+    // page navigates away, so we just show "Linking…" and hand off the provider.
     let link = move |provider: &'static str| {
         let mut linking = linking;
         linking.set(Linking::Working);
-        spawn(async move {
-            match firebase::link_provider(provider).await {
-                Ok(identity) => {
-                    on_link.call(identity);
-                    linking.set(Linking::Idle);
-                }
-                Err(e) => linking.set(Linking::Failed(e)),
-            }
-        });
+        on_link.call(provider.to_string());
     };
 
     let chip = format!(
@@ -195,12 +187,6 @@ fn LinkedAccounts(
                     }
                 },
                 (None, _) => rsx! {},
-            }
-            if let Linking::Failed(msg) = linking() {
-                span {
-                    style: format!("font-family:{};font-size:12px;color:{};", tokens::FONT_SANS, tokens::TEXT_MUTED),
-                    "Couldn't link: {msg}"
-                }
             }
         }
     }
