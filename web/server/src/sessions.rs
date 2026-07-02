@@ -168,8 +168,10 @@ fn fetch_sessions(
     Ok(parse_sessions(provider, repo, &value))
 }
 
-/// The git-tree endpoint URL for `repo` on `provider`.
-fn tree_url(provider: Provider, repo: &str) -> String {
+/// The git-tree endpoint URL for `repo` on `provider`. Shared with the
+/// GitHub-App workspace path (`github_app.rs`), which reads the same
+/// `.darkrun/` tree through an installation token.
+pub(crate) fn tree_url(provider: Provider, repo: &str) -> String {
     match provider {
         // The whole tree at the default branch (`HEAD`), recursively, in one
         // call; we filter the entries down to `.darkrun/` ourselves.
@@ -217,8 +219,9 @@ fn authorize(request: HttpRequest, provider: Provider, cred: &Credential) -> Htt
     }
 }
 
-/// Normalize a provider's tree JSON into the runs under `.darkrun/`.
-fn parse_sessions(
+/// Normalize a provider's tree JSON into the runs under `.darkrun/`. Shared with
+/// the GitHub-App workspace path (`github_app.rs`).
+pub(crate) fn parse_sessions(
     provider: Provider,
     repo: &str,
     value: &serde_json::Value,
