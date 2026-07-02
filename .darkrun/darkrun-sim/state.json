@@ -6,12 +6,13 @@
   "stations": {
     "frame": {
       "station": "frame",
-      "status": "pending",
+      "status": "in_progress",
       "phase": "spec",
       "checkpoint": {
         "kind": "ask"
       },
-      "branch": "darkrun/darkrun-sim/frame"
+      "branch": "darkrun/darkrun-sim/frame",
+      "started_at": "2026-07-02T23:40:58.266557+00:00"
     }
   },
   "created_with_version": "0.5.0",
