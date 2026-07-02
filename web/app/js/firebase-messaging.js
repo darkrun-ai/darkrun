@@ -26,7 +26,10 @@ import {
 
 const firebaseConfig = {
   apiKey: "AIzaSyDhYi2DQAkbancuR71x3tqQhQ9AE3U29d8",
-  authDomain: "darkrun.firebaseapp.com",
+  // Must match firebase-login.js's authDomain (app.darkrun.ai): whichever module
+  // creates the default Firebase app sets it for auth too, and a mismatched
+  // authDomain breaks the sign-in redirect resolver.
+  authDomain: "app.darkrun.ai",
   projectId: "darkrun",
   messagingSenderId: "32118591905",
   appId: "1:32118591905:web:987db3ba09d6991b837be0",

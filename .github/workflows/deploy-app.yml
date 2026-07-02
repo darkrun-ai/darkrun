@@ -92,7 +92,12 @@ jobs:
           TOKEN="$(gcloud auth print-access-token)"
           auth=(-H "Authorization: Bearer $TOKEN")
 
-          cfg='{"config":{"rewrites":[{"glob":"**","path":"/index.html"}],"headers":[{"glob":"/.well-known/apple-app-site-association","headers":{"Content-Type":"application/json"}},{"glob":"/.well-known/assetlinks.json","headers":{"Content-Type":"application/json"}}]}}'
+          # Cache policy: everything defaults to no-cache so a new deploy is seen
+          # immediately (the shell + index.html must NOT be stale, or users keep
+          # running the old wasm bundle). Content-hashed assets under /assets get
+          # a long immutable cache (their filenames change on every build). Later
+          # matching globs win, so /assets/** overrides the ** no-cache.
+          cfg='{"config":{"rewrites":[{"glob":"**","path":"/index.html"}],"headers":[{"glob":"**","headers":{"Cache-Control":"no-cache"}},{"glob":"/assets/**","headers":{"Cache-Control":"public, max-age=31536000, immutable"}},{"glob":"/.well-known/apple-app-site-association","headers":{"Content-Type":"application/json"}},{"glob":"/.well-known/assetlinks.json","headers":{"Content-Type":"application/json"}}]}}'
           VER=$(curl -fsS -X POST "$API/sites/$SITE/versions" "${auth[@]}" -H "Content-Type: application/json" -d "$cfg" | jq -r .name)
           echo "version=$VER"; test -n "$VER" -a "$VER" != null
 

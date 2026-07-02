@@ -83,30 +83,30 @@ function friendlyAuthError(e, providerKey) {
 //
 // We use redirect, NOT popup: the app fires sign-in from an async task (a Dioxus
 // spawn), so signInWithPopup's window.open lands outside the user gesture and the
-// browser blocks it (auth/popup-blocked) — and worse, its handler-iframe init can
-// stall before window.open is even reached, stranding the app on "Signing in…"
-// forever. A redirect is a top-level navigation, always allowed, no popup. This
-// call does NOT resolve on success (the page unloads); it only rejects if it
-// fails before navigating.
+// browser blocks it (auth/popup-blocked). A redirect is a top-level navigation,
+// always allowed, no popup.
+//
+// CRITICAL: do NOT `await` signInWithRedirect here. Its promise never resolves
+// (the page unloads), and — verified in-browser — awaiting it from the wasm
+// async runtime prevents the navigation from ever running, leaving the app stuck
+// on "Signing in…". Firing it (fire-and-forget) lets the navigation proceed. A
+// rare pre-navigation failure (bad config) is logged; there's nowhere to go.
 export async function startSignInRedirect(providerKey) {
-  try {
-    await signInWithRedirect(auth, providerFor(providerKey));
-  } catch (e) {
-    throw new Error(friendlyAuthError(e, providerKey));
-  }
+  signInWithRedirect(auth, providerFor(providerKey)).catch((e) => {
+    console.error("darkrun: sign-in redirect failed to start:", e);
+  });
 }
 
 // Start a full-page redirect to LINK `providerKey` to the currently signed-in
 // account, so ONE darkrun account spans both GitHub and GitLab. Same return path
-// as startSignInRedirect; consumeRedirect() reports it with mode "link".
+// as startSignInRedirect; consumeRedirect() reports it with mode "link". Same
+// fire-and-forget rule: do NOT await linkWithRedirect (see startSignInRedirect).
 export async function startLinkRedirect(providerKey) {
   const user = auth.currentUser;
   if (!user) throw new Error("Sign in before linking another account.");
-  try {
-    await linkWithRedirect(user, providerFor(providerKey));
-  } catch (e) {
-    throw new Error(friendlyAuthError(e, providerKey));
-  }
+  linkWithRedirect(user, providerFor(providerKey)).catch((e) => {
+    console.error("darkrun: link redirect failed to start:", e);
+  });
 }
 
 // On app load, consume a pending redirect result (present only right after we
