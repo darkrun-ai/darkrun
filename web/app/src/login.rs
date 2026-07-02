@@ -53,8 +53,8 @@ pub fn LoginPage() -> Element {
             let nonce = nonce.clone();
             spawn(async move {
                 match firebase::consume_redirect().await {
-                    Ok(Some(outcome)) => {
-                        match firebase::deposit(&firebase::web_base(), &nonce, &outcome.id_token).await {
+                    Ok(Some(session)) => {
+                        match firebase::deposit(&firebase::web_base(), &nonce, &session.id_token).await {
                             Ok(()) => step.set(Step::Done),
                             Err(e) => step.set(Step::Failed(format!("Couldn't hand the token to the CLI: {e}"))),
                         }
@@ -179,7 +179,7 @@ pub(crate) fn StandaloneLogin() -> Element {
     use_effect(move || {
         spawn(async move {
             match firebase::consume_redirect().await {
-                Ok(Some(outcome)) => account.set(Some(Account::new(outcome.session()))),
+                Ok(Some(session)) => account.set(Some(Account::new(session))),
                 Ok(None) => step.set(Step::Idle),
                 Err(e) => step.set(Step::Failed(e)),
             }

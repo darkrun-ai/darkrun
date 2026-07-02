@@ -67,41 +67,19 @@ pub struct Session {
     pub provider: String,
 }
 
-/// The outcome of a returned redirect: which flow it was (`signIn` or `link`)
-/// plus the identity it carries.
-#[derive(Clone, PartialEq, Deserialize)]
-pub struct RedirectOutcome {
-    /// `"signIn"` for a fresh sign-in, `"link"` for a linked second provider.
-    pub mode: String,
-    #[serde(rename = "idToken")]
-    pub id_token: String,
-    #[serde(rename = "accessToken")]
-    pub access_token: String,
-    pub provider: String,
-}
-
-impl RedirectOutcome {
-    /// The identity this outcome carries.
-    pub fn session(&self) -> Session {
-        Session {
-            id_token: self.id_token.clone(),
-            access_token: self.access_token.clone(),
-            provider: self.provider.clone(),
-        }
-    }
-}
-
 /// Consume a pending redirect result on load. `Ok(None)` means there is no
-/// pending redirect (a normal page load); `Ok(Some(_))` means we just returned
-/// from a provider and the sign-in / link completed.
-pub async fn consume_redirect() -> Result<Option<RedirectOutcome>, String> {
+/// pending redirect (a normal page load); `Ok(Some(session))` means we just
+/// returned from a provider and the sign-in / link completed. (The JS also
+/// reports a `mode` field; the app treats sign-in and link the same on return,
+/// so [`Session`] simply ignores it.)
+pub async fn consume_redirect() -> Result<Option<Session>, String> {
     match consumeRedirect().await {
         Ok(v) => {
             let json = v.as_string().unwrap_or_default();
             if json.is_empty() {
                 return Ok(None);
             }
-            serde_json::from_str::<RedirectOutcome>(&json)
+            serde_json::from_str::<Session>(&json)
                 .map(Some)
                 .map_err(|e| format!("couldn't read the sign-in result: {e}"))
         }
@@ -131,20 +109,6 @@ impl Account {
     /// A fresh account from the first sign-in.
     pub fn new(first: Session) -> Self {
         Self { identities: vec![first] }
-    }
-
-    /// Add (or replace, by provider) a linked identity — e.g. after linking the
-    /// second provider, or re-linking to refresh an access token.
-    pub fn link(&mut self, identity: Session) {
-        if let Some(existing) = self
-            .identities
-            .iter_mut()
-            .find(|s| s.provider == identity.provider)
-        {
-            *existing = identity;
-        } else {
-            self.identities.push(identity);
-        }
     }
 
     /// Is `provider` already linked to this account?
