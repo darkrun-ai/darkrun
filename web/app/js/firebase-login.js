@@ -93,15 +93,14 @@ function friendlyAuthError(e, providerKey) {
 // (outside the wasm call stack) it navigates normally — matching a direct
 // page-context call, which works. Do not await it either (the page unloads).
 export async function startSignInRedirect(providerKey) {
-  console.log("[darkrun] startSignInRedirect ENTER:", providerKey, "authDomain=", auth && auth.config && auth.config.authDomain);
   const provider = providerFor(providerKey);
+  // Defer to a fresh macrotask so the navigation runs in clean page context,
+  // decoupled from the wasm call that invoked us.
   setTimeout(() => {
-    console.log("[darkrun] firing signInWithRedirect for:", providerKey);
-    signInWithRedirect(auth, provider)
-      .then(() => console.log("[darkrun] signInWithRedirect RESOLVED (no nav)"))
-      .catch((e) => console.error("[darkrun] signInWithRedirect REJECTED:", e && e.code, e && e.message));
+    signInWithRedirect(auth, provider).catch((e) => {
+      console.error("darkrun: sign-in redirect failed to start:", e);
+    });
   }, 0);
-  console.log("[darkrun] startSignInRedirect RETURN (scheduled)");
 }
 
 // Start a full-page redirect to LINK `providerKey` to the currently signed-in
