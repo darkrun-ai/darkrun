@@ -509,6 +509,9 @@ pub struct CommittedStation {
     pub name: String,
     /// Lifecycle status (display string).
     pub status: String,
+    /// The station's current phase within its lifecycle, if recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 /// Assemble a [`CommittedRun`] from the raw `state.json` + `run.md` text (either
@@ -581,9 +584,15 @@ fn parse_stations(state: &serde_json::Value) -> Vec<CommittedStation> {
                 .and_then(|s| s.as_str())
                 .unwrap_or("pending")
                 .to_string();
+            let phase = station
+                .get("phase")
+                .and_then(|p| p.as_str())
+                .filter(|p| !p.is_empty())
+                .map(str::to_string);
             CommittedStation {
                 name: name.clone(),
                 status,
+                phase,
             }
         })
         .collect()
@@ -790,8 +799,8 @@ mod tests {
             "factory": "software",
             "active_station": "build",
             "stations": {
-                "frame": { "status": "completed" },
-                "build": { "status": "active" }
+                "frame": { "status": "completed", "phase": "checkpoint" },
+                "build": { "status": "active", "phase": "manufacture" }
             }
         }"#;
         let run_md = "---\ntitle: My Run\nstatus: active\n---\nbody";
@@ -804,7 +813,9 @@ mod tests {
         assert_eq!(run.status.as_deref(), Some("active"));
         assert_eq!(run.stations.len(), 2);
         // Stations come from the JSON object (sorted by key via serde_json map order).
-        assert!(run.stations.iter().any(|s| s.name == "build" && s.status == "active"));
+        let build = run.stations.iter().find(|s| s.name == "build").unwrap();
+        assert_eq!(build.status, "active");
+        assert_eq!(build.phase.as_deref(), Some("manufacture"));
     }
 
     #[test]

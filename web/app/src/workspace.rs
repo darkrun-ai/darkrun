@@ -66,6 +66,9 @@ pub struct CommittedStation {
     pub name: String,
     /// Lifecycle status (display string).
     pub status: String,
+    /// The station's current phase, if recorded.
+    #[serde(default)]
+    pub phase: Option<String>,
 }
 
 /// The full committed state of one run (mirrors the server's `CommittedRun`).
@@ -320,6 +323,7 @@ fn RunDetail(run: CommittedRun) -> Element {
                             StationRow {
                                 name: st.name.clone(),
                                 status: st.status.clone(),
+                                phase: st.phase.clone(),
                                 active: run.active_station.as_deref() == Some(st.name.as_str()),
                             }
                         }
@@ -330,9 +334,10 @@ fn RunDetail(run: CommittedRun) -> Element {
     }
 }
 
-/// One station row in the detail: a status dot, the name, and its status label.
+/// One station row in the detail: a status dot, the name, its phase (when
+/// recorded), and its status label.
 #[component]
-fn StationRow(name: String, status: String, active: bool) -> Element {
+fn StationRow(name: String, status: String, phase: Option<String>, active: bool) -> Element {
     let dot = status_dot(&status);
     let card = format!(
         "display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;\
@@ -349,6 +354,15 @@ fn StationRow(name: String, status: String, active: bool) -> Element {
                     tokens::FONT_SANS, tokens::TEXT,
                 ),
                 "{name}"
+            }
+            if let Some(phase) = &phase {
+                span {
+                    style: format!(
+                        "font-family:{};font-size:11px;color:{};",
+                        tokens::FONT_MONO, tokens::TEXT_FAINT,
+                    ),
+                    "{phase}"
+                }
             }
             span {
                 style: format!(
