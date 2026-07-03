@@ -14,14 +14,34 @@
 //! pattern [`crate::gcp_auth`] uses for the Google SA assertion), lists its
 //! installations, mints a per-installation token, and lists that installation's
 //! repositories. Given the GitHub identity carried in the verified Firebase
-//! token (login + numeric id, see [`crate::firebase_auth`]), the server selects
-//! the installation(s) whose account is that user (or, best-effort, an org the
-//! user's installations cover) and returns their repos — each already carrying
-//! its `.darkrun/` runs, read the same committed-tree way `sessions.rs` reads
-//! them.
+//! token (numeric user id, see [`crate::firebase_auth`]), the server selects the
+//! installation(s) whose account is that user, plus any **organization**
+//! installation the user is a *verified member* of, and returns their repos —
+//! each already carrying its `.darkrun/` runs, read the same committed-tree way
+//! `sessions.rs` reads them.
+//!
+//! # Organization coverage requirements
+//!
+//! The darkrun App is typically installed on an **organization** (e.g.
+//! `darkrun-ai`), not on the individual's personal account. An org installation's
+//! repos are only included for a user when **all** of the following hold:
+//!
+//! 1. The darkrun GitHub App is **installed on that organization**.
+//! 2. The App has the **`Members: read`** organization permission (the
+//!    "Organization permissions → Members: Read-only" grant). Without it, the
+//!    `GET /orgs/{org}/members` call returns 403 and the org is skipped.
+//! 3. The signed-in user is a **verified member** of the org — matched by their
+//!    numeric GitHub user id against the org's member list.
+//!
+//! Membership is proven by listing the org's members through the **org
+//! installation token** and matching the caller's numeric id (the numeric id is
+//! the stable key; it sidesteps a fragile id→login resolution step). If that
+//! check errors for any reason (missing `Members: read`, a 403, a timeout, a
+//! transport failure), the org is **skipped, never included** — we fail safe and
+//! log a `tracing::warn`, so a permission gap can never leak an org's repos.
 //!
 //! Everything rides the injectable [`HttpTransport`](darkrun_vcs::HttpTransport)
-//! seam, so the pure parts — JWT claims, installation selection, repo/run
+//! seam, so the pure parts — JWT claims, member-id parsing, repo/run
 //! normalization — are unit-tested fully offline; only the signing + network
 //! calls need real credentials.
 //!
@@ -45,6 +65,17 @@ const APP_JWT_TTL_SECS: u64 = 540;
 /// Backdate the App JWT's `iat` by this many seconds to tolerate our clock
 /// running slightly ahead of GitHub's (GitHub rejects a future `iat`).
 const APP_JWT_IAT_SKEW_SECS: u64 = 60;
+
+/// Members per page when listing an org's members (`GET /orgs/{org}/members`).
+/// GitHub caps this at 100.
+const MEMBERS_PER_PAGE: u32 = 100;
+
+/// The most pages of org members we will page through before giving up and
+/// treating the caller as "not found on the pages we saw". At
+/// [`MEMBERS_PER_PAGE`] members per page this covers 5,000 members; larger orgs
+/// are capped and logged (a member past the cap is treated as not-a-member, so
+/// the fail-safe direction is to *exclude*, never over-include).
+const MEMBERS_MAX_PAGES: u32 = 50;
 
 /// The darkrun GitHub App: its numeric App id and RSA private key (PEM).
 ///
@@ -156,15 +187,25 @@ impl GitHubApp {
     }
 
     /// The user-visible list of a signed-in user's repositories (with their
-    /// runs), assembled from every installation whose account matches the user.
+    /// runs), assembled from every installation the user owns or is a verified
+    /// member of.
     ///
-    /// Pure orchestration over the synchronous
+    /// Orchestration over the synchronous
     /// [`HttpTransport`](darkrun_vcs::HttpTransport) seam, so a caller runs it on
     /// the blocking pool exactly like `repos.rs`/`sessions.rs`.
     ///
-    /// Steps: sign an App JWT → list installations → keep the installation(s)
-    /// this user owns (login/id match) → for each, mint an installation token,
-    /// list its repositories, and read each repo's `.darkrun/` runs.
+    /// Steps: sign an App JWT → list installations → for each installation, mint
+    /// its token, then decide inclusion:
+    /// - a **User** installation is included when its account IS the caller
+    ///   (numeric id, falling back to login);
+    /// - an **Organization** installation is included only when the caller is a
+    ///   verified member of that org (their numeric id appears in the org's
+    ///   member list, read via the org installation token). A membership check
+    ///   that errors (missing `Members: read`, 403, timeout, transport failure)
+    ///   **skips** the org and logs a `tracing::warn` — never includes it.
+    ///
+    /// For each included installation, list its repositories and read each repo's
+    /// `.darkrun/` runs.
     #[cfg(not(tarpaulin_include))] // network orchestration (parts below are tested)
     pub fn workspace(
         &self,
@@ -174,11 +215,15 @@ impl GitHubApp {
     ) -> Result<Vec<WorkspaceRepo>, String> {
         let jwt = self.app_jwt(now)?;
         let installations = list_installations(transport, &jwt)?;
-        let mine = installations_for(&installations, identity);
 
         let mut repos = Vec::new();
-        for inst in mine {
+        for inst in &installations {
+            // Mint the installation token first: an org's membership check needs
+            // it, and it is the same token used to list the repos below.
             let token = installation_token(transport, &jwt, inst.id)?;
+            if !installation_covers_user(transport, &token, &inst.account, identity) {
+                continue;
+            }
             let listed = list_installation_repos(transport, &token)?;
             for mut repo in listed {
                 repo.runs = read_runs(transport, &token, &repo.full_name)?;
@@ -195,10 +240,17 @@ impl GitHubApp {
     /// `full_name`), mints its token, and reads the run's `state.json` + `run.md`
     /// blobs. `None` from any single blob is tolerated — the detail is assembled
     /// from whatever committed files are present.
+    ///
+    /// The owning installation is subject to the **same access gate as the
+    /// workspace list**: a User installation must BE the caller, and an
+    /// Organization installation must be one the caller is a verified member of.
+    /// This keeps `/api/run` from serving a repo the caller could not see in the
+    /// workspace. A membership check that errors fails safe (access denied).
     #[cfg(not(tarpaulin_include))] // network orchestration (parts below are tested)
     pub fn run_detail(
         &self,
         transport: &dyn darkrun_vcs::HttpTransport,
+        identity: &GitHubIdentity,
         full_name: &str,
         run_id: &str,
         now: u64,
@@ -209,6 +261,13 @@ impl GitHubApp {
         let inst = installation_for_owner(&installations, owner)
             .ok_or_else(|| format!("no darkrun GitHub App installation covers `{owner}`"))?;
         let token = installation_token(transport, &jwt, inst.id)?;
+
+        // Gate exactly as the workspace list does: never serve a repo whose
+        // owning installation the caller does not own / is not a verified member
+        // of. A membership-check error fails safe (treated as no access).
+        if !installation_covers_user(transport, &token, &inst.account, identity) {
+            return Err(format!("you do not have access to `{owner}` through darkrun"));
+        }
 
         let state = read_blob(transport, &token, full_name, &state_path(run_id))?;
         let run_md = read_blob(transport, &token, full_name, &run_md_path(run_id))?;
@@ -409,26 +468,34 @@ fn parse_installations(value: &serde_json::Value) -> Vec<Installation> {
         .unwrap_or_default()
 }
 
-/// Select the installations whose account IS the signed-in user — matched on the
-/// numeric GitHub id (stable), falling back to a case-insensitive login match.
+/// Whether a signed-in user may see an installation's repos.
 ///
-/// A user-account installation is the user's own repos. Org installations the
-/// user's *own* installation doesn't cover are NOT included here: the App can't,
-/// from installations alone, prove the user is a member of that org's account,
-/// so returning them would leak repos. (Selecting org installations the user
-/// belongs to needs a membership check — a documented limitation.)
-fn installations_for<'a>(
-    installations: &'a [Installation],
+/// - A **User** installation is covered when its account IS the caller — matched
+///   on the numeric GitHub id (stable), falling back to a case-insensitive login
+///   match. An org account never matches a user identity this way.
+/// - An **Organization** installation is covered only when the caller is a
+///   verified member of that org: their numeric id appears in the org's member
+///   list, read via the org installation `token`.
+///
+/// **Fail safe.** If the org membership check errors (missing `Members: read`,
+/// a 403, a timeout, a transport failure, or an unparsable body), the org is
+/// treated as *not covered* — this returns `false` and logs a `tracing::warn`.
+/// A permission gap can never widen exposure.
+fn installation_covers_user(
+    transport: &dyn darkrun_vcs::HttpTransport,
+    token: &str,
+    account: &InstallationAccount,
     identity: &GitHubIdentity,
-) -> Vec<&'a Installation> {
-    installations
-        .iter()
-        .filter(|inst| account_matches_user(&inst.account, identity))
-        .collect()
+) -> bool {
+    if account.account_type.eq_ignore_ascii_case("organization") {
+        return org_membership_confirmed(transport, token, &account.login, identity);
+    }
+    account_matches_user(account, identity)
 }
 
 /// The single installation whose account owns `owner` (login match), if any —
-/// used to resolve which installation can read a specific repo.
+/// used to resolve which installation can read a specific repo. Access is gated
+/// separately by [`installation_covers_user`]; this only resolves the owner.
 fn installation_for_owner<'a>(
     installations: &'a [Installation],
     owner: &str,
@@ -438,8 +505,8 @@ fn installation_for_owner<'a>(
         .find(|inst| inst.account.login.eq_ignore_ascii_case(owner))
 }
 
-/// Whether an installation's account is the signed-in user (id first, then
-/// login). Org accounts never match a user identity here.
+/// Whether an installation's *user* account is the signed-in user (id first,
+/// then login). Org accounts never match a user identity here.
 fn account_matches_user(account: &InstallationAccount, identity: &GitHubIdentity) -> bool {
     if account.account_type.eq_ignore_ascii_case("organization") {
         return false;
@@ -451,6 +518,98 @@ fn account_matches_user(account: &InstallationAccount, identity: &GitHubIdentity
         Some(login) => !account.login.is_empty() && account.login.eq_ignore_ascii_case(login),
         None => false,
     }
+}
+
+/// Confirm the caller is a member of `org` by listing the org's members via the
+/// org installation `token` and matching the caller's numeric id.
+///
+/// Returns `true` only on a *confirmed* match. Any error path — the members call
+/// failing (e.g. the App lacks `Members: read`, or a 403/timeout), an unparsable
+/// body, or the caller carrying no numeric id — returns `false` and logs a
+/// `tracing::warn` naming the org and the reason. This is the fail-safe gate:
+/// on doubt, exclude the org.
+fn org_membership_confirmed(
+    transport: &dyn darkrun_vcs::HttpTransport,
+    token: &str,
+    org: &str,
+    identity: &GitHubIdentity,
+) -> bool {
+    let Ok(target_id) = identity.user_id.parse::<u64>() else {
+        tracing::warn!(
+            org = %org,
+            reason = "caller has no numeric GitHub id",
+            "skipping org: cannot verify membership",
+        );
+        return false;
+    };
+    match list_org_member_ids(transport, token, org) {
+        Ok(ids) => ids.contains(&target_id),
+        Err(reason) => {
+            tracing::warn!(
+                org = %org,
+                %reason,
+                "skipping org: membership check failed (App needs `Members: read`?)",
+            );
+            false
+        }
+    }
+}
+
+/// List an org's member numeric ids via `GET /orgs/{org}/members`, paginating up
+/// to [`MEMBERS_MAX_PAGES`] pages. Any non-success status is an error (the caller
+/// fails safe on it). If the cap is hit, logs a `tracing::warn` (the remaining
+/// members are unseen, so a member past the cap is treated as not-a-member —
+/// excluding, never over-including).
+fn list_org_member_ids(
+    transport: &dyn darkrun_vcs::HttpTransport,
+    token: &str,
+    org: &str,
+) -> Result<std::collections::HashSet<u64>, String> {
+    let mut ids = std::collections::HashSet::new();
+    for page in 1..=MEMBERS_MAX_PAGES {
+        let url = format!(
+            "{}/orgs/{}/members?per_page={}&page={}",
+            Provider::GitHub.api_base(),
+            org,
+            MEMBERS_PER_PAGE,
+            page,
+        );
+        let request = token_authorize(HttpRequest::get(url), token);
+        let response = transport.execute(request).map_err(|e| e.to_string())?;
+        if !response.is_success() {
+            return Err(format!("listing org members failed ({})", response.status));
+        }
+        let value: serde_json::Value = response.json().map_err(|e| e.to_string())?;
+        let page_ids = parse_member_ids(&value);
+        let page_len = page_ids.len();
+        ids.extend(page_ids);
+        // A short page (fewer than a full page) is the last page.
+        if page_len < MEMBERS_PER_PAGE as usize {
+            return Ok(ids);
+        }
+        if page == MEMBERS_MAX_PAGES {
+            tracing::warn!(
+                org = %org,
+                pages = MEMBERS_MAX_PAGES,
+                "org member list hit the pagination cap; members past it are unseen (treated as non-members)",
+            );
+        }
+    }
+    Ok(ids)
+}
+
+/// Parse the numeric `id` of each member from a `GET /orgs/{org}/members` page
+/// (a top-level array of user objects), skipping any entry without a numeric id.
+fn parse_member_ids(value: &serde_json::Value) -> Vec<u64> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(|id| id.as_u64()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Normalize `GET /installation/repositories` JSON (`{ repositories: [...] }`)
@@ -664,12 +823,59 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use darkrun_vcs::{HttpResponse, Method, MockTransport};
 
     fn identity(login: &str, id: &str) -> GitHubIdentity {
         GitHubIdentity {
             login: Some(login.to_string()),
             user_id: id.to_string(),
         }
+    }
+
+    /// Identity carrying only a numeric id (no login) — the real workspace shape,
+    /// since the Firebase token yields only the numeric GitHub id.
+    fn identity_id_only(id: &str) -> GitHubIdentity {
+        GitHubIdentity {
+            login: None,
+            user_id: id.to_string(),
+        }
+    }
+
+    fn user_account(login: &str, id: u64) -> InstallationAccount {
+        InstallationAccount {
+            login: login.to_string(),
+            id,
+            account_type: "User".to_string(),
+        }
+    }
+
+    fn org_account(login: &str, id: u64) -> InstallationAccount {
+        InstallationAccount {
+            login: login.to_string(),
+            id,
+            account_type: "Organization".to_string(),
+        }
+    }
+
+    /// The `GET /orgs/{org}/members` URL for a page — must match how
+    /// [`list_org_member_ids`] builds it so the mock keys line up.
+    fn members_url(org: &str, page: u32) -> String {
+        format!(
+            "{}/orgs/{}/members?per_page={}&page={}",
+            Provider::GitHub.api_base(),
+            org,
+            MEMBERS_PER_PAGE,
+            page,
+        )
+    }
+
+    /// A members-page body: a top-level array of `{ "id": ... }` user objects.
+    fn members_body(ids: &[u64]) -> Vec<u8> {
+        let arr: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| serde_json::json!({ "id": id, "login": format!("u{id}") }))
+            .collect();
+        serde_json::to_vec(&serde_json::Value::Array(arr)).unwrap()
     }
 
     #[test]
@@ -706,27 +912,170 @@ mod tests {
     }
 
     #[test]
-    fn installations_for_matches_user_by_id_then_login() {
-        let insts = parse_installations(&serde_json::json!([
-            { "id": 1, "account": { "login": "JWaldrip", "id": 7, "type": "User" } },
-            { "id": 2, "account": { "login": "acme", "id": 9, "type": "Organization" } },
-        ]));
+    fn account_matches_user_by_id_then_login_and_never_org() {
         // id match (login case differs — id wins).
-        let mine = installations_for(&insts, &identity("someone-else", "7"));
-        assert_eq!(mine.len(), 1);
-        assert_eq!(mine[0].id, 1);
-        // Org installations are never a user match.
-        let mine = installations_for(&insts, &identity("acme", "9"));
-        assert!(mine.is_empty());
+        assert!(account_matches_user(
+            &user_account("JWaldrip", 7),
+            &identity("someone-else", "7"),
+        ));
+        // Falls back to a case-insensitive login match when the id is absent (0).
+        assert!(account_matches_user(
+            &user_account("jwaldrip", 0),
+            &identity("JWALDRIP", "0"),
+        ));
+        // An org account is never a user match, even with a matching id.
+        assert!(!account_matches_user(
+            &org_account("acme", 9),
+            &identity("acme", "9"),
+        ));
     }
 
     #[test]
-    fn installations_for_falls_back_to_login_when_id_absent() {
-        let insts = parse_installations(&serde_json::json!([
-            { "id": 1, "account": { "login": "jwaldrip", "type": "User" } },
-        ]));
-        let mine = installations_for(&insts, &identity("JWALDRIP", "0"));
-        assert_eq!(mine.len(), 1);
+    fn installation_covers_own_user_account_without_any_http() {
+        // A User installation that IS the caller is covered by id alone, with no
+        // members call — the mock is empty, so any HTTP would error out.
+        let mock = MockTransport::new();
+        let account = user_account("jwaldrip", 7);
+        assert!(installation_covers_user(
+            &mock,
+            "tok",
+            &account,
+            &identity_id_only("7"),
+        ));
+        // A different user is not covered.
+        assert!(!installation_covers_user(
+            &mock,
+            "tok",
+            &account,
+            &identity_id_only("999"),
+        ));
+        // No members call was made for a User installation.
+        assert!(mock.requests().is_empty());
+    }
+
+    #[test]
+    fn installation_covers_org_when_user_is_a_member() {
+        let mock = MockTransport::new();
+        // One short page of members that includes the caller's id (42).
+        mock.expect(
+            Method::Get,
+            members_url("darkrun-ai", 1),
+            HttpResponse::new(200, members_body(&[7, 42, 100])),
+        );
+        assert!(installation_covers_user(
+            &mock,
+            "org-tok",
+            &org_account("darkrun-ai", 555),
+            &identity_id_only("42"),
+        ));
+    }
+
+    #[test]
+    fn installation_excludes_org_when_user_is_not_a_member() {
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Get,
+            members_url("darkrun-ai", 1),
+            HttpResponse::new(200, members_body(&[7, 100])),
+        );
+        assert!(!installation_covers_user(
+            &mock,
+            "org-tok",
+            &org_account("darkrun-ai", 555),
+            &identity_id_only("42"),
+        ));
+    }
+
+    #[test]
+    fn installation_excludes_org_when_membership_call_fails() {
+        // A 403 (App lacks `Members: read`) must fail safe → excluded.
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Get,
+            members_url("darkrun-ai", 1),
+            HttpResponse::new(403, br#"{"message":"Resource not accessible by integration"}"#.to_vec()),
+        );
+        assert!(!installation_covers_user(
+            &mock,
+            "org-tok",
+            &org_account("darkrun-ai", 555),
+            &identity_id_only("42"),
+        ));
+    }
+
+    #[test]
+    fn installation_excludes_org_when_transport_errors() {
+        // No mock response queued → the transport returns an error → fail safe.
+        let mock = MockTransport::new();
+        assert!(!installation_covers_user(
+            &mock,
+            "org-tok",
+            &org_account("darkrun-ai", 555),
+            &identity_id_only("42"),
+        ));
+    }
+
+    #[test]
+    fn org_membership_excluded_when_caller_has_no_numeric_id() {
+        // A non-numeric id can never match a numeric member id, and no HTTP is
+        // even attempted (the mock is empty).
+        let mock = MockTransport::new();
+        assert!(!org_membership_confirmed(
+            &mock,
+            "org-tok",
+            "darkrun-ai",
+            &identity_id_only("not-a-number"),
+        ));
+        assert!(mock.requests().is_empty());
+    }
+
+    #[test]
+    fn list_org_member_ids_paginates_until_a_short_page() {
+        let mock = MockTransport::new();
+        // A full first page (100 ids) forces a second fetch; the second page is
+        // short (2 ids), ending pagination.
+        let full: Vec<u64> = (1..=MEMBERS_PER_PAGE as u64).collect();
+        mock.expect(
+            Method::Get,
+            members_url("bigorg", 1),
+            HttpResponse::new(200, members_body(&full)),
+        );
+        mock.expect(
+            Method::Get,
+            members_url("bigorg", 2),
+            HttpResponse::new(200, members_body(&[9_001, 9_002])),
+        );
+        let ids = list_org_member_ids(&mock, "org-tok", "bigorg").unwrap();
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&9_002));
+        assert_eq!(ids.len(), MEMBERS_PER_PAGE as usize + 2);
+        // Exactly two pages were fetched (the short second page stops paging).
+        assert_eq!(mock.requests().len(), 2);
+    }
+
+    #[test]
+    fn list_org_member_ids_surfaces_a_non_success_status() {
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Get,
+            members_url("acme", 1),
+            HttpResponse::new(404, br#"{"message":"Not Found"}"#.to_vec()),
+        );
+        let err = list_org_member_ids(&mock, "org-tok", "acme").unwrap_err();
+        assert!(err.contains("404"), "error should carry the status: {err}");
+    }
+
+    #[test]
+    fn parse_member_ids_reads_ids_and_skips_idless_entries() {
+        let body = serde_json::json!([
+            { "id": 7, "login": "a" },
+            { "login": "no-id" },
+            { "id": 42, "login": "c" },
+        ]);
+        let ids = parse_member_ids(&body);
+        assert_eq!(ids, vec![7, 42]);
+        // A non-array (e.g. an error object) yields no ids.
+        assert!(parse_member_ids(&serde_json::json!({ "message": "Bad" })).is_empty());
     }
 
     #[test]

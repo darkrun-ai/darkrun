@@ -9,8 +9,9 @@
 //! ([`crate::github_app`]) — so the workspace works on every later load without
 //! re-authorizing a provider.
 //!
-//! - `GET /api/workspace` → every repo the user's installation(s) cover, each
-//!   with its committed `.darkrun/` runs embedded.
+//! - `GET /api/workspace` → every repo the user's installation(s) cover — their
+//!   own account plus any org they are a verified member of — each with its
+//!   committed `.darkrun/` runs embedded.
 //! - `GET /api/run?repo=&id=` → one run's full committed state (from
 //!   `.darkrun/<id>/state.json` + `run.md`).
 //!
@@ -48,10 +49,10 @@ pub struct RunQuery {
 
 /// `GET /api/workspace`
 ///
-/// Verify the Firebase ID token → resolve the GitHub identity → list the App
-/// installations for the user → return their repos, each with its `.darkrun/`
-/// runs. The App orchestration is synchronous (the transport seam), so it runs
-/// on the blocking pool, mirroring `list_repos`.
+/// Verify the Firebase ID token → resolve the GitHub identity → include every
+/// installation the user owns or is a verified org member of → return their
+/// repos, each with its `.darkrun/` runs. The App orchestration is synchronous
+/// (the transport seam), so it runs on the blocking pool, mirroring `list_repos`.
 pub async fn workspace(State(state): State<WebState>, headers: axum::http::HeaderMap) -> Response {
     let (app, identity) = match resolve(&state, &headers) {
         Ok(pair) => pair,
@@ -102,7 +103,7 @@ pub async fn run_detail(
         );
     }
 
-    let (app, _identity) = match resolve(&state, &headers) {
+    let (app, identity) = match resolve(&state, &headers) {
         Ok(pair) => pair,
         Err(resp) => return *resp,
     };
@@ -110,7 +111,7 @@ pub async fn run_detail(
     let transport = state.transport.clone();
     let now = now_unix();
     let built = tokio::task::spawn_blocking(move || {
-        app.run_detail(transport.as_ref(), &repo, &run_id, now)
+        app.run_detail(transport.as_ref(), &identity, &repo, &run_id, now)
     })
     .await;
 
