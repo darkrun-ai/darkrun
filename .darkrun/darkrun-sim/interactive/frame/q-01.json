@@ -1,0 +1,32 @@
+{
+  "session_type": "question",
+  "session_id": "q-01",
+  "status": "answered",
+  "run_slug": "darkrun-sim",
+  "title": "Operator-collaboration gates in simulated runs",
+  "prompt": "How should the runs the simulator drives handle operator-collaboration gates (Spec holds, checkpoints, questions)?",
+  "context": "Carrying forward your June frame decisions unchanged: full 4-phase scope, record locally → committed fixtures → static replay on the site, new crate `crates/darkrun-sim`, player in `web/site`. One new wrinkle from discovery: in team/solo modes every station's Spec phase **holds** until `darkrun_elaborate_seal`, and checkpoints wait on operator decisions — so a zero-knowledge prompt-follower needs either an operator in the loop or a `dark`-mode run (pre-elaborated, linear, no per-station collab hold). The engine's deadlock guard (`Escalate` after 4 no-progress ticks) is the stranded verdict either way.",
+  "options": [
+    {
+      "id": "dark-spine-operator-sim-later",
+      "label": "Dark-mode spine first, operator-sim later (Recommended)",
+      "description": "The recorder's v1 fixtures drive dark-mode runs (linear, no collaboration hold) — protocol fidelity of the prompt chain gets tested end-to-end with the least scope. A scripted operator-sim (answers questions, decides checkpoints, triggers seals) arrives as a later phase, unlocking solo-mode gate-surfacing coverage."
+    },
+    {
+      "id": "operator-sim-in-spine",
+      "label": "Operator-sim in the spine from day one",
+      "description": "Build the scripted operator-sim into phase 1 so solo-mode runs (gates, checkpoints, questions) are simulated immediately. Fuller coverage of the gate surface earlier, at the cost of a bigger spine before anything is demoable."
+    },
+    {
+      "id": "dark-only-forever",
+      "label": "Dark mode only — operator gates permanently out of scope",
+      "description": "The simulator only ever drives dark-mode runs; gate/checkpoint surfacing stays covered by the existing e2e + manual use, and the sim stays maximally small."
+    }
+  ],
+  "multi_select": false,
+  "answer": {
+    "selected": [
+      "dark-spine-operator-sim-later"
+    ]
+  }
+}
