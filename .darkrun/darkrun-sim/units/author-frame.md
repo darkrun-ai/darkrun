@@ -8,6 +8,9 @@ model: opus
 station: frame
 outputs:
 - frame/frame.md
+reviews:
+  value:
+    at: 2026-07-03T01:23:42.340439+00:00
 quality_gates:
 - name: artifact-nonempty
   command: test -s .darkrun/darkrun-sim/frame/frame.md
