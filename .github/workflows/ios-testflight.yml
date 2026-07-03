@@ -1,25 +1,27 @@
 name: ios-testflight
 
 # Build the darkrun iOS app (Dioxus → Xcode → signed .ipa) and upload it to
-# TestFlight on every push to main. Auth is an App Store Connect API key; signing
-# is fastlane `match`. See fastlane/Fastfile for the required secrets.
+# TestFlight AUTOMATICALLY on every push to main that touches the app. Auth is an
+# App Store Connect API key; signing is fastlane `match`. See fastlane/Fastfile
+# for the required secrets (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8, MATCH_GIT_URL,
+# MATCH_PASSWORD, MATCH_GIT_BASIC_AUTHORIZATION) — all present; manual runs pass.
 #
-# Manual-only (workflow_dispatch) until the secrets below exist + `match` is
-# populated. Enable the `push:` trigger once these repo secrets are set:
-#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8,
-#   MATCH_GIT_URL, MATCH_PASSWORD, MATCH_GIT_BASIC_AUTHORIZATION
+# The build number is the commit count (CFBundleVersion = git rev-list --count),
+# so each pushed build is monotonically newer. workflow_dispatch stays for
+# on-demand rebuilds. Web/server/site-only pushes do NOT rebuild the iOS app
+# (path filter), since they don't change what ships.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "fastlane/**"
+      - ".github/workflows/ios-testflight.yml"
   workflow_dispatch:
-  # push:
-  #   branches: [main]
-  #   paths:
-  #     - "desktop/**"
-  #     - "crates/**"
-  #     - "Cargo.toml"
-  #     - "Cargo.lock"
-  #     - "fastlane/**"
-  #     - ".github/workflows/ios-testflight.yml"
 
 concurrency:
   group: ios-testflight
