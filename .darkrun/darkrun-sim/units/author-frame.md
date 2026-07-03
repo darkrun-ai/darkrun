@@ -9,6 +9,8 @@ station: frame
 outputs:
 - frame/frame.md
 reviews:
+  feasibility:
+    at: 2026-07-03T01:24:16.145824+00:00
   value:
     at: 2026-07-03T01:23:42.340439+00:00
 quality_gates:
