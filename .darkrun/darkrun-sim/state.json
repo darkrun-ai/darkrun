@@ -7,7 +7,7 @@
     "frame": {
       "station": "frame",
       "status": "in_progress",
-      "phase": "spec",
+      "phase": "review",
       "elaborated": true,
       "checkpoint": {
         "kind": "ask"
