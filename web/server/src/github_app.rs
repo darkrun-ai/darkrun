@@ -158,8 +158,9 @@ impl GitHubApp {
     /// The user-visible list of a signed-in user's repositories (with their
     /// runs), assembled from every installation whose account matches the user.
     ///
-    /// Pure orchestration over the synchronous [`HttpTransport`] seam, so a
-    /// caller runs it on the blocking pool exactly like `repos.rs`/`sessions.rs`.
+    /// Pure orchestration over the synchronous
+    /// [`HttpTransport`](darkrun_vcs::HttpTransport) seam, so a caller runs it on
+    /// the blocking pool exactly like `repos.rs`/`sessions.rs`.
     ///
     /// Steps: sign an App JWT → list installations → keep the installation(s)
     /// this user owns (login/id match) → for each, mint an installation token,

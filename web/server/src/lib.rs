@@ -14,7 +14,8 @@
 //!    static files with an SPA fallback to `index.html`, so a single process
 //!    hosts both the marketing site and the OAuth endpoints.
 //!
-//! The networking seam is darkrun-vcs's [`HttpTransport`]: production wires the
+//! The networking seam is darkrun-vcs's
+//! [`HttpTransport`](darkrun_vcs::HttpTransport): production wires the
 //! [`ReqwestTransport`]; tests inject a mock so the suite is fully offline.
 //!
 //! Entry points: [`serve`] (env-configured, production) and [`build_router`]
