@@ -22,16 +22,17 @@ extern "C" {
     #[wasm_bindgen(catch)]
     async fn startSignInRedirect(provider: &str) -> Result<JsValue, JsValue>;
 
-    /// Start a full-page redirect to link `provider` to the signed-in account.
-    /// Defined in the JS glue.
-    #[wasm_bindgen(catch)]
-    async fn startLinkRedirect(provider: &str) -> Result<JsValue, JsValue>;
-
     /// Consume a pending redirect result on load — resolves to the outcome JSON
     /// `{ mode, idToken, accessToken, provider }`, or "" if there is no pending
     /// redirect. Defined in the JS glue.
     #[wasm_bindgen(catch)]
     async fn consumeRedirect() -> Result<JsValue, JsValue>;
+
+    /// Resolve the PERSISTED user's Firebase ID token (the "remember me" path),
+    /// or "" when nobody is signed in. Awaits the SDK restoring auth from local
+    /// storage. Defined in the JS glue.
+    #[wasm_bindgen(catch)]
+    async fn currentUserIdToken() -> Result<JsValue, JsValue>;
 }
 
 /// Start a full-page redirect sign-in for `provider`. On success the page
@@ -44,34 +45,23 @@ pub async fn start_sign_in_redirect(provider: &str) -> Result<(), String> {
         .map_err(|e| js_error(&e))
 }
 
-/// Start a full-page redirect to link `provider` to the signed-in account.
-pub async fn start_link_redirect(provider: &str) -> Result<(), String> {
-    startLinkRedirect(provider)
-        .await
-        .map(|_| ())
-        .map_err(|e| js_error(&e))
-}
-
-/// The signed-in identity the standalone dashboard works with: the Firebase ID
-/// token (account identity) plus the provider OAuth access token (the key that
-/// lists the user's repos through `darkrun-web`'s `/api/repos` proxy).
+/// The signed-in identity the standalone workspace works with: the Firebase ID
+/// token (the DURABLE account identity the App-backed `/api/workspace` +
+/// `/api/run` calls authenticate with). The JS glue also reports the provider
+/// access token + provider key on the credential, but the persistent workspace
+/// keys off the Firebase identity alone, so this only carries the ID token.
 #[derive(Clone, PartialEq, Deserialize)]
 pub struct Session {
     /// The Firebase ID token (the account `uid` after verification).
     #[serde(rename = "idToken")]
     pub id_token: String,
-    /// The provider OAuth access token (may be empty if the provider returned none).
-    #[serde(rename = "accessToken")]
-    pub access_token: String,
-    /// The provider key (`github` | `gitlab`).
-    pub provider: String,
 }
 
 /// Consume a pending redirect result on load. `Ok(None)` means there is no
 /// pending redirect (a normal page load); `Ok(Some(session))` means we just
-/// returned from a provider and the sign-in / link completed. (The JS also
-/// reports a `mode` field; the app treats sign-in and link the same on return,
-/// so [`Session`] simply ignores it.)
+/// returned from a provider and the sign-in completed. Extra fields the JS
+/// reports (`mode`, `accessToken`, `provider`) are ignored — the workspace uses
+/// only the Firebase ID token.
 pub async fn consume_redirect() -> Result<Option<Session>, String> {
     match consumeRedirect().await {
         Ok(v) => {
@@ -87,44 +77,20 @@ pub async fn consume_redirect() -> Result<Option<Session>, String> {
     }
 }
 
-/// The two providers a darkrun account can link. Order is the display order.
-pub const PROVIDERS: [&str; 2] = ["github", "gitlab"];
-
-/// Human label for a provider key.
-pub fn provider_label(provider: &str) -> &'static str {
-    if provider == "gitlab" { "GitLab" } else { "GitHub" }
-}
-
-/// A signed-in account: one Firebase identity (uid) that may link BOTH GitHub and
-/// GitLab. Each linked provider keeps its own OAuth access token (Firebase only
-/// vends those at sign-in/link time, so they live for the session). The dashboard
-/// lists every linked provider's repos as one combined portfolio.
-#[derive(Clone, PartialEq)]
-pub struct Account {
-    /// One [`Session`] per linked provider, all under the same Firebase uid.
-    pub identities: Vec<Session>,
-}
-
-impl Account {
-    /// A fresh account from the first sign-in.
-    pub fn new(first: Session) -> Self {
-        Self { identities: vec![first] }
-    }
-
-    /// Is `provider` already linked to this account?
-    pub fn has(&self, provider: &str) -> bool {
-        self.identities.iter().any(|s| s.provider == provider)
-    }
-
-    /// The identity (token) for `provider`, if linked.
-    pub fn identity_for(&self, provider: &str) -> Option<&Session> {
-        self.identities.iter().find(|s| s.provider == provider)
-    }
-
-    /// The provider not yet linked (`github`/`gitlab`), if exactly one is missing
-    /// — what the "Link …" button offers. `None` once both are linked.
-    pub fn missing_provider(&self) -> Option<&'static str> {
-        PROVIDERS.into_iter().find(|p| !self.has(p))
+/// Restore the persisted Firebase session on load: `Some(id_token)` when a user
+/// is still signed in (Firebase persists auth in browser local storage, so this
+/// survives reloads and new tabs without re-login), or `None` when nobody is.
+///
+/// This is the "remember me" key: the standalone workspace uses this ID token as
+/// the bearer for the App-backed `/api/workspace` + `/api/run` calls, so a
+/// returning user lands straight in their workspace with no provider re-auth.
+pub async fn restore_session() -> Option<String> {
+    match currentUserIdToken().await {
+        Ok(v) => {
+            let token = v.as_string().unwrap_or_default();
+            (!token.is_empty()).then_some(token)
+        }
+        Err(_) => None,
     }
 }
 
