@@ -5,20 +5,27 @@ name: macos-appstore
 # human hits "Submit" in App Store Connect. Auth is an App Store Connect API key;
 # signing is fastlane `match` (the macOS MAS cert types). Mirrors ios-release.yml.
 #
-# Manual-only (workflow_dispatch) until the secrets exist + `match macos` is
-# populated. Enable the `push: tags` trigger once these repo secrets are set
-# (the SAME set iOS uses — bootstrap-macos-signing.sh reuses the iOS match repo):
-#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8,
-#   MATCH_GIT_URL, MATCH_PASSWORD, MATCH_GIT_BASIC_AUTHORIZATION
+# Builds AUTOMATICALLY on every push to main that touches the app, uploading the
+# .pkg to App Store Connect (visible in TestFlight; a human still hits "Submit"
+# for the store). Same secrets iOS uses (all present; manual runs pass). Build
+# number = commit count, so each build is monotonically newer. Web/server-only
+# pushes don't rebuild. workflow_dispatch stays for on-demand rebuilds.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "fastlane/**"
+      - ".github/workflows/macos-appstore.yml"
   workflow_dispatch:
     inputs:
       version:
         description: "Marketing version (e.g. 0.7.0). Defaults to Cargo.toml."
         required: false
-  # push:
-  #   tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 concurrency:
   group: macos-appstore
