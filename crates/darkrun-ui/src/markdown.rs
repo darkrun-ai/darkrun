@@ -73,6 +73,25 @@ fn list_item(line: &str) -> Option<&str> {
     t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))
 }
 
+/// Whether a line is an ATX heading (`# ` … `###### `), returning its level
+/// (1..=6) and the trimmed heading text. Up to three leading spaces are allowed
+/// (CommonMark); more, or no space after the hashes, is not a heading.
+fn heading(line: &str) -> Option<(u8, &str)> {
+    let t = line.trim_start();
+    let hashes = t.len() - t.trim_start_matches('#').len();
+    if (1..=6).contains(&hashes) {
+        if let Some(text) = t[hashes..].strip_prefix(' ') {
+            return Some((hashes as u8, text.trim()));
+        }
+    }
+    None
+}
+
+/// Whether a line opens/closes a fenced code block (``` optionally with a lang).
+fn is_fence(line: &str) -> bool {
+    line.trim_start().starts_with("```")
+}
+
 /// Render the supported markdown subset of `src` to an HTML string. Empty input
 /// yields an empty string. Blocks are paragraphs and `<ul>` lists; consecutive
 /// list lines group into one list, blank lines break paragraphs.
@@ -102,11 +121,45 @@ pub fn to_html(src: &str) -> String {
         }
     };
 
+    // Fenced code blocks (```) are taken verbatim, so their state spans lines.
+    let mut in_code = false;
+    let mut code: Vec<String> = Vec::new();
+    let flush_code = |out: &mut String, code: &mut Vec<String>| {
+        out.push_str("<pre class=\"dr-md-pre\"><code>");
+        out.push_str(&escape(&code.join("\n")));
+        out.push_str("</code></pre>");
+        code.clear();
+    };
+
     for raw in src.lines() {
+        // A fence line toggles code mode (and never appears in the output).
+        if is_fence(raw) {
+            if in_code {
+                flush_code(&mut out, &mut code);
+                in_code = false;
+            } else {
+                flush_list(&mut out, &mut list);
+                flush_para(&mut out, &mut para);
+                in_code = true;
+            }
+            continue;
+        }
+        if in_code {
+            // Verbatim — the source line as-is (indentation is significant).
+            code.push(raw.to_string());
+            continue;
+        }
         let line = raw.trim_end();
         if line.trim().is_empty() {
             flush_list(&mut out, &mut list);
             flush_para(&mut out, &mut para);
+        } else if let Some((level, text)) = heading(line) {
+            // A heading is its own block: close any open list/paragraph first.
+            flush_list(&mut out, &mut list);
+            flush_para(&mut out, &mut para);
+            out.push_str(&format!("<h{level} class=\"dr-md-h{level}\">"));
+            out.push_str(&inline(&escape(text)));
+            out.push_str(&format!("</h{level}>"));
         } else if let Some(item) = list_item(line) {
             // A list starts: close any open paragraph first.
             flush_para(&mut out, &mut para);
@@ -117,10 +170,40 @@ pub fn to_html(src: &str) -> String {
             para.push(escape(line.trim()));
         }
     }
+    // Close anything still open — an unterminated fence flushes as a code block.
+    if in_code && !code.is_empty() {
+        flush_code(&mut out, &mut code);
+    }
     flush_list(&mut out, &mut list);
     flush_para(&mut out, &mut para);
     out
 }
+
+/// Scoped CSS for markdown rendered by [`to_html`] — headings, paragraphs, lists,
+/// inline code, and fenced code blocks under a `.dr-md` container. Inject this
+/// once on any surface that renders `to_html` output (the session views ship
+/// their own copy of the base rules; this is the self-contained set, including
+/// headings + code fences, for other surfaces like the review artifact stage).
+pub const CSS: &str = "\
+.dr-md{font-family:var(--dr-font-sans);color:var(--dr-text);line-height:1.55;}\
+.dr-md .dr-md-h1{font-size:20px;font-weight:700;margin:2px 0 10px;line-height:1.25;}\
+.dr-md .dr-md-h2{font-size:16px;font-weight:700;margin:18px 0 8px;line-height:1.3;}\
+.dr-md .dr-md-h3{font-size:14px;font-weight:700;margin:14px 0 6px;}\
+.dr-md .dr-md-h4,.dr-md .dr-md-h5,.dr-md .dr-md-h6{font-size:13px;font-weight:700;margin:12px 0 4px;color:var(--dr-text-muted);}\
+.dr-md .dr-md-h1:first-child,.dr-md .dr-md-h2:first-child{margin-top:0;}\
+.dr-md .dr-md-p{margin:0 0 10px;}\
+.dr-md .dr-md-p:last-child{margin-bottom:0;}\
+.dr-md .dr-md-ul{margin:8px 0;padding-left:20px;display:flex;flex-direction:column;gap:5px;}\
+.dr-md .dr-md-ul li{line-height:1.5;}\
+.dr-md .dr-md-code{font-family:var(--dr-font-mono);font-size:0.92em;\
+background:var(--dr-surface-overlay);border:1px solid var(--dr-border);\
+border-radius:4px;padding:1px 5px;}\
+.dr-md .dr-md-pre{font-family:var(--dr-font-mono);font-size:12.5px;line-height:1.5;\
+background:var(--dr-surface-overlay);border:1px solid var(--dr-border);\
+border-radius:8px;padding:12px 14px;overflow-x:auto;margin:10px 0;}\
+.dr-md .dr-md-pre code{font-family:inherit;background:none;border:none;padding:0;white-space:pre;}\
+.dr-md strong{font-weight:700;}\
+";
 
 #[cfg(test)]
 mod tests {
@@ -166,6 +249,29 @@ mod tests {
         assert!(html.contains("2 * 3"), "{html}");
         assert!(!html.contains("<strong>"), "{html}");
         assert!(!html.contains("<code"), "{html}");
+    }
+
+    #[test]
+    fn renders_atx_headings() {
+        let html = to_html("# Unit: author-frame\n\n## Goal\n\nbody text");
+        assert!(html.contains("<h1 class=\"dr-md-h1\">Unit: author-frame</h1>"), "{html}");
+        assert!(html.contains("<h2 class=\"dr-md-h2\">Goal</h2>"), "{html}");
+        assert!(html.contains("<p class=\"dr-md-p\">body text</p>"), "{html}");
+        // A hash without a following space is NOT a heading.
+        assert!(to_html("#nospace").contains("<p class=\"dr-md-p\">#nospace</p>"));
+    }
+
+    #[test]
+    fn renders_fenced_code_verbatim_and_escaped() {
+        let html = to_html("before\n\n```rust\nlet x = 1 < 2;\n```\n\nafter");
+        assert!(
+            html.contains("<pre class=\"dr-md-pre\"><code>let x = 1 &lt; 2;</code></pre>"),
+            "{html}"
+        );
+        assert!(html.contains("<p class=\"dr-md-p\">before</p>"), "{html}");
+        assert!(html.contains("<p class=\"dr-md-p\">after</p>"), "{html}");
+        // The fence lines themselves never appear in the output.
+        assert!(!html.contains("```"), "{html}");
     }
 
     #[test]

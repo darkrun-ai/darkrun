@@ -995,6 +995,9 @@ fn AnnotateSurface(
     on_close: EventHandler<MouseEvent>,
 ) -> Element {
     let kind = if visual { SurfaceKind::Visual } else { SurfaceKind::Text };
+    // Markdown artifacts render as a formatted document in the stage (headings,
+    // lists, bold, code) rather than raw source.
+    let is_markdown = path.ends_with(".md") || path.ends_with(".markdown");
     let default_tool = if visual { AnnotateTool::Pin } else { AnnotateTool::Select };
     let tool = use_signal(|| default_tool);
     // The placed visual marks (pin/rect/arrow/path/highlight) over the surface.
@@ -1217,6 +1220,7 @@ fn AnnotateSurface(
 
     rsx! {
         Card {
+            style { "{darkrun_ui::markdown::CSS}" }
             div { style: "display:flex;align-items:center;gap:8px;margin-bottom:10px;",
                 Badge { tone: Tone::Info, if visual { "annotate · visual" } else { "annotate · text" } }
                 span {
@@ -1245,6 +1249,7 @@ fn AnnotateSurface(
                     display_marks.extend(text_marks.read().iter().cloned());
                     annotate_stage(
                         visual,
+                        is_markdown,
                         active_tool,
                         screenshot_url.clone(),
                         placed,
@@ -1254,7 +1259,7 @@ fn AnnotateSurface(
                         place,
                     )
                 }
-                div { style: "flex:1;min-width:0;",
+                div { style: if visual { "flex:1;min-width:0;" } else { "flex:0 0 320px;min-width:0;" },
                     CommentPanel {
                         comments: thread,
                         placeholder: "comment on this artifact…".to_string(),
@@ -1313,6 +1318,7 @@ fn norm_xy(px: f64, py: f64) -> (f64, f64) {
 #[allow(clippy::too_many_arguments)]
 fn annotate_stage(
     visual: bool,
+    markdown: bool,
     active: AnnotateTool,
     screenshot_url: Option<String>,
     marks: Vec<VisualMark>,
@@ -1326,14 +1332,24 @@ fn annotate_stage(
     let mut origin = use_signal(|| None::<(f64, f64)>);
     let mut stroke = use_signal(Vec::<(f64, f64)>::new);
 
-    let stage = format!(
-        "position:relative;flex:0 0 360px;min-height:220px;border-radius:8px;\
-         border:1px solid {border};background:{base};overflow:hidden;\
-         {cursor}",
-        border = tokens::var::BORDER,
-        base = tokens::var::SURFACE_BASE,
-        cursor = if visual { "cursor:crosshair;" } else { "" },
-    );
+    // Visual surfaces are a fixed 360px box (the gesture math normalizes against
+    // it). A text artifact is the PRIMARY content: let it grow wide and scroll,
+    // so a rendered doc reads like a document, not a cramped column.
+    let stage = if visual {
+        format!(
+            "position:relative;flex:0 0 360px;min-height:220px;border-radius:8px;\
+             border:1px solid {border};background:{base};overflow:hidden;cursor:crosshair;",
+            border = tokens::var::BORDER,
+            base = tokens::var::SURFACE_BASE,
+        )
+    } else {
+        format!(
+            "position:relative;flex:1;min-width:0;min-height:220px;max-height:72vh;\
+             overflow:auto;border-radius:8px;border:1px solid {border};background:{base};",
+            border = tokens::var::BORDER,
+            base = tokens::var::SURFACE_BASE,
+        )
+    };
     let is_pen = active == AnnotateTool::Pen;
     rsx! {
         div {
@@ -1406,7 +1422,22 @@ fn annotate_stage(
                     {render_mark(mark, i + 1)}
                 }
             } else if let Some(body) = text.as_deref() {
-                {render_text_with_marks(body, &text_marks)}
+                {
+                    // Markdown artifacts render as a formatted document (the primary
+                    // read); other text (code/json) stays raw with painted marks.
+                    // Either way the stage's mouseup captures the real selection.
+                    if markdown {
+                        rsx! {
+                            div {
+                                class: "dr-md",
+                                style: "padding:20px 24px;font-size:14px;",
+                                dangerous_inner_html: darkrun_ui::markdown::to_html(body),
+                            }
+                        }
+                    } else {
+                        render_text_with_marks(body, &text_marks)
+                    }
+                }
             } else {
                 div {
                     style: "padding:14px;color:var(--dr-text-muted);font-size:12px;\
@@ -3078,16 +3109,16 @@ mod panel_render_tests {
                     points: vec![PinPoint::new(0.1, 0.1, ""), PinPoint::new(0.2, 0.2, "")],
                 },
             ];
-            annotate_stage(true, AnnotateTool::Pin, Some("/s.png".into()), marks, None, vec![], Callback::new(|_: String| {}), |_| {})
+            annotate_stage(true, false, AnnotateTool::Pin, Some("/s.png".into()), marks, None, vec![], Callback::new(|_: String| {}), |_| {})
         }
         fn VisualNoShot() -> Element {
-            annotate_stage(true, AnnotateTool::Pen, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
+            annotate_stage(true, false, AnnotateTool::Pen, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
         }
         fn Text() -> Element {
-            annotate_stage(false, AnnotateTool::Select, None, vec![], Some("Alpha beta.\n\nGamma delta.".into()), vec![TextMark { selected_text: "beta".into(), paragraph: 0, tool: Some(AnnotateTool::Select), stale: false }], Callback::new(|_: String| {}), |_| {})
+            annotate_stage(false, false, AnnotateTool::Select, None, vec![], Some("Alpha beta.\n\nGamma delta.".into()), vec![TextMark { selected_text: "beta".into(), paragraph: 0, tool: Some(AnnotateTool::Select), stale: false }], Callback::new(|_: String| {}), |_| {})
         }
         fn TextNoBody() -> Element {
-            annotate_stage(false, AnnotateTool::Select, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
+            annotate_stage(false, false, AnnotateTool::Select, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
         }
         let _ = render(Visual);
         assert!(render(VisualNoShot).contains("draw on the surface"));
