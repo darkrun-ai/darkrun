@@ -47,7 +47,11 @@ jobs:
         id: v
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          # A TAG push (vX.Y.Z) uses the tag as the marketing version; a BRANCH
+          # push (main, the continuous build) and dispatch fall back to the
+          # Cargo.toml version. Keying on event_name="push" broke the branch case
+          # (ref_name was "main", which Apple rejects as CFBundleShortVersionString).
+          if [ "${{ github.ref_type }}" = "tag" ]; then
             ver="${GITHUB_REF_NAME#v}"
           elif [ -n "${{ inputs.version }}" ]; then
             ver="${{ inputs.version }}"
