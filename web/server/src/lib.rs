@@ -14,7 +14,8 @@
 //!    static files with an SPA fallback to `index.html`, so a single process
 //!    hosts both the marketing site and the OAuth endpoints.
 //!
-//! The networking seam is darkrun-vcs's [`HttpTransport`]: production wires the
+//! The networking seam is darkrun-vcs's
+//! [`HttpTransport`](darkrun_vcs::HttpTransport): production wires the
 //! [`ReqwestTransport`]; tests inject a mock so the suite is fully offline.
 //!
 //! Entry points: [`serve`] (env-configured, production) and [`build_router`]
@@ -27,6 +28,7 @@ mod config;
 mod firebase_auth;
 mod firestore;
 mod gcp_auth;
+mod github_app;
 mod oauth_routes;
 mod push;
 mod ratelimit;
@@ -36,6 +38,7 @@ mod sessions;
 mod relay_broker;
 mod state;
 mod transport;
+mod workspace;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -49,7 +52,8 @@ pub use config::{ProviderCredentials, WebConfig, DEFAULT_WEB_BASE};
 pub use oauth_routes::BrokerPayload;
 pub use repos::Repo;
 pub use sessions::DiscoveredSession;
-pub use firebase_auth::{FirebaseTokenAuth, FIREBASE_CERTS_URL};
+pub use firebase_auth::{FirebaseTokenAuth, VerifiedClaims, FIREBASE_CERTS_URL};
+pub use github_app::{CommittedRun, CommittedStation, GitHubApp, GitHubIdentity, WorkspaceRepo};
 pub use firestore::FirestoreDeviceRegistry;
 pub use gcp_auth::{ServiceAccount, ServiceAccountTokenSource, DATASTORE_SCOPE, FCM_SCOPE};
 pub use relay_broker::{relay_auth_router, ClaimPayload, RelayBroker};
@@ -82,10 +86,19 @@ pub fn oauth_router(state: WebState) -> Router {
 /// Build the standalone web-app API sub-router (the `/api/...` endpoints the
 /// app.darkrun.ai dashboard calls).
 ///
-/// Two read-only endpoints, both authenticated by the access token the caller
-/// presents: `GET /api/repos` (the signed-in user's repository portfolio) and
-/// `GET /api/repos/sessions` (a single repo's darkrun runs, read from its
-/// committed `.darkrun/` tree — no live engine, no state sync).
+/// Two credential families, all read-only:
+///
+/// **Provider-OAuth-token endpoints** (the ephemeral sign-in token in the
+/// `Authorization` header): `GET /api/repos` (the signed-in user's repository
+/// portfolio) and `GET /api/repos/sessions` (a single repo's darkrun runs, read
+/// from its committed `.darkrun/` tree).
+///
+/// **Firebase-ID-token endpoints** (the DURABLE web-app session; App-backed):
+/// `GET /api/workspace` (every repo the user's darkrun GitHub App installation
+/// covers, each with its `.darkrun/` runs embedded) and `GET /api/run` (one
+/// run's full committed state). These verify the Firebase token, extract the
+/// GitHub identity, and read through the App installation — so the workspace
+/// persists across loads without re-authorizing a provider.
 ///
 /// The dashboard runs on `app.darkrun.ai` but this API is served from the website
 /// host (`darkrun.ai`), so the browser does a CORS preflight on the `GET` (the
@@ -108,6 +121,8 @@ pub fn api_router(state: WebState) -> Router {
     Router::new()
         .route("/api/repos", get(repos::list_repos))
         .route("/api/repos/sessions", get(sessions::list_sessions))
+        .route("/api/workspace", get(workspace::workspace))
+        .route("/api/run", get(workspace::run_detail))
         .layer(cors)
         .with_state(state)
 }
@@ -215,7 +230,9 @@ pub fn site_dir_from_env() -> PathBuf {
 /// Build the production [`WebState`] from the environment.
 ///
 /// Reads OAuth client credentials and the web base from env, constructs the
-/// live [`ReqwestTransport`], and a default-TTL [`Broker`].
+/// live [`ReqwestTransport`], and a default-TTL [`Broker`]. The App-backed
+/// workspace surface is attached separately by [`attach_workspace_from_env`]
+/// (it needs an async cert refresh), so it stays disabled here.
 pub fn state_from_env() -> std::io::Result<WebState> {
     let config = WebConfig::from_env();
     let transport =
@@ -246,6 +263,58 @@ where
     });
 }
 
+/// Attach the persistent-login workspace surface (`GET /api/workspace`,
+/// `GET /api/run`) to `state`, when both halves are configured:
+///
+/// - the darkrun **GitHub App** — [`GitHubApp::from_env`] (`GITHUB_APP_ID` /
+///   `GITHUB_APP_PRIVATE_KEY`); absent → the workspace endpoints answer with a
+///   clear "not configured" error.
+/// - the **Firebase verifier** — built from `DARKRUN_FIREBASE_PROJECT`, with
+///   Google's signing certs loaded up front (and refreshed hourly in the
+///   background, matching `relay_router_from_env`).
+///
+/// Returns `state` unchanged when either half is missing.
+#[cfg(not(tarpaulin_include))] // env + network cert load
+pub async fn attach_workspace_from_env(state: WebState) -> WebState {
+    let app = github_app::GitHubApp::from_env().map(Arc::new);
+    match &app {
+        Some(_) => tracing::info!("darkrun GitHub App configured (workspace endpoints enabled)"),
+        None => tracing::info!(
+            "GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY absent — workspace endpoints disabled"
+        ),
+    }
+
+    let auth = match std::env::var("DARKRUN_FIREBASE_PROJECT")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+    {
+        Some(project) => {
+            let auth = Arc::new(FirebaseTokenAuth::new(project));
+            match auth.refresh_from_google().await {
+                Ok(n) => tracing::info!(keys = n, "loaded Firebase signing certs (workspace)"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not load Firebase certs for workspace at startup")
+                }
+            }
+            let refresher = auth.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    if let Err(e) = refresher.refresh_from_google().await {
+                        tracing::warn!(error = %e, "Firebase cert refresh failed (workspace)");
+                    }
+                }
+            });
+            Some(auth)
+        }
+        None => None,
+    };
+
+    state.with_app_auth(app, auth)
+}
+
 /// Start the website host on `addr`.
 ///
 /// Resolves config, transport, and the site directory from the environment,
@@ -253,6 +322,9 @@ where
 #[cfg(not(tarpaulin_include))] // socket bind + serve loop
 pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
     let state = state_from_env()?;
+    // Attach the App-backed workspace surface (needs an async Firebase cert
+    // load); a no-op when the App / project env is unset.
+    let state = attach_workspace_from_env(state).await;
     let site_dir = site_dir_from_env();
     // Claims evict lazily, but abandoned (never-claimed) OAuth entries only go
     // away on a sweep — run one on a timer so the map can't grow without bound.
