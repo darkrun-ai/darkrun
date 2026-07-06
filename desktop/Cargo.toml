@@ -34,7 +34,8 @@ darkrun-mcp = { workspace = true }
 darkrun-core = { workspace = true }
 
 # Clone & register — the desktop clones a Git URL into ~/darkrun/<name> directly
-# (shells out to `git`) and validates local repos before registering them.
+# (in-process via gitoxide, no `git` CLI shell-out) and validates local repos
+# before registering them.
 darkrun-git = { workspace = true }
 
 # Home-directory resolution for the default clone root (~/darkrun).

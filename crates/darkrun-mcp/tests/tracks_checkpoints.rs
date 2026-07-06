@@ -1676,10 +1676,27 @@ fn reject_twice_keeps_blocked_and_refiles() {
     feedback::set_status(&store, "r", &fb.id, FeedbackStatus::Addressed).unwrap();
     let res = checkpoint_decide(&store, "r", false, Some("second".into())).expect("reject2");
     assert_eq!(station_status(&store, "r", "frame"), Status::Blocked);
-    // The fb-checkpoint id is overwritten with the latest reason.
+    // The first was SETTLED before the re-decide, so its slot is fair game —
+    // the base id is reused with the latest reason.
     let raw = store.read_feedback_raw("r").unwrap();
     assert!(raw["fb-checkpoint"].contains("second"));
     assert_eq!(res.position.track, Track::Feedback);
+}
+
+#[test]
+fn reject_twice_without_settling_preserves_the_first_pending_note() {
+    let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
+    checkpoint_decide(&store, "r", false, Some("first note".into())).expect("reject1");
+    // Re-decide WITHOUT addressing the first: the still-pending operator note
+    // must NOT be clobbered — the second reject files a NEW item alongside it.
+    checkpoint_decide(&store, "r", false, Some("second note".into())).expect("reject2");
+    let raw = store.read_feedback_raw("r").unwrap();
+    assert!(raw["fb-checkpoint"].contains("first note"), "first pending note preserved");
+    assert!(
+        raw.get("fb-checkpoint-2").is_some_and(|d| d.contains("second note")),
+        "second reject filed separately, not over the pending first"
+    );
 }
 
 #[test]

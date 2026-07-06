@@ -20,15 +20,15 @@ You don't configure gates per station. You set one global dial for the run, and 
 |---|---|---|
 | **team** | external | opens a PR your team reviews and merges |
 | **solo** | ask | asks you for local review in the desktop app |
-| **dark** | auto | advances on its own; stops only on real ambiguity |
+| **dark** | auto | advances on its own; stops only on an external/await gate |
 
-In **team**, every checkpoint is a pull request. The run waits for your team to merge. In **solo**, every checkpoint asks you locally before it advances. In **dark**, checkpoints clear automatically and the run keeps moving, stopping only when it hits something external it's waiting on or genuine ambiguity it can't resolve from the frame.
+In **team**, every checkpoint is a pull request. The run waits for your team to merge. In **solo**, every checkpoint asks you locally before it advances. In **dark**, checkpoints clear automatically and the run keeps moving, stopping only when it hits something external it's waiting on. It resolves ambiguity itself instead of stopping: it decides, records the assumption, and continues, and you can override that call later through feedback.
 
 One dial. The whole run honors it. You know going in how often it'll check in, because you picked the altitude.
 
 ## Low-risk work clears without you
 
-The reason this saves attention instead of just rationing it: a checkpoint that has nothing to decide doesn't need you. In dark mode, a station that retired its risk cleanly and produced exactly what the frame asked for advances on the auto gate and you never see it. No notification, no approval, no "looks good" you typed without reading.
+The reason this saves attention instead of just rationing it: a checkpoint that has nothing to decide doesn't need you. A station that retired its risk cleanly and produced exactly what the frame asked for advances on the auto gate and you never see it. No notification, no approval, no "looks good" you typed without reading.
 
 ```
 station finishes ─▶ checkpoint ─▶ gate
@@ -45,7 +45,7 @@ The decisions that matter stop and ask.
 - An ambiguity it can't resolve without you.
 :::
 
-Those hit the gate and wait.
+Those hit the gate and wait. That is the picture in **team** and **solo**, where a human is on the loop to answer. In **dark** there's nobody to ask, so the run doesn't stop for a judgment call: it decides, records the assumption, and keeps moving, and you can override it later through feedback. What still stops a dark run is a genuinely external or await gate, something outside the loop it can't produce on its own.
 
 So you don't pay attention evenly across the whole run. You pay it where it's load-bearing and nowhere else.
 

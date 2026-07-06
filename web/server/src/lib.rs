@@ -31,6 +31,7 @@ mod gcp_auth;
 mod github_app;
 mod oauth_routes;
 mod push;
+mod ratelimit;
 mod relay;
 mod repos;
 mod sessions;
@@ -240,6 +241,28 @@ pub fn state_from_env() -> std::io::Result<WebState> {
     Ok(WebState::new(config, Broker::new(), transport))
 }
 
+/// Spawn a background task that sweeps a broker's expired entries once a minute.
+///
+/// Both brokers evict claimed entries lazily, but abandoned (never-claimed) ones
+/// only clear on a sweep; without this a churn of unclaimed deposits grows the
+/// map without bound. `sweep` invokes the target's own `sweep_expired`.
+#[cfg(not(tarpaulin_include))] // timer loop; the sweep logic itself is unit-tested
+fn spawn_sweeper<T, F>(label: &'static str, target: T, sweep: F)
+where
+    T: Send + 'static,
+    F: Fn(&T) + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.tick().await; // the interval's first tick is immediate — skip it
+        loop {
+            tick.tick().await;
+            sweep(&target);
+            tracing::trace!(sweeper = label, "swept expired broker entries");
+        }
+    });
+}
+
 /// Attach the persistent-login workspace surface (`GET /api/workspace`,
 /// `GET /api/run`) to `state`, when both halves are configured:
 ///
@@ -303,6 +326,9 @@ pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
     // load); a no-op when the App / project env is unset.
     let state = attach_workspace_from_env(state).await;
     let site_dir = site_dir_from_env();
+    // Claims evict lazily, but abandoned (never-claimed) OAuth entries only go
+    // away on a sweep — run one on a timer so the map can't grow without bound.
+    spawn_sweeper("oauth broker", state.broker.clone(), |b| b.sweep_expired());
     let mut router = build_router(state, &site_dir);
     // Mount the remote-tunnel relay when a verifier is configured (else the
     // endpoints stay absent — safe default).
@@ -311,8 +337,11 @@ pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
         tracing::info!("relay endpoints mounted (/relay/host, /relay/client)");
     }
     // The relay-token broker carries a browser-minted Firebase token to the CLI
-    // (POST /auth/relay/deposit, GET /auth/relay/claim/:nonce).
-    router = router.merge(relay_auth_router(RelayBroker::new()));
+    // (POST /auth/relay/deposit, GET /auth/relay/claim/:nonce). Sweep its
+    // abandoned deposits on a timer too — the deposit endpoint is unauthenticated.
+    let relay_broker = RelayBroker::new();
+    spawn_sweeper("relay broker", relay_broker.clone(), |b| b.sweep_expired());
+    router = router.merge(relay_auth_router(relay_broker));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(

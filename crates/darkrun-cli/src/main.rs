@@ -12,6 +12,7 @@
 //! - `darkrun auth login`      — website-brokered OAuth login (GitHub/GitLab).
 //! - `darkrun auth status`     — show which providers are authed.
 //! - `darkrun auth logout`     — remove a stored credential.
+//! - `darkrun migrate [slug]`  — carry legacy `.darkrun/` state forward (dry-run; `--apply` to write).
 //! - `darkrun factory list`    — list the embedded factories and their stations.
 //! - `darkrun statusline`      — render the Claude Code status line (+ install/uninstall).
 //!
@@ -22,6 +23,7 @@
 
 mod auth;
 mod hook;
+mod migrate;
 mod plugin;
 mod pr;
 mod statusline;
@@ -67,6 +69,9 @@ enum Command {
         #[arg(value_name = "github|gitlab", default_value = "github")]
         provider: String,
     },
+    /// Migrate legacy `.darkrun/` run state forward to the current on-disk
+    /// schema shape. Dry-runs by default; `--apply` writes the changes.
+    Migrate(MigrateArgs),
     /// Inspect embedded factory content.
     #[command(subcommand)]
     Factory(FactoryCommand),
@@ -116,7 +121,7 @@ struct McpArgs {
     #[arg(long)]
     addr: Option<SocketAddr>,
     /// The agent harness hosting this MCP server (claude-code, cursor,
-    /// windsurf, gemini-cli, opencode, kiro). Overrides DARKRUN_HARNESS;
+    /// windsurf, gemini-cli, opencode, kiro, codex). Overrides DARKRUN_HARNESS;
     /// defaults to claude-code. Selects which tools, instructions, and prompts
     /// the server adapts to.
     #[arg(long)]
@@ -206,6 +211,22 @@ enum AuthCommand {
 enum FactoryCommand {
     /// List the embedded factories and their stations.
     List,
+}
+
+/// `darkrun migrate` — carry legacy run state forward to the current schema.
+#[derive(Debug, Args)]
+struct MigrateArgs {
+    /// The run slug to migrate (required unless `--all`).
+    slug: Option<String>,
+    /// Write the migration instead of only reporting it (default: dry-run).
+    #[arg(long)]
+    apply: bool,
+    /// Migrate every run in the store rather than a single slug.
+    #[arg(long)]
+    all: bool,
+    /// Permit `--apply` even when the working tree has uncommitted changes.
+    #[arg(long)]
+    allow_dirty: bool,
 }
 
 /// `darkrun verify` — surface-routed objective evidence.
@@ -353,6 +374,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let provider = auth::parse_provider(&provider)?;
                     auth::relay_login(provider)
                 }
+                Command::Migrate(args) => migrate::migrate_command(
+                    &repo_root,
+                    migrate::MigrateArgs {
+                        slug: args.slug,
+                        apply: args.apply,
+                        all: args.all,
+                        allow_dirty: args.allow_dirty,
+                    },
+                ),
                 Command::Factory(cmd) => factory_command(cmd),
                 Command::Statusline(_)
                 | Command::Hook { .. }

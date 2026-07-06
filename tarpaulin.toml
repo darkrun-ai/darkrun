@@ -2,6 +2,19 @@
 #
 # Run:  ./scripts/coverage.sh        (writes /tmp/cov/lcov.info + prints the %)
 #
+# ── Where the 99% floor is (and isn't) enforced ─────────────────────────────
+# The `fail-under = 99` below is enforced LOCALLY, by the full-workspace
+# `./scripts/coverage.sh` run described here. It is an ADVISORY developer gate.
+#
+# CI does NOT enforce a 99% coverage gate. The `.github/workflows/coverage.yml`
+# job measures a SMALLER subset (library crates only — cli/e2e/desktop/site/app
+# excluded, `--lib`, no `--fail-under`) and uploads it to Codecov as PURELY
+# INFORMATIONAL (codecov.yml: `informational: true`; the job sets
+# `fail_ci_if_error: false`). That subset currently reports ~77% and never blocks
+# a merge. The hard merge gate is `ci` (build + test + `-D warnings` clippy) — not
+# coverage. Do not read the 99% floor below as a CI-enforced number; it is the
+# local full-workspace posture only.
+#
 # ── What is measured ────────────────────────────────────────────────────────
 # Every crate's LOGIC: the engine (core), the orchestrator + tools (mcp), the
 # contract (api), HTTP/WS (http), git, content, prompts, vcs, verify, the CLI,

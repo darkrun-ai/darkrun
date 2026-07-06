@@ -34,11 +34,14 @@ fn provider_from_key_aliases() {
 #[test]
 fn provider_from_host() {
     assert_eq!(Provider::from_host("github.com"), Some(Provider::GitHub));
+    assert_eq!(Provider::from_host("api.github.com"), Some(Provider::GitHub));
     assert_eq!(Provider::from_host("gitlab.com"), Some(Provider::GitLab));
-    assert_eq!(
-        Provider::from_host("gitlab.example.org"),
-        Some(Provider::GitLab)
-    );
+    // Self-hosted hosts are NOT inferred — the crate's endpoints are hardcoded
+    // to the SaaS hosts, so a self-hosted GitLab (or GitHub Enterprise) must be
+    // rejected rather than routed to gitlab.com / github.com.
+    assert_eq!(Provider::from_host("gitlab.example.org"), None);
+    assert_eq!(Provider::from_host("gitlab.mycorp.com"), None);
+    assert_eq!(Provider::from_host("github.mycorp.com"), None);
     assert_eq!(Provider::from_host("example.com"), None);
 }
 
@@ -63,6 +66,53 @@ fn credential_serde_skips_none_optionals() {
     assert!(!json.contains("refresh_token"));
     assert!(!json.contains("expires_in"));
     assert!(json.contains("\"access_token\":\"t\""));
+}
+
+#[test]
+fn credential_is_refreshable_tracks_refresh_token() {
+    // A bare credential (GitHub OAuth token) carries no refresh token.
+    assert!(!Credential::new(Provider::GitHub, "gho").is_refreshable());
+
+    let gl = Credential {
+        provider: Provider::GitLab,
+        access_token: "at".into(),
+        refresh_token: Some("rt".into()),
+        expires_in: Some(7200),
+        token_type: Some("bearer".into()),
+    };
+    assert!(gl.is_refreshable());
+
+    // An empty refresh token doesn't count.
+    let empty = Credential {
+        refresh_token: Some(String::new()),
+        ..gl.clone()
+    };
+    assert!(!empty.is_refreshable());
+}
+
+#[test]
+fn credential_needs_refresh_uses_expiry_and_skew() {
+    use darkrun_vcs::REFRESH_SKEW_SECS;
+    // A GitLab token obtained at t=1000 with a 7200s lifetime expires at 8200.
+    let gl = Credential {
+        provider: Provider::GitLab,
+        access_token: "at".into(),
+        refresh_token: Some("rt".into()),
+        expires_in: Some(7200),
+        token_type: Some("bearer".into()),
+    };
+    let obtained_at = 1000;
+    let expires_at = obtained_at + 7200;
+    // Fresh: well before the skew window.
+    assert!(!gl.needs_refresh(obtained_at, obtained_at + 10));
+    // Just inside the skew window → refresh early.
+    assert!(gl.needs_refresh(obtained_at, expires_at - REFRESH_SKEW_SECS + 1));
+    // Past expiry → refresh.
+    assert!(gl.needs_refresh(obtained_at, expires_at + 100));
+
+    // A credential with no reported lifetime (GitHub) never needs refreshing.
+    let gh = Credential::new(Provider::GitHub, "gho");
+    assert!(!gh.needs_refresh(obtained_at, expires_at + 10_000));
 }
 
 #[test]

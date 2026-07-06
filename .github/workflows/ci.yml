@@ -69,9 +69,43 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # Clippy runs as a report but does NOT block merges yet: the codebase has
-      # never been linted under `-D warnings`, so cleaning it to zero is a
-      # separate follow-up. Flip `continue-on-error` off once that's done.
-      - name: Clippy (non-blocking)
-        continue-on-error: true
+      # Clippy is a BLOCKING gate: the workspace is linted under `-D warnings`,
+      # so any lint (or unused import / dead_code / unused_mut) fails the PR.
+      - name: Clippy (blocking, -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Cross-target compile gate. The `rust` job above only builds Linux, so a
+  # target-specific break (e.g. the E0282 type-inference failure that killed the
+  # v0.5.0 / v0.6.0 releases) would only surface at release time on the macOS /
+  # Windows binaries. Compile-check the SHIPPABLE surface (lib + bins) on both so
+  # those breaks fail the PR instead. Tests are intentionally excluded: some are
+  # inherently Unix-only (chmod 0o000, symlinks, PermissionsExt) and run on the
+  # Linux job; the release artifact is lib + bins, which is what must cross-build.
+  # `cargo check` (not test/build) keeps it fast; the native webview headers ship
+  # with the macOS / Windows runners, so no extra deps.
+  cross-check:
+    name: check ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Configure git identity (for fixture-touching builds)
+        shell: bash
+        run: |
+          git config --global user.email "ci@darkrun.ai"
+          git config --global user.name "darkrun ci"
+          git config --global init.defaultBranch main
+
+      - name: Check (lib + bins, the shippable surface)
+        run: cargo check --workspace --lib --bins

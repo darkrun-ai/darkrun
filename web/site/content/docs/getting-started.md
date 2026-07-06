@@ -67,8 +67,12 @@ The same engine runs headless if you'd rather drive it directly:
 
 ```sh
 npm i -g darkrun          # the native binary, no JS app
-darkrun run "add rate limiting to the public API"
+darkrun run start "add rate limiting to the public API"
+darkrun run next          # tick the manager; print the next action
 ```
 
-`run` opens a top-level Run and starts the manager loop. Most people use the
-agent path above; the CLI is there for scripts and CI.
+`run start` seeds a new Run at the factory's first station. From there you drive
+it a tick at a time: each `darkrun run next` advances the manager one step and
+prints the next concrete action to take. Keep ticking until a Checkpoint asks you
+to decide (`darkrun run decide`, or `--reject` to route rework back as drift). Most
+people use the agent path above; the CLI is there for scripts and CI.

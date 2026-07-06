@@ -2,6 +2,14 @@ name: coverage
 
 # Code-coverage tracking with cargo-tarpaulin (the codebase is already annotated
 # with `#[cfg(not(tarpaulin_include))]` on the irreducible-I/O paths) → Codecov.
+#
+# INFORMATIONAL ONLY — this job is NOT a merge gate. It measures a subset (the
+# library crates; cli/e2e/desktop/site/app excluded, `--lib`) and uploads it to
+# Codecov with `fail_ci_if_error: false`; codecov.yml marks the status
+# `informational: true`. It runs no `--fail-under`, so a low number (currently
+# ~77%) never blocks a PR. The 99% floor in tarpaulin.toml is the LOCAL
+# full-workspace posture (`./scripts/coverage.sh`), not this CI job. The hard
+# merge gate is `ci` (build + test + `-D warnings` clippy).
 
 on:
   push:

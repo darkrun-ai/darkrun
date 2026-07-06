@@ -2,7 +2,8 @@
 
 use darkrun_vcs::transport::{HttpResponse, Method};
 use darkrun_vcs::{
-    authorize_url, exchange_code, percent_encode, MockTransport, Provider, VcsError,
+    authorize_url, exchange_code, percent_encode, refresh_access_token, MockTransport, Provider,
+    VcsError,
 };
 
 #[test]
@@ -176,6 +177,77 @@ fn exchange_code_transport_error_when_no_mock_queued() {
     )
     .expect_err("no queued response");
     assert!(matches!(err, VcsError::Transport(_)));
+}
+
+#[test]
+fn refresh_access_token_gitlab_remints_and_rotates() {
+    // GitLab's refresh grant returns a fresh access token, a new lifetime, and a
+    // rotated refresh token.
+    let mock = MockTransport::new();
+    mock.expect(
+        Method::Post,
+        "https://gitlab.com/oauth/token",
+        HttpResponse::new(
+            200,
+            r#"{"access_token":"glpat2","refresh_token":"r2","expires_in":7200,"token_type":"bearer"}"#,
+        ),
+    );
+
+    let cred = refresh_access_token(&mock, Provider::GitLab, "id", "secret", "r1")
+        .expect("refresh should succeed");
+    assert_eq!(cred.access_token, "glpat2");
+    assert_eq!(cred.refresh_token.as_deref(), Some("r2"));
+    assert_eq!(cred.expires_in, Some(7200));
+
+    // The request carries the refresh-token grant.
+    let req = mock.single_request();
+    let body: serde_json::Value =
+        serde_json::from_slice(req.body.as_ref().expect("body")).expect("json body");
+    assert_eq!(body["grant_type"], "refresh_token");
+    assert_eq!(body["refresh_token"], "r1");
+    assert_eq!(body["client_secret"], "secret");
+}
+
+#[test]
+fn refresh_access_token_carries_forward_refresh_token_when_omitted() {
+    // If the provider's response omits a rotated refresh token, the incoming one
+    // is preserved so the credential stays refreshable.
+    let mock = MockTransport::new();
+    mock.expect(
+        Method::Post,
+        "https://gitlab.com/oauth/token",
+        HttpResponse::new(
+            200,
+            r#"{"access_token":"glpat2","expires_in":7200,"token_type":"bearer"}"#,
+        ),
+    );
+
+    let cred = refresh_access_token(&mock, Provider::GitLab, "id", "secret", "r-old")
+        .expect("refresh should succeed");
+    assert_eq!(cred.access_token, "glpat2");
+    assert_eq!(cred.refresh_token.as_deref(), Some("r-old"));
+}
+
+#[test]
+fn refresh_access_token_error_body_is_surfaced() {
+    let mock = MockTransport::new();
+    mock.expect(
+        Method::Post,
+        "https://gitlab.com/oauth/token",
+        HttpResponse::new(
+            400,
+            r#"{"error":"invalid_grant","error_description":"refresh token is expired"}"#,
+        ),
+    );
+    let err = refresh_access_token(&mock, Provider::GitLab, "id", "secret", "stale")
+        .expect_err("expired refresh token should surface an error");
+    match err {
+        VcsError::OauthExchange { error, description } => {
+            assert_eq!(error, "invalid_grant");
+            assert_eq!(description.as_deref(), Some("refresh token is expired"));
+        }
+        other => panic!("expected OauthExchange, got {other:?}"),
+    }
 }
 
 #[test]

@@ -246,6 +246,20 @@ impl Mode {
             _ => Mode::Solo,
         }
     }
+
+    /// STRICT parse: `Some` only for a RECOGNIZED mode token (the current
+    /// `team`/`solo`/`dark` plus the legacy aliases [`from_label`] tolerates),
+    /// `None` for anything else. Unlike [`from_label`], this does NOT silently
+    /// coerce a typo to `solo` — the run-start path uses it to reject an invalid
+    /// `--mode` instead of quietly running the wrong review posture.
+    pub fn parse_strict(s: &str) -> Option<Mode> {
+        match s.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+            "team" | "discrete" | "discrete_hybrid" => Some(Mode::Team),
+            "solo" | "continuous" | "collaborative" => Some(Mode::Solo),
+            "dark" | "auto" | "autopilot" => Some(Mode::Dark),
+            _ => None,
+        }
+    }
 }
 
 impl std::str::FromStr for Mode {

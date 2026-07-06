@@ -11,14 +11,14 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use darkrun_api::session::{ReviewSessionPayload, SessionPayload};
+use darkrun_api::session::SessionPayload;
 use darkrun_api::tunnel::{ClientCommand, ClientFrame, ServerFrame};
 use dioxus::prelude::*;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{select, FutureExt, SinkExt, StreamExt};
 use gloo_net::websocket::{futures::WebSocket, Message};
 
-/// The live connection state the UI renders. (Not `PartialEq` — the review
+/// The live connection state the UI renders. (Not `PartialEq` — the session
 /// payload isn't; the UI re-renders on every set, which is what we want for a
 /// live feed.)
 #[derive(Clone)]
@@ -27,10 +27,26 @@ pub enum RemoteState {
     Unconfigured,
     /// Opening the socket / awaiting the first snapshot.
     Connecting,
-    /// A live review payload is in hand.
-    Live(Box<ReviewSessionPayload>),
+    /// A live session payload is in hand — a checkpoint Review, or an interactive
+    /// Question / Direction / Picker the engine mirrored onto the run feed.
+    Live(Box<SessionPayload>),
     /// The socket dropped; retrying.
     Reconnecting,
+}
+
+/// The outcome of the operator's most recent remote command (approve a gate,
+/// answer a question). Surfaced in the UI so a remote action is never a silent
+/// no-op: the host's ack — or its rejection — is shown.
+#[derive(Clone, PartialEq)]
+pub enum CommandOutcome {
+    /// No command has been issued yet.
+    Idle,
+    /// A command was dispatched; awaiting the host's ack.
+    Pending,
+    /// The host applied the command.
+    Applied,
+    /// The host rejected the command, or it couldn't be delivered.
+    Failed(String),
 }
 
 /// Where to connect: the relay client URL for a session, assembled from the page
@@ -83,14 +99,17 @@ fn next_command_id() -> String {
     format!("c{}", N.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Run the connection loop forever: push live review payloads into `state`, and
+/// Run the connection loop forever: push live session payloads into `state`,
 /// forward any [`ClientCommand`] arriving on `cmd_rx` to the host as a guarded,
-/// acked `Cmd` frame. Reconnects with a fixed backoff after any drop. Commands
-/// sent while disconnected are dropped (the operator retries from the live UI).
+/// acked `Cmd` frame, and reflect each command's ack (or rejection) into
+/// `outcome` so the UI can surface it. Reconnects with a fixed backoff after any
+/// drop. Commands sent while disconnected are dropped (the operator retries from
+/// the live UI).
 pub async fn run_connection(
     url: String,
     mut state: Signal<RemoteState>,
     mut cmd_rx: UnboundedReceiver<ClientCommand>,
+    mut outcome: Signal<CommandOutcome>,
 ) {
     loop {
         state.set(RemoteState::Connecting);
@@ -100,13 +119,23 @@ pub async fn run_connection(
             if let Ok(hello) = serde_json::to_string(&ClientFrame::Hello { last_seq: None }) {
                 let _ = tx.send(Message::Text(hello)).await;
             }
-            // Pump inbound review frames AND outbound commands over the one socket.
+            // Pump inbound session frames AND outbound commands over the one socket.
             loop {
                 select! {
                     msg = rx.next().fuse() => match msg {
                         Some(Ok(Message::Text(t))) => {
-                            if let Some(payload) = review_payload(&t) {
+                            if let Some(payload) = session_payload(&t) {
                                 state.set(RemoteState::Live(Box::new(payload)));
+                            } else if let Some((ok, error)) = command_ack(&t) {
+                                // Surface the host's verdict on the last command
+                                // instead of dropping it silently.
+                                outcome.set(if ok {
+                                    CommandOutcome::Applied
+                                } else {
+                                    CommandOutcome::Failed(
+                                        error.unwrap_or_else(|| "the host rejected the command".to_string()),
+                                    )
+                                });
                             }
                         }
                         Some(Ok(_)) => continue,
@@ -118,6 +147,9 @@ pub async fn run_connection(
                             let frame = ClientFrame::Cmd { id: next_command_id(), command };
                             if let Ok(j) = serde_json::to_string(&frame) {
                                 if tx.send(Message::Text(j)).await.is_err() {
+                                    outcome.set(CommandOutcome::Failed(
+                                        "lost the connection before the command was sent".to_string(),
+                                    ));
                                     break;
                                 }
                             }
@@ -131,15 +163,31 @@ pub async fn run_connection(
     }
 }
 
-/// Decode a relay text frame to a review payload, if it carries one.
-fn review_payload(text: &str) -> Option<ReviewSessionPayload> {
+/// Decode a relay text frame to the session payload it carries, keeping only the
+/// surfaces the web app renders: the checkpoint `Review` and the interactive
+/// `Question` / `Direction` / `Picker` prompts the engine mirrors onto the run
+/// feed. Other variants (view/visual_review/proof) return `None`, so the UI
+/// keeps the last state it knew how to render.
+fn session_payload(text: &str) -> Option<SessionPayload> {
     let frame = serde_json::from_str::<ServerFrame>(text).ok()?;
     let payload = match frame {
         ServerFrame::Snapshot { payload, .. } | ServerFrame::Update { payload, .. } => payload,
         _ => return None,
     };
-    match serde_json::from_value::<SessionPayload>(payload).ok()? {
-        SessionPayload::Review(p) => Some(p),
+    let session = serde_json::from_value::<SessionPayload>(payload).ok()?;
+    match session {
+        SessionPayload::Review(_)
+        | SessionPayload::Question(_)
+        | SessionPayload::Direction(_)
+        | SessionPayload::Picker(_) => Some(session),
+        _ => None,
+    }
+}
+
+/// Decode a relay text frame to a command ack `(ok, error)`, if it is one.
+fn command_ack(text: &str) -> Option<(bool, Option<String>)> {
+    match serde_json::from_str::<ServerFrame>(text).ok()? {
+        ServerFrame::Ack { ok, error, .. } => Some((ok, error)),
         _ => None,
     }
 }

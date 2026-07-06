@@ -2,7 +2,8 @@
 
 use darkrun_vcs::rest::{
     create_change_request, github_create_pull_request, github_get_repo, github_mark_ready,
-    gitlab_create_merge_request, gitlab_mark_ready, gitlab_resolve_project,
+    github_review_notes, gitlab_create_merge_request, gitlab_mark_ready, gitlab_notes,
+    gitlab_resolve_project,
 };
 use darkrun_vcs::transport::{HttpResponse, Method};
 use darkrun_vcs::{parse_remote_url, Credential, MockTransport, Provider, RepoCoords, VcsError};
@@ -297,4 +298,94 @@ fn gitlab_mark_ready_noops_when_already_ready() {
     );
     gitlab_mark_ready(&mock, &gl_cred(), 77, 9).unwrap();
     assert_eq!(mock.requests().len(), 1, "no PUT when the title is un-prefixed");
+}
+
+#[test]
+fn github_review_notes_follow_pagination_and_flag_changes_requested() {
+    let coords = parse_remote_url("https://github.com/o/r.git").unwrap();
+    let mock = MockTransport::new();
+
+    // A FULL first page of comments (exactly PAGE_SIZE=100) forces a second GET;
+    // the note that only lives on page 2 must not be dropped (the bug).
+    let page1: Vec<serde_json::Value> = (1..=100)
+        .map(|i| serde_json::json!({"id": i, "user": {"login": "bot"}, "body": format!("c{i}")}))
+        .collect();
+    mock.expect(
+        Method::Get,
+        "https://api.github.com/repos/o/r/issues/12/comments?per_page=100&page=1",
+        HttpResponse::new(200, serde_json::Value::Array(page1).to_string()),
+    );
+    mock.expect(
+        Method::Get,
+        "https://api.github.com/repos/o/r/issues/12/comments?per_page=100&page=2",
+        HttpResponse::new(
+            200,
+            r#"[{"id":200,"user":{"login":"carol"},"body":"second-page comment"}]"#,
+        ),
+    );
+
+    // Reviews fit on one (short) page: a change request, an actionable comment,
+    // and a bodyless APPROVED (dropped).
+    mock.expect(
+        Method::Get,
+        "https://api.github.com/repos/o/r/pulls/12/reviews?per_page=100&page=1",
+        HttpResponse::new(
+            200,
+            r#"[
+                {"id":900,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"fix the metric"},
+                {"id":901,"user":{"login":"dave"},"state":"COMMENTED","body":"looks close"},
+                {"id":902,"user":{"login":"erin"},"state":"APPROVED","body":""}
+            ]"#,
+        ),
+    );
+
+    let notes = github_review_notes(&mock, &gh_cred(), &coords, 12).unwrap();
+
+    // The page-2 comment is present → pagination followed.
+    let page2 = notes.iter().find(|n| n.id == "c200").expect("page-2 comment");
+    assert_eq!(page2.author, "carol");
+    assert!(!page2.change_request);
+    // 100 first-page comments + 1 second-page comment.
+    assert_eq!(notes.iter().filter(|n| n.id.starts_with('c')).count(), 101);
+
+    let cr = notes.iter().find(|n| n.id == "r900").expect("changes-requested review");
+    assert!(cr.change_request);
+    let plain = notes.iter().find(|n| n.id == "r901").expect("commented review");
+    assert!(!plain.change_request);
+    // The bodyless APPROVED review is dropped.
+    assert!(notes.iter().all(|n| n.id != "r902"));
+}
+
+#[test]
+fn gitlab_notes_map_requested_changes_system_note_to_blocker() {
+    let mock = MockTransport::new();
+    mock.expect(
+        Method::Get,
+        "https://gitlab.com/api/v4/projects/77/merge_requests/9/notes?per_page=100&page=1",
+        HttpResponse::new(
+            200,
+            r#"[
+                {"id":1,"system":false,"author":{"username":"alice"},"body":"please tighten this up"},
+                {"id":2,"system":true,"author":{"username":"bob"},"body":"assigned to @bob"},
+                {"id":3,"system":true,"author":{"username":"carol"},"body":"requested changes"},
+                {"id":4,"system":true,"author":{"username":"dave"},"body":"approved this merge request"}
+            ]"#,
+        ),
+    );
+
+    let notes = gitlab_notes(&mock, &gl_cred(), 77, 9).unwrap();
+
+    // The human comment is a plain (non-blocking) note.
+    let human = notes.iter().find(|n| n.id == "1").expect("human note");
+    assert!(!human.change_request);
+    assert_eq!(human.author, "alice");
+
+    // The "requested changes" system note becomes a change request (Blocker).
+    let cr = notes.iter().find(|n| n.id == "3").expect("changes-requested note");
+    assert!(cr.change_request);
+    assert_eq!(cr.author, "carol");
+
+    // Benign system notes (assignment, approval) are dropped.
+    assert!(notes.iter().all(|n| n.id != "2" && n.id != "4"));
+    assert_eq!(notes.len(), 2);
 }

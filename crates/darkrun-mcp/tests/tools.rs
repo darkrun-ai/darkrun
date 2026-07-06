@@ -3280,7 +3280,7 @@ fn run_start_mode_right_sized_persists_in_show() {
 }
 
 #[test]
-fn run_start_unknown_mode_normalizes_to_solo() {
+fn run_start_unknown_mode_is_rejected() {
     let (_d, server) = server();
     let res = server
         .darkrun_run_new(Parameters(RunStartInput {
@@ -3290,8 +3290,10 @@ fn run_start_unknown_mode_normalizes_to_solo() {
             mode: "experimental-xyz".into(),
             size: "full".into(),        }))
         .unwrap();
-    // An unrecognized mode label resolves to the in-the-loop default.
-    assert_eq!(body(&res)["frontmatter"]["mode"], "solo");
+    // An unrecognized mode is REJECTED rather than silently coerced to solo —
+    // a typo must not quietly run the wrong review posture.
+    assert!(is_err(&res), "invalid mode bounces: {res:?}");
+    assert!(err_message(&res).contains("unknown run mode"), "{}", err_message(&res));
 }
 
 #[test]

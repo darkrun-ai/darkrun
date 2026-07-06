@@ -13,7 +13,10 @@ mod register;
 mod remote;
 mod workspace;
 
-use darkrun_api::session::ReviewSessionPayload;
+use darkrun_api::session::{
+    DirectionSessionPayload, PickerSessionPayload, QuestionSessionPayload, ReviewSessionPayload,
+    SessionPayload,
+};
 use darkrun_ui::prelude::*;
 use darkrun_ui::tokens;
 
@@ -22,7 +25,7 @@ use darkrun_api::tunnel::ClientCommand;
 use futures::channel::mpsc::UnboundedReceiver;
 
 use login::{LoginPage, StandaloneLogin};
-use remote::{run_connection, target_from_url, RemoteState};
+use remote::{run_connection, target_from_url, CommandOutcome, RemoteState};
 
 /// Whether the current page path is the login route.
 fn is_login_path() -> bool {
@@ -80,13 +83,16 @@ pub fn App() -> Element {
     }
 
     let state = use_signal(|| RemoteState::Unconfigured);
+    // The outcome of the operator's most recent command, so an approve/answer
+    // isn't a silent no-op: the connection reflects the host's ack here.
+    let cmd_outcome = use_signal(|| CommandOutcome::Idle);
 
     // The connection runs as a coroutine so its handle doubles as the command
-    // channel: the UI sends a `ClientCommand` (approve a gate, file feedback) and
-    // the connection forwards it to the host over the tunnel.
+    // channel: the UI sends a `ClientCommand` (approve a gate, answer a question)
+    // and the connection forwards it to the host over the tunnel.
     let commands = use_coroutine(move |cmd_rx: UnboundedReceiver<ClientCommand>| async move {
         if let Some(target) = target_from_url() {
-            run_connection(target.url, state, cmd_rx).await;
+            run_connection(target.url, state, cmd_rx, cmd_outcome).await;
         }
     });
 
@@ -118,7 +124,7 @@ pub fn App() -> Element {
                     },
                     RemoteState::Connecting => rsx! { Status { text: "Connecting to your run\u{2026}" } },
                     RemoteState::Reconnecting => rsx! { Status { text: "Reconnecting\u{2026}" } },
-                    RemoteState::Live(payload) => session_view(&payload, commands),
+                    RemoteState::Live(payload) => live_view(&payload, commands, cmd_outcome),
                 }
             }
         }
@@ -297,13 +303,40 @@ fn ReviewLanding(id: String) -> Element {
     }
 }
 
+/// Render whatever live session the run is parked on — the checkpoint `Review`,
+/// or an interactive `Question` / `Direction` / `Picker` the engine mirrored onto
+/// the run feed (so a dark-mode run parked on a question is actionable, not
+/// stale). A plain function (not a `#[component]`) because the payload isn't
+/// `PartialEq` — it's re-rendered on every live update.
+fn live_view(
+    payload: &SessionPayload,
+    commands: Coroutine<ClientCommand>,
+    cmd_outcome: Signal<CommandOutcome>,
+) -> Element {
+    match payload {
+        SessionPayload::Review(p) => session_view(p, commands, cmd_outcome),
+        SessionPayload::Question(p) => question_view(p, commands, cmd_outcome),
+        SessionPayload::Direction(p) => direction_view(p, commands, cmd_outcome),
+        SessionPayload::Picker(p) => picker_view(p, commands, cmd_outcome),
+        // `remote::session_payload` never stores the other variants; nothing to
+        // render here.
+        _ => rsx! {},
+    }
+}
+
 /// The live review surface for one run: identity, the phase strip, the stations,
 /// the station narrative, and — when a gate is open — an Approve action that
-/// pushes a command back to the host over the tunnel. A plain function (not a
-/// `#[component]`) because the payload isn't `PartialEq` — it's re-rendered on
-/// every live update. `commands` forwards operator actions to the connection.
-fn session_view(payload: &ReviewSessionPayload, commands: Coroutine<ClientCommand>) -> Element {
-    let run = payload.run_slug.clone().unwrap_or_else(|| "run".to_string());
+/// pushes a command back to the host over the tunnel. `commands` forwards
+/// operator actions to the connection; `cmd_outcome` surfaces the host's ack.
+fn session_view(
+    payload: &ReviewSessionPayload,
+    commands: Coroutine<ClientCommand>,
+    cmd_outcome: Signal<CommandOutcome>,
+) -> Element {
+    // A real slug drives the Advance command. A missing/empty slug must NOT send
+    // `Advance { run: "run" }` for a literal run named "run" — guard the button.
+    let run_slug = payload.run_slug.clone().filter(|s| !s.is_empty());
+    let run_display = run_slug.clone().unwrap_or_else(|| "run".to_string());
     let phase = active_phase(payload);
 
     rsx! {
@@ -315,7 +348,7 @@ fn session_view(payload: &ReviewSessionPayload, commands: Coroutine<ClientComman
                         "font-family:{};font-size:22px;color:{};margin:0 0 10px;",
                         tokens::FONT_SANS, tokens::TEXT,
                     ),
-                    "{run}"
+                    "{run_display}"
                 }
                 StationPipeline { dots: strip_for(phase), labels: true }
             }
@@ -324,7 +357,7 @@ fn session_view(payload: &ReviewSessionPayload, commands: Coroutine<ClientComman
             // advances the run past it (pushed to the host over the tunnel).
             if let Some(gate) = payload.gate_type {
                 {
-                    let run = run.clone();
+                    let run_slug = run_slug.clone();
                     rsx! {
                         div {
                             style: format!(
@@ -339,16 +372,34 @@ fn session_view(payload: &ReviewSessionPayload, commands: Coroutine<ClientComman
                                 ),
                                 { format!("A {gate:?} checkpoint is waiting for your decision.") }
                             }
-                            button {
-                                style: format!(
-                                    "padding:8px 18px;border:none;border-radius:6px;cursor:pointer;\
-                                     background:{};color:{};font-family:{};font-size:14px;font-weight:600;",
-                                    tokens::ACCENT, tokens::ON_ACCENT, tokens::FONT_SANS,
-                                ),
-                                onclick: move |_| commands.send(ClientCommand::Advance { run: run.clone() }),
-                                "Approve"
+                            match run_slug {
+                                Some(run) => rsx! {
+                                    button {
+                                        style: format!(
+                                            "padding:8px 18px;border:none;border-radius:6px;cursor:pointer;\
+                                             background:{};color:{};font-family:{};font-size:14px;font-weight:600;",
+                                            tokens::ACCENT, tokens::ON_ACCENT, tokens::FONT_SANS,
+                                        ),
+                                        onclick: move |_| {
+                                            let mut cmd_outcome = cmd_outcome;
+                                            cmd_outcome.set(CommandOutcome::Pending);
+                                            commands.send(ClientCommand::Advance { run: run.clone() });
+                                        },
+                                        "Approve"
+                                    }
+                                },
+                                None => rsx! {
+                                    span {
+                                        style: format!(
+                                            "font-family:{};font-size:13px;color:{};",
+                                            tokens::FONT_SANS, tokens::STATUS_WARN,
+                                        ),
+                                        "This run's id didn't come through — approve it from the desktop or CLI."
+                                    }
+                                },
                             }
                         }
+                        { command_outcome_note(cmd_outcome) }
                     }
                 }
             }
@@ -421,6 +472,307 @@ fn session_view(payload: &ReviewSessionPayload, commands: Coroutine<ClientComman
                     None => rsx! {},
                 }
             }
+        }
+    }
+}
+
+/// A visual Question the agent posed mid-run: the prompt plus its options. The
+/// operator picks one, which sends the [`ClientCommand::Answer`] the engine
+/// resolves the session with. (Single-pick per click covers the common case; the
+/// answer shape — `{ "selected": [id] }` — matches the question answer endpoint
+/// the tunnel routes to.)
+fn question_view(
+    payload: &QuestionSessionPayload,
+    commands: Coroutine<ClientCommand>,
+    cmd_outcome: Signal<CommandOutcome>,
+) -> Element {
+    let session = payload.session_id.clone();
+    let answered = payload.answer.is_some();
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:16px;",
+            InteractiveHeader {
+                kind: "question".to_string(),
+                run: payload.run_slug.clone(),
+                title: payload.title.clone(),
+                prompt: payload.prompt.clone(),
+                context: payload.context.clone(),
+            }
+            if !payload.image_urls.is_empty() {
+                div { style: "display:flex;flex-wrap:wrap;gap:8px;",
+                    for url in payload.image_urls.iter() {
+                        img {
+                            src: "{url}",
+                            style: format!("max-width:240px;border-radius:8px;border:1px solid {};", tokens::BORDER),
+                        }
+                    }
+                }
+            }
+            div { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;",
+                for opt in payload.options.iter() {
+                    {
+                        let session = session.clone();
+                        let id = opt.id.clone();
+                        rsx! {
+                            OptionCard {
+                                label: opt.label.clone(),
+                                description: opt.description.clone(),
+                                image_url: opt.image_url.clone(),
+                                onpick: move |_| {
+                                    let mut cmd_outcome = cmd_outcome;
+                                    cmd_outcome.set(CommandOutcome::Pending);
+                                    commands.send(ClientCommand::Answer {
+                                        session: session.clone(),
+                                        answer: serde_json::json!({ "selected": [id.clone()] }),
+                                    });
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            if payload.multi_select {
+                Hint { text: "This question takes more than one answer; pick the best fit — multi-select from the web is on the way.".to_string() }
+            }
+            if answered {
+                Hint { text: "An answer is already on record; picking again replaces it.".to_string() }
+            }
+            { command_outcome_note(cmd_outcome) }
+        }
+    }
+}
+
+/// A design Direction the agent asked for: the prompt plus image-backed
+/// archetype cards. Picking one sends [`ClientCommand::Answer`] with
+/// `{ "archetype": id }`. (Host routing of the Answer command beyond the
+/// question endpoint is a later, server-side wave.)
+fn direction_view(
+    payload: &DirectionSessionPayload,
+    commands: Coroutine<ClientCommand>,
+    cmd_outcome: Signal<CommandOutcome>,
+) -> Element {
+    let session = payload.session_id.clone();
+    let chosen = payload.chosen_archetype.is_some();
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:16px;",
+            InteractiveHeader {
+                kind: "direction".to_string(),
+                run: payload.run_slug.clone(),
+                title: payload.title.clone(),
+                prompt: payload.prompt.clone(),
+                context: payload.context.clone(),
+            }
+            div { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;",
+                for arch in payload.archetypes.iter() {
+                    {
+                        let session = session.clone();
+                        let id = arch.id.clone();
+                        rsx! {
+                            OptionCard {
+                                label: arch.label.clone(),
+                                description: Some(arch.description.clone()),
+                                image_url: Some(arch.image_url.clone()),
+                                onpick: move |_| {
+                                    let mut cmd_outcome = cmd_outcome;
+                                    cmd_outcome.set(CommandOutcome::Pending);
+                                    commands.send(ClientCommand::Answer {
+                                        session: session.clone(),
+                                        answer: serde_json::json!({ "archetype": id.clone() }),
+                                    });
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            if chosen {
+                Hint { text: "A direction is already chosen; picking again replaces it.".to_string() }
+            }
+            { command_outcome_note(cmd_outcome) }
+        }
+    }
+}
+
+/// A blocking Picker the agent raised (factory / mode / size / …): the prompt
+/// plus its options. Picking one sends [`ClientCommand::Answer`] with
+/// `{ "id": id }`. (As with Direction, host routing of the Answer command beyond
+/// the question endpoint is a later, server-side wave.)
+fn picker_view(
+    payload: &PickerSessionPayload,
+    commands: Coroutine<ClientCommand>,
+    cmd_outcome: Signal<CommandOutcome>,
+) -> Element {
+    let session = payload.session_id.clone();
+    let selected = payload.selection.is_some();
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:16px;",
+            InteractiveHeader {
+                kind: "picker".to_string(),
+                run: payload.run_slug.clone(),
+                title: Some(payload.title.clone()),
+                prompt: payload.prompt.clone(),
+                context: None,
+            }
+            div { style: "display:flex;flex-direction:column;gap:8px;",
+                for opt in payload.options.iter() {
+                    {
+                        let session = session.clone();
+                        let id = opt.id.clone();
+                        rsx! {
+                            OptionCard {
+                                label: opt.label.clone(),
+                                description: opt.description.clone(),
+                                image_url: None,
+                                onpick: move |_| {
+                                    let mut cmd_outcome = cmd_outcome;
+                                    cmd_outcome.set(CommandOutcome::Pending);
+                                    commands.send(ClientCommand::Answer {
+                                        session: session.clone(),
+                                        answer: serde_json::json!({ "id": id.clone() }),
+                                    });
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            if selected {
+                Hint { text: "A choice is already on record; picking again replaces it.".to_string() }
+            }
+            { command_outcome_note(cmd_outcome) }
+        }
+    }
+}
+
+/// The prompt header shared by the interactive views: a kind tag + optional run
+/// slug, an optional title, the prompt, and an optional context preamble.
+#[component]
+fn InteractiveHeader(
+    kind: String,
+    run: Option<String>,
+    title: Option<String>,
+    prompt: String,
+    context: Option<String>,
+) -> Element {
+    let title = title.filter(|t| !t.is_empty());
+    let context = context.filter(|c| !c.is_empty());
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:8px;",
+            div { style: "display:flex;align-items:center;gap:10px;",
+                span {
+                    style: format!(
+                        "font-family:{};font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:{};",
+                        tokens::FONT_MONO, tokens::TEXT_FAINT,
+                    ),
+                    "{kind}"
+                }
+                if let Some(run) = run {
+                    span {
+                        style: format!("font-family:{};font-size:12px;color:{};", tokens::FONT_MONO, tokens::TEXT_MUTED),
+                        "{run}"
+                    }
+                }
+            }
+            if let Some(title) = title {
+                h1 {
+                    style: format!("font-family:{};font-size:20px;color:{};margin:0;", tokens::FONT_SANS, tokens::TEXT),
+                    "{title}"
+                }
+            }
+            if !prompt.is_empty() {
+                p {
+                    style: format!("font-family:{};font-size:15px;color:{};margin:0;line-height:1.5;", tokens::FONT_SANS, tokens::TEXT),
+                    "{prompt}"
+                }
+            }
+            if let Some(context) = context {
+                p {
+                    style: format!(
+                        "font-family:{};font-size:13px;color:{};margin:0;white-space:pre-wrap;line-height:1.5;",
+                        tokens::FONT_SANS, tokens::TEXT_MUTED,
+                    ),
+                    "{context}"
+                }
+            }
+        }
+    }
+}
+
+/// One selectable option/archetype card: an optional preview image, a label, and
+/// an optional description. `onpick` fires the answer command.
+#[component]
+fn OptionCard(
+    label: String,
+    description: Option<String>,
+    image_url: Option<String>,
+    onpick: EventHandler<MouseEvent>,
+) -> Element {
+    let description = description.filter(|d| !d.is_empty());
+    rsx! {
+        button {
+            style: format!(
+                "display:flex;flex-direction:column;gap:8px;text-align:left;cursor:pointer;\
+                 padding:12px 14px;border:1px solid {};border-radius:10px;background:{};",
+                tokens::BORDER, tokens::SURFACE_RAISED,
+            ),
+            onclick: move |e| onpick.call(e),
+            if let Some(url) = image_url {
+                img {
+                    src: "{url}",
+                    style: format!(
+                        "width:100%;max-height:200px;object-fit:cover;border-radius:6px;border:1px solid {};",
+                        tokens::BORDER,
+                    ),
+                }
+            }
+            span {
+                style: format!("font-family:{};font-size:14px;font-weight:600;color:{};", tokens::FONT_SANS, tokens::TEXT),
+                "{label}"
+            }
+            if let Some(description) = description {
+                span {
+                    style: format!("font-family:{};font-size:13px;color:{};line-height:1.5;", tokens::FONT_SANS, tokens::TEXT_MUTED),
+                    "{description}"
+                }
+            }
+        }
+    }
+}
+
+/// A small muted hint line.
+#[component]
+fn Hint(text: String) -> Element {
+    rsx! {
+        p {
+            style: format!("font-family:{};font-size:12px;color:{};margin:0;", tokens::FONT_SANS, tokens::TEXT_FAINT),
+            "{text}"
+        }
+    }
+}
+
+/// Surface the most recent command's outcome (sending / applied / failed) so a
+/// remote action isn't a silent no-op. Nothing renders until a command is issued.
+fn command_outcome_note(cmd_outcome: Signal<CommandOutcome>) -> Element {
+    match cmd_outcome() {
+        CommandOutcome::Idle => rsx! {},
+        CommandOutcome::Pending => rsx! {
+            OutcomeNote { text: "Sending your response\u{2026}".to_string(), color: tokens::TEXT_MUTED.to_string() }
+        },
+        CommandOutcome::Applied => rsx! {
+            OutcomeNote { text: "Done — the run has your response.".to_string(), color: tokens::STATUS_OK.to_string() }
+        },
+        CommandOutcome::Failed(msg) => rsx! {
+            OutcomeNote { text: format!("That didn't go through: {msg}"), color: tokens::STATUS_DANGER.to_string() }
+        },
+    }
+}
+
+/// A single-line command-outcome note in `color`.
+#[component]
+fn OutcomeNote(text: String, color: String) -> Element {
+    rsx! {
+        p {
+            style: format!("font-family:{};font-size:13px;color:{};margin:0;", tokens::FONT_SANS, color),
+            "{text}"
         }
     }
 }

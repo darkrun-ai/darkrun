@@ -23,7 +23,7 @@ use darkrun_api::annotation::{
 };
 
 use crate::error::{CoreError, Result};
-use crate::state::{io, StateStore};
+use crate::state::{io, write_atomic, StateStore};
 use crate::witness::hash_bytes;
 
 impl StateStore {
@@ -44,7 +44,7 @@ impl StateStore {
         io(&dir, fs::create_dir_all(&dir))?;
         let path = self.annotation_path(run, &annotation.id);
         let json = serde_json::to_string_pretty(annotation)?;
-        io(&path, fs::write(&path, json))
+        write_atomic(&path, json)
     }
 
     /// Read one annotation by id, or `None` when absent.
