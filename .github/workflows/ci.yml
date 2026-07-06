@@ -77,9 +77,12 @@ jobs:
   # Cross-target compile gate. The `rust` job above only builds Linux, so a
   # target-specific break (e.g. the E0282 type-inference failure that killed the
   # v0.5.0 / v0.6.0 releases) would only surface at release time on the macOS /
-  # Windows binaries. Compile-check the whole workspace on both so those breaks
-  # fail the PR instead. `cargo check` (not test/build) keeps it fast; the native
-  # webview headers ship with the macOS / Windows runners, so no extra deps.
+  # Windows binaries. Compile-check the SHIPPABLE surface (lib + bins) on both so
+  # those breaks fail the PR instead. Tests are intentionally excluded: some are
+  # inherently Unix-only (chmod 0o000, symlinks, PermissionsExt) and run on the
+  # Linux job; the release artifact is lib + bins, which is what must cross-build.
+  # `cargo check` (not test/build) keeps it fast; the native webview headers ship
+  # with the macOS / Windows runners, so no extra deps.
   cross-check:
     name: check ${{ matrix.os }}
     strategy:
@@ -104,5 +107,5 @@ jobs:
           git config --global user.name "darkrun ci"
           git config --global init.defaultBranch main
 
-      - name: Check (all targets)
-        run: cargo check --workspace --all-targets
+      - name: Check (lib + bins, the shippable surface)
+        run: cargo check --workspace --lib --bins

@@ -88,21 +88,40 @@ jobs:
         with:
           tool: cargo-audit
       # GATING: cargo-audit fails the PR on any advisory EXCEPT the documented
-      # transitive ones darkrun can't fix directly (they come in through the
-      # dioxus/webview graph, not darkrun's own deps). Each `--ignore` is a
-      # deliberate, reviewed exception; anything NEW (a fixable vuln in a crate we
-      # control, or a fresh advisory) fails the job. This replaces the old
-      # `|| true` report-only posture so audit is a real gate again.
+      # transitive ones darkrun can't fix directly. A FIXABLE advisory is fixed by
+      # upgrading (e.g. quinn-proto was bumped 0.11.14 -> 0.11.15 for
+      # RUSTSEC-2026-0185), never ignored. Each `--ignore` below is a deliberate,
+      # reviewed exception with no upgrade path; anything NEW fails the job.
       #
-      # Seeded ignores (transitive, no direct fix):
-      #   RUSTSEC-2024-0429  glib <0.20 VariantStrIter unsoundness (via webview)
-      #   RUSTSEC-2024-0370  proc-macro-error 1.x unmaintained (via webview macros)
-      # NOTE: this list must be reconciled against a live `cargo audit` run — the
-      # fix environment had no advisory DB, so additional transitive advisories in
-      # the current lockfile may need appending on the first CI run (see the PR's
-      # needs-owner note). Do NOT broaden it to silence darkrun's own crates.
+      # Ignored (transitive, no fix available), reconciled against a live audit:
+      #   RUSTSEC-2023-0071  rsa Marvin timing sidechannel — no fixed release exists
+      #   gtk-rs GTK3 bindings, unmaintained (via the dioxus desktop graph, GTK3 is EOL):
+      #     0411 gdkwayland-sys  0412 gdk       0413 atk        0414 gdkx11-sys
+      #     0415 gtk            0416 atk-sys    0418 gdk-sys    0419 gtk3-macros
+      #     0420 gtk-sys        0429 glib       0370 proc-macro-error
+      #   RUSTSEC-2024-0436  paste unmaintained (proc-macro, no successor pinned)
+      #   RUSTSEC-2025-0057  fxhash unmaintained (transitive)
+      #   RUSTSEC-2026-0097  rand unsound w/ custom logger (transitive, no fixed release)
+      #   RUSTSEC-2026-0186  memmap2 unchecked ptr offset (transitive, no fixed release)
+      #   RUSTSEC-2026-0190  anyhow downcast_mut unsoundness (transitive, no fixed release)
+      # Do NOT broaden this to silence darkrun's own crates.
       - name: Audit dependencies (gating)
         run: |
           cargo audit --deny warnings \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2024-0370 \
+            --ignore RUSTSEC-2024-0411 \
+            --ignore RUSTSEC-2024-0412 \
+            --ignore RUSTSEC-2024-0413 \
+            --ignore RUSTSEC-2024-0414 \
+            --ignore RUSTSEC-2024-0415 \
+            --ignore RUSTSEC-2024-0416 \
+            --ignore RUSTSEC-2024-0418 \
+            --ignore RUSTSEC-2024-0419 \
+            --ignore RUSTSEC-2024-0420 \
             --ignore RUSTSEC-2024-0429 \
-            --ignore RUSTSEC-2024-0370
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2025-0057 \
+            --ignore RUSTSEC-2026-0097 \
+            --ignore RUSTSEC-2026-0186 \
+            --ignore RUSTSEC-2026-0190
