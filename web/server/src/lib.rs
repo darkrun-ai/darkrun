@@ -33,6 +33,7 @@ mod oauth_routes;
 mod push;
 mod ratelimit;
 mod relay;
+mod relay_registry;
 mod repos;
 mod sessions;
 mod relay_broker;
@@ -67,6 +68,7 @@ pub use relay::{
     device_router, relay_router, AttachError, DevTokenAuth, Frame, HostCmd, HostEvent,
     RegisterDevice, Relay, RelayAuth, RelayState,
 };
+pub use relay_registry::{FirestoreSessionRegistry, SessionRegistry, SESSION_TTL};
 pub use state::{SharedTransport, WebState};
 pub use transport::ReqwestTransport;
 
@@ -168,6 +170,11 @@ pub fn build_oauth_only(state: WebState) -> Router {
 /// - else `DARKRUN_RELAY_DEV_AUTH=1` → [`DevTokenAuth`] (token == account id),
 ///   for local/dev ONLY — never set this in production.
 /// - else `None` (relay closed).
+///
+/// When service-account credentials are also present, the relay's session
+/// metadata, owner authz, and single-host-per-session move to Firestore (a
+/// [`FirestoreSessionRegistry`]) so they're correct across Cloud Run instances;
+/// absent, the relay runs pure in-memory (single-instance, unchanged from today).
 pub async fn relay_router_from_env() -> Option<Router> {
     if let Some(project) = std::env::var("DARKRUN_FIREBASE_PROJECT")
         .ok()
@@ -190,14 +197,34 @@ pub async fn relay_router_from_env() -> Option<Router> {
                 }
             }
         });
-        // Wire FCM remote push when service-account credentials are present
-        // (GOOGLE_APPLICATION_CREDENTIALS). Absent → push stays disabled; the
-        // host's LOCAL OS notification still fires. The one key mints two
-        // scope-specific token sources: FCM `messages:send` for the sender,
-        // `datastore` for the Firestore-persisted device registry.
-        let mut state = RelayState::new(Arc::new(Relay::new()), auth);
-        if let Some(account) = ServiceAccount::from_env() {
-            tracing::info!("FCM remote push enabled (service-account credentials loaded)");
+        // Wire FCM remote push AND the cross-instance session registry when
+        // service-account credentials are present (GOOGLE_APPLICATION_CREDENTIALS).
+        // Absent → push stays disabled (the host's LOCAL OS notification still
+        // fires) and the relay runs pure in-memory (single-instance authz +
+        // single-host, unchanged from today). The one key mints several
+        // scope-specific token sources: FCM `messages:send` for the sender, and
+        // `datastore` for the Firestore-persisted device registry + session
+        // registry (a token source per consumer — tokens are cached per source).
+        let account = ServiceAccount::from_env();
+        let relay = match &account {
+            Some(account) => {
+                // The Firestore session registry: single-host-per-session + owner
+                // authz correct across Cloud Run instances. (Frame delivery stays
+                // in-memory this landing; the cross-instance frame bus is Step 1c.)
+                let session_tokens =
+                    ServiceAccountTokenSource::new(account.clone()).with_scope(DATASTORE_SCOPE);
+                let registry =
+                    Arc::new(FirestoreSessionRegistry::new(project.clone(), session_tokens));
+                Arc::new(Relay::new().with_registry(registry))
+            }
+            None => Arc::new(Relay::new()),
+        };
+        let mut state = RelayState::new(relay, auth);
+        if let Some(account) = account {
+            tracing::info!(
+                "FCM remote push enabled + session registry backed by Firestore \
+                 (cross-instance authz + single-host)"
+            );
             let fcm_tokens = ServiceAccountTokenSource::new(account.clone());
             let store_tokens =
                 ServiceAccountTokenSource::new(account).with_scope(DATASTORE_SCOPE);
@@ -207,7 +234,8 @@ pub async fn relay_router_from_env() -> Option<Router> {
             );
         } else {
             tracing::info!(
-                "FCM credentials absent — remote push disabled (local notifications still fire)"
+                "FCM credentials absent — remote push disabled; session registry in-memory \
+                 (local notifications still fire; relay is single-instance)"
             );
         }
         return Some(relay_router(state.clone()).merge(device_router(state)));

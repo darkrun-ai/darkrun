@@ -104,6 +104,25 @@ resource "google_firestore_field" "relay_broker_ttl" {
   depends_on = [google_project_service.services]
 }
 
+# Native Firestore TTL for the relay's `sessions` collection: GC each live-session
+# document once its `expiresAt` timestamp passes, server-side. A host heartbeat
+# renews `expiresAt` while it lives (web/server/src/relay_registry.rs); a
+# crashed/abandoned host's doc goes stale and this GCs it, so single-host-per-
+# session frees up. Same caveats as the relayBroker policy: the `(default)`
+# database is operator-created (never a destroyable resource here), and TTL GC is
+# best-effort/lagging, so the registry's read-time `expiresAt` check stays
+# authoritative regardless.
+resource "google_firestore_field" "sessions_ttl" {
+  project    = var.gcp_project
+  database   = "(default)"
+  collection = "sessions"
+  field      = "expiresAt"
+
+  ttl_config {}
+
+  depends_on = [google_project_service.services]
+}
+
 module "sentry" {
   source = "./modules/sentry"
 
