@@ -59,36 +59,27 @@ pub fn broker_url(web_base: &str, nonce: &str) -> String {
     )
 }
 
-/// Generate a URL-safe random nonce. Uses process + time entropy mixed through
-/// a small splitmix64 so we avoid pulling in an RNG crate for one value.
+/// Generate a URL-safe random nonce. The nonce doubles as the OAuth `state`
+/// value guarding the browser round-trip, so it must be unguessable — it is
+/// drawn from the operating-system CSPRNG (`getrandom`), never a seeded PRNG.
 pub fn generate_nonce() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // A monotonic per-call counter guarantees successive calls differ even when
-    // the system clock hasn't advanced a nanosecond between them.
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seed = {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let bump = COUNTER.fetch_add(1, Ordering::Relaxed);
-        nanos
-            ^ (std::process::id() as u64).rotate_left(17)
-            ^ bump.rotate_left(40)
-            ^ 0x9E37_79B9_7F4A_7C15
-    };
-    let mut state = seed;
-    let mut out = String::with_capacity(32);
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-    for _ in 0..32 {
-        // splitmix64 step.
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        out.push(ALPHABET[(z % ALPHABET.len() as u64) as usize] as char);
+    // 252 = 36 * 7, the largest multiple of the alphabet length ≤ 256. Rejecting
+    // bytes at or above it keeps the mapping onto the 36-char alphabet unbiased.
+    const REJECT_AT: u8 = (256 / ALPHABET.len() * ALPHABET.len()) as u8;
+    let mut out = String::with_capacity(32);
+    let mut buf = [0u8; 64];
+    let mut i = buf.len();
+    while out.len() < 32 {
+        if i >= buf.len() {
+            getrandom::fill(&mut buf).expect("OS CSPRNG unavailable");
+            i = 0;
+        }
+        let byte = buf[i];
+        i += 1;
+        if byte < REJECT_AT {
+            out.push(ALPHABET[(byte % ALPHABET.len() as u8) as usize] as char);
+        }
     }
     out
 }

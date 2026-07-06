@@ -1486,6 +1486,7 @@ dependencies = [
  "darkrun-telemetry",
  "darkrun-vcs",
  "darkrun-verify",
+ "getrandom 0.3.4",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
