@@ -63,7 +63,7 @@ jobs:
         run: cargo install dioxus-cli --version "^0.7" --locked
 
       - name: Set up Ruby + fastlane (bundler)
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@d45b1a4e94b71acab930e56e79c6aa188764e7f9 # v1
         with:
           ruby-version: "3.3"
           bundler-cache: true
