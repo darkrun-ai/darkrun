@@ -1050,15 +1050,33 @@ impl GitBackend for GixBackend {
         let branch = branch.to_string();
         crate::net::with_deadline("fetch", move || {
             let repo = gix::open(&wt).map_err(gix_err)?;
-            let remote = repo
-                .find_remote("origin")
-                .map_err(gix_err)?
+            let origin = repo.find_remote("origin").map_err(gix_err)?;
+
+            // Bridge in HTTPS credentials (a token from the darkrun credential
+            // store / env — the same source push uses). gix's HTTP transport
+            // reads basic-auth from the URL's userinfo, so inject the identity
+            // there and fetch from that URL; a remote that needs no credentials
+            // (file://, ssh) is fetched as configured.
+            let fetch_url = origin
+                .url(gix::remote::Direction::Fetch)
+                .ok_or_else(|| GitError::Gix("origin has no fetch URL".into()))?
+                .to_owned();
+            let remote = match crate::push::credentials_for(&fetch_url) {
+                Some(account) => {
+                    let mut url = fetch_url;
+                    url.set_user(Some(account.username));
+                    url.set_password(Some(account.password));
+                    repo.remote_at(url).map_err(gix_err)?
+                }
+                None => origin,
+            };
+
+            remote
                 .with_refspecs(
                     Some(format!("+refs/heads/{branch}:refs/remotes/origin/{branch}").as_str()),
                     gix::remote::Direction::Fetch,
                 )
-                .map_err(gix_err)?;
-            remote
+                .map_err(gix_err)?
                 .connect(gix::remote::Direction::Fetch)
                 .map_err(gix_err)?
                 .prepare_fetch(gix::progress::Discard, Default::default())

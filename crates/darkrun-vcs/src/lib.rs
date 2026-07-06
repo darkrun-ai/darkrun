@@ -39,8 +39,8 @@ pub mod store;
 pub mod transport;
 
 pub use error::{Result, VcsError};
-pub use oauth::{authorize_url, exchange_code, percent_encode};
-pub use provider::{Credential, Provider};
+pub use oauth::{authorize_url, exchange_code, percent_encode, refresh_access_token};
+pub use provider::{Credential, Provider, REFRESH_SKEW_SECS};
 pub use remote::{parse_remote_url, RepoCoords};
 pub use rest::{
     create_change_request, github_create_comment, github_create_pull_request,

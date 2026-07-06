@@ -55,6 +55,10 @@ fn init_repo() -> (TempDir, PathBuf) {
     git(&root, &["config", "user.email", "test@darkrun.local"]);
     git(&root, &["config", "user.name", "darkrun test"]);
     git(&root, &["config", "commit.gpgsign", "false"]);
+    // A global `tag.gpgSign=true` would promote a lightweight `git tag` into a
+    // signed annotated tag that then fails for want of a message; neutralize it
+    // in the fixture the way commit signing is.
+    git(&root, &["config", "tag.gpgsign", "false"]);
     std::fs::write(root.join("README.md"), "# fixture\n").unwrap();
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-q", "-m", "init"]);
@@ -393,6 +397,10 @@ fn current_branch_default_branch_name_respected() {
     git(&root, &["config", "user.email", "t@d.local"]);
     git(&root, &["config", "user.name", "t"]);
     git(&root, &["config", "commit.gpgsign", "false"]);
+    // A global `tag.gpgSign=true` would promote a lightweight `git tag` into a
+    // signed annotated tag that then fails for want of a message; neutralize it
+    // in the fixture the way commit signing is.
+    git(&root, &["config", "tag.gpgsign", "false"]);
     std::fs::write(root.join("f"), "x").unwrap();
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "i"]);

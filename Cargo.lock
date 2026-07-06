@@ -1571,6 +1571,7 @@ dependencies = [
 name = "darkrun-git"
 version = "0.7.0"
 dependencies = [
+ "darkrun-vcs",
  "gix",
  "gix-imara-diff",
  "gix-pack",

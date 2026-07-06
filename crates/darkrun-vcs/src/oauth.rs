@@ -78,10 +78,58 @@ pub fn exchange_code(
         .json_body(&body)?;
 
     let response = transport.execute(request)?;
+    parse_token_response(provider, response, None)
+}
+
+/// Re-mint an expired/expiring access token from a `refresh_token` grant
+/// (server-side).
+///
+/// GitLab access tokens expire (~2h) and are issued alongside a refresh token;
+/// this exchanges that refresh token for a fresh [`Credential`] — a new access
+/// token, a new `expires_in`, and (GitLab rotates them) usually a new refresh
+/// token. Mirrors [`exchange_code`]: the website holds the client secret and
+/// drives this through the injectable transport. GitHub OAuth App tokens are
+/// long-lived and issue no refresh token, so this is a GitLab-shaped path in
+/// practice.
+///
+/// If the provider's response omits a rotated `refresh_token`, the one passed in
+/// is carried forward so the credential stays refreshable.
+pub fn refresh_access_token(
+    transport: &dyn HttpTransport,
+    provider: Provider,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Result<Credential> {
+    let body = serde_json::json!({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    });
+
+    let request = HttpRequest::post(provider.token_endpoint())
+        .header("Accept", "application/json")
+        .json_body(&body)?;
+
+    let response = transport.execute(request)?;
+    parse_token_response(provider, response, Some(refresh_token))
+}
+
+/// Parse a token-endpoint response (shared by the authorization-code and
+/// refresh grants) into a [`Credential`].
+///
+/// Both providers report failures as a JSON object with an `error` key,
+/// sometimes alongside a 200 status (GitHub), so the body is checked first.
+/// `fallback_refresh` is carried into the credential when the response omits a
+/// `refresh_token` (the refresh grant preserves the incoming token that way).
+fn parse_token_response(
+    provider: Provider,
+    response: crate::transport::HttpResponse,
+    fallback_refresh: Option<&str>,
+) -> Result<Credential> {
     let value: serde_json::Value = response.json()?;
 
-    // Both providers report failures as a JSON object with an `error` key,
-    // sometimes alongside a 200 status (GitHub), so check the body first.
     if let Some(err) = value.get("error").and_then(|v| v.as_str()) {
         return Err(VcsError::OauthExchange {
             error: err.to_string(),
@@ -112,7 +160,8 @@ pub fn exchange_code(
         refresh_token: value
             .get("refresh_token")
             .and_then(|v| v.as_str())
-            .map(str::to_string),
+            .map(str::to_string)
+            .or_else(|| fallback_refresh.map(str::to_string)),
         expires_in: value.get("expires_in").and_then(|v| v.as_u64()),
         token_type: value
             .get("token_type")

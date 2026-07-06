@@ -84,12 +84,25 @@ impl Provider {
         }
     }
 
-    /// Infer the provider from a host (e.g. `github.com`, `gitlab.example.org`).
+    /// Infer the provider from a host (e.g. `github.com`, `gitlab.com`).
+    ///
+    /// Only the two providers' canonical SaaS hosts are recognized. A
+    /// self-hosted instance is deliberately NOT inferred: this crate's REST and
+    /// OAuth endpoints ([`api_base`](Self::api_base),
+    /// [`authorize_endpoint`](Self::authorize_endpoint),
+    /// [`token_endpoint`](Self::token_endpoint)) are hardcoded to `github.com` /
+    /// `gitlab.com`, so treating `gitlab.example.org` as GitLab would silently
+    /// route its API calls and OAuth to `gitlab.com` — the wrong instance. A
+    /// self-hosted GitHub Enterprise host (`github.mycorp.com`) is already
+    /// rejected this way (it matches neither `github.com` nor `.github.com`);
+    /// GitLab is now symmetric — only exactly `gitlab.com` matches. Returning
+    /// `None` lets callers reject the host rather than authenticate against the
+    /// wrong one.
     pub fn from_host(host: &str) -> Option<Self> {
         let host = host.trim().to_ascii_lowercase();
         if host == "github.com" || host.ends_with(".github.com") {
             Some(Provider::GitHub)
-        } else if host == "gitlab.com" || host.contains("gitlab") {
+        } else if host == "gitlab.com" {
             Some(Provider::GitLab)
         } else {
             None
@@ -139,7 +152,37 @@ impl Credential {
     pub fn authorization_header(&self) -> String {
         format!("Bearer {}", self.access_token)
     }
+
+    /// Whether this credential carries a non-empty refresh token, i.e. it can be
+    /// re-minted via [`refresh_access_token`](crate::oauth::refresh_access_token).
+    /// GitLab issues one; GitHub OAuth App tokens are long-lived and do not.
+    pub fn is_refreshable(&self) -> bool {
+        self.refresh_token.as_deref().is_some_and(|t| !t.is_empty())
+    }
+
+    /// Whether this credential should be refreshed before use, given the unix
+    /// timestamp it was obtained at and the current unix time.
+    ///
+    /// A [`REFRESH_SKEW_SECS`] margin re-mints the token just BEFORE it actually
+    /// expires (so an in-flight request never races the expiry). The store
+    /// persists `expires_in` but not the issue time, so the caller supplies
+    /// `obtained_at_unix` (e.g. the credentials file's mtime, or a recorded
+    /// issue time). Credentials the provider issued without an `expires_in`
+    /// (GitHub OAuth tokens are long-lived) never expire here.
+    pub fn needs_refresh(&self, obtained_at_unix: u64, now_unix: u64) -> bool {
+        match self.expires_in {
+            Some(ttl) => {
+                let expires_at = obtained_at_unix.saturating_add(ttl);
+                now_unix.saturating_add(REFRESH_SKEW_SECS) >= expires_at
+            }
+            None => false,
+        }
+    }
 }
+
+/// The clock-skew margin (seconds) applied by [`Credential::needs_refresh`] so a
+/// token is re-minted just before it expires rather than exactly at expiry.
+pub const REFRESH_SKEW_SECS: u64 = 300;
 
 #[cfg(test)]
 mod provider_tests {

@@ -25,6 +25,11 @@ gix-pack = { version = "0.71", default-features = false, features = ["generate"]
 # `unified_diff` turns on imara-diff's Display-based unified renderer — Cargo
 # unifies it into the gix-imara-diff instance gix already uses. Pure Rust.
 gix-imara-diff = { version = "0.2.2", default-features = false, features = ["unified_diff"] }
+# The OAuth credential store (`~/.darkrun/credentials`, written by
+# `darkrun auth login`) is the source of HTTPS push/fetch tokens — bridged into
+# the send-pack/fetch credential paths so both authenticate with the stored
+# provider token rather than an environment variable nothing exports.
+darkrun-vcs.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
