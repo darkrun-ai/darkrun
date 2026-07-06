@@ -29,6 +29,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{McpError, Result};
 
+/// The heading that opens the engine's own proof PR/MR comment. It is the marker
+/// the external-feedback ingestion filters on so the engine never re-ingests its
+/// OWN proof comment as if it were a human review note (see
+/// [`crate::feedback::create_external`]).
+pub const PROOF_COMMENT_MARKER: &str = "## darkrun proof";
+
 /// The on-disk proof store: per-station attached proofs plus an optional
 /// run-level (unscoped) proof. Serialized to `.darkrun/<run>/proof.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -285,7 +291,7 @@ pub fn station_proof_markdown(store: &StateStore, slug: &str, station: &str) -> 
     let proof = ps.stations.get(station).or(ps.run.as_ref())?;
     let json = serde_json::to_string_pretty(proof).ok()?;
     Some(format!(
-        "## darkrun proof — `{station}` ({surface})\n\n\
+        "{PROOF_COMMENT_MARKER} — `{station}` ({surface})\n\n\
          Objective verification recorded by the darkrun **{station}** station for run `{slug}`. \
          This is the measured evidence the Prove/Audit gate passed against.\n\n\
          ```json\n{json}\n```\n",

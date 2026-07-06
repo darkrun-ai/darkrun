@@ -183,27 +183,54 @@ pub async fn serve_stdio_on(
 
     // Dial the relay when remote access is enabled: the host connector parks an
     // outbound WebSocket and bridges remote clients to this loopback server.
-    if let (Some(cand), Some(run)) = (relay_candidate, active_run.as_deref()) {
-        if let Some(token) = resolve_relay_token() {
-            let cfg = darkrun_tunnel::ConnectorConfig {
-                relay_host_url: format!(
-                    "{}/relay/host/{}?token={}",
-                    cand.url.trim_end_matches('/'),
-                    cand.session,
-                    token
-                ),
-                local_http_base: format!("http://{bound}"),
-                run: run.to_string(),
-                reconnect: std::time::Duration::from_secs(3),
-            };
-            eprintln!("darkrun: remote access enabled — dialing relay {}", cand.url);
-            tokio::spawn(darkrun_tunnel::run(cfg));
-        } else {
-            eprintln!(
-                "darkrun: DARKRUN_RELAY_URL set but no DARKRUN_RELAY_TOKEN — \
-                 run /darkrun:darkrun-login to enable remote access (staying local-only)"
-            );
-        }
+    //
+    // The candidate is RE-RESOLVED as the active run changes — a supervisor
+    // watches the active-run pointer and dials each new run once. This is what
+    // reaches a run STARTED AFTER boot (the common case: the engine comes up
+    // with no active run, then `darkrun_run_new` starts one); the boot snapshot
+    // alone would never dial it. Remote engages once the operator has logged in
+    // (a dial token is present); until then the engine stays local-only.
+    {
+        let relay_store = state.store.clone();
+        tokio::spawn(async move {
+            let mut dialed: Option<String> = None;
+            let mut warned_missing_token = false;
+            loop {
+                if let Some(run) = relay_store.active_run().ok().flatten() {
+                    if dialed.as_deref() != Some(run.as_str()) {
+                        if let Some(cand) = resolve_relay_candidate(Some(&run)) {
+                            if let Some(token) = resolve_relay_token() {
+                                let cfg = darkrun_tunnel::ConnectorConfig {
+                                    relay_host_url: format!(
+                                        "{}/relay/host/{}?token={}",
+                                        cand.url.trim_end_matches('/'),
+                                        cand.session,
+                                        token
+                                    ),
+                                    local_http_base: format!("http://{bound}"),
+                                    run: run.clone(),
+                                    reconnect: std::time::Duration::from_secs(3),
+                                };
+                                eprintln!(
+                                    "darkrun: remote access enabled — dialing relay {} for run {run}",
+                                    cand.url
+                                );
+                                tokio::spawn(darkrun_tunnel::run(cfg));
+                                dialed = Some(run);
+                                warned_missing_token = false;
+                            } else if !warned_missing_token {
+                                eprintln!(
+                                    "darkrun: remote relay configured but no DARKRUN_RELAY_TOKEN — \
+                                     run /darkrun:darkrun-login to enable remote access (staying local-only)"
+                                );
+                                warned_missing_token = true;
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
     }
 
     // Spawn the axum HTTP/WS server on the same runtime, sharing the state, on
@@ -269,15 +296,25 @@ fn resolve_relay_token() -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
-/// The relay candidate to advertise + dial, resolved from the environment.
-/// Remote access is enabled when `DARKRUN_RELAY_URL` is set AND there's an active
-/// run to tunnel into (its slug is the relay session id). Returns `None` for a
-/// local-only engine. The dial token is read separately — it's a secret and
-/// never enters the candidate (which is written to the public descriptor).
+/// The production relay endpoint the engine dials by default. `DARKRUN_RELAY_URL`
+/// overrides it (staging / self-hosted); nothing needs to SET it for remote
+/// access to work, so `darkrun login` (which stores the dial token) is
+/// sufficient to make a run reachable — the URL no longer has to be exported by
+/// hand, which nothing did.
+pub const DEFAULT_RELAY_URL: &str = "wss://relay.darkrun.ai";
+
+/// The relay candidate to advertise + dial. The base URL defaults to the
+/// production relay ([`DEFAULT_RELAY_URL`]) and is overridable via
+/// `DARKRUN_RELAY_URL`; the session is the active run's slug. Returns `None` only
+/// when there is no active run to tunnel into. The dial token is read separately
+/// — it's a secret and never enters the candidate (which is written to the
+/// public descriptor).
 fn resolve_relay_candidate(active_run: Option<&str>) -> Option<darkrun_api::tunnel::RelayCandidate> {
     let url = std::env::var("DARKRUN_RELAY_URL")
         .ok()
-        .filter(|u| !u.trim().is_empty())?;
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
     let session = active_run?.to_string();
     Some(darkrun_api::tunnel::RelayCandidate { url, session })
 }

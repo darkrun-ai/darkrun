@@ -217,8 +217,10 @@ async fn visual_review_annotate_produces_feedback() {
 async fn request_unit_reset_surfaces_a_persistence_fault() {
     use std::os::unix::fs::PermissionsExt;
     let state = test_state();
-    // Seed a unit, then make its doc file read-only so the read succeeds but the
-    // reset-flag write fails → 500.
+    // Seed a unit, then make its units DIR read-only so the read succeeds but the
+    // reset-flag write fails → 500. (The write is atomic — temp file + rename —
+    // so a read-only doc FILE would no longer block it; the fault has to deny the
+    // temp-file creation, which needs write on the directory.)
     let unit = darkrun_core::domain::Unit {
         slug: "u".into(),
         frontmatter: darkrun_core::domain::UnitFrontmatter { station: Some("build".into()), ..Default::default() },
@@ -226,11 +228,11 @@ async fn request_unit_reset_surfaces_a_persistence_fault() {
         body: String::new(),
     };
     state.store.write_unit("run", &unit).unwrap();
-    let path = state.store.units_dir("run").join("u.md");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let dir = state.store.units_dir("run");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
     let resp = send(build_router(state), post_json("/api/unit/run/u/reset", &json!({}))).await;
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[tokio::test]
