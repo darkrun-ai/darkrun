@@ -992,9 +992,17 @@ fn MainPane(
         Selection::Run { port, slug, project } => {
             let mut run_cfg = cfg.with_session(slug.clone());
             run_cfg.port = port;
+            // Key by run slug+port so selecting a different run REMOUNTS
+            // ReviewApp — otherwise its one-shot session feed keeps streaming the
+            // previous run while the checkpoint bar targets the new one (a
+            // decision recorded against the wrong run). The key must sit on the
+            // first node of its own rsx block, so nest it.
+            let review = rsx! {
+                ReviewApp { key: "{slug}:{port}", cfg: run_cfg }
+            };
             rsx! {
                 MainHeader { name: slug.clone(), crumb: project.clone() }
-                ReviewApp { cfg: run_cfg }
+                {review}
             }
         }
         Selection::NoEngine { name, path } => rsx! {

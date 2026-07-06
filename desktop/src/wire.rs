@@ -101,6 +101,21 @@ impl ConnConfig {
         }
     }
 
+    /// Rewrite a host-relative artifact fetch path (e.g. `/api/output/x.png`)
+    /// into an absolute URL on the engine's loopback authority.
+    ///
+    /// The desktop webview is served over a custom protocol, so a bare relative
+    /// URL would resolve against that origin — not the engine — and never load.
+    /// Absolute `http(s)` URLs pass through unchanged; a leading slash is
+    /// normalized so both `/api/…` and `api/…` become `http://host:port/api/…`.
+    pub fn artifact_url(&self, path: &str) -> String {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            path.to_string()
+        } else {
+            format!("http://{}/{}", self.authority(), path.trim_start_matches('/'))
+        }
+    }
+
     /// The WebSocket URL for the session feed.
     pub fn ws_url(&self) -> String {
         format!(
@@ -1192,5 +1207,26 @@ mod asset_url_tests {
         // Right shape but a different run slug — not this run's asset.
         let elsewhere = "file:///x/.darkrun/other-run/assets/a.png";
         assert_eq!(c.asset_url("r", elsewhere), elsewhere);
+    }
+
+    #[test]
+    fn artifact_url_absolutizes_host_relative_paths() {
+        let c = cfg();
+        // A host-relative fetch path gets the engine authority prefixed.
+        assert_eq!(
+            c.artifact_url("/api/output/home.png"),
+            "http://127.0.0.1:59298/api/output/home.png"
+        );
+        // A leading slash is optional — both normalize to the same URL.
+        assert_eq!(
+            c.artifact_url("api/output/home.png"),
+            "http://127.0.0.1:59298/api/output/home.png"
+        );
+        // Already-absolute http(s) urls pass through unchanged.
+        assert_eq!(c.artifact_url("https://cdn/x.png"), "https://cdn/x.png");
+        assert_eq!(
+            c.artifact_url("http://127.0.0.1:59298/api/output/x.png"),
+            "http://127.0.0.1:59298/api/output/x.png"
+        );
     }
 }
