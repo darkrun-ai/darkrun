@@ -361,16 +361,19 @@ async fn register_device(
 }
 
 /// `DELETE /devices/{token}` — drop a device token. Requires a valid bearer
-/// token (only an authenticated caller, who alone knows their tokens, can ask).
+/// token AND that the caller's account owns the token: without the ownership
+/// check any authenticated account could unregister a stranger's device by its
+/// token, silently disabling their gate push. Idempotent — a token the caller
+/// doesn't own is a `204` no-op (no oracle for which tokens exist).
 async fn unregister_device(
     State(state): State<RelayState>,
     headers: axum::http::HeaderMap,
     Path(token): Path<String>,
 ) -> Response {
-    if bearer(&headers).and_then(|t| state.account_for(t)).is_none() {
+    let Some(account) = bearer(&headers).and_then(|t| state.account_for(t)) else {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
-    }
-    state.devices.unregister(&token).await;
+    };
+    state.devices.unregister_for(&account, &token).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -589,6 +592,40 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let _ = res.into_body().collect().await;
         assert!(registry.devices_for("acct-a").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_cannot_drop_another_accounts_device() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let registry: Arc<dyn DeviceRegistry> = Arc::new(InMemoryDeviceRegistry::new());
+        // acct-a owns device "d1".
+        registry
+            .register("acct-a", DeviceToken { token: "d1".into(), platform: "ios".into() })
+            .await;
+        let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth))
+            .with_push(registry.clone(), Arc::new(NoopPushSender));
+        let app = device_router(state);
+
+        // acct-b (authenticated, but not the owner) tries to delete acct-a's device.
+        let res = app
+            .oneshot(
+                axum::http::Request::delete("/devices/d1")
+                    .header("authorization", "Bearer acct-b")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Idempotent no-op (no existence oracle), but the device MUST survive.
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let _ = res.into_body().collect().await;
+        assert_eq!(
+            registry.devices_for("acct-a").await,
+            vec![DeviceToken { token: "d1".into(), platform: "ios".into() }],
+            "a non-owner must not be able to unregister the device"
+        );
     }
 
     #[tokio::test]

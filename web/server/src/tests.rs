@@ -716,7 +716,7 @@ async fn sessions_lists_github_runs_from_the_tree() {
 #[tokio::test]
 async fn sessions_lists_gitlab_runs_from_the_subtree() {
     let state = sessions_state(
-        "https://gitlab.com/api/v4/projects/jwaldrip%2Fdarkrun/repository/tree?path=.darkrun&recursive=true&per_page=100",
+        "https://gitlab.com/api/v4/projects/jwaldrip%2Fdarkrun/repository/tree?path=.darkrun&recursive=true&per_page=100&page=1",
         200,
         serde_json::json!([
             { "path": ".darkrun/run-1/run.md", "type": "blob" },

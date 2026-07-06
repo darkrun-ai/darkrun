@@ -47,10 +47,31 @@ pub trait DeviceRegistry: Send + Sync {
     /// re-registering an existing token updates its platform, never duplicates.
     fn register<'a>(&'a self, account: &'a str, device: DeviceToken) -> RegistryFuture<'a, ()>;
     /// Drop a device token (logout / token rotation / uninstall). Idempotent —
-    /// an unknown token is a silent no-op.
+    /// an unknown token is a silent no-op. This is the UNSCOPED drop; the public
+    /// HTTP path must use [`unregister_for`](Self::unregister_for) so one account
+    /// can't delete another's device.
     fn unregister<'a>(&'a self, token: &'a str) -> RegistryFuture<'a, ()>;
     /// Every device currently registered to `account` (empty if none).
     fn devices_for<'a>(&'a self, account: &'a str) -> RegistryFuture<'a, Vec<DeviceToken>>;
+
+    /// Drop `token` **only if** it is registered to `account` — the
+    /// ownership-scoped unregister the `DELETE /devices/{token}` handler uses.
+    /// Without this an authenticated caller could pass any token and unregister a
+    /// stranger's device, silently disabling their gate push. Idempotent: a token
+    /// the account doesn't own (or that doesn't exist) is a no-op. The default
+    /// verifies ownership via [`devices_for`](Self::devices_for) then drops;
+    /// impls may override with a narrower query.
+    fn unregister_for<'a>(
+        &'a self,
+        account: &'a str,
+        token: &'a str,
+    ) -> RegistryFuture<'a, ()> {
+        Box::pin(async move {
+            if self.devices_for(account).await.iter().any(|d| d.token == token) {
+                self.unregister(token).await;
+            }
+        })
+    }
 }
 
 /// An in-memory registry: `account -> {token -> platform}`. Stateless across
@@ -312,6 +333,23 @@ mod tests {
         // Unknown token is a no-op.
         reg.unregister("nope").await;
         assert_eq!(reg.devices_for("acct-a").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unregister_for_only_drops_the_owning_accounts_token() {
+        let reg = InMemoryDeviceRegistry::new();
+        reg.register("owner", dev("t1", "ios")).await;
+        reg.register("intruder", dev("t2", "web")).await;
+
+        // An account that doesn't own the token can't drop it.
+        reg.unregister_for("intruder", "t1").await;
+        assert_eq!(reg.devices_for("owner").await, vec![dev("t1", "ios")]);
+
+        // The owner can.
+        reg.unregister_for("owner", "t1").await;
+        assert!(reg.devices_for("owner").await.is_empty());
+        // The intruder's own device is untouched throughout.
+        assert_eq!(reg.devices_for("intruder").await, vec![dev("t2", "web")]);
     }
 
     #[test]
