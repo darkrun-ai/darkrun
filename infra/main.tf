@@ -35,6 +35,11 @@ resource "google_project_service" "services" {
     # committed firestore.rules via the Rules REST API so the repo is the source
     # of truth for the ruleset (no console drift).
     "firebaserules.googleapis.com",
+    # Pub/Sub: the relay's cross-instance frame bus (Step 1c). A host on one Cloud
+    # Run instance and a client on another exchange frames over the `relay_frames`
+    # topic (web/server/src/relay_bus.rs). Per-instance subscriptions are created
+    # at RUNTIME with an expiration policy — never in Terraform.
+    "pubsub.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false
@@ -123,6 +128,77 @@ resource "google_firestore_field" "sessions_ttl" {
   depends_on = [google_project_service.services]
 }
 
+# The relay's cross-instance frame bus topic (Step 1c). Every relay instance
+# publishes host↔client frames here addressed by `to_instance`, and each instance
+# pulls from its OWN per-instance subscription (created at runtime with an
+# expiration_policy so a dead instance's subscription self-deletes — hence NO
+# subscription resource here). Storage is pinned in-region to keep frames close to
+# the Cloud Run service and avoid cross-region egress.
+resource "google_pubsub_topic" "relay_frames" {
+  project = var.gcp_project
+  name    = "relay_frames"
+
+  message_storage_policy {
+    allowed_persistence_regions = [var.gcp_region]
+  }
+
+  depends_on = [google_project_service.services]
+}
+
+# Let the darkrun-web runtime SA PUBLISH frames to the topic (topic-scoped — the
+# narrowest publish grant).
+resource "google_pubsub_topic_iam_member" "web_frame_publisher" {
+  project = var.gcp_project
+  topic   = google_pubsub_topic.relay_frames.name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${module.web.service_account}"
+}
+
+# The darkrun-web runtime SA creates its OWN per-instance subscription at boot
+# (web/server/src/relay_bus.rs — PubSubFrameBus::ensure_subscription does a runtime
+# PUT subscriptions.create) and then pulls/acks it. roles/pubsub.subscriber grants
+# consume/get/delete but NOT pubsub.subscriptions.create — that lives only in the
+# far-broader roles/pubsub.editor. Without create, the boot-time PUT 403s and the
+# whole receive path goes silently dark. Grant a LEAST-PRIVILEGE custom role with
+# exactly the subscription-lifecycle permissions the runtime needs, nothing more
+# (publish stays on the topic-scoped roles/pubsub.publisher above).
+resource "google_project_iam_custom_role" "relay_frame_subscriber" {
+  project     = var.gcp_project
+  role_id     = "relayFrameSubscriber"
+  title       = "Relay Frame Subscriber"
+  description = "Create, consume, and tear down the relay's per-instance Pub/Sub subscriptions at runtime."
+  permissions = [
+    "pubsub.subscriptions.create",
+    "pubsub.subscriptions.consume",
+    "pubsub.subscriptions.get",
+    "pubsub.subscriptions.delete",
+    "pubsub.topics.attachSubscription",
+  ]
+}
+
+# Bind the darkrun-web runtime SA to that custom role. Project-level because the
+# subscription name is derived per-instance at runtime, not a fixed Terraform
+# resource.
+resource "google_project_iam_member" "web_frame_subscriber" {
+  project = var.gcp_project
+  role    = google_project_iam_custom_role.relay_frame_subscriber.id
+  member  = "serviceAccount:${module.web.service_account}"
+
+  depends_on = [google_project_service.services]
+}
+
+# Let the darkrun-web runtime SA read+write Firestore (the relay's device
+# registry, relay-token broker, and session registry — Step 1a/1b — all write
+# `(default)` with this SA via the REST API). Was implicitly relied on; grant it
+# explicitly so the relay's Firestore access isn't dependent on a broader role.
+resource "google_project_iam_member" "web_datastore_user" {
+  project = var.gcp_project
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${module.web.service_account}"
+
+  depends_on = [google_project_service.services]
+}
+
 module "sentry" {
   source = "./modules/sentry"
 
@@ -157,6 +233,11 @@ module "web" {
 
   # Relay + FCM remote push run on this Firebase project. Empty disables both.
   firebase_project = var.firebase_project
+
+  # The cross-instance frame bus topic (Step 1c) — turns DARKRUN_PUBSUB_TOPIC on in
+  # the service when the relay is enabled, so a split host/client pair can exchange
+  # frames across instances.
+  pubsub_topic = google_pubsub_topic.relay_frames.name
 
   manage_domain_mapping = var.manage_domain_mapping
 

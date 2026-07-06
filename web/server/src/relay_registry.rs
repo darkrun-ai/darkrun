@@ -25,7 +25,19 @@
 //! * attach-client authz reads the doc for the ATTACHING CLIENT'S owner: a live
 //!   `(client owner, session)` doc authorizes; a missing/expired one is "no
 //!   host". A different owner is a different doc, so cross-owner collision is
-//!   structurally impossible — there is no "owner mismatch" case to reject.
+//!   structurally impossible — there is no "owner mismatch" case to reject. The
+//!   same read yields the `hostInstance` the client's Join must be routed to
+//!   ([`lookup_host_instance`](SessionRegistry::lookup_host_instance)).
+//!
+//! ## Client routing sub-collection (Step 1c)
+//!
+//! Under each session doc, a `clients/{clientId}` sub-collection records where a
+//! client's frame sink lives — `{ instance, expiresAt }` — so a host on one Cloud
+//! Run instance can route a frame to a client attached on another. It is the
+//! DURABLE BACKSTOP for the relay's in-memory client→instance routing table (the
+//! fast path); a host consults it only when the in-memory table misses. Written
+//! by the client's instance on attach, deleted on detach, and TTL-bounded like
+//! the parent doc so an abandoned client's routing row can't strand.
 //!
 //! Wall-clock expiry (`expiresAt`) is authoritative on read regardless of
 //! Firestore native-TTL GC lag — exactly like the broker.
@@ -119,6 +131,61 @@ pub trait SessionRegistry: Send + Sync {
         session: &'a str,
         owner: &'a str,
     ) -> SessionRegistryFuture<'a, Option<String>>;
+
+    /// The `hostInstance` of the LIVE `(owner, session)` doc, or `None` if the doc
+    /// is missing/expired. This is the attach-client authz check AND the routing
+    /// key in one read: a `Some(instance)` both authorizes the attach and tells
+    /// the relay which Cloud Run instance the host is on — so a client on a
+    /// different instance can route its Join over the frame bus (Step 1c).
+    fn lookup_host_instance<'a>(
+        &'a self,
+        session: &'a str,
+        owner: &'a str,
+    ) -> SessionRegistryFuture<'a, Option<String>>;
+
+    /// Record — under the `(owner, session)` doc — that client `client_id`'s frame
+    /// sink lives on `instance`, TTL-bounded. The DURABLE BACKSTOP for the host's
+    /// in-memory client→instance routing table; written by the client's instance
+    /// on attach. Best-effort; the default is a no-op so in-memory registries need
+    /// not model it.
+    fn register_client<'a>(
+        &'a self,
+        session: &'a str,
+        owner: &'a str,
+        client_id: u64,
+        instance: &'a str,
+    ) -> SessionRegistryFuture<'a, ()> {
+        let _ = (session, owner, client_id, instance);
+        Box::pin(async {})
+    }
+
+    /// The instance a client's frame sink lives on, per the `clients/{clientId}`
+    /// backstop sub-doc — consulted only when the host's in-memory routing table
+    /// misses. `None` if the row is absent or expired. The default returns `None`
+    /// (in-memory registries route entirely off the fast-path table).
+    fn lookup_client_instance<'a>(
+        &'a self,
+        session: &'a str,
+        owner: &'a str,
+        client_id: u64,
+    ) -> SessionRegistryFuture<'a, Option<String>> {
+        let _ = (session, owner, client_id);
+        Box::pin(async { None })
+    }
+
+    /// Drop a client's routing backstop sub-doc (its socket closed) — only while
+    /// `instance` still owns it, so a re-attach on another instance isn't
+    /// clobbered. Best-effort; the default is a no-op.
+    fn drop_client<'a>(
+        &'a self,
+        session: &'a str,
+        owner: &'a str,
+        client_id: u64,
+        instance: &'a str,
+    ) -> SessionRegistryFuture<'a, ()> {
+        let _ = (session, owner, client_id, instance);
+        Box::pin(async {})
+    }
 }
 
 // ── Firestore-backed registry ───────────────────────────────────────────────
@@ -140,7 +207,12 @@ const MAX_TXN_ATTEMPTS: usize = 5;
 /// can't appear in a Firebase uid or a session slug, so no two distinct pairs can
 /// collide by concatenation. Hashing also keeps the id fixed-length and path-safe
 /// (a slug can contain `/`) — mirrors the broker's per-nonce hashing.
-fn doc_id(owner: &str, session: &str) -> String {
+///
+/// `pub(crate)` because the frame bus reuses it to build the composite
+/// `(owner, session)` Pub/Sub ordering key (see `relay_bus::publish_body`): two
+/// owners can hold the same low-entropy slug, so ordering by the bare slug would
+/// couple their head-of-line ordering across the owner boundary.
+pub(crate) fn doc_id(owner: &str, session: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(owner.as_bytes());
     hasher.update([0u8]); // unambiguous separator — absent from uids and slugs
@@ -154,6 +226,21 @@ fn doc_name(project_id: &str, owner: &str, session: &str) -> String {
     format!(
         "projects/{project_id}/databases/(default)/documents/{SESSIONS_COLLECTION}/{}",
         doc_id(owner, session),
+    )
+}
+
+/// The sub-collection under a session doc recording each attached client's
+/// routing row (`{ instance, expiresAt }`) — the durable backstop for the relay's
+/// in-memory client→instance table (Step 1c).
+const CLIENTS_SUBCOLLECTION: &str = "clients";
+
+/// The Firestore resource name for the `clients/{clientId}` routing sub-doc under
+/// the `(owner, session)` document — the value a write's `update.name` / `delete`
+/// takes. `client_id` is a `u64`, so it's a path-safe doc id as-is.
+fn client_doc_name(project_id: &str, owner: &str, session: &str, client_id: u64) -> String {
+    format!(
+        "{}/{CLIENTS_SUBCOLLECTION}/{client_id}",
+        doc_name(project_id, owner, session),
     )
 }
 
@@ -179,6 +266,30 @@ fn session_document_write(
                 "expiresAt": { "timestampValue": expires_at },
             }
         }
+    })
+}
+
+/// One upsert write of a client routing sub-doc: `{ instance, expiresAt }`.
+fn client_document_write(doc_name: &str, instance: &str, expires_at: &str) -> serde_json::Value {
+    serde_json::json!({
+        "update": {
+            "name": doc_name,
+            "fields": {
+                "instance": { "stringValue": instance },
+                "expiresAt": { "timestampValue": expires_at },
+            }
+        }
+    })
+}
+
+/// A non-transactional `:commit` body upserting one client routing sub-doc. The
+/// routing backstop is best-effort (the in-memory table is authoritative), so it
+/// skips the read-modify-write ceremony the session doc uses. (The DELETE path is
+/// a compare-and-delete on `instance`, so it reuses the transactional
+/// [`delete_commit_body`].)
+fn client_write_commit_body(doc_name: &str, instance: &str, expires_at: &str) -> serde_json::Value {
+    serde_json::json!({
+        "writes": [ client_document_write(doc_name, instance, expires_at) ],
     })
 }
 
@@ -237,6 +348,11 @@ fn doc_owner(doc: &serde_json::Value) -> Option<String> {
 /// The `hostInstance` of a fetched session document, if present.
 fn doc_instance(doc: &serde_json::Value) -> Option<String> {
     doc_string(doc, "hostInstance")
+}
+
+/// The `instance` field of a fetched client routing sub-doc, if present.
+fn client_doc_instance(doc: &serde_json::Value) -> Option<String> {
+    doc_string(doc, "instance")
 }
 
 /// The `expiresAt` instant of a fetched session document, if present + valid.
@@ -548,6 +664,145 @@ impl<T: AccessTokenSource> FirestoreSessionRegistry<T> {
         // Wall-clock expiry is authoritative even if native TTL hasn't GC'd yet.
         doc_is_live(&doc, Utc::now()).then(|| doc_owner(&doc)).flatten()
     }
+
+    /// lookup the `hostInstance` of the LIVE `(owner, session)` doc with a plain
+    /// (non-transactional) read — attach authz + the routing key in one hop. A
+    /// missing (404) OR expired doc → `None` ("no host"); otherwise the instance
+    /// the host is on, so a client elsewhere can route its Join over the bus.
+    async fn lookup_host_instance_txn(&self, session: &str, owner: &str) -> Option<String> {
+        let access = self.access("lookup_host_instance").await?;
+        let url = format!("{FIRESTORE_BASE}/{}", doc_name(&self.project_id, owner, session));
+        let resp = match self.http.get(url).bearer_auth(&access).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => return None,
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), "Firestore host-instance lookup rejected");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Firestore host-instance lookup failed");
+                return None;
+            }
+        };
+        let doc = match resp.json::<serde_json::Value>().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "Firestore host-instance lookup parse failed");
+                return None;
+            }
+        };
+        doc_is_live(&doc, Utc::now()).then(|| doc_instance(&doc)).flatten()
+    }
+
+    /// Upsert a client routing backstop sub-doc (`clients/{clientId}` under the
+    /// session doc) — best-effort, non-transactional (the in-memory table is
+    /// authoritative; this is only the backstop).
+    async fn register_client_txn(&self, session: &str, owner: &str, client_id: u64, instance: &str) {
+        let Some(access) = self.access("register_client").await else {
+            return;
+        };
+        let expires = expires_at_rfc3339(Utc::now(), self.ttl);
+        let name = client_doc_name(&self.project_id, owner, session, client_id);
+        let _ = self
+            .commit(&access, &client_write_commit_body(&name, instance, &expires))
+            .await;
+    }
+
+    /// Read the instance a client's sink lives on from its backstop sub-doc, live
+    /// only. A plain (non-transactional) read; missing/expired → `None`.
+    async fn lookup_client_instance_txn(
+        &self,
+        session: &str,
+        owner: &str,
+        client_id: u64,
+    ) -> Option<String> {
+        let access = self.access("lookup_client_instance").await?;
+        let name = client_doc_name(&self.project_id, owner, session, client_id);
+        let resp = match self.http.get(format!("{FIRESTORE_BASE}/{name}")).bearer_auth(&access).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => return None,
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), "Firestore client lookup rejected");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Firestore client lookup failed");
+                return None;
+            }
+        };
+        let doc = match resp.json::<serde_json::Value>().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "Firestore client lookup parse failed");
+                return None;
+            }
+        };
+        doc_is_live(&doc, Utc::now()).then(|| client_doc_instance(&doc)).flatten()
+    }
+
+    /// Delete a client routing backstop sub-doc — only while `instance` still owns
+    /// it, so a re-attach elsewhere isn't clobbered. Best-effort, transactional
+    /// (a compare-and-delete on the `instance` field).
+    async fn drop_client_txn(&self, session: &str, owner: &str, client_id: u64, instance: &str) {
+        let Some(access) = self.access("drop_client").await else {
+            return;
+        };
+        let name = client_doc_name(&self.project_id, owner, session, client_id);
+        for _ in 0..MAX_TXN_ATTEMPTS {
+            let Some(transaction) = self.begin_transaction(&access).await else {
+                return;
+            };
+            // Reuse the session read plumbing: fetch this exact sub-doc by name.
+            let existing = match self.get_doc_by_name(&access, &name, &transaction).await {
+                Ok(doc) => doc,
+                Err(()) => {
+                    let _ = self.commit(&access, &release_commit_body(&transaction)).await;
+                    return;
+                }
+            };
+            let ours = existing.as_ref().and_then(client_doc_instance).as_deref() == Some(instance);
+            let body = if ours {
+                delete_commit_body(&transaction, &name)
+            } else {
+                release_commit_body(&transaction)
+            };
+            match self.commit(&access, &body).await {
+                Commit::Ok | Commit::Failed => return,
+                Commit::Aborted => continue,
+            }
+        }
+    }
+
+    /// Read a document by its full resource name within `transaction` (the
+    /// by-name analogue of [`get_doc`](Self::get_doc), for sub-docs).
+    async fn get_doc_by_name(
+        &self,
+        access: &str,
+        name: &str,
+        transaction: &str,
+    ) -> Result<Option<serde_json::Value>, ()> {
+        match self
+            .http
+            .get(format!("{FIRESTORE_BASE}/{name}"))
+            .bearer_auth(access)
+            .query(&[("transaction", transaction)])
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.map(Some).map_err(|e| {
+                tracing::warn!(error = %e, "Firestore client read parse failed");
+            }),
+            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => Ok(None),
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), "Firestore client read rejected");
+                Err(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Firestore client read failed");
+                Err(())
+            }
+        }
+    }
 }
 
 impl<T: AccessTokenSource> SessionRegistry for FirestoreSessionRegistry<T> {
@@ -588,6 +843,47 @@ impl<T: AccessTokenSource> SessionRegistry for FirestoreSessionRegistry<T> {
         owner: &'a str,
     ) -> SessionRegistryFuture<'a, Option<String>> {
         Box::pin(async move { self.lookup_txn(session, owner).await })
+    }
+
+    #[cfg(not(tarpaulin_include))] // network I/O — request/parse shapes are unit-tested
+    fn lookup_host_instance<'a>(
+        &'a self,
+        session: &'a str,
+        owner: &'a str,
+    ) -> SessionRegistryFuture<'a, Option<String>> {
+        Box::pin(async move { self.lookup_host_instance_txn(session, owner).await })
+    }
+
+    #[cfg(not(tarpaulin_include))] // network I/O — request/commit shapes are unit-tested
+    fn register_client<'a>(
+        &'a self,
+        session: &'a str,
+        owner: &'a str,
+        client_id: u64,
+        instance: &'a str,
+    ) -> SessionRegistryFuture<'a, ()> {
+        Box::pin(async move { self.register_client_txn(session, owner, client_id, instance).await })
+    }
+
+    #[cfg(not(tarpaulin_include))] // network I/O — request/parse shapes are unit-tested
+    fn lookup_client_instance<'a>(
+        &'a self,
+        session: &'a str,
+        owner: &'a str,
+        client_id: u64,
+    ) -> SessionRegistryFuture<'a, Option<String>> {
+        Box::pin(async move { self.lookup_client_instance_txn(session, owner, client_id).await })
+    }
+
+    #[cfg(not(tarpaulin_include))] // network I/O — request/commit shapes are unit-tested
+    fn drop_client<'a>(
+        &'a self,
+        session: &'a str,
+        owner: &'a str,
+        client_id: u64,
+        instance: &'a str,
+    ) -> SessionRegistryFuture<'a, ()> {
+        Box::pin(async move { self.drop_client_txn(session, owner, client_id, instance).await })
     }
 }
 
@@ -725,5 +1021,54 @@ mod tests {
         let resp = serde_json::json!({ "transaction": "CgYKBBix" });
         assert_eq!(transaction_id(&resp).as_deref(), Some("CgYKBBix"));
         assert_eq!(transaction_id(&serde_json::json!({})), None);
+    }
+
+    // ── Client routing sub-collection (Step 1c) shape tests ──────────────────
+
+    #[test]
+    fn client_doc_name_nests_under_the_session_doc() {
+        let name = client_doc_name("darkrun-app", "owner-1", "sess-abc", 42);
+        assert_eq!(
+            name,
+            format!(
+                "{}/clients/42",
+                doc_name("darkrun-app", "owner-1", "sess-abc"),
+            )
+        );
+        // Always under the OWNER-scoped session doc, so a different owner's client
+        // rows live in a different (unaddressable) sub-tree.
+        assert!(name.contains("/documents/sessions/"));
+        assert!(name.ends_with("/clients/42"));
+    }
+
+    #[test]
+    fn client_write_upserts_instance_and_expiry() {
+        let name = client_doc_name("darkrun-app", "acct-owner", "s1", 7);
+        let body = client_write_commit_body(&name, "inst-b", "2026-07-06T18:05:00Z");
+        let write = &body["writes"][0];
+        assert_eq!(write["update"]["name"], name);
+        assert_eq!(write["update"]["fields"]["instance"]["stringValue"], "inst-b");
+        assert_eq!(
+            write["update"]["fields"]["expiresAt"]["timestampValue"],
+            "2026-07-06T18:05:00Z"
+        );
+        // Best-effort backstop: no transaction wrapper, exactly one write.
+        assert!(body.get("transaction").is_none());
+        assert_eq!(body["writes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn client_doc_instance_parses_the_routing_row() {
+        let doc = serde_json::json!({
+            "fields": {
+                "instance": { "stringValue": "inst-b" },
+                "expiresAt": { "timestampValue": "2026-07-06T18:05:00Z" },
+            }
+        });
+        assert_eq!(client_doc_instance(&doc).as_deref(), Some("inst-b"));
+        // Liveness still gates read (the same `doc_is_live` the session doc uses).
+        assert!(doc_is_live(&doc, Utc.with_ymd_and_hms(2026, 7, 6, 18, 4, 0).unwrap()));
+        assert!(!doc_is_live(&doc, Utc.with_ymd_and_hms(2026, 7, 6, 18, 6, 0).unwrap()));
+        assert_eq!(client_doc_instance(&serde_json::json!({ "fields": {} })), None);
     }
 }

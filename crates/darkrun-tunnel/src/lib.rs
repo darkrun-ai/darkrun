@@ -341,6 +341,14 @@ fn handle_client_frame(
         // The subscription opened on Join already streams the snapshot.
         ClientFrame::Hello { .. } => {}
         ClientFrame::Cmd { id, command } => {
+            // TODO(Step 1c/1d): host-side command DEDUPE belongs here. The relay's
+            // cross-instance frame bus (web/server/src/relay_bus.rs) is Pub/Sub —
+            // at-least-once — so a `Cmd` can arrive at this host MORE THAN ONCE (a
+            // redelivered bus frame). `id` is the idempotency key; before executing,
+            // check a per-session seen-id set and, on a repeat, re-`Ack` WITHOUT
+            // re-running `exec_command` (advance/answer/feedback are not naturally
+            // idempotent). Single-instance today can't double-deliver, so this is a
+            // required follow-up that couples to the bus landing, not a regression.
             let base = local_http_base.to_string();
             tokio::spawn(async move {
                 let ack = match exec_command(&http, &base, &command).await {

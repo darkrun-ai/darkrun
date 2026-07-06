@@ -26,6 +26,9 @@ sha2.workspace = true
 # Encode/parse Firestore `timestampValue` (RFC3339) for the relay-token broker's
 # wall-clock expiry, and compute expiry on the write path.
 chrono.workspace = true
+# Base64-encode frame payloads as Pub/Sub message `data` for the cross-instance
+# frame bus (the relay's Step 1c cross-instance frame routing).
+base64 = "0.22"
 tokio.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"

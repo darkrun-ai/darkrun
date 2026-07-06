@@ -33,6 +33,7 @@ mod oauth_routes;
 mod push;
 mod ratelimit;
 mod relay;
+mod relay_bus;
 mod relay_registry;
 mod repos;
 mod sessions;
@@ -56,7 +57,9 @@ pub use sessions::DiscoveredSession;
 pub use firebase_auth::{FirebaseTokenAuth, VerifiedClaims, FIREBASE_CERTS_URL};
 pub use github_app::{CommittedRun, CommittedStation, GitHubApp, GitHubIdentity, WorkspaceRepo};
 pub use firestore::FirestoreDeviceRegistry;
-pub use gcp_auth::{ServiceAccount, ServiceAccountTokenSource, DATASTORE_SCOPE, FCM_SCOPE};
+pub use gcp_auth::{
+    ServiceAccount, ServiceAccountTokenSource, DATASTORE_SCOPE, FCM_SCOPE, PUBSUB_SCOPE,
+};
 pub use relay_broker::{
     relay_auth_router, ClaimPayload, FirestoreRelayStore, InMemoryRelayStore, RelayTokenStore,
 };
@@ -68,6 +71,7 @@ pub use relay::{
     device_router, relay_router, AttachError, DevTokenAuth, Frame, HostCmd, HostEvent,
     RegisterDevice, Relay, RelayAuth, RelayState,
 };
+pub use relay_bus::{BusFrame, FrameBus, NoopFrameBus, PubSubFrameBus};
 pub use relay_registry::{FirestoreSessionRegistry, SessionRegistry, SESSION_TTL};
 pub use state::{SharedTransport, WebState};
 pub use transport::ReqwestTransport;
@@ -175,6 +179,11 @@ pub fn build_oauth_only(state: WebState) -> Router {
 /// metadata, owner authz, and single-host-per-session move to Firestore (a
 /// [`FirestoreSessionRegistry`]) so they're correct across Cloud Run instances;
 /// absent, the relay runs pure in-memory (single-instance, unchanged from today).
+/// When a Pub/Sub topic (`DARKRUN_PUBSUB_TOPIC`) is also configured, the
+/// cross-instance frame bus ([`PubSubFrameBus`]) is wired + its subscriber spawned
+/// so a host and a client on DIFFERENT instances can exchange frames (Step 1c);
+/// absent, a split pair is authorized but stays single-instance for frame
+/// delivery.
 pub async fn relay_router_from_env() -> Option<Router> {
     if let Some(project) = std::env::var("DARKRUN_FIREBASE_PROJECT")
         .ok()
@@ -209,13 +218,33 @@ pub async fn relay_router_from_env() -> Option<Router> {
         let relay = match &account {
             Some(account) => {
                 // The Firestore session registry: single-host-per-session + owner
-                // authz correct across Cloud Run instances. (Frame delivery stays
-                // in-memory this landing; the cross-instance frame bus is Step 1c.)
+                // authz correct across Cloud Run instances.
                 let session_tokens =
                     ServiceAccountTokenSource::new(account.clone()).with_scope(DATASTORE_SCOPE);
                 let registry =
                     Arc::new(FirestoreSessionRegistry::new(project.clone(), session_tokens));
-                Arc::new(Relay::new().with_registry(registry))
+                let base = Relay::new().with_registry(registry);
+                // The cross-instance frame bus (Step 1c): a host and a client on
+                // different instances exchange frames through Pub/Sub. Wired when a
+                // topic is configured (DARKRUN_PUBSUB_TOPIC); absent, the relay is
+                // single-instance (a split pair is authorized but can't exchange
+                // frames — unchanged from before Step 1c).
+                match pubsub_bus_from_env(&project, account, base.instance_id()) {
+                    Some(bus) => {
+                        let relay = Arc::new(base.with_bus(bus.clone()));
+                        // The subscriber pulls frames addressed to this instance and
+                        // dispatches them into the relay's local delivery path.
+                        bus.spawn_subscriber(relay.clone());
+                        tracing::info!("cross-instance frame bus enabled (Pub/Sub)");
+                        relay
+                    }
+                    None => {
+                        tracing::info!(
+                            "DARKRUN_PUBSUB_TOPIC unset — frame bus disabled (single-instance)"
+                        );
+                        Arc::new(base)
+                    }
+                }
             }
             None => Arc::new(Relay::new()),
         };
@@ -265,6 +294,26 @@ fn relay_token_store_from_env() -> Option<Arc<dyn RelayTokenStore>> {
     let account = ServiceAccount::from_env()?;
     let tokens = ServiceAccountTokenSource::new(account).with_scope(DATASTORE_SCOPE);
     Some(Arc::new(FirestoreRelayStore::new(project, tokens)))
+}
+
+/// Build the Pub/Sub-backed cross-instance frame bus from the environment, or
+/// `None` when no topic is configured (single-instance — the relay stays
+/// local-delivery-only, exactly as before Step 1c).
+///
+/// Gated on `DARKRUN_PUBSUB_TOPIC`; the token source is the same service-account
+/// key the registry/FCM use, re-scoped to Pub/Sub ([`PUBSUB_SCOPE`]). The
+/// `instance_id` (from the relay) names this instance's own subscription.
+#[cfg(not(tarpaulin_include))] // env + credential wiring
+fn pubsub_bus_from_env(
+    project: &str,
+    account: &ServiceAccount,
+    instance_id: &str,
+) -> Option<Arc<PubSubFrameBus<ServiceAccountTokenSource>>> {
+    let topic = std::env::var("DARKRUN_PUBSUB_TOPIC")
+        .ok()
+        .filter(|t| !t.trim().is_empty())?;
+    let tokens = ServiceAccountTokenSource::new(account.clone()).with_scope(PUBSUB_SCOPE);
+    Some(Arc::new(PubSubFrameBus::new(project, topic, instance_id, tokens)))
 }
 
 /// Resolve the static site directory from `DARKRUN_SITE_DIR`, falling back to

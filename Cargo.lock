@@ -1730,6 +1730,7 @@ name = "darkrun-web"
 version = "0.7.0"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
  "darkrun-api",
  "darkrun-telemetry",

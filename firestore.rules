@@ -62,12 +62,18 @@ service cloud.firestore {
     // The relay records one document per LIVE session, holding
     // { ownerAccountId, hostInstance, expiresAt }, so single-host-per-session and
     // owner authz are correct across Cloud Run instances (web/server/src/relay_registry.rs).
-    // The service account reads and writes these (rules bypassed); a client reaches
-    // a session only through the relay's authenticated tunnel endpoints, never
+    // Under each session doc, a `clients/{clientId}` sub-collection holds the
+    // cross-instance routing backstop { instance, expiresAt } (Step 1c). The
+    // service account reads and writes both (rules bypassed); a client reaches a
+    // session only through the relay's authenticated tunnel endpoints, never
     // Firestore. So NO client may read or write here — like /relayBroker, and
     // matching SCHEMA.md's "reached through the relay, not mirrored" model.
     match /sessions/{sessionId} {
       allow read, write: if false; // relay service-account only
+
+      match /clients/{clientId} {
+        allow read, write: if false; // relay service-account only (routing backstop)
+      }
     }
   }
 }
