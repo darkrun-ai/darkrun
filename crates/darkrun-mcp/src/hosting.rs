@@ -920,7 +920,7 @@ mod tests {
         let mock = MockTransport::new();
         mock.expect(
             VcsMethod::Get,
-            "https://api.github.com/repos/o/r/issues/7/comments",
+            "https://api.github.com/repos/o/r/issues/7/comments?per_page=100&page=1",
             json_resp(
                 200,
                 serde_json::json!([
@@ -931,7 +931,7 @@ mod tests {
         );
         mock.expect(
             VcsMethod::Get,
-            "https://api.github.com/repos/o/r/pulls/7/reviews",
+            "https://api.github.com/repos/o/r/pulls/7/reviews?per_page=100&page=1",
             json_resp(
                 200,
                 serde_json::json!([
