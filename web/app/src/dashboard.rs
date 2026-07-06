@@ -352,12 +352,32 @@ fn RepoRow(repo: Repo, session: Session) -> Element {
     }
 }
 
-/// One discovered run — a read-only line. (Live attach is a later PR.)
+/// The read-only `/browse` viewer URL on the website for a discovered `run`:
+/// `{web_base}/browse/{host}/{owner}/{repo}/run/{run_id}`. `/browse` renders a
+/// repo's committed `.darkrun/` workspace read-only, entirely in the browser —
+/// the read-only landing until live attach lands. `run.repo` is already
+/// owner-qualified (`owner/repo`), which is exactly the middle of that path.
+fn browse_url(run: &DiscoveredSession) -> String {
+    let host = if run.provider == "gitlab" { "gitlab.com" } else { "github.com" };
+    format!(
+        "{}/browse/{}/{}/run/{}",
+        firebase::web_base().trim_end_matches('/'),
+        host,
+        run.repo,
+        run.run_id,
+    )
+}
+
+/// One discovered run — a link out to the read-only `/browse` viewer for that
+/// run's committed `.darkrun/` tree. (Live attach is a later PR.)
 #[component]
 fn SessionRow(run: DiscoveredSession) -> Element {
     rsx! {
-        div {
-            style: "display:flex;align-items:center;gap:8px;padding:4px 0;",
+        a {
+            href: "{browse_url(&run)}",
+            target: "_blank",
+            rel: "noreferrer",
+            style: "display:flex;align-items:center;gap:8px;padding:4px 0;text-decoration:none;",
             i {
                 class: "fa-solid fa-diagram-project",
                 style: format!("color:{};font-size:11px;", tokens::TEXT_FAINT),
@@ -370,13 +390,17 @@ fn SessionRow(run: DiscoveredSession) -> Element {
                 "{run.run_id}"
             }
             span {
-                title: "read-only, from the committed .darkrun/ tree",
+                title: "open the read-only browser for this run's committed .darkrun/ tree",
                 style: format!(
                     "font-family:{};font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:{};",
                     tokens::FONT_MONO, tokens::TEXT_FAINT,
                 ),
                 i { class: "fa-solid fa-code-branch", style: "margin-right:5px;" }
-                "git"
+                "browse"
+                i {
+                    class: "fa-solid fa-arrow-up-right-from-square",
+                    style: "margin-left:6px;",
+                }
             }
         }
     }

@@ -37,7 +37,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Read the relay endpoint + session + token from the page URL query string.
-web-sys = { version = "0.3", features = ["Window", "Location", "Document", "Element"] }
+web-sys = { version = "0.3", features = ["Window", "Location", "Document", "Element", "Storage"] }
 
 # JS interop for the Firebase Auth sign-in glue (the SDK is JavaScript).
 wasm-bindgen = "0.2"

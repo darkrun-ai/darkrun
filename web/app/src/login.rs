@@ -183,11 +183,30 @@ pub(crate) fn StandaloneLogin() -> Element {
 
     use_effect(move || {
         spawn(async move {
+            // The account parked before the link redirect (if any). On the link
+            // return we MERGE the newly linked provider into it instead of
+            // replacing it — so both GitHub and GitLab identities survive.
+            let existing = firebase::load_account();
             match firebase::consume_redirect().await {
-                Ok(Some(session)) => account.set(Some(Account::new(session))),
+                Ok(Some(session)) => {
+                    let acc = match existing {
+                        Some(mut acc) => {
+                            acc.link(session);
+                            acc
+                        }
+                        None => Account::new(session),
+                    };
+                    firebase::store_account(&acc);
+                    account.set(Some(acc));
+                }
                 Ok(None) => {
-                    if pending.peek().is_none() {
-                        step.set(Step::Idle);
+                    // No pending redirect. A parked account means this is a
+                    // reload (or a redirect that returned no result) — restore it
+                    // and stay signed in; otherwise show the sign-in prompt.
+                    match existing {
+                        Some(acc) => account.set(Some(acc)),
+                        None if pending.peek().is_none() => step.set(Step::Idle),
+                        None => {}
                     }
                 }
                 Err(e) => step.set(Step::Failed(e)),
@@ -216,6 +235,12 @@ pub(crate) fn StandaloneLogin() -> Element {
             Dashboard {
                 account: account().unwrap(),
                 on_link: move |provider: String| {
+                    // Park the current account (with the first provider's token)
+                    // so the link redirect's return can merge the second provider
+                    // into it rather than dropping the first.
+                    if let Some(acc) = account() {
+                        firebase::store_account(&acc);
+                    }
                     step.set(Step::Working);
                     spawn(async move {
                         if let Err(e) = firebase::start_link_redirect(&provider).await {

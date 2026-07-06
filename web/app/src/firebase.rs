@@ -55,7 +55,11 @@ pub async fn start_link_redirect(provider: &str) -> Result<(), String> {
 /// The signed-in identity the standalone dashboard works with: the Firebase ID
 /// token (account identity) plus the provider OAuth access token (the key that
 /// lists the user's repos through `darkrun-web`'s `/api/repos` proxy).
-#[derive(Clone, PartialEq, Deserialize)]
+///
+/// `Serialize` too, so the account (and each identity's token) can be parked in
+/// sessionStorage and survive the full-page link redirect — see
+/// [`store_account`] / [`load_account`].
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     /// The Firebase ID token (the account `uid` after verification).
     #[serde(rename = "idToken")]
@@ -99,7 +103,7 @@ pub fn provider_label(provider: &str) -> &'static str {
 /// GitLab. Each linked provider keeps its own OAuth access token (Firebase only
 /// vends those at sign-in/link time, so they live for the session). The dashboard
 /// lists every linked provider's repos as one combined portfolio.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Account {
     /// One [`Session`] per linked provider, all under the same Firebase uid.
     pub identities: Vec<Session>,
@@ -109,6 +113,26 @@ impl Account {
     /// A fresh account from the first sign-in.
     pub fn new(first: Session) -> Self {
         Self { identities: vec![first] }
+    }
+
+    /// Merge a newly signed-in / linked `identity` INTO this account, keeping all
+    /// prior identities. Linking the second provider APPENDS it (so the combined
+    /// GitHub + GitLab portfolio renders both); re-linking a provider already
+    /// present refreshes its identity (token) in place rather than duplicating it.
+    ///
+    /// This is the append that makes multi-identity work: on the link redirect's
+    /// return the app merges the returned identity here instead of replacing the
+    /// account with only the new provider.
+    pub fn link(&mut self, identity: Session) {
+        if let Some(existing) = self
+            .identities
+            .iter_mut()
+            .find(|s| s.provider == identity.provider)
+        {
+            *existing = identity;
+        } else {
+            self.identities.push(identity);
+        }
     }
 
     /// Is `provider` already linked to this account?
@@ -156,6 +180,35 @@ pub async fn deposit(web_base: &str, nonce: &str, token: &str) -> Result<(), Str
 /// default).
 pub fn web_base() -> String {
     query_param("web").unwrap_or_else(|| DEFAULT_WEB_BASE.to_string())
+}
+
+/// The sessionStorage key the signed-in [`Account`] is parked under.
+const ACCOUNT_STORAGE_KEY: &str = "darkrun.account";
+
+/// This tab's `sessionStorage`, if available.
+fn session_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.session_storage().ok().flatten()
+}
+
+/// Persist the signed-in `account` for this tab so it survives the full-page
+/// LINK redirect: linking a second provider navigates away and reloads the wasm
+/// app, which would otherwise lose the first identity. Parking every linked
+/// identity here (each with its OAuth access token) lets the return trip MERGE
+/// the new provider into the existing account instead of replacing it.
+///
+/// sessionStorage (not localStorage): scoped to this tab, cleared when it closes
+/// — the tokens don't outlive the session.
+pub fn store_account(account: &Account) {
+    if let (Some(storage), Ok(json)) = (session_storage(), serde_json::to_string(account)) {
+        let _ = storage.set_item(ACCOUNT_STORAGE_KEY, &json);
+    }
+}
+
+/// Load the account [`store_account`] parked for this tab, if any — the first
+/// identity the link redirect's return merges the newly linked provider into.
+pub fn load_account() -> Option<Account> {
+    let json = session_storage()?.get_item(ACCOUNT_STORAGE_KEY).ok()??;
+    serde_json::from_str(&json).ok()
 }
 
 /// Read a query param from the page URL.
