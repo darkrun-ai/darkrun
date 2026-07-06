@@ -31,6 +31,10 @@ resource "google_project_service" "services" {
     # permanent and a stray `terraform destroy` must never be able to drop it,
     # the same reason the OAuth secrets + the Hosting site are operator-managed.
     "firestore.googleapis.com",
+    # Firestore Security Rules API: the deploy-app workflow publishes the
+    # committed firestore.rules via the Rules REST API so the repo is the source
+    # of truth for the ruleset (no console drift).
+    "firebaserules.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false
@@ -45,6 +49,18 @@ resource "google_project_service" "services" {
 resource "google_project_iam_member" "app_hosting_deployer" {
   project = var.gcp_project
   role    = "roles/firebasehosting.admin"
+  member  = "serviceAccount:cloudbuild-web@${var.gcp_project}.iam.gserviceaccount.com"
+
+  depends_on = [google_project_service.services]
+}
+
+# Let the same CI SA publish Firestore Security Rules (the deploy-app workflow
+# creates a ruleset from firestore.rules and points the cloud.firestore release
+# at it via the Rules REST API). Keeps the committed rules the source of truth,
+# keyless via WIF, scoped to just the rules-admin permission.
+resource "google_project_iam_member" "firestore_rules_deployer" {
+  project = var.gcp_project
+  role    = "roles/firebaserules.admin"
   member  = "serviceAccount:cloudbuild-web@${var.gcp_project}.iam.gserviceaccount.com"
 
   depends_on = [google_project_service.services]
