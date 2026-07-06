@@ -17,6 +17,7 @@ import {
   signInWithRedirect,
   getRedirectResult,
   linkWithRedirect,
+  onAuthStateChanged,
   GithubAuthProvider,
   OAuthProvider,
 } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
@@ -148,6 +149,37 @@ export async function consumeRedirect() {
   const accessToken = (credential && credential.accessToken) || "";
   const mode = result.operationType === "link" ? "link" : "signIn";
   return JSON.stringify({ mode, idToken, accessToken, provider: providerKey });
+}
+
+// Resolve the PERSISTED user's Firebase ID token, or "" when nobody is signed
+// in. This is what makes the web app a "remember me" workspace: Firebase Auth
+// persists the session in browser local storage, so on any later load the user
+// is still signed in without re-authorizing a provider. We await a one-shot
+// onAuthStateChanged (the SDK restores persisted auth asynchronously, so
+// auth.currentUser can be null for a beat right after load), then mint a fresh
+// ID token from the restored user. The Rust app calls this on startup and uses
+// the token as the bearer for the App-backed /api/workspace + /api/run calls.
+export async function currentUserIdToken() {
+  const user = await new Promise((resolve) => {
+    const unsub = onAuthStateChanged(
+      auth,
+      (u) => {
+        unsub();
+        resolve(u);
+      },
+      () => {
+        unsub();
+        resolve(null);
+      },
+    );
+  });
+  if (!user) return "";
+  try {
+    return await user.getIdToken();
+  } catch (e) {
+    console.error("darkrun: could not read the persisted ID token:", e);
+    return "";
+  }
 }
 
 // Determine "github" | "gitlab" from a redirect UserCredential.
