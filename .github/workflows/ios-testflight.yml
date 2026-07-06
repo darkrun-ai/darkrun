@@ -110,6 +110,12 @@ jobs:
         run: dx build --package darkrun-desktop --platform ios --release --target aarch64-apple-ios
         env:
           IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+          # Bake the Sentry DSN + release into the binary at compile time
+          # (darkrun-telemetry reads DARKRUN_SENTRY_DSN via option_env!). The DSN
+          # is a public ingest key, stored as a repo secret only to keep it out of
+          # logs; if the secret is unset, telemetry compiles out (no-op).
+          DARKRUN_SENTRY_DSN: ${{ secrets.DARKRUN_SENTRY_DSN }}
+          DARKRUN_RELEASE: ${{ steps.ver.outputs.marketing }}
 
       - name: Sign + package the .ipa
         run: ./fastlane/package-ios-ipa.sh

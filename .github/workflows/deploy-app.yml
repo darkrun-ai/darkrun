@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["web/app/**", "crates/darkrun-ui/**", "crates/darkrun-api/**", "firebase.json", "web/well-known/**"]
+    paths: ["web/app/**", "crates/darkrun-ui/**", "crates/darkrun-api/**", "firebase.json", "firestore.rules", "web/well-known/**"]
 
 concurrency:
   group: deploy-app-${{ github.ref }}
@@ -124,3 +124,41 @@ jobs:
           curl -fsS -X PATCH "$API/$VER?updateMask=status" "${auth[@]}" -H "Content-Type: application/json" -d '{"status":"FINALIZED"}' >/dev/null
           curl -fsS -X POST "$API/sites/$SITE/releases?versionName=$VER" "${auth[@]}" >/dev/null
           echo "released $VER"
+
+      # Deploy firestore.rules so the COMMITTED rules are the source of truth
+      # (previously the rules had no deploy path — they lived only in the repo and
+      # had to be pushed by hand via `firebase deploy`). Keyless, reusing the same
+      # gcloud-minted token as the Hosting deploy above. Uses the Firebase Rules
+      # REST API: create a ruleset from firestore.rules, then point the
+      # `cloud.firestore` release at it.
+      #
+      # needs-owner: the cloudbuild-web SA must have roles/firebaserules.admin and
+      # the firebaserules.googleapis.com API must be enabled on the project (add
+      # both in infra/main.tf + `terraform apply`). Until then this step 403s.
+      - name: Deploy Firestore rules (REST, keyless)
+        run: |
+          set -euo pipefail
+          PROJECT=darkrun
+          API=https://firebaserules.googleapis.com/v1
+          TOKEN="$(gcloud auth print-access-token)"
+          auth=(-H "Authorization: Bearer $TOKEN")
+
+          # Build the ruleset payload, JSON-escaping the rules file content via jq.
+          body=$(jq -n --rawfile src firestore.rules \
+            '{source:{files:[{name:"firestore.rules",content:$src}]}}')
+          ruleset=$(curl -fsS -X POST "$API/projects/$PROJECT/rulesets" \
+            "${auth[@]}" -H "Content-Type: application/json" -d "$body" | jq -r .name)
+          echo "ruleset=$ruleset"; test -n "$ruleset" -a "$ruleset" != null
+
+          # Point the Firestore release at the new ruleset. The release exists after
+          # the first deploy — PATCH it; if it doesn't exist yet, create it (POST).
+          rel="projects/$PROJECT/releases/cloud.firestore"
+          patch=$(jq -n --arg n "$rel" --arg r "$ruleset" \
+            '{release:{name:$n,rulesetName:$r},updateMask:"rulesetName"}')
+          if ! curl -fsS -X PATCH "$API/$rel" "${auth[@]}" \
+                -H "Content-Type: application/json" -d "$patch" >/dev/null 2>&1; then
+            jq -n --arg n "$rel" --arg r "$ruleset" '{name:$n,rulesetName:$r}' \
+              | curl -fsS -X POST "$API/projects/$PROJECT/releases" "${auth[@]}" \
+                  -H "Content-Type: application/json" -d @- >/dev/null
+          fi
+          echo "released Firestore rules -> $ruleset"

@@ -38,6 +38,7 @@
     "bin",
     "commands",
     "factories",
+    "hooks",
     "prompts",
     "skills",
     "README.md"
