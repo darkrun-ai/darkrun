@@ -16,6 +16,50 @@ struct Release {
 
 const RELEASES: &[Release] = &[
     Release {
+        version: "0.7.0",
+        date: "2026-06-17",
+        notes: &[
+            "Web push registration and the Firebase web config: login is now functional.",
+            "Web Push VAPID key wired, so remote push is fully configured.",
+            "Firestore-backed device registry so push survives restarts.",
+        ],
+    },
+    Release {
+        version: "0.6.0",
+        date: "2026-06-16",
+        notes: &[
+            "Remote-push spine: FCM fan-out plus device registration.",
+            "The host connector fires a remote notification when a run reaches a gate.",
+            "Google service-account token source, so FCM push goes live.",
+        ],
+    },
+    Release {
+        version: "0.5.0",
+        date: "2026-06-16",
+        notes: &[
+            "darkrun login and the shared local/remote tunnel protocol: remote access to your runs.",
+            "Firebase-native cloud foundation: Firestore data model, rules, project config.",
+            "SHA optimistic-concurrency write guards on artifacts; engine-driven run setup; questions surface on the run and persist across restarts.",
+        ],
+    },
+    Release {
+        version: "0.4.0",
+        date: "2026-06-11",
+        notes: &[
+            "The statusline demo on the website: boxed session banner, left/right stepper, in-situ render under the prompt box.",
+            "Terminal panels follow the site theme; the statusline reads on light terminals.",
+        ],
+    },
+    Release {
+        version: "0.3.0",
+        date: "2026-06-11",
+        notes: &[
+            "Composite runs: multi-factory topology with sync points.",
+            "Reject-escalation up the model ladder, the keep-or-drop station offer, and the runtime-verifier reviewer.",
+            "Run-level draft PRs, docs search with JSON-LD, and a live per-tick desktop session mirror.",
+        ],
+    },
+    Release {
         version: "0.2.0",
         date: "2026-06-08",
         notes: &[

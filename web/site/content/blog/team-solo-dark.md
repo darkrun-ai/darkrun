@@ -7,7 +7,7 @@ The dial controls where you sit relative to the run. In the loop with your team.
 :::keypoints title="The three modes"
 - **team** — in the loop with your team; each gate opens a PR they review and merge.
 - **solo** — in the loop alone; each gate asks for local review in the desktop app.
-- **dark** — on the loop; the run advances, pausing only on external/await gates and real ambiguity.
+- **dark** — on the loop; the run advances unattended, resolving ambiguity itself and pausing only on a genuinely external/await gate.
 :::
 
 ## The three modes
@@ -16,13 +16,13 @@ The dial controls where you sit relative to the run. In the loop with your team.
 |---|---|---|
 | **team** | in the loop, with your team | opens a PR they review and merge |
 | **solo** | in the loop, alone | asks for local review in the desktop app |
-| **dark** | on the loop | runs through, stops only on real ambiguity |
+| **dark** | on the loop | runs through, stops only on an external/await gate |
 
 **team** is for shared work. When a station finishes, it opens a pull request. Your team reviews it and merges it the way they review anything. The gate is external — it lives in your existing PR flow, and the run waits for the merge. The people who own the code stay the people who approve the change.
 
 **solo** is you and the machine. Each station finishes and asks for review locally. You approve it in the desktop app and it advances. No PR overhead, no waiting on anyone, but you still see every station boundary before the run crosses it.
 
-**dark** is lights-out. You pre-elaborate the whole run up front, then it goes station to station without stopping. It pauses for two things only: a gate that's genuinely external or awaiting something it can't produce, and real ambiguity it can't resolve from the frame. Otherwise you're on the loop, not in it. You set the direction once and read the result.
+**dark** is lights-out. You pre-elaborate the whole run up front, then it goes station to station without stopping. It pauses for one thing only: a gate that's genuinely external or awaiting something it can't produce. When it hits an ambiguity it can't resolve from the frame, it doesn't stop and ask, because a lights-out line has nobody standing there to answer. It decides, records the assumption, and keeps moving; you can override that call later through feedback. Otherwise you're on the loop, not in it. You set the direction once and read the result.
 
 ## All three pre-elaborate
 
@@ -38,12 +38,12 @@ The tempting design is a gate setting per station. Ask on Frame, auto on Build, 
 
 Per-station gates make the run unpredictable. You can't answer "will this stop and ask me?" without opening the config and reading six settings. You end up either babysitting a run you thought was autonomous, or walking away from one that was about to block on you. The altitude you're working at keeps shifting under you.
 
-One global dial fixes the altitude. You pick it once and the whole run honors it. In team, every boundary is a PR — you know that going in. In dark, nothing stops except ambiguity — you know that too. You spend your attention at one consistent level instead of context-switching every time a different station decides to handle gates its own way.
+One global dial fixes the altitude. You pick it once and the whole run honors it. In team, every boundary is a PR, and you know that going in. In dark, nothing stops except a genuinely external gate, and you know that too. You spend your attention at one consistent level instead of context-switching every time a different station decides to handle gates its own way.
 
 ```
 team   →  external gate   (PR review + merge)
 solo   →  ask gate        (local desktop approval)
-dark   →  auto gate       (advance; pause only on external/await + ambiguity)
+dark   →  auto gate       (advance; pause only on external/await gates)
 ```
 
 The gate kind comes from the mode now, not the station. team makes every gate external, solo makes every gate ask, dark makes every gate auto. The station says what it does; the mode says how much it checks in.
