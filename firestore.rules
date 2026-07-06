@@ -7,8 +7,9 @@ rules_version = '2';
 // (read-only when no session is live). These rules describe only what code
 // actually reads and writes today:
 //
-//   - accounts + their linked provider identities, and
-//   - a top-level `devices` collection of FCM push registrations.
+//   - accounts + their linked provider identities,
+//   - a top-level `devices` collection of FCM push registrations, and
+//   - a top-level `relayBroker` collection of parked login tokens (nonce-keyed).
 //
 // Trust model: every signed-in Firebase Auth user's `uid` IS the account id.
 // Device docs are written by the relay's service account (see
@@ -44,6 +45,17 @@ service cloud.firestore {
     match /devices/{deviceId} {
       allow read: if isOwner(resource.data.account);
       allow write: if false; // relay service-account only
+    }
+
+    // ── Relay-token broker ──────────────────────────────────────────────────
+    // The relay parks one document per login nonce, holding { token, expiresAt },
+    // so deposit/claim scale across Cloud Run instances (web/server/src/relay_broker.rs).
+    // The service account reads and writes these (rules bypassed); the parked
+    // token is a bearer secret the browser deposits and the CLI claims over the
+    // authenticated HTTP endpoints, never through Firestore. So NO client may read
+    // or write here — unlike /devices, not even owner reads (a nonce has no owner).
+    match /relayBroker/{nonce} {
+      allow read, write: if false; // relay service-account only
     }
   }
 }

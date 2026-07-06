@@ -85,6 +85,25 @@ resource "google_service_account_iam_member" "build_sa_actas_web_runtime" {
   member             = "serviceAccount:cloudbuild-web@${var.gcp_project}.iam.gserviceaccount.com"
 }
 
+# Native Firestore TTL for the relay-token broker's `relayBroker` collection: GC
+# each parked-token document once its `expiresAt` timestamp passes, server-side.
+# This replaces the in-memory broker's timer sweep for the Firestore-backed store
+# (web/server/src/relay_broker.rs) so abandoned deposits can't accumulate. Only
+# the FIELD TTL policy is Terraform-managed here; the `(default)` database itself
+# is operator-created (see the firestore.googleapis.com note above) and must never
+# be a destroyable resource. TTL GC is best-effort/lagging, so the store's
+# read-time `expiresAt` check stays authoritative regardless.
+resource "google_firestore_field" "relay_broker_ttl" {
+  project    = var.gcp_project
+  database   = "(default)"
+  collection = "relayBroker"
+  field      = "expiresAt"
+
+  ttl_config {}
+
+  depends_on = [google_project_service.services]
+}
+
 module "sentry" {
   source = "./modules/sentry"
 

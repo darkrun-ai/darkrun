@@ -56,7 +56,9 @@ pub use firebase_auth::{FirebaseTokenAuth, VerifiedClaims, FIREBASE_CERTS_URL};
 pub use github_app::{CommittedRun, CommittedStation, GitHubApp, GitHubIdentity, WorkspaceRepo};
 pub use firestore::FirestoreDeviceRegistry;
 pub use gcp_auth::{ServiceAccount, ServiceAccountTokenSource, DATASTORE_SCOPE, FCM_SCOPE};
-pub use relay_broker::{relay_auth_router, ClaimPayload, RelayBroker};
+pub use relay_broker::{
+    relay_auth_router, ClaimPayload, FirestoreRelayStore, InMemoryRelayStore, RelayTokenStore,
+};
 pub use push::{
     fan_out, fcm_endpoint, fcm_message, AccessTokenSource, DeviceRegistry, DeviceToken,
     FcmPushSender, InMemoryDeviceRegistry, NoopPushSender, PushSender, StaticTokenSource,
@@ -217,6 +219,26 @@ pub async fn relay_router_from_env() -> Option<Router> {
     None
 }
 
+/// Build the Firestore-backed relay-token store from the environment, or `None`
+/// to fall back to the in-memory store.
+///
+/// Selected by the SAME env as the Firestore device registry: both the Firebase
+/// project (`DARKRUN_FIREBASE_PROJECT`) and service-account credentials
+/// (`GOOGLE_APPLICATION_CREDENTIALS`, via [`ServiceAccount::from_env`]) must be
+/// present. The store shares the datastore-scoped token source shape the registry
+/// uses. Absent → `None`, and the caller keeps the in-memory store (with a timer
+/// sweep). Firestore-backed, deposit/claim work from any Cloud Run instance and
+/// native TTL replaces the sweep.
+#[cfg(not(tarpaulin_include))] // env + credential load
+fn relay_token_store_from_env() -> Option<Arc<dyn RelayTokenStore>> {
+    let project = std::env::var("DARKRUN_FIREBASE_PROJECT")
+        .ok()
+        .filter(|p| !p.trim().is_empty())?;
+    let account = ServiceAccount::from_env()?;
+    let tokens = ServiceAccountTokenSource::new(account).with_scope(DATASTORE_SCOPE);
+    Some(Arc::new(FirestoreRelayStore::new(project, tokens)))
+}
+
 /// Resolve the static site directory from `DARKRUN_SITE_DIR`, falling back to
 /// [`DEFAULT_SITE_DIR`].
 pub fn site_dir_from_env() -> PathBuf {
@@ -337,11 +359,28 @@ pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
         tracing::info!("relay endpoints mounted (/relay/host, /relay/client)");
     }
     // The relay-token broker carries a browser-minted Firebase token to the CLI
-    // (POST /auth/relay/deposit, GET /auth/relay/claim/:nonce). Sweep its
-    // abandoned deposits on a timer too — the deposit endpoint is unauthenticated.
-    let relay_broker = RelayBroker::new();
-    spawn_sweeper("relay broker", relay_broker.clone(), |b| b.sweep_expired());
-    router = router.merge(relay_auth_router(relay_broker));
+    // (POST /auth/relay/deposit, GET /auth/relay/claim/:nonce). Select its store
+    // the same way the FCM device registry is selected: a Firestore-backed store
+    // when the Firebase project + service-account credentials are present (so any
+    // Cloud Run instance can serve deposit/claim), else the in-memory store.
+    let relay_store: Arc<dyn RelayTokenStore> = match relay_token_store_from_env() {
+        Some(store) => {
+            tracing::info!("relay-token broker backed by Firestore (horizontally scalable)");
+            // Firestore's native TTL GCs expired docs server-side, so no timer
+            // sweep is needed for this backend.
+            store
+        }
+        None => {
+            // In-memory: claims evict lazily, but abandoned (never-claimed)
+            // deposits only clear on a sweep — run one on a timer so the map can't
+            // grow without bound (the deposit endpoint is unauthenticated).
+            let store = Arc::new(InMemoryRelayStore::new());
+            spawn_sweeper("relay broker", store.clone(), |s| s.sweep_expired());
+            let store: Arc<dyn RelayTokenStore> = store;
+            store
+        }
+    };
+    router = router.merge(relay_auth_router(relay_store));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(

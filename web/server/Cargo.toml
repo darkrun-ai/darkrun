@@ -20,8 +20,12 @@ darkrun-vcs.workspace = true
 darkrun-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Hash FCM tokens into stable Firestore document ids (the persistent registry).
+# Hash FCM tokens and relay nonces into stable Firestore document ids (the
+# persistent device registry + the horizontally-scalable relay-token broker).
 sha2.workspace = true
+# Encode/parse Firestore `timestampValue` (RFC3339) for the relay-token broker's
+# wall-clock expiry, and compute expiry on the write path.
+chrono.workspace = true
 tokio.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
