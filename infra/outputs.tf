@@ -23,6 +23,16 @@ output "dns_zone" {
   value       = module.dns.zone_name
 }
 
+output "auth_authorized_domains" {
+  description = "Firebase Auth authorized domains now tracked as code."
+  value       = module.auth.authorized_domains
+}
+
+output "auth_managed_providers" {
+  description = "Sign-in providers Terraform manages (empty when manage_auth_idp = false)."
+  value       = module.auth.managed_providers
+}
+
 # Per-surface Sentry DSNs. The web DSN is already wired into Cloud Run; the cli +
 # desktop DSNs feed the release pipeline (set them as GitHub Actions secrets so the
 # build bakes them into the binaries); the site DSN feeds the browser SDK.

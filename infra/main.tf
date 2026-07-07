@@ -35,6 +35,10 @@ resource "google_project_service" "services" {
     # committed firestore.rules via the Rules REST API so the repo is the source
     # of truth for the ruleset (no console drift).
     "firebaserules.googleapis.com",
+    # Identity Platform: backs Firebase Auth. The auth module tracks the sign-in
+    # config (authorized domains + the GitHub/GitLab providers) as code so console
+    # drift can't silently break sign-in.
+    "identitytoolkit.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false
@@ -121,6 +125,27 @@ module "web" {
   firebase_project = var.firebase_project
 
   manage_domain_mapping = var.manage_domain_mapping
+
+  depends_on = [google_project_service.services]
+}
+
+# Firebase Auth / Identity Platform sign-in config as code: the authorized
+# domains (always) and, opt-in, the GitHub + GitLab providers. Captures what used
+# to live only in the Firebase console so console drift surfaces as a plan diff.
+module "auth" {
+  source = "./modules/auth"
+
+  project            = var.firebase_project != "" ? var.firebase_project : var.gcp_project
+  authorized_domains = var.auth_authorized_domains
+
+  # Off by default: the provider resources require the OAuth client SECRET, which
+  # Terraform persists to state (the repo keeps OAuth secrets out of state). When
+  # off, only authorized_domains is tracked and the providers stay console-managed.
+  manage_idp           = var.manage_auth_idp
+  github_client_id     = var.github_oauth_client_id
+  github_client_secret = var.github_oauth_client_secret
+  gitlab_client_id     = var.gitlab_oauth_client_id
+  gitlab_client_secret = var.gitlab_oauth_client_secret
 
   depends_on = [google_project_service.services]
 }
