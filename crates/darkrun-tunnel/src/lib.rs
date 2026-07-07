@@ -173,9 +173,17 @@ impl GateWatcher {
     }
 }
 
-/// Run the host connector forever: connect to the relay, serve until the
-/// connection drops, then reconnect after the configured backoff. Returns only
-/// if the task is cancelled by the caller.
+/// Run the host connector: connect to the relay, serve until the connection
+/// drops, then reconnect after the configured backoff. Loops on TRANSIENT drops
+/// (DNS/TCP/TLS/5xx/protocol) forever, so it returns only when either the caller
+/// cancels the task OR the relay REJECTS the dial credential.
+///
+/// An auth rejection (the relay answers the WS handshake with 401/403) means the
+/// baked dial token is stale — retrying it in place would 401 forever, which is
+/// exactly the long-run failure crit#6 fixes. So `run` EXITS on an auth
+/// rejection, surfacing it to the dial supervisor (which re-resolves + refreshes
+/// the credential and re-dials with a fresh token) instead of silently hammering
+/// the relay with a dead token.
 pub async fn run(cfg: ConnectorConfig) {
     let http = reqwest::Client::new();
     // One command-dedup cache for the whole SESSION, hoisted above the reconnect
@@ -186,11 +194,64 @@ pub async fn run(cfg: ConnectorConfig) {
     // TTL still bounds it.
     let dedup = Arc::new(Mutex::new(CommandDedup::new()));
     loop {
-        if let Err(e) = serve_once(&cfg, &http, &dedup).await {
-            tracing::warn!("darkrun-tunnel: relay connection ended: {e}");
+        match serve_once(&cfg, &http, &dedup).await {
+            Ok(()) => {}
+            Err(e) if e.auth => {
+                tracing::error!(
+                    "darkrun-tunnel: {} — the /darkrun:darkrun-login credential is stale; \
+                     a refresh + re-dial is needed (not retrying this token in place)",
+                    e.message
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("darkrun-tunnel: relay connection ended: {}", e.message);
+            }
         }
         tokio::time::sleep(cfg.reconnect).await;
     }
+}
+
+/// Why a relay connection attempt ended: an AUTH rejection (the relay answered
+/// the WS handshake with 401/403, so the dial token is stale and a fresh one is
+/// needed) versus a transient dial/stream failure worth retrying in place.
+#[derive(Debug)]
+struct DialError {
+    /// The relay rejected the dial credential at the WS handshake (401/403).
+    auth: bool,
+    /// A human-readable reason, for the log line.
+    message: String,
+}
+
+impl DialError {
+    /// A retryable (non-auth) failure.
+    fn transient(message: String) -> Self {
+        Self { auth: false, message }
+    }
+}
+
+/// Whether an HTTP status at the WS handshake is an AUTH rejection (the relay
+/// refused the dial token) rather than a transient failure.
+fn is_auth_status(status: u16) -> bool {
+    status == 401 || status == 403
+}
+
+/// Classify a WS-handshake failure. A tungstenite `Http` response carrying a
+/// 401/403 is an auth rejection — the baked dial token is stale, so the caller
+/// must re-dial with a FRESH one rather than retry this token; everything else
+/// (DNS, TCP, TLS, a 5xx, a protocol error) is transient and retried in place.
+fn classify_dial_error(err: &tokio_tungstenite::tungstenite::Error) -> DialError {
+    if let tokio_tungstenite::tungstenite::Error::Http(resp) = err {
+        let status = resp.status().as_u16();
+        if is_auth_status(status) {
+            return DialError {
+                auth: true,
+                message: format!("relay rejected the dial token (HTTP {status})"),
+            };
+        }
+        return DialError::transient(format!("relay handshake failed (HTTP {status})"));
+    }
+    DialError::transient(format!("dialing relay: {err}"))
 }
 
 /// One relay connection's lifetime: register, then bridge clients until the
@@ -199,10 +260,10 @@ async fn serve_once(
     cfg: &ConnectorConfig,
     http: &reqwest::Client,
     dedup: &Arc<Mutex<CommandDedup>>,
-) -> Result<(), String> {
+) -> Result<(), DialError> {
     let (ws, _) = connect_async(&cfg.relay_host_url)
         .await
-        .map_err(|e| format!("dialing relay: {e}"))?;
+        .map_err(|e| classify_dial_error(&e))?;
     let (mut sink, mut stream) = ws.split();
 
     // One writer drains the outbound queue to the relay sink, so every task
@@ -240,7 +301,11 @@ async fn serve_once(
     // a non-idempotent command even if it straddles a reconnect.
 
     let mut clients: HashMap<u64, JoinHandle<()>> = HashMap::new();
-    let result = read_loop(cfg, http, &mut stream, &out_tx, &mut clients, dedup).await;
+    // A drop mid-stream is always transient — the handshake already succeeded, so
+    // the token was accepted; only a fresh handshake can be an auth rejection.
+    let result = read_loop(cfg, http, &mut stream, &out_tx, &mut clients, dedup)
+        .await
+        .map_err(DialError::transient);
 
     // Tear everything down — clients re-attach (with fresh snapshots) on reconnect.
     for (_, handle) in clients {
@@ -566,6 +631,42 @@ mod tests {
             reconnect: Duration::from_secs(1),
         };
         assert_eq!(cfg.local_ws_url(), "ws://127.0.0.1:4317/ws/session/quiet-canyon");
+    }
+
+    #[test]
+    fn auth_statuses_are_401_and_403_only() {
+        assert!(is_auth_status(401));
+        assert!(is_auth_status(403));
+        // Everything else is transient — including neighbors and 5xx.
+        for s in [101u16, 200, 400, 404, 429, 500, 502, 503] {
+            assert!(!is_auth_status(s), "status {s} must not classify as auth");
+        }
+    }
+
+    #[test]
+    fn classify_dial_error_flags_401_403_as_auth_and_the_rest_transient() {
+        use tokio_tungstenite::tungstenite::http::Response;
+        use tokio_tungstenite::tungstenite::Error as WsError;
+
+        let http_err = |status: u16| {
+            let resp = Response::builder().status(status).body(None).unwrap();
+            WsError::Http(Box::new(resp))
+        };
+
+        // A 401/403 handshake response is an auth rejection (re-dial needed).
+        let e = classify_dial_error(&http_err(401));
+        assert!(e.auth, "401 must be an auth rejection");
+        assert!(e.message.contains("401"));
+        assert!(classify_dial_error(&http_err(403)).auth);
+
+        // A 5xx (or any other) handshake response is transient (retry in place).
+        let e = classify_dial_error(&http_err(503));
+        assert!(!e.auth, "503 is transient, not auth");
+        assert!(e.message.contains("503"));
+
+        // A non-HTTP failure (e.g. the socket closed) is transient too.
+        let e = classify_dial_error(&WsError::ConnectionClosed);
+        assert!(!e.auth, "a connection-closed error is transient");
     }
 
     #[test]

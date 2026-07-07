@@ -72,6 +72,7 @@ pub mod position;
 pub mod proof;
 pub mod reflection;
 pub mod registry;
+pub mod relay_token;
 pub mod reset;
 pub mod runs;
 pub mod scaffold;

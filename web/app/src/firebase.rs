@@ -47,14 +47,50 @@ pub async fn start_sign_in_redirect(provider: &str) -> Result<(), String> {
 
 /// The signed-in identity the standalone workspace works with: the Firebase ID
 /// token (the DURABLE account identity the App-backed `/api/workspace` +
-/// `/api/run` calls authenticate with). The JS glue also reports the provider
-/// access token + provider key on the credential, but the persistent workspace
-/// keys off the Firebase identity alone, so this only carries the ID token.
+/// `/api/run` calls authenticate with), plus the relay-refresh material the CLI
+/// bridge parks so the engine can re-mint the ID token itself.
+///
+/// The standalone workspace keys off the Firebase identity (`id_token`) alone;
+/// the extra fields only matter on the CLI-login path, where [`deposit`] packs
+/// them into the relay-token blob the CLI claims.
 #[derive(Clone, PartialEq, Deserialize)]
 pub struct Session {
     /// The Firebase ID token (the account `uid` after verification).
     #[serde(rename = "idToken")]
     pub id_token: String,
+    /// The Firebase refresh token, when the provider issued one — the material
+    /// the securetoken endpoint re-mints the ID token from.
+    #[serde(rename = "refreshToken", default)]
+    pub refresh_token: Option<String>,
+    /// The PUBLIC Firebase Web API key the securetoken endpoint keys on.
+    #[serde(rename = "apiKey", default)]
+    pub api_key: Option<String>,
+    /// The ID token's absolute expiry (unix seconds).
+    #[serde(rename = "expiresAt", default)]
+    pub expires_at: Option<i64>,
+    /// When the ID token was issued (unix seconds).
+    #[serde(rename = "issuedAt", default)]
+    pub issued_at: Option<i64>,
+}
+
+impl Session {
+    /// Serialize this session into the JSON `RelayToken` blob the broker carries
+    /// to the CLI verbatim. Field names match
+    /// `darkrun_mcp::relay_token::RelayToken`, so the CLI parses it directly; a
+    /// bare/empty optional collapses to `null` (→ `None`), which yields a
+    /// legacy-compatible, unrefreshable token when the provider gave no refresh
+    /// material.
+    fn relay_token_blob(&self) -> Result<String, String> {
+        let clean = |o: &Option<String>| o.as_deref().filter(|s| !s.is_empty()).map(str::to_string);
+        let value = serde_json::json!({
+            "id_token": self.id_token,
+            "refresh_token": clean(&self.refresh_token),
+            "api_key": clean(&self.api_key),
+            "expires_at": self.expires_at.filter(|&n| n > 0),
+            "issued_at": self.issued_at.filter(|&n| n > 0),
+        });
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
 }
 
 /// Consume a pending redirect result on load. `Ok(None)` means there is no
@@ -101,12 +137,15 @@ struct Deposit<'a> {
     token: &'a str,
 }
 
-/// POST the minted token to the relay broker under `nonce`, so the waiting CLI
-/// claims it. `web_base` is the website host (the broker lives there).
-pub async fn deposit(web_base: &str, nonce: &str, token: &str) -> Result<(), String> {
+/// POST the minted credential to the relay broker under `nonce`, so the waiting
+/// CLI claims it. The deposited "token" is the JSON `RelayToken` blob (ID token +
+/// refresh material); the broker treats it as an opaque string, so no broker
+/// change is needed. `web_base` is the website host (the broker lives there).
+pub async fn deposit(web_base: &str, nonce: &str, session: &Session) -> Result<(), String> {
+    let blob = session.relay_token_blob()?;
     let url = format!("{}/auth/relay/deposit", web_base.trim_end_matches('/'));
     let resp = Request::post(&url)
-        .json(&Deposit { nonce, token })
+        .json(&Deposit { nonce, token: &blob })
         .map_err(|e| e.to_string())?
         .send()
         .await

@@ -138,10 +138,16 @@ export function startLinkRedirect(providerKey) {
 
 // On app load, consume a pending redirect result (present only right after we
 // return from a provider). Resolves to JSON:
-//   { mode: "signIn" | "link", idToken, accessToken, provider }
+//   { mode, idToken, accessToken, provider, refreshToken, apiKey, expiresAt, issuedAt }
 // or "" when there is no pending redirect. The dashboard needs the provider OAuth
 // access token (to list repos through darkrun-web's /api/repos proxy), which
 // Firebase vends only here, on the sign-in/link result's credential.
+//
+// refreshToken + apiKey + expiresAt/issuedAt are the relay-refresh material: the
+// CLI parks them with the ID token so the CLI/engine can re-mint the ID token
+// from Google's public securetoken endpoint before its ~1h lifetime lapses,
+// instead of dialing an expired token and 401ing forever (crit#6). The API key
+// is the PUBLIC Firebase Web API key from firebaseConfig — safe to ship.
 export async function consumeRedirect() {
   let result;
   try {
@@ -158,14 +164,30 @@ export async function consumeRedirect() {
   }
   if (!result) return "";
   const providerKey = providerKeyOf(result);
-  const idToken = await result.user.getIdToken();
+  // getIdTokenResult vends the ID token AND its expiry/issued-at claims in one
+  // call, so the refresh can be scheduled ahead of expiry.
+  const tokenResult = await result.user.getIdTokenResult();
+  const idToken = tokenResult.token;
+  const refreshToken = result.user.refreshToken || "";
+  const apiKey = firebaseConfig.apiKey;
+  const expiresAt = Math.floor(new Date(tokenResult.expirationTime).getTime() / 1000) || 0;
+  const issuedAt = Math.floor(new Date(tokenResult.issuedAtTime).getTime() / 1000) || 0;
   const credential =
     providerKey === "gitlab"
       ? OAuthProvider.credentialFromResult(result)
       : GithubAuthProvider.credentialFromResult(result);
   const accessToken = (credential && credential.accessToken) || "";
   const mode = result.operationType === "link" ? "link" : "signIn";
-  return JSON.stringify({ mode, idToken, accessToken, provider: providerKey });
+  return JSON.stringify({
+    mode,
+    idToken,
+    accessToken,
+    provider: providerKey,
+    refreshToken,
+    apiKey,
+    expiresAt,
+    issuedAt,
+  });
 }
 
 // Resolve the PERSISTED user's Firebase ID token, or "" when nobody is signed

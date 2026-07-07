@@ -55,7 +55,7 @@ pub fn LoginPage() -> Element {
             spawn(async move {
                 match firebase::consume_redirect().await {
                     Ok(Some(session)) => {
-                        match firebase::deposit(&firebase::web_base(), &nonce, &session.id_token).await {
+                        match firebase::deposit(&firebase::web_base(), &nonce, &session).await {
                             Ok(()) => step.set(Step::Done),
                             Err(e) => step.set(Step::Failed(format!("Couldn't hand the token to the CLI: {e}"))),
                         }
