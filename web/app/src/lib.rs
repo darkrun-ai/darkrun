@@ -27,12 +27,19 @@ use futures::channel::mpsc::UnboundedReceiver;
 use login::{LoginPage, StandaloneLogin};
 use remote::{run_connection, target_from_url, CommandOutcome, RemoteState};
 
-/// Whether the current page path is the login route.
+/// Whether the current page path is the login route. Reads `location.pathname`;
+/// the pure predicate is [`is_login_pathname`].
 fn is_login_path() -> bool {
     web_sys::window()
         .and_then(|w| w.location().pathname().ok())
-        .map(|p| p.trim_end_matches('/').ends_with("/login"))
+        .map(|p| is_login_pathname(&p))
         .unwrap_or(false)
+}
+
+/// Whether `path` is the `/login` route (trailing slash tolerated). Pure, so the
+/// routing decision is unit-tested off-browser.
+fn is_login_pathname(path: &str) -> bool {
+    path.trim_end_matches('/').ends_with("/login")
 }
 
 /// The review id in the current `/review/:id` path, if that's where we are.
@@ -40,9 +47,18 @@ fn is_login_path() -> bool {
 /// This is the route a darkrun review link points at — the same
 /// `https://app.darkrun.ai/review/<id>` Universal Link the native apps claim
 /// (see `desktop/Dioxus.toml [deep_links]`). On the web (the fallback when the
-/// native app isn't installed) it renders the review by id below.
+/// native app isn't installed) it renders the review by id below. Reads
+/// `location.pathname`; the parsing lives in the pure [`review_id_from_pathname`].
 fn review_id_from_path() -> Option<String> {
     let path = web_sys::window()?.location().pathname().ok()?;
+    review_id_from_pathname(&path)
+}
+
+/// Extract the review id from a `/review/:id` pathname, or `None` when the path
+/// isn't a single-segment review route. A trailing slash is tolerated; a nested
+/// path (`/review/a/b`) or an empty id (`/review/`) is rejected. Pure (no
+/// `web_sys`) so the route parsing is unit-tested on native.
+fn review_id_from_pathname(path: &str) -> Option<String> {
     let rest = path.trim_end_matches('/').strip_prefix("/review/")?;
     // Only a single, non-empty segment is a review id.
     if rest.is_empty() || rest.contains('/') {
@@ -335,7 +351,7 @@ fn session_view(
 ) -> Element {
     // A real slug drives the Advance command. A missing/empty slug must NOT send
     // `Advance { run: "run" }` for a literal run named "run" — guard the button.
-    let run_slug = payload.run_slug.clone().filter(|s| !s.is_empty());
+    let run_slug = guarded_run_slug(&payload.run_slug);
     let run_display = run_slug.clone().unwrap_or_else(|| "run".to_string());
     let phase = active_phase(payload);
 
@@ -782,4 +798,96 @@ fn active_phase(payload: &ReviewSessionPayload) -> Option<Phase> {
     let rp = payload.current_state.as_ref()?.phase.as_ref()?;
     let name = serde_json::to_value(rp).ok()?;
     Phase::from_name(name.as_str()?)
+}
+
+/// The run slug to drive the Approve/Advance command with: the payload's slug,
+/// but only when it's a real, non-empty value. A missing/empty slug returns
+/// `None` so the UI never sends `Advance { run: "run" }` for a literal run named
+/// "run" (it shows the "approve from desktop/CLI" fallback instead).
+fn guarded_run_slug(run_slug: &Option<String>) -> Option<String> {
+    run_slug.clone().filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Native (`#[test]`) coverage of the pure routing + session-render helpers:
+    //! `/login` and `/review/:id` path parsing, the active-phase mapping, and the
+    //! run-slug guard. None touch `web_sys`, so they run under
+    //! `cargo test -p darkrun-app`.
+    use super::*;
+    use darkrun_api::session::{RunCurrentState, RunPhase};
+
+    #[test]
+    fn is_login_pathname_matches_the_login_route() {
+        assert!(is_login_pathname("/login"));
+        assert!(is_login_pathname("/login/")); // trailing slash tolerated
+        assert!(!is_login_pathname("/"));
+        assert!(!is_login_pathname("/review/abc"));
+        // Only a `/login` SEGMENT — a slug that merely ends in "login" must match
+        // the segment boundary; `ends_with("/login")` requires the slash.
+        assert!(!is_login_pathname("/relogin"));
+    }
+
+    #[test]
+    fn review_id_from_pathname_reads_a_single_segment_id() {
+        assert_eq!(review_id_from_pathname("/review/abc123"), Some("abc123".into()));
+        // Trailing slash tolerated.
+        assert_eq!(review_id_from_pathname("/review/abc123/"), Some("abc123".into()));
+    }
+
+    #[test]
+    fn review_id_from_pathname_rejects_non_review_and_nested_paths() {
+        assert_eq!(review_id_from_pathname("/"), None);
+        assert_eq!(review_id_from_pathname("/login"), None);
+        assert_eq!(review_id_from_pathname("/review/"), None); // empty id
+        assert_eq!(review_id_from_pathname("/review"), None); // no segment
+        // A nested path is not a bare review id.
+        assert_eq!(review_id_from_pathname("/review/a/b"), None);
+    }
+
+    #[test]
+    fn active_phase_maps_the_current_state_phase() {
+        let payload = ReviewSessionPayload {
+            current_state: Some(RunCurrentState {
+                phase: Some(RunPhase::Manufacture),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(active_phase(&payload), Some(Phase::Manufacture));
+
+        // Every RunPhase resolves to its Phase counterpart (the wire names match).
+        for (rp, expect) in [
+            (RunPhase::Spec, Phase::Spec),
+            (RunPhase::Review, Phase::Review),
+            (RunPhase::Manufacture, Phase::Manufacture),
+            (RunPhase::Audit, Phase::Audit),
+            (RunPhase::Reflect, Phase::Reflect),
+            (RunPhase::Checkpoint, Phase::Checkpoint),
+        ] {
+            let p = ReviewSessionPayload {
+                current_state: Some(RunCurrentState { phase: Some(rp), ..Default::default() }),
+                ..Default::default()
+            };
+            assert_eq!(active_phase(&p), Some(expect));
+        }
+    }
+
+    #[test]
+    fn active_phase_is_none_without_a_current_state_or_phase() {
+        assert_eq!(active_phase(&ReviewSessionPayload::default()), None);
+        let no_phase = ReviewSessionPayload {
+            current_state: Some(RunCurrentState { phase: None, ..Default::default() }),
+            ..Default::default()
+        };
+        assert_eq!(active_phase(&no_phase), None);
+    }
+
+    #[test]
+    fn guarded_run_slug_keeps_real_slugs_and_drops_empty_ones() {
+        assert_eq!(guarded_run_slug(&Some("my-run".into())), Some("my-run".into()));
+        assert_eq!(guarded_run_slug(&None), None);
+        // An empty slug is guarded out so no `Advance { run: "run" }` is sent.
+        assert_eq!(guarded_run_slug(&Some(String::new())), None);
+    }
 }

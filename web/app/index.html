@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <!-- Title is filled from Dioxus.toml `[web.app] title`; leave empty so dx
+         doesn't append into (and double up) an existing value. -->
+    <title></title>
+    <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="UTF-8" />
+
+    <!-- Browser crash reporting (Sentry) — the browser half of darkrun's
+         crash-reporting story (the CLI / desktop / iOS surfaces report via the
+         native `darkrun-telemetry` crate; this is the wasm web app).
+
+         A Sentry BROWSER DSN is PUBLIC and safe to embed (it only authorizes
+         *sending* events, never reading them), so there is no secret here.
+
+         Provisioning (kept intentionally minimal):
+           - `window.DARKRUN_SENTRY_DSN` below carries the DSN. It defaults to the
+             build-time token `__DARKRUN_SENTRY_DSN__`; a deploy step may replace
+             that token in the built index.html with the real DSN, or the value can
+             be set directly here / injected ahead of this script.
+           - init runs ONLY when a *real* DSN is present (non-empty and not the
+             unreplaced `__…__` token), so an un-provisioned build is a clean
+             no-op and never contacts Sentry.
+
+         Panic capture: a Rust/wasm panic aborts by throwing, which surfaces as an
+         uncaught exception; Dioxus's default panic hook ALSO logs it to
+         `console.error`. Sentry's default global handlers (onerror /
+         unhandledrejection) capture the thrown panic — so the crash the console
+         shows reaches Sentry with no extra wiring. -->
+    <script>
+      window.DARKRUN_SENTRY_DSN =
+        window.DARKRUN_SENTRY_DSN || "__DARKRUN_SENTRY_DSN__";
+    </script>
+    <script
+      src="https://browser.sentry-cdn.com/7.120.0/bundle.min.js"
+      crossorigin="anonymous"
+    ></script>
+    <script>
+      (function () {
+        var dsn = window.DARKRUN_SENTRY_DSN;
+        // No-op unless the SDK loaded AND a real DSN is configured (guard the
+        // unreplaced `__…__` build token so an un-provisioned build stays silent).
+        if (!window.Sentry || !dsn || dsn.indexOf("__") === 0) return;
+        window.Sentry.init({
+          dsn: dsn,
+          release: window.DARKRUN_RELEASE || undefined,
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="main"></div>
+  </body>
+</html>

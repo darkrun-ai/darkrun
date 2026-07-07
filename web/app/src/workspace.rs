@@ -521,12 +521,7 @@ async fn fetch_run(
     repo: &str,
     run_id: &str,
 ) -> Result<CommittedRun, String> {
-    let url = format!(
-        "{}/api/run?repo={}&id={}",
-        web_base.trim_end_matches('/'),
-        urlencode(repo),
-        urlencode(run_id),
-    );
+    let url = run_detail_url(web_base, repo, run_id);
     let resp = Request::get(&url)
         .header("Authorization", &format!("Bearer {id_token}"))
         .send()
@@ -560,4 +555,155 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The `GET /api/run` URL for one run: `{web_base}/api/run?repo=&id=`, with the
+/// owner-qualified repo path and the run id percent-encoded (both may carry `/`).
+/// `web_base`'s trailing slash is trimmed. Pure, so the URL construction is
+/// unit-tested off-browser.
+fn run_detail_url(web_base: &str, repo: &str, run_id: &str) -> String {
+    format!(
+        "{}/api/run?repo={}&id={}",
+        web_base.trim_end_matches('/'),
+        urlencode(repo),
+        urlencode(run_id),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    //! Native (`#[test]`) coverage of the workspace's pure helpers: the run-detail
+    //! URL + query encoding, the server-error mapping, the sidebar projection, the
+    //! run→repo lookup, the status-dot / provider-icon mappings, and the committed
+    //! response (`CommittedRun` / `WorkspaceRepo`) descriptor parsing. All pure, so
+    //! they run under `cargo test -p darkrun-app`.
+    use super::*;
+
+    fn repo(full_name: &str, provider: &str, run_ids: &[&str]) -> WorkspaceRepo {
+        WorkspaceRepo {
+            name: full_name.rsplit('/').next().unwrap_or(full_name).to_string(),
+            full_name: full_name.to_string(),
+            url: format!("https://github.com/{full_name}"),
+            provider: provider.to_string(),
+            runs: run_ids
+                .iter()
+                .map(|id| DiscoveredSession {
+                    run_id: (*id).to_string(),
+                    repo: full_name.to_string(),
+                    provider: provider.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn urlencode_escapes_slashes_and_keeps_unreserved() {
+        assert_eq!(urlencode("jwaldrip/darkrun"), "jwaldrip%2Fdarkrun");
+        assert_eq!(urlencode("a b"), "a%20b");
+        // Unreserved chars pass through untouched.
+        assert_eq!(urlencode("run-1_2.3~x"), "run-1_2.3~x");
+    }
+
+    #[test]
+    fn run_detail_url_encodes_repo_and_id_and_trims_base() {
+        assert_eq!(
+            run_detail_url("https://darkrun.ai/", "jwaldrip/darkrun", "web-multi/identity"),
+            "https://darkrun.ai/api/run?repo=jwaldrip%2Fdarkrun&id=web-multi%2Fidentity"
+        );
+    }
+
+    #[test]
+    fn server_error_maps_the_known_statuses() {
+        assert!(server_error(401).contains("expired"));
+        assert!(server_error(403).contains("linked GitHub"));
+        assert!(server_error(503).contains("isn't configured"));
+        assert_eq!(server_error(500), "server returned 500");
+    }
+
+    #[test]
+    fn provider_icon_brands_github_and_gitlab() {
+        assert_eq!(provider_icon("gitlab"), "fa-brands fa-gitlab");
+        assert_eq!(provider_icon("github"), "fa-brands fa-github");
+        // Unknown providers fall back to the GitHub brand.
+        assert_eq!(provider_icon("bitbucket"), "fa-brands fa-github");
+    }
+
+    #[test]
+    fn status_dot_colors_by_lifecycle() {
+        assert_eq!(status_dot("completed"), tokens::STATUS_OK);
+        assert_eq!(status_dot("active"), tokens::ACCENT);
+        assert_eq!(status_dot("in_progress"), tokens::ACCENT);
+        assert_eq!(status_dot("blocked"), tokens::STATUS_WARN);
+        assert_eq!(status_dot("pending"), tokens::TEXT_FAINT);
+        assert_eq!(status_dot("whatever"), tokens::TEXT_FAINT);
+    }
+
+    #[test]
+    fn repo_for_run_finds_the_owning_repo() {
+        let repos = vec![
+            repo("jwaldrip/darkrun", "github", &["run-a", "run-b"]),
+            repo("acme/widgets", "gitlab", &["run-c"]),
+        ];
+        assert_eq!(repo_for_run(&repos, "run-b"), Some("jwaldrip/darkrun".into()));
+        assert_eq!(repo_for_run(&repos, "run-c"), Some("acme/widgets".into()));
+        assert_eq!(repo_for_run(&repos, "missing"), None);
+    }
+
+    #[test]
+    fn sidebar_projects_nests_runs_and_marks_the_active_one() {
+        let repos = vec![repo("jwaldrip/darkrun", "gitlab", &["run-a", "run-b"])];
+        let projects = sidebar_projects(&repos, Some("run-b"));
+        assert_eq!(projects.len(), 1);
+        let p = &projects[0];
+        assert_eq!(p.id, "jwaldrip/darkrun");
+        assert_eq!(p.icon, "fa-brands fa-gitlab");
+        assert_eq!(p.runs.len(), 2);
+        assert!(!p.runs[0].active, "run-a is not the open run");
+        assert!(p.runs[1].active, "run-b is the open run");
+        // Committed runs are read from git → idle status. (`RunDot` is `PartialEq`
+        // but not `Debug`, so compare with `==` rather than `assert_eq!`.)
+        assert!(p.runs[0].status == RunDot::Idle);
+    }
+
+    #[test]
+    fn committed_run_parses_with_defaulted_optionals() {
+        // The minimal shape the server may return — only the required fields.
+        let json = r#"{"run_id":"r1","repo":"jwaldrip/darkrun","title":"Fix the thing"}"#;
+        let run: CommittedRun = serde_json::from_str(json).unwrap();
+        assert_eq!(run.run_id, "r1");
+        assert_eq!(run.title, "Fix the thing");
+        assert!(run.factory.is_none());
+        assert!(run.active_station.is_none());
+        assert!(run.stations.is_empty());
+
+        // The full shape, with stations (a station's phase is optional).
+        let full = r#"{
+            "run_id":"r1","repo":"jwaldrip/darkrun","title":"t","factory":"software",
+            "active_station":"build","status":"active",
+            "stations":[{"name":"frame","status":"completed"},
+                        {"name":"build","status":"active","phase":"manufacture"}]
+        }"#;
+        let run: CommittedRun = serde_json::from_str(full).unwrap();
+        assert_eq!(run.factory.as_deref(), Some("software"));
+        assert_eq!(run.active_station.as_deref(), Some("build"));
+        assert_eq!(run.stations.len(), 2);
+        assert_eq!(run.stations[0].phase, None);
+        assert_eq!(run.stations[1].phase.as_deref(), Some("manufacture"));
+    }
+
+    #[test]
+    fn workspace_response_parses_repos_with_nested_runs() {
+        let json = r#"{
+            "repos":[{
+                "name":"darkrun","full_name":"jwaldrip/darkrun",
+                "url":"https://github.com/jwaldrip/darkrun","provider":"github",
+                "runs":[{"run_id":"run-a","repo":"jwaldrip/darkrun","provider":"github"}]
+            }]
+        }"#;
+        let resp: WorkspaceResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.repos.len(), 1);
+        assert_eq!(resp.repos[0].full_name, "jwaldrip/darkrun");
+        assert_eq!(resp.repos[0].runs.len(), 1);
+        assert_eq!(resp.repos[0].runs[0].run_id, "run-a");
+    }
 }

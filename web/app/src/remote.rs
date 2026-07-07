@@ -60,9 +60,23 @@ pub struct Target {
 }
 
 /// Resolve the connection target from the page URL query string, or `None` when
-/// the app was opened without one (e.g. the bare landing).
+/// the app was opened without one (e.g. the bare landing). Reads the browser's
+/// `location.search`; the parsing itself lives in the pure [`target_from_query`]
+/// so it is testable off-browser.
 pub fn target_from_url() -> Option<Target> {
     let search = web_sys::window()?.location().search().ok()?;
+    target_from_query(&search)
+}
+
+/// Build the relay [`Target`] from a raw query string (`?relay=…&session=…&token=…`,
+/// with or without the leading `?`). Returns `None` unless all three of `relay`,
+/// `session`, and `token` are present and non-empty. The URL is the shared
+/// `{relay}/relay/client/{session}?token=…` contract (mirrors
+/// [`darkrun_api::tunnel::RelayCandidate::client_ws_url`]); `relay`'s trailing
+/// slash is trimmed so the path never doubles up.
+///
+/// Pure (no `web_sys`) so the reachability parsing is unit-tested on native.
+fn target_from_query(search: &str) -> Option<Target> {
     let query = search.trim_start_matches('?');
     let mut relay = None;
     let mut session = None;
@@ -189,5 +203,206 @@ fn command_ack(text: &str) -> Option<(bool, Option<String>)> {
     match serde_json::from_str::<ServerFrame>(text).ok()? {
         ServerFrame::Ack { ok, error, .. } => Some((ok, error)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Native (`#[test]`) coverage of the pure transport logic: the relay-URL
+    //! construction from the page query, percent-decoding, the command-id
+    //! generator, and the two frame decoders (session payload + command ack).
+    //! None of these touch `web_sys`, so they run off-browser under
+    //! `cargo test -p darkrun-app`.
+    use super::*;
+    use darkrun_api::common::{GateType, SessionStatus};
+    use darkrun_api::session::{
+        DirectionSessionPayload, PickerKind, PickerSessionPayload, QuestionSessionPayload,
+        ReviewSessionPayload, SessionPayload, ViewMode, ViewSessionPayload, ViewStatus,
+        VisualReviewSessionPayload,
+    };
+
+    /// Wrap a `SessionPayload` in a `Snapshot` frame's JSON, the way the host
+    /// sends it — the exact bytes `session_payload` parses off the wire.
+    fn snapshot_json(payload: &SessionPayload) -> String {
+        let frame = ServerFrame::Snapshot {
+            seq: 1,
+            payload: serde_json::to_value(payload).unwrap(),
+        };
+        serde_json::to_string(&frame).unwrap()
+    }
+
+    fn review(gate: Option<GateType>) -> SessionPayload {
+        SessionPayload::Review(ReviewSessionPayload {
+            session_id: "sess-1".into(),
+            status: SessionStatus::Pending,
+            run_slug: Some("my-run".into()),
+            gate_type: gate,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn target_from_query_builds_the_relay_client_url() {
+        let t = target_from_query("?relay=wss://relay.darkrun.ai&session=sess-1&token=tok-9")
+            .expect("all three params present");
+        assert_eq!(t.session, "sess-1");
+        assert_eq!(t.url, "wss://relay.darkrun.ai/relay/client/sess-1?token=tok-9");
+    }
+
+    #[test]
+    fn target_from_query_trims_a_trailing_relay_slash() {
+        // A trailing slash on the relay base must not double up in the path.
+        let t = target_from_query("relay=wss://relay.darkrun.ai/&session=s&token=t").unwrap();
+        assert_eq!(t.url, "wss://relay.darkrun.ai/relay/client/s?token=t");
+    }
+
+    #[test]
+    fn target_from_query_percent_decodes_the_relay_scheme() {
+        // The relay arrives percent-encoded (`wss%3A%2F%2F…`); decode restores it.
+        let t = target_from_query("relay=wss%3A%2F%2Frelay.darkrun.ai&session=s&token=t").unwrap();
+        assert_eq!(t.url, "wss://relay.darkrun.ai/relay/client/s?token=t");
+    }
+
+    #[test]
+    fn target_from_query_requires_all_three_params() {
+        assert!(target_from_query("session=s&token=t").is_none()); // no relay
+        assert!(target_from_query("relay=wss://r&token=t").is_none()); // no session
+        assert!(target_from_query("relay=wss://r&session=s").is_none()); // no token
+        assert!(target_from_query("").is_none());
+        assert!(target_from_query("?").is_none());
+    }
+
+    #[test]
+    fn target_from_query_rejects_empty_values() {
+        // Present-but-empty is as good as absent — never build a half URL.
+        assert!(target_from_query("relay=&session=s&token=t").is_none());
+        assert!(target_from_query("relay=wss://r&session=&token=t").is_none());
+        assert!(target_from_query("relay=wss://r&session=s&token=").is_none());
+    }
+
+    #[test]
+    fn target_from_query_ignores_unrelated_params() {
+        let t = target_from_query("web=https://x&relay=wss://r&foo=bar&session=s&token=t").unwrap();
+        assert_eq!(t.url, "wss://r/relay/client/s?token=t");
+    }
+
+    #[test]
+    fn decode_restores_percent_encoded_scheme_and_slashes() {
+        assert_eq!(decode("wss%3A%2F%2Fhost"), "wss://host");
+        assert_eq!(decode("a%2fb"), "a/b"); // lowercase %2f too
+        assert_eq!(decode("plain"), "plain"); // nothing to decode
+    }
+
+    #[test]
+    fn next_command_id_is_prefixed_and_strictly_monotonic() {
+        let a = next_command_id();
+        let b = next_command_id();
+        assert!(a.starts_with('c'), "ids are `c<n>`: {a}");
+        assert!(b.starts_with('c'));
+        assert_ne!(a, b, "each id is unique");
+        let na: u64 = a[1..].parse().unwrap();
+        let nb: u64 = b[1..].parse().unwrap();
+        assert_eq!(nb, na + 1, "ids increment by one");
+    }
+
+    #[test]
+    fn session_payload_keeps_the_four_rendered_surfaces() {
+        // Review / Question / Direction / Picker are the surfaces the web app
+        // renders — each must survive the Snapshot round-trip.
+        for payload in [
+            review(Some(GateType::Ask)),
+            SessionPayload::Question(QuestionSessionPayload {
+                session_id: "q".into(),
+                ..Default::default()
+            }),
+            SessionPayload::Direction(DirectionSessionPayload {
+                session_id: "d".into(),
+                ..Default::default()
+            }),
+            SessionPayload::Picker(PickerSessionPayload {
+                session_id: "p".into(),
+                status: SessionStatus::Pending,
+                run_slug: None,
+                kind: PickerKind::Factory,
+                title: "pick".into(),
+                prompt: "choose".into(),
+                options: vec![],
+                selection: None,
+            }),
+        ] {
+            let got = session_payload(&snapshot_json(&payload))
+                .unwrap_or_else(|| panic!("{} should be kept", payload.session_type()));
+            assert_eq!(got.session_type(), payload.session_type());
+        }
+    }
+
+    #[test]
+    fn session_payload_reads_an_update_frame_too() {
+        let frame = ServerFrame::Update {
+            seq: 7,
+            payload: serde_json::to_value(review(None)).unwrap(),
+        };
+        let got = session_payload(&serde_json::to_string(&frame).unwrap()).unwrap();
+        assert_eq!(got.session_type(), "review");
+    }
+
+    #[test]
+    fn session_payload_drops_non_rendered_variants() {
+        // View / Proof / VisualReview are never rendered here → None, so the UI
+        // holds the last state it knew how to draw.
+        let view = SessionPayload::View(ViewSessionPayload {
+            session_id: "v".into(),
+            status: ViewStatus::Open,
+            run_slug: "r".into(),
+            scope: Default::default(),
+            artifacts: vec![],
+            factory: None,
+            station: None,
+            artifact: None,
+            mode: ViewMode::Viewer,
+            boot_port: None,
+            boot_command: None,
+        });
+        assert!(session_payload(&snapshot_json(&view)).is_none());
+
+        let visual = SessionPayload::VisualReview(VisualReviewSessionPayload {
+            session_id: "vr".into(),
+            ..Default::default()
+        });
+        assert!(session_payload(&snapshot_json(&visual)).is_none());
+    }
+
+    #[test]
+    fn session_payload_rejects_acks_and_garbage() {
+        let ack = ServerFrame::Ack { id: "c1".into(), ok: true, error: None };
+        assert!(session_payload(&serde_json::to_string(&ack).unwrap()).is_none());
+        assert!(session_payload("not json").is_none());
+        assert!(session_payload("{}").is_none());
+    }
+
+    #[test]
+    fn command_ack_reads_success_and_failure() {
+        let ok = ServerFrame::Ack { id: "c1".into(), ok: true, error: None };
+        assert_eq!(
+            command_ack(&serde_json::to_string(&ok).unwrap()),
+            Some((true, None))
+        );
+
+        let bad = ServerFrame::Ack {
+            id: "c2".into(),
+            ok: false,
+            error: Some("host rejected".into()),
+        };
+        assert_eq!(
+            command_ack(&serde_json::to_string(&bad).unwrap()),
+            Some((false, Some("host rejected".into())))
+        );
+    }
+
+    #[test]
+    fn command_ack_ignores_non_ack_frames() {
+        assert!(command_ack(&serde_json::to_string(&ServerFrame::Pong).unwrap()).is_none());
+        assert!(command_ack(&snapshot_json(&review(None))).is_none());
+        assert!(command_ack("garbage").is_none());
     }
 }
