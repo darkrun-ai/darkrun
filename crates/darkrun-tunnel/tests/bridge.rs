@@ -107,6 +107,7 @@ async fn client_reads_snapshot_then_a_command_hits_the_local_engine() {
 
     // Send an advance command; the connector translates it to POST /api/advance/run1.
     let cmd = serde_json::to_string(&ClientFrame::Cmd {
+        instance: "tab-1".into(),
         id: "c1".into(),
         command: darkrun_api::tunnel::ClientCommand::Advance { run: "run1".into() },
     })

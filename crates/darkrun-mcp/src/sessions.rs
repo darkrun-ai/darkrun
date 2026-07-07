@@ -637,7 +637,7 @@ pub(crate) fn raise_setup_picker(registry: &SessionRegistry, slug: &str, title: 
             "Which review mode? (how much oversight the work needs)".to_string(),
             vec![
                 opt("solo", "solo", "Each station asks for local review before advancing. Default."),
-                opt("team", "team", "Each station opens a PR/MR the team reviews and merges. Needs gh/glab."),
+                opt("team", "team", "Each station opens a PR/MR the team reviews and merges. Needs `darkrun auth login`."),
                 opt("dark", "dark", "Pre-elaborate up front, then run without stopping for review."),
             ],
         ),

@@ -1651,6 +1651,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "darkrun-sim"
+version = "0.8.0"
+dependencies = [
+ "darkrun-core",
+ "darkrun-mcp",
+ "darkrun-prompts",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "darkrun-site"
 version = "0.8.0"
 dependencies = [
@@ -1730,6 +1741,8 @@ name = "darkrun-web"
 version = "0.8.0"
 dependencies = [
  "axum",
+ "base64",
+ "chrono",
  "darkrun-api",
  "darkrun-telemetry",
  "darkrun-vcs",

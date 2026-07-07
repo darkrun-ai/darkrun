@@ -33,6 +33,8 @@ mod oauth_routes;
 mod push;
 mod ratelimit;
 mod relay;
+mod relay_bus;
+mod relay_registry;
 mod repos;
 mod sessions;
 mod relay_broker;
@@ -44,7 +46,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::{routing::get, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use tower_http::services::{ServeDir, ServeFile};
 
 pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
@@ -55,16 +60,23 @@ pub use sessions::DiscoveredSession;
 pub use firebase_auth::{FirebaseTokenAuth, VerifiedClaims, FIREBASE_CERTS_URL};
 pub use github_app::{CommittedRun, CommittedStation, GitHubApp, GitHubIdentity, WorkspaceRepo};
 pub use firestore::FirestoreDeviceRegistry;
-pub use gcp_auth::{ServiceAccount, ServiceAccountTokenSource, DATASTORE_SCOPE, FCM_SCOPE};
-pub use relay_broker::{relay_auth_router, ClaimPayload, RelayBroker};
+pub use gcp_auth::{
+    ServiceAccount, ServiceAccountTokenSource, DATASTORE_SCOPE, FCM_SCOPE, PUBSUB_SCOPE,
+};
+pub use relay_broker::{
+    relay_auth_router, ClaimPayload, FirestoreRelayStore, InMemoryRelayStore, RelayTokenStore,
+};
 pub use push::{
     fan_out, fcm_endpoint, fcm_message, AccessTokenSource, DeviceRegistry, DeviceToken,
     FcmPushSender, InMemoryDeviceRegistry, NoopPushSender, PushSender, StaticTokenSource,
 };
 pub use relay::{
-    device_router, relay_router, AttachError, DevTokenAuth, Frame, HostCmd, HostEvent,
-    RegisterDevice, Relay, RelayAuth, RelayState,
+    device_router, relay_descriptor_router, relay_router, AttachError, DevTokenAuth, Frame, HostCmd,
+    HostEvent, RegisterDevice, Relay, RelayAuth, RelayDescriptor, RelayState,
+    DEFAULT_RELAY_PUBLIC_URL,
 };
+pub use relay_bus::{BusFrame, FrameBus, NoopFrameBus, PubSubFrameBus};
+pub use relay_registry::{FirestoreSessionRegistry, SessionRegistry, SESSION_TTL};
 pub use state::{SharedTransport, WebState};
 pub use transport::ReqwestTransport;
 
@@ -72,7 +84,7 @@ pub use transport::ReqwestTransport;
 /// overridable via `DARKRUN_SITE_DIR`.
 pub const DEFAULT_SITE_DIR: &str = "web/site/dist";
 
-/// Build the OAuth sub-router (the three `/auth/...` endpoints).
+/// Build the OAuth sub-router (the `/auth/...` endpoints).
 ///
 /// Public so tests can mount just the OAuth surface without a site directory.
 pub fn oauth_router(state: WebState) -> Router {
@@ -80,6 +92,8 @@ pub fn oauth_router(state: WebState) -> Router {
         .route("/auth/{provider}/start", get(oauth_routes::start))
         .route("/auth/{provider}/callback", get(oauth_routes::callback))
         .route("/auth/broker/{nonce}", get(oauth_routes::broker_claim))
+        // Re-mint a near-expiry token from a refresh token (hosted GitLab flow).
+        .route("/auth/{provider}/refresh", post(oauth_routes::refresh))
         .with_state(state)
 }
 
@@ -166,6 +180,16 @@ pub fn build_oauth_only(state: WebState) -> Router {
 /// - else `DARKRUN_RELAY_DEV_AUTH=1` → [`DevTokenAuth`] (token == account id),
 ///   for local/dev ONLY — never set this in production.
 /// - else `None` (relay closed).
+///
+/// When service-account credentials are also present, the relay's session
+/// metadata, owner authz, and single-host-per-session move to Firestore (a
+/// [`FirestoreSessionRegistry`]) so they're correct across Cloud Run instances;
+/// absent, the relay runs pure in-memory (single-instance, unchanged from today).
+/// When a Pub/Sub topic (`DARKRUN_PUBSUB_TOPIC`) is also configured, the
+/// cross-instance frame bus ([`PubSubFrameBus`]) is wired + its subscriber spawned
+/// so a host and a client on DIFFERENT instances can exchange frames (Step 1c);
+/// absent, a split pair is authorized but stays single-instance for frame
+/// delivery.
 pub async fn relay_router_from_env() -> Option<Router> {
     if let Some(project) = std::env::var("DARKRUN_FIREBASE_PROJECT")
         .ok()
@@ -188,14 +212,54 @@ pub async fn relay_router_from_env() -> Option<Router> {
                 }
             }
         });
-        // Wire FCM remote push when service-account credentials are present
-        // (GOOGLE_APPLICATION_CREDENTIALS). Absent → push stays disabled; the
-        // host's LOCAL OS notification still fires. The one key mints two
-        // scope-specific token sources: FCM `messages:send` for the sender,
-        // `datastore` for the Firestore-persisted device registry.
-        let mut state = RelayState::new(Arc::new(Relay::new()), auth);
-        if let Some(account) = ServiceAccount::from_env() {
-            tracing::info!("FCM remote push enabled (service-account credentials loaded)");
+        // Wire FCM remote push AND the cross-instance session registry when
+        // service-account credentials are present (GOOGLE_APPLICATION_CREDENTIALS).
+        // Absent → push stays disabled (the host's LOCAL OS notification still
+        // fires) and the relay runs pure in-memory (single-instance authz +
+        // single-host, unchanged from today). The one key mints several
+        // scope-specific token sources: FCM `messages:send` for the sender, and
+        // `datastore` for the Firestore-persisted device registry + session
+        // registry (a token source per consumer — tokens are cached per source).
+        let account = ServiceAccount::from_env();
+        let relay = match &account {
+            Some(account) => {
+                // The Firestore session registry: single-host-per-session + owner
+                // authz correct across Cloud Run instances.
+                let session_tokens =
+                    ServiceAccountTokenSource::new(account.clone()).with_scope(DATASTORE_SCOPE);
+                let registry =
+                    Arc::new(FirestoreSessionRegistry::new(project.clone(), session_tokens));
+                let base = Relay::new().with_registry(registry);
+                // The cross-instance frame bus (Step 1c): a host and a client on
+                // different instances exchange frames through Pub/Sub. Wired when a
+                // topic is configured (DARKRUN_PUBSUB_TOPIC); absent, the relay is
+                // single-instance (a split pair is authorized but can't exchange
+                // frames — unchanged from before Step 1c).
+                match pubsub_bus_from_env(&project, account, base.instance_id()) {
+                    Some(bus) => {
+                        let relay = Arc::new(base.with_bus(bus.clone()));
+                        // The subscriber pulls frames addressed to this instance and
+                        // dispatches them into the relay's local delivery path.
+                        bus.spawn_subscriber(relay.clone());
+                        tracing::info!("cross-instance frame bus enabled (Pub/Sub)");
+                        relay
+                    }
+                    None => {
+                        tracing::info!(
+                            "DARKRUN_PUBSUB_TOPIC unset — frame bus disabled (single-instance)"
+                        );
+                        Arc::new(base)
+                    }
+                }
+            }
+            None => Arc::new(Relay::new()),
+        };
+        let mut state = RelayState::new(relay, auth).with_relay_url(relay_public_url_from_env());
+        if let Some(account) = account {
+            tracing::info!(
+                "FCM remote push enabled + session registry backed by Firestore \
+                 (cross-instance authz + single-host)"
+            );
             let fcm_tokens = ServiceAccountTokenSource::new(account.clone());
             let store_tokens =
                 ServiceAccountTokenSource::new(account).with_scope(DATASTORE_SCOPE);
@@ -205,16 +269,76 @@ pub async fn relay_router_from_env() -> Option<Router> {
             );
         } else {
             tracing::info!(
-                "FCM credentials absent — remote push disabled (local notifications still fire)"
+                "FCM credentials absent — remote push disabled; session registry in-memory \
+                 (local notifications still fire; relay is single-instance)"
             );
         }
-        return Some(relay_router(state.clone()).merge(device_router(state)));
+        return Some(
+            relay_router(state.clone())
+                .merge(device_router(state.clone()))
+                .merge(relay_descriptor_router(state)),
+        );
     }
     if std::env::var("DARKRUN_RELAY_DEV_AUTH").ok().as_deref() == Some("1") {
-        let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth));
-        return Some(relay_router(state.clone()).merge(device_router(state)));
+        let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth))
+            .with_relay_url(relay_public_url_from_env());
+        return Some(
+            relay_router(state.clone())
+                .merge(device_router(state.clone()))
+                .merge(relay_descriptor_router(state)),
+        );
     }
     None
+}
+
+/// The public relay base URL the descriptor API hands clients, from
+/// `DARKRUN_RELAY_PUBLIC_URL` (default [`DEFAULT_RELAY_PUBLIC_URL`] —
+/// `wss://relay.darkrun.ai`, the same base the engine dials).
+fn relay_public_url_from_env() -> String {
+    std::env::var("DARKRUN_RELAY_PUBLIC_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_RELAY_PUBLIC_URL.to_string())
+}
+
+/// Build the Firestore-backed relay-token store from the environment, or `None`
+/// to fall back to the in-memory store.
+///
+/// Selected by the SAME env as the Firestore device registry: both the Firebase
+/// project (`DARKRUN_FIREBASE_PROJECT`) and service-account credentials
+/// (`GOOGLE_APPLICATION_CREDENTIALS`, via [`ServiceAccount::from_env`]) must be
+/// present. The store shares the datastore-scoped token source shape the registry
+/// uses. Absent → `None`, and the caller keeps the in-memory store (with a timer
+/// sweep). Firestore-backed, deposit/claim work from any Cloud Run instance and
+/// native TTL replaces the sweep.
+#[cfg(not(tarpaulin_include))] // env + credential load
+fn relay_token_store_from_env() -> Option<Arc<dyn RelayTokenStore>> {
+    let project = std::env::var("DARKRUN_FIREBASE_PROJECT")
+        .ok()
+        .filter(|p| !p.trim().is_empty())?;
+    let account = ServiceAccount::from_env()?;
+    let tokens = ServiceAccountTokenSource::new(account).with_scope(DATASTORE_SCOPE);
+    Some(Arc::new(FirestoreRelayStore::new(project, tokens)))
+}
+
+/// Build the Pub/Sub-backed cross-instance frame bus from the environment, or
+/// `None` when no topic is configured (single-instance — the relay stays
+/// local-delivery-only, exactly as before Step 1c).
+///
+/// Gated on `DARKRUN_PUBSUB_TOPIC`; the token source is the same service-account
+/// key the registry/FCM use, re-scoped to Pub/Sub ([`PUBSUB_SCOPE`]). The
+/// `instance_id` (from the relay) names this instance's own subscription.
+#[cfg(not(tarpaulin_include))] // env + credential wiring
+fn pubsub_bus_from_env(
+    project: &str,
+    account: &ServiceAccount,
+    instance_id: &str,
+) -> Option<Arc<PubSubFrameBus<ServiceAccountTokenSource>>> {
+    let topic = std::env::var("DARKRUN_PUBSUB_TOPIC")
+        .ok()
+        .filter(|t| !t.trim().is_empty())?;
+    let tokens = ServiceAccountTokenSource::new(account.clone()).with_scope(PUBSUB_SCOPE);
+    Some(Arc::new(PubSubFrameBus::new(project, topic, instance_id, tokens)))
 }
 
 /// Resolve the static site directory from `DARKRUN_SITE_DIR`, falling back to
@@ -337,11 +461,28 @@ pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
         tracing::info!("relay endpoints mounted (/relay/host, /relay/client)");
     }
     // The relay-token broker carries a browser-minted Firebase token to the CLI
-    // (POST /auth/relay/deposit, GET /auth/relay/claim/:nonce). Sweep its
-    // abandoned deposits on a timer too — the deposit endpoint is unauthenticated.
-    let relay_broker = RelayBroker::new();
-    spawn_sweeper("relay broker", relay_broker.clone(), |b| b.sweep_expired());
-    router = router.merge(relay_auth_router(relay_broker));
+    // (POST /auth/relay/deposit, GET /auth/relay/claim/:nonce). Select its store
+    // the same way the FCM device registry is selected: a Firestore-backed store
+    // when the Firebase project + service-account credentials are present (so any
+    // Cloud Run instance can serve deposit/claim), else the in-memory store.
+    let relay_store: Arc<dyn RelayTokenStore> = match relay_token_store_from_env() {
+        Some(store) => {
+            tracing::info!("relay-token broker backed by Firestore (horizontally scalable)");
+            // Firestore's native TTL GCs expired docs server-side, so no timer
+            // sweep is needed for this backend.
+            store
+        }
+        None => {
+            // In-memory: claims evict lazily, but abandoned (never-claimed)
+            // deposits only clear on a sweep — run one on a timer so the map can't
+            // grow without bound (the deposit endpoint is unauthenticated).
+            let store = Arc::new(InMemoryRelayStore::new());
+            spawn_sweeper("relay broker", store.clone(), |s| s.sweep_expired());
+            let store: Arc<dyn RelayTokenStore> = store;
+            store
+        }
+    };
+    router = router.merge(relay_auth_router(relay_store));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(

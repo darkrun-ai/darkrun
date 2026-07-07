@@ -6,6 +6,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Result, VcsError};
 use crate::provider::{Credential, Provider};
 
@@ -19,8 +21,26 @@ pub struct CredentialStore {
     path: PathBuf,
 }
 
-/// The serialized on-disk shape: provider key → credential.
-type CredMap = BTreeMap<String, Credential>;
+/// A stored [`Credential`] plus the unix time it was persisted.
+///
+/// `obtained_at` is storage bookkeeping the refresh-before-use decision needs
+/// (a token's issue time), kept OUT of [`Credential`] itself — the broker and
+/// web deserialize `Credential` directly, so its wire shape stays untouched.
+/// `#[serde(flatten)]` keeps the on-disk JSON a `Credential` object with one
+/// extra `obtained_at` key, so entries written before this field simply
+/// deserialize with `obtained_at: None` (backward compatible both ways).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredCredential {
+    /// The credential itself, inlined into the entry object.
+    #[serde(flatten)]
+    credential: Credential,
+    /// Unix seconds when this entry was last written (login or refresh).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    obtained_at: Option<u64>,
+}
+
+/// The serialized on-disk shape: provider key → stored credential.
+type CredMap = BTreeMap<String, StoredCredential>;
 
 impl CredentialStore {
     /// Open the store at an explicit path (used by tests and custom homes).
@@ -72,13 +92,37 @@ impl CredentialStore {
 
     /// Fetch the credential for `provider`, if present.
     pub fn get(&self, provider: Provider) -> Result<Option<Credential>> {
-        Ok(self.load_map()?.remove(provider.key()))
+        Ok(self
+            .load_map()?
+            .remove(provider.key())
+            .map(|s| s.credential))
     }
 
-    /// Insert or replace the credential for its provider.
+    /// Fetch the credential for `provider` paired with the unix time it was
+    /// persisted — the `obtained_at` the refresh-before-use decision
+    /// ([`crate::refresh_before_use`]) needs. An entry written before the
+    /// `obtained_at` field reports `0`, which reads as long-expired and so
+    /// forces a proactive refresh the first time (self-corrects on the next
+    /// save).
+    pub fn get_with_obtained_at(&self, provider: Provider) -> Result<Option<(Credential, u64)>> {
+        Ok(self
+            .load_map()?
+            .remove(provider.key())
+            .map(|s| (s.credential, s.obtained_at.unwrap_or(0))))
+    }
+
+    /// Insert or replace the credential for its provider, stamping the save time
+    /// as its `obtained_at`. Both the login broker save and a refresh save go
+    /// through here, so every stored credential carries an accurate issue time.
     pub fn save(&self, credential: &Credential) -> Result<()> {
         let mut map = self.load_map()?;
-        map.insert(credential.provider.key().to_string(), credential.clone());
+        map.insert(
+            credential.provider.key().to_string(),
+            StoredCredential {
+                credential: credential.clone(),
+                obtained_at: Some(crate::now_unix()),
+            },
+        );
         self.write_map(&map)
     }
 

@@ -275,9 +275,25 @@ impl ApiHosting {
             })
             .and_then(|url| darkrun_vcs::parse_remote_url(&url).ok());
         let cred = provider.and_then(|p| {
-            darkrun_vcs::CredentialStore::default_path()
-                .ok()
-                .and_then(|store| store.get(p).ok().flatten())
+            let store = darkrun_vcs::CredentialStore::default_path().ok()?;
+            // Refresh a near-expiry GitLab token BEFORE the first REST call, when
+            // the client holds its own OAuth app credentials (the website-brokered
+            // flow keeps the secret server-side, so this is a best-effort escape
+            // hatch). Any refresh failure falls back to the stored token — hosting
+            // is best-effort and never crashes the tick. GitHub tokens report no
+            // `expires_in`, so this is a no-op for them.
+            if let Some(oauth) = darkrun_vcs::OauthClient::from_env(p) {
+                if let Ok(Some(fresh)) = darkrun_vcs::refresh_before_use(
+                    &store,
+                    transport.as_ref(),
+                    &oauth,
+                    p,
+                    darkrun_vcs::now_unix(),
+                ) {
+                    return Some(fresh);
+                }
+            }
+            store.get(p).ok().flatten()
         });
         Self {
             provider,

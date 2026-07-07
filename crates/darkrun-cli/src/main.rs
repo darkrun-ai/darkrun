@@ -404,6 +404,10 @@ fn serve_mcp(
     harness: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let harness = darkrun_harness::detect(harness.as_deref());
+    // Pre-flight: re-mint the relay credential now if it's near expiry, so the
+    // engine starts dialing from a fresh ID token instead of racing its ~1h
+    // lifetime. Best-effort — the engine also refreshes per-dial.
+    auth::refresh_relay_token_if_needed();
     let runtime = tokio::runtime::Runtime::new()?;
     match addr {
         Some(addr) => runtime.block_on(darkrun_mcp::serve_stdio_on(repo_root, addr, harness))?,

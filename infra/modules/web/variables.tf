@@ -76,3 +76,9 @@ variable "fcm_secret_id" {
   type        = string
   default     = "FCM_SA_KEY"
 }
+
+variable "pubsub_topic" {
+  description = "Pub/Sub topic name for the relay's cross-instance frame bus (Step 1c). Set (with firebase_project) turns DARKRUN_PUBSUB_TOPIC on so a host and a client on different instances can exchange frames; empty leaves the relay single-instance (frames stay local-only)."
+  type        = string
+  default     = ""
+}

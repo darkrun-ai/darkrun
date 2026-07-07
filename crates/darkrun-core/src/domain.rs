@@ -139,6 +139,13 @@ pub enum CheckpointKind {
     /// Hand off to an external review surface (e.g. a PR).
     External,
     /// Block on a `darkrun_await_gate` call until a decision arrives.
+    ///
+    /// NOTE: no station Checkpoint is ever *derived* as `Await` — [`Mode::gate`]
+    /// only ever yields `Auto`/`Ask`/`External`, so a run's mode never produces
+    /// an await checkpoint. This variant exists solely as the wire/UI
+    /// representation of the run-level await surface (the blocking
+    /// `darkrun_await_gate` waiter / [`SealKind::Await`]) that clients render;
+    /// it is not a fourth mode-selectable gate.
     Await,
 }
 

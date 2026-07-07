@@ -11,6 +11,25 @@ every Unit it has produced. Each Unit shows its type, its status, and which
 **Pass** it is on. The desktop app and the website render the same session
 payload over the local engine's WebSocket feed.
 
+### Platforms
+
+Every release ships the `darkrun` CLI. Most platforms (macOS, x86_64 Linux,
+Windows) also ship the bundled **desktop review app** next to the CLI, so
+opening a review just works.
+
+**linux-arm64 (aarch64) is CLI-only.** Cross-compiling the desktop app's system
+webview for that target is not reliable, so the arm64 build ships without the
+bundled desktop binary. Everything the CLI does still works headless; only the
+bundled review window is missing. On that platform, opening a review finds no
+desktop app, and you have two ways to review anyway:
+
+- **Review from the website.** The website renders the exact same session
+  payload over the same WebSocket feed, so it is a full-fidelity substitute for
+  the desktop window.
+- **Point at your own desktop build.** If you build the desktop app yourself
+  (`cargo build -p darkrun-desktop`), set `DARKRUN_DESKTOP` to that binary and
+  darkrun launches it like any bundled build.
+
 ## Leaving feedback
 
 Feedback is anchored. You can pin a comment to a Unit as a whole, or inline to a

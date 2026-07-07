@@ -54,6 +54,8 @@ jobs:
       # Assemble the deploy dir firebase.json points at (web/app/dist): the dx
       # web output + the universal-link well-known files served from /.well-known.
       - name: Assemble dist
+        env:
+          SENTRY_DSN: ${{ secrets.DARKRUN_WEB_SENTRY_DSN }}
         run: |
           rm -rf web/app/dist && mkdir -p web/app/dist/.well-known
           cp -r target/dx/darkrun-app/release/web/public/. web/app/dist/
@@ -62,6 +64,14 @@ jobs:
           # The FCM background service worker must be served from the app ROOT
           # (a service worker only controls its own path and below).
           cp web/app/firebase-messaging-sw.js web/app/dist/
+          # Inject the browser Sentry DSN (a public value) into the built
+          # index.html when provisioned. Unset leaves the placeholder token, which
+          # the init in index.html guards to a clean no-op. This mirrors the native
+          # surfaces' option_env! DSN wiring, so a build reports crashes only once
+          # the operator sets the DARKRUN_WEB_SENTRY_DSN secret.
+          if [ -n "${SENTRY_DSN}" ]; then
+            sed -i "s|__DARKRUN_SENTRY_DSN__|${SENTRY_DSN}|g" web/app/dist/index.html
+          fi
 
       # Keyless auth: federate the GitHub OIDC token to the cloudbuild-web SA.
       # Exports GOOGLE_APPLICATION_CREDENTIALS (the impersonated external_account).

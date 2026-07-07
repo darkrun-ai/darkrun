@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use darkrun_vcs::{
-    HttpRequest, HttpResponse, HttpTransport, Method, MockTransport, Provider, Result as VcsResult,
+    Credential, HttpRequest, HttpResponse, HttpTransport, Method, MockTransport, Provider,
+    Result as VcsResult,
 };
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -543,6 +544,234 @@ async fn callback_for_an_unconfigured_provider_is_unavailable() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+// ---- broker refresh material + POST /auth/:provider/refresh -----------------
+
+/// A state whose GitLab token endpoint returns `body` once (the exchange OR the
+/// refresh grant — both POST the same GitLab token endpoint).
+fn gitlab_token_state(body: serde_json::Value, broker: Broker) -> WebState {
+    let mock = MockTransport::new();
+    mock.expect(
+        Method::Post,
+        Provider::GitLab.token_endpoint(),
+        HttpResponse::new(200, serde_json::to_vec(&body).unwrap()),
+    );
+    state_with(Arc::new(SyncMock::new(mock)), broker)
+}
+
+#[tokio::test]
+async fn broker_hands_the_cli_gitlab_refresh_material() {
+    // A GitLab login now parks the full credential AND the broker returns the
+    // refresh token + expiry to the CLI, so a hosted GitLab run can refresh
+    // before its token expires mid-run.
+    let broker = Broker::new();
+    let state = gitlab_token_state(
+        serde_json::json!({
+            "access_token": "gl-access",
+            "refresh_token": "gl-refresh",
+            "expires_in": 7200,
+            "token_type": "bearer"
+        }),
+        broker.clone(),
+    );
+    let app = build_oauth_only(state);
+
+    // Callback exchanges the code (GitLab) and parks the full credential.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/auth/gitlab/callback?code=c&state=n")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The CLI claims it — the payload carries refresh_token + expires_in.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/broker/n")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let payload: BrokerPayload = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(payload.provider, Provider::GitLab);
+    assert_eq!(payload.access_token, "gl-access");
+    assert_eq!(payload.refresh_token.as_deref(), Some("gl-refresh"));
+    assert_eq!(payload.expires_in, Some(7200));
+}
+
+#[tokio::test]
+async fn broker_github_payload_carries_no_refresh_material() {
+    // GitHub OAuth-app tokens are long-lived and issue neither — the payload
+    // stays `{ provider, access_token }` with the optional fields omitted.
+    let broker = Broker::new();
+    let state = github_exchange_state("gh-access", broker.clone());
+    let app = build_oauth_only(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/auth/github/callback?code=c&state=n")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/broker/n")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let raw = body_string(resp).await;
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["access_token"], "gh-access");
+    assert!(value.get("refresh_token").is_none(), "no refresh_token key");
+    assert!(value.get("expires_in").is_none(), "no expires_in key");
+}
+
+#[tokio::test]
+async fn refresh_route_rotates_a_gitlab_token_and_sends_the_grant() {
+    // POST /auth/gitlab/refresh runs the refresh grant with the WEBSITE-held
+    // secret and returns the rotated credential.
+    let mock = MockTransport::new();
+    mock.expect(
+        Method::Post,
+        Provider::GitLab.token_endpoint(),
+        HttpResponse::new(
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "access_token": "rotated-access",
+                "refresh_token": "rotated-refresh",
+                "expires_in": 7200,
+                "token_type": "bearer"
+            }))
+            .unwrap(),
+        ),
+    );
+    let sync = Arc::new(SyncMock::new(mock));
+    let state = state_with(sync.clone(), Broker::new());
+    let app = build_oauth_only(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/gitlab/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"refresh_token":"stored-refresh"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cred: Credential = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(cred.provider, Provider::GitLab);
+    assert_eq!(cred.access_token, "rotated-access");
+    assert_eq!(cred.refresh_token.as_deref(), Some("rotated-refresh"));
+    assert_eq!(cred.expires_in, Some(7200));
+
+    // The server-side grant carried the CLI's refresh token + the website secret;
+    // the CLI never sees the secret.
+    let reqs = sync.0.lock().unwrap().requests();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].url, Provider::GitLab.token_endpoint());
+    let body: serde_json::Value = serde_json::from_slice(reqs[0].body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["grant_type"], "refresh_token");
+    assert_eq!(body["refresh_token"], "stored-refresh");
+    assert_eq!(body["client_secret"], "gl-secret");
+}
+
+#[tokio::test]
+async fn refresh_route_rejects_an_empty_refresh_token() {
+    let state = github_exchange_state("unused", Broker::new());
+    let app = build_oauth_only(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/gitlab/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"refresh_token":"   "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn refresh_route_unconfigured_provider_is_unavailable() {
+    // No GitLab credentials configured → the refresh grant can't run.
+    let cfg = WebConfig::new(
+        "https://darkrun.ai",
+        Some(ProviderCredentials { client_id: "gh".into(), client_secret: "s".into() }),
+        None,
+    );
+    let state = WebState::new(cfg, Broker::new(), Arc::new(FailingTransport));
+    let app = build_oauth_only(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/gitlab/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"refresh_token":"r"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn refresh_route_provider_failure_is_bad_gateway() {
+    let state = state_with(Arc::new(FailingTransport), Broker::new());
+    let app = build_oauth_only(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/gitlab/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"refresh_token":"r"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn refresh_route_rejects_unknown_provider() {
+    let state = github_exchange_state("unused", Broker::new());
+    let app = build_oauth_only(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/bitbucket/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"refresh_token":"r"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // ---- /api/repos -------------------------------------------------------------
 
 /// A state whose GitHub list-repos call returns the given JSON array body.
@@ -559,7 +788,8 @@ fn repos_state(method_url: &str, body: serde_json::Value) -> WebState {
 #[tokio::test]
 async fn repos_lists_github_normalized() {
     let state = repos_state(
-        "https://api.github.com/user/repos?per_page=100&sort=updated",
+        // The fetch now paginates with `&page=N`; a single short page ends it.
+        "https://api.github.com/user/repos?per_page=100&sort=updated&page=1",
         serde_json::json!([
             { "name": "darkrun", "full_name": "jwaldrip/darkrun", "html_url": "https://github.com/jwaldrip/darkrun" },
         ]),
@@ -588,7 +818,8 @@ async fn repos_lists_github_normalized() {
 #[tokio::test]
 async fn repos_lists_gitlab_normalized() {
     let state = repos_state(
-        "https://gitlab.com/api/v4/projects?membership=true&per_page=100&order_by=last_activity_at",
+        // The fetch now paginates with `&page=N`; a single short page ends it.
+        "https://gitlab.com/api/v4/projects?membership=true&per_page=100&order_by=last_activity_at&page=1",
         serde_json::json!([
             { "name": "darkrun", "path_with_namespace": "jwaldrip/darkrun", "web_url": "https://gitlab.com/jwaldrip/darkrun" },
         ]),
@@ -716,7 +947,8 @@ async fn sessions_lists_github_runs_from_the_tree() {
 #[tokio::test]
 async fn sessions_lists_gitlab_runs_from_the_subtree() {
     let state = sessions_state(
-        "https://gitlab.com/api/v4/projects/jwaldrip%2Fdarkrun/repository/tree?path=.darkrun&recursive=true&per_page=100",
+        // The GitLab tree fetch now paginates with `&page=N`; a short page ends it.
+        "https://gitlab.com/api/v4/projects/jwaldrip%2Fdarkrun/repository/tree?path=.darkrun&recursive=true&per_page=100&page=1",
         200,
         serde_json::json!([
             { "path": ".darkrun/run-1/run.md", "type": "blob" },

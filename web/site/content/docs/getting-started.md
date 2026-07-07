@@ -35,7 +35,9 @@ walking the line:
 :::steps
 - **darkrun-new** scaffolds the run and opens the first station.
 - The **manager** advances each station through its phases, doing the work.
-- You **review in the desktop app** — approve, request changes, or annotate.
+- You **review in the desktop app** (or the website on CLI-only builds like
+  linux-arm64): approve, request changes, or annotate. See
+  [Review and feedback](/docs/review) for the per-platform surfaces.
 - At each **checkpoint** the run either advances on its own or stops and asks you.
 :::
 

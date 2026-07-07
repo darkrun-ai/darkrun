@@ -1,14 +1,22 @@
-//! The three OAuth endpoints the website hosts.
+//! The OAuth endpoints the website hosts.
 //!
 //! ```text
-//! GET /auth/:provider/start?state=NONCE     -> 302 to the provider authorize URL
-//! GET /auth/:provider/callback?code&state   -> exchange code, park under nonce, HTML
-//! GET /auth/broker/:nonce                    -> one-time JSON { provider, access_token }
+//! GET  /auth/:provider/start?state=NONCE     -> 302 to the provider authorize URL
+//! GET  /auth/:provider/callback?code&state   -> exchange code, park under nonce, HTML
+//! GET  /auth/broker/:nonce                    -> one-time JSON credential
+//! POST /auth/:provider/refresh                -> re-mint a token from a refresh token
 //! ```
 //!
 //! The browser is the only client of `start`/`callback`; the CLI is the only
-//! client of `broker`. The client secret is used solely inside `callback`'s
-//! server-side exchange and never crosses to the browser or the CLI.
+//! client of `broker` and `refresh`. The client secret is used solely inside the
+//! server-side `callback` exchange and the `refresh` grant, and never crosses to
+//! the browser or the CLI.
+//!
+//! `refresh` closes the hosted-flow half of "GitLab OAuth tokens expire": the
+//! GitLab client secret lives only on the website, so the CLI cannot run the
+//! refresh grant itself. It posts its stored refresh token here; the website
+//! performs the secret-bearing grant and returns the rotated credential, so a
+//! long run's GitLab token is re-minted before it expires (~2h) mid-run.
 
 use axum::{
     extract::{Path, Query, State},
@@ -16,7 +24,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     Json,
 };
-use darkrun_vcs::{authorize_url, exchange_code, Provider};
+use darkrun_vcs::{authorize_url, exchange_code, refresh_access_token, Credential, Provider};
 use serde::{Deserialize, Serialize};
 
 use crate::state::WebState;
@@ -42,12 +50,32 @@ pub struct CallbackQuery {
 }
 
 /// The one-time payload the CLI claims from `/auth/broker/:nonce`.
+///
+/// Carries the OAuth **refresh material** (`refresh_token` + `expires_in`) as
+/// well as the access token, so the hosted CLI can later re-mint a near-expiry
+/// GitLab token through `/auth/:provider/refresh`. Without them the CLI would
+/// store only a bare access token and a GitLab run would still die ~2h in. Both
+/// are omitted from the JSON when absent — GitHub OAuth-app tokens are long-lived
+/// and issue neither, so a GitHub payload is unchanged (`{ provider, access_token }`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrokerPayload {
     /// The provider this token authenticates against.
     pub provider: Provider,
     /// The OAuth access token.
     pub access_token: String,
+    /// The OAuth refresh token, when the provider issues one (GitLab does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// Seconds-from-issue lifetime, when the provider reports one (GitLab does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<u64>,
+}
+
+/// Body for `POST /auth/:provider/refresh` — the refresh token to rotate.
+#[derive(Debug, Deserialize)]
+pub struct RefreshBody {
+    /// The stored OAuth refresh token the CLI wants re-minted.
+    pub refresh_token: String,
 }
 
 /// Resolve a `:provider` path segment, or `400` if unknown.
@@ -213,6 +241,11 @@ pub async fn broker_claim(
         Some(cred) => Json(BrokerPayload {
             provider: cred.provider,
             access_token: cred.access_token,
+            // Hand the CLI the refresh material so a hosted GitLab run can later
+            // re-mint its token via `/auth/:provider/refresh`. GitHub issues
+            // neither, so its payload stays `{ provider, access_token }`.
+            refresh_token: cred.refresh_token,
+            expires_in: cred.expires_in,
         })
         .into_response(),
         None => (
@@ -221,6 +254,108 @@ pub async fn broker_claim(
         )
             .into_response(),
     }
+}
+
+/// `POST /auth/:provider/refresh`
+///
+/// Re-mints a near-expiry token from a refresh token, server-side. The CLI (the
+/// only client) posts `{ refresh_token }`; the server runs the OAuth refresh
+/// grant against the provider with the website-held client id/secret (the same
+/// [`WebConfig::credentials`](crate::WebConfig::credentials) the `callback`
+/// exchange reads) and returns the rotated [`Credential`] as JSON
+/// (`{ provider, access_token, refresh_token, expires_in, token_type }`).
+///
+/// Authorization is possession-based, exactly like `callback`'s `code`: a caller
+/// must present a valid refresh token, or the provider's grant rejects it and
+/// this answers `502`. The refresh token and client secret are never logged.
+///
+/// GitHub OAuth-app tokens don't expire and issue no refresh token, so in
+/// practice this is a GitLab-shaped path; it stays provider-generic for symmetry.
+#[cfg(not(tarpaulin_include))] // spawns a blocking refresh grant over the network — irreducible I/O
+pub async fn refresh(
+    State(state): State<WebState>,
+    Path(provider_key): Path<String>,
+    Json(body): Json<RefreshBody>,
+) -> Response {
+    let provider = match Provider::from_key(&provider_key) {
+        Some(p) => p,
+        None => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                &format!("`{provider_key}` is not a supported provider."),
+            )
+        }
+    };
+
+    if body.refresh_token.trim().is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "A refresh_token is required.");
+    }
+
+    let creds = match state.config.credentials(provider) {
+        Some(c) => c.clone(),
+        None => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!(
+                    "{} sign-in is not available on this server.",
+                    provider.display_name()
+                ),
+            )
+        }
+    };
+
+    let transport = state.transport.clone();
+    let refresh_token = body.refresh_token;
+
+    // The grant is synchronous (the transport seam is) and may block on I/O; run
+    // it off the async reactor, exactly like the `callback` exchange.
+    let refreshed = tokio::task::spawn_blocking(move || {
+        refresh_access_token(
+            transport.as_ref(),
+            provider,
+            &creds.client_id,
+            &creds.client_secret,
+            &refresh_token,
+        )
+    })
+    .await;
+
+    match refreshed {
+        Ok(Ok(cred)) => refreshed_response(cred),
+        Ok(Err(e)) => {
+            // `e` carries the provider's OAuth error (code/description) or an HTTP
+            // status + body — never the refresh token or client secret.
+            tracing::warn!(provider = provider.key(), error = %e, "token refresh failed");
+            json_error(
+                StatusCode::BAD_GATEWAY,
+                "darkrun could not refresh the token with the provider.",
+            )
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "refresh task panicked");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Something went wrong refreshing the token.",
+            )
+        }
+    }
+}
+
+/// Serialize a rotated credential as the refresh response JSON.
+///
+/// A [`Credential`] serializes to `{ provider, access_token, refresh_token?,
+/// expires_in?, token_type? }` — a superset of the `{ access_token,
+/// refresh_token, expires_in }` the CLI needs, and the exact shape its
+/// credential store round-trips, so the CLI deserializes it straight back into a
+/// [`Credential`] and persists it.
+fn refreshed_response(cred: Credential) -> Response {
+    Json(cred).into_response()
+}
+
+/// A JSON error body with `status`. The CLI parses only the HTTP status, but a
+/// JSON body keeps this API surface consistent with `/api/*`.
+fn json_error(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
 /// The minimal dark-branded "return to your terminal" page.

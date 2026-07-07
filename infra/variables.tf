@@ -46,6 +46,54 @@ variable "min_instances" {
   default     = 0
 }
 
+# ── Firebase Auth / Identity Platform ────────────────────────────────────
+# The sign-in surface as code. authorized_domains is always managed (no secret).
+# The provider ids/secrets are opt-in (manage_auth_idp) because the secret lands
+# in state; supply the SECRETS via TF_VAR_* env / TFC sensitive vars, never tfvars.
+variable "auth_authorized_domains" {
+  description = "Firebase Auth authorized domains (origins allowed to complete the OAuth redirect). Must include app.darkrun.ai + the firebaseapp.com/web.app handler origins."
+  type        = list(string)
+  default = [
+    "localhost",
+    "darkrun.firebaseapp.com",
+    "darkrun.web.app",
+    "app.darkrun.ai",
+    "darkrun.ai",
+  ]
+}
+
+variable "manage_auth_idp" {
+  description = "Also manage the GitHub + GitLab sign-in providers in Terraform. Default false (the provider resources persist the OAuth client SECRET to state, which the repo otherwise avoids). When off, only authorized_domains is tracked and the providers stay console-managed."
+  type        = bool
+  default     = false
+}
+
+variable "github_oauth_client_id" {
+  description = "GitHub OAuth app client id for the GitHub sign-in provider (non-secret). Used only when manage_auth_idp = true."
+  type        = string
+  default     = ""
+}
+
+variable "github_oauth_client_secret" {
+  description = "GitHub OAuth app client SECRET. Supply via TF_VAR_github_oauth_client_secret (sensitive TFC var / env), NEVER tfvars. Used only when manage_auth_idp = true."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "gitlab_oauth_client_id" {
+  description = "GitLab OIDC application id for the oidc.gitlab provider (non-secret). Used only when manage_auth_idp = true."
+  type        = string
+  default     = ""
+}
+
+variable "gitlab_oauth_client_secret" {
+  description = "GitLab OIDC application SECRET. Supply via TF_VAR_gitlab_oauth_client_secret (sensitive TFC var / env), NEVER tfvars. Used only when manage_auth_idp = true."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 # ── DNS ──────────────────────────────────────────────────────────────────
 variable "manage_dns" {
   description = "Create the Cloud DNS zone + apex/www records for web_domain. Set false to manage DNS elsewhere."
