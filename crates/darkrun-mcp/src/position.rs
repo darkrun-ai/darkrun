@@ -1,9 +1,18 @@
 //! The manager — a single virtual cursor over a Run's aggregate state.
 //!
-//! The manager is a **pure read** of on-disk state that returns ONE structured
-//! [`RunAction`] describing the next thing the caller (the agent) should do. It
-//! does NOT run LLM agents — it tells the caller what to do, the caller does it
-//! (writes artifacts / units / stamps), then calls `run_next` again.
+//! The manager derives ONE structured [`RunAction`] describing the next thing
+//! the caller (the agent) should do from on-disk state. It does NOT run LLM
+//! agents — it tells the caller what to do, the caller does it (writes artifacts
+//! / units / stamps), then calls `run_next` again.
+//!
+//! **Purity caveat (team mode).** [`derive_position`] itself is a pure read, and
+//! in `solo`/`dark` a whole tick is effectively read-only. In `team` mode,
+//! though, [`run_tick_with_hosting`] performs hosting **side effects** inline
+//! before it derives: [`resolve_discrete_gate`] pushes the station branch to
+//! origin, opens/polls the station PR/MR, posts the objective-proof comment, and
+//! files remote review notes as `external` feedback. So the "a wedged run is
+//! just a cursor you can force/reset" story is side-effect-free only in
+//! `solo`/`dark`; a `team`-mode tick can mutate the remote.
 //!
 //! ## Three-track priority (Drift -> Feedback -> Run)
 //!
