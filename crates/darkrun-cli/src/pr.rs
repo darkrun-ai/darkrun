@@ -105,16 +105,28 @@ pub fn create_for_run(
             provider.key()
         )
     })?;
-    // Re-mint a near-expiry GitLab token before opening the PR/MR, when the
-    // client holds its OAuth app credentials (best-effort: the brokered flow
-    // normally keeps the secret server-side, and GitHub tokens never expire).
-    // On any refresh failure the stored token is used as-is.
-    if let Some(oauth) = OauthClient::from_env(provider) {
-        if let Ok(Some(fresh)) =
-            refresh_before_use(cred_store, transport, &oauth, provider, darkrun_vcs::now_unix())
-        {
-            cred = fresh;
+    // Re-mint a near-expiry GitLab token before opening the PR/MR, best-effort;
+    // on any refresh failure the stored token is used as-is. GitHub tokens never
+    // expire, so this is a no-op for them.
+    //
+    // Which refresher runs depends on WHERE the OAuth client secret lives:
+    //  - self-hosted/desktop hold the secret locally (`DARKRUN_GITLAB_CLIENT_*`)
+    //    → refresh DIRECTLY against the provider.
+    //  - the hosted default keeps the secret on the website, so the CLI never has
+    //    it → refresh through the website broker (`<web>/auth/<provider>/refresh`).
+    //    This is what closes the finding for the real deployment: a hosted GitLab
+    //    run's token is now re-minted before it expires mid-run, not just the
+    //    self-hosted one.
+    let now = darkrun_vcs::now_unix();
+    let refreshed = match OauthClient::from_env(provider) {
+        Some(oauth) => refresh_before_use(cred_store, transport, &oauth, provider, now),
+        None => {
+            let broker = crate::auth::BrokerRefresher::new(crate::auth::web_base());
+            refresh_before_use(cred_store, transport, &broker, provider, now)
         }
+    };
+    if let Ok(Some(fresh)) = refreshed {
+        cred = fresh;
     }
 
     // 3. The pure intent (title/body/head) from the manager.

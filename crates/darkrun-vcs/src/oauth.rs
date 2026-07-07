@@ -171,6 +171,34 @@ fn parse_token_response(
     })
 }
 
+/// Re-mints a near-expiry [`Credential`] into a fresh one — the pluggable refresh
+/// strategy [`refresh_before_use`] drives.
+///
+/// The product ships two shapes of this, because the GitLab OAuth **client
+/// secret** lives in different places depending on the deployment:
+///
+/// * [`OauthClient`] — the client holds the secret itself (self-hosted/desktop,
+///   `DARKRUN_GITLAB_CLIENT_SECRET`) and runs the refresh grant **directly**
+///   against the provider.
+/// * a WEBSITE-broker refresher (implemented in the CLI) — the hosted default,
+///   where the secret stays on the website. The CLI can't run the grant itself,
+///   so it posts the refresh token to the website's `/auth/<provider>/refresh`
+///   route, which performs the secret-bearing grant and returns the rotated
+///   credential.
+///
+/// Making refresh a trait keeps [`refresh_before_use`] identical for both: the
+/// caller picks the strategy, the guard runs it.
+pub trait Refresher {
+    /// Re-mint `credential`, returning a fresh one (new access token, expiry, and
+    /// usually a rotated refresh token). Errors with [`VcsError::MissingField`]
+    /// when the credential carries no refresh token (nothing to exchange).
+    fn refresh(
+        &self,
+        transport: &dyn HttpTransport,
+        credential: &Credential,
+    ) -> Result<Credential>;
+}
+
 /// The confidential OAuth client credentials (`client_id` + `client_secret`) the
 /// refresh grant needs, bundled so [`refresh_before_use`] carries exactly what
 /// [`refresh_access_token`] requires.
@@ -182,6 +210,9 @@ fn parse_token_response(
 /// the environment ([`from_env`](Self::from_env)); the hosting/PR paths then use
 /// them to re-mint a near-expiry GitLab token in place. GitHub OAuth-app tokens
 /// never expire (they report no `expires_in`), so this only matters for GitLab.
+///
+/// For the hosted default (no local secret) the CLI plugs in a website-broker
+/// [`Refresher`] instead, so the refresh closes the loop there too.
 #[derive(Debug, Clone)]
 pub struct OauthClient {
     client_id: String,
@@ -200,8 +231,8 @@ impl OauthClient {
     /// Load the client credentials for `provider` from the environment:
     /// `DARKRUN_<PROVIDER>_CLIENT_ID` and `DARKRUN_<PROVIDER>_CLIENT_SECRET`
     /// (e.g. `DARKRUN_GITLAB_CLIENT_ID`). Returns `None` unless BOTH are set to a
-    /// non-empty value — absent them the caller skips refresh and uses the stored
-    /// token as-is (the default brokered flow, where the secret stays on the
+    /// non-empty value — absent them the caller falls back to the website-broker
+    /// refresher (the default brokered flow, where the secret stays on the
     /// website).
     pub fn from_env(provider: Provider) -> Option<Self> {
         let up = provider.key().to_ascii_uppercase();
@@ -209,12 +240,12 @@ impl OauthClient {
         let secret = non_empty_env(&format!("DARKRUN_{up}_CLIENT_SECRET"))?;
         Some(Self::new(id, secret))
     }
+}
 
-    /// Re-mint `credential` via the refresh grant, returning a fresh credential.
-    ///
-    /// Errors with [`VcsError::MissingField`] when the credential carries no
-    /// refresh token (there is nothing to exchange).
-    pub fn refresh(
+impl Refresher for OauthClient {
+    /// Re-mint `credential` by running the refresh grant DIRECTLY against the
+    /// provider with the locally-held client secret.
+    fn refresh(
         &self,
         transport: &dyn HttpTransport,
         credential: &Credential,
@@ -246,14 +277,18 @@ fn non_empty_env(key: &str) -> Option<String> {
 /// ([`CredentialStore::get_with_obtained_at`]); if the token
 /// [`needs_refresh`](Credential::needs_refresh) AND is
 /// [`refreshable`](Credential::is_refreshable), it mints a fresh one through
-/// `oauth`, persists it (which restamps `obtained_at`), and returns the fresh
+/// `refresher`, persists it (which restamps `obtained_at`), and returns the fresh
 /// credential. Otherwise it returns the stored credential untouched — and a
 /// credential with no `expires_in` (GitHub) never triggers a refresh. `Ok(None)`
 /// when no credential is stored for `provider`.
+///
+/// `refresher` is the pluggable strategy: an [`OauthClient`] for a client that
+/// holds the secret (self-hosted/desktop), or the CLI's website-broker refresher
+/// for the hosted default. Both satisfy [`Refresher`], so the guard is identical.
 pub fn refresh_before_use(
     store: &CredentialStore,
     transport: &dyn HttpTransport,
-    oauth: &OauthClient,
+    refresher: &dyn Refresher,
     provider: Provider,
     now_unix: u64,
 ) -> Result<Option<Credential>> {
@@ -261,7 +296,7 @@ pub fn refresh_before_use(
         return Ok(None);
     };
     if credential.needs_refresh(obtained_at, now_unix) && credential.is_refreshable() {
-        let fresh = oauth.refresh(transport, &credential)?;
+        let fresh = refresher.refresh(transport, &credential)?;
         store.save(&fresh)?;
         Ok(Some(fresh))
     } else {
@@ -412,6 +447,72 @@ mod oauth_tests {
         let oauth = OauthClient::new("id", "secret");
         let err = oauth.refresh(&mock, &cred).unwrap_err();
         assert!(matches!(err, VcsError::MissingField("refresh_token")));
+    }
+
+    /// A stand-in for the CLI's website-broker refresher: it never touches the
+    /// provider directly (holds no secret), it just hands back a canned rotated
+    /// credential — the shape the hosted flow plugs into `refresh_before_use`.
+    struct StubBroker {
+        rotated: Credential,
+    }
+
+    impl Refresher for StubBroker {
+        fn refresh(
+            &self,
+            _transport: &dyn HttpTransport,
+            credential: &Credential,
+        ) -> Result<Credential> {
+            // Mirror the real broker's precondition: a refresh needs a token.
+            credential
+                .refresh_token
+                .as_deref()
+                .ok_or(VcsError::MissingField("refresh_token"))?;
+            Ok(self.rotated.clone())
+        }
+    }
+
+    #[test]
+    fn refresh_before_use_drives_a_non_oauth_client_refresher() {
+        // The hosted flow: no local secret, so the guard runs through a broker
+        // Refresher instead of an OauthClient — same guard, pluggable strategy.
+        let cred = gitlab_cred("old-access", Some("old-refresh"), Some(7200));
+        let (_dir, store) = seeded_store(&cred);
+        let issued = crate::now_unix();
+
+        let broker = StubBroker {
+            rotated: gitlab_cred("broker-access", Some("broker-refresh"), Some(7200)),
+        };
+        // No provider round-trip happens through the transport for a broker.
+        let mock = MockTransport::new();
+
+        let fresh = refresh_before_use(&store, &mock, &broker, Provider::GitLab, issued + 7200)
+            .unwrap()
+            .expect("a credential is stored");
+
+        // The guard returned the broker's rotated credential …
+        assert_eq!(fresh.access_token, "broker-access");
+        assert_eq!(fresh.refresh_token.as_deref(), Some("broker-refresh"));
+        // … and persisted it (so the next request reads the fresh token).
+        assert_eq!(
+            store.get(Provider::GitLab).unwrap().unwrap().access_token,
+            "broker-access"
+        );
+    }
+
+    #[test]
+    fn refresh_before_use_leaves_a_healthy_token_untouched_for_a_broker() {
+        // A broker Refresher must not be invoked when the token is still healthy.
+        let cred = gitlab_cred("live-access", Some("live-refresh"), Some(7200));
+        let (_dir, store) = seeded_store(&cred);
+        let issued = crate::now_unix();
+        let broker = StubBroker {
+            rotated: gitlab_cred("should-not-be-used", Some("nope"), Some(7200)),
+        };
+        let mock = MockTransport::new();
+        let out = refresh_before_use(&store, &mock, &broker, Provider::GitLab, issued + 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.access_token, "live-access");
     }
 
     #[test]

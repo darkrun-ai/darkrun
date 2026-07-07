@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use darkrun_vcs::{
-    Credential, CredentialStore, HttpRequest, HttpResponse, HttpTransport, Provider,
+    Credential, CredentialStore, HttpRequest, HttpResponse, HttpTransport, Provider, Refresher,
 };
 
 /// The default website base when `DARKRUN_WEB_BASE` is unset.
@@ -57,6 +57,69 @@ pub fn broker_url(web_base: &str, nonce: &str) -> String {
         base = web_base.trim_end_matches('/'),
         nonce = darkrun_vcs::percent_encode(nonce),
     )
+}
+
+/// Build the website refresh-broker URL: `<web>/auth/<provider>/refresh`.
+pub fn refresh_url(web_base: &str, provider: Provider) -> String {
+    format!(
+        "{base}/auth/{provider}/refresh",
+        base = web_base.trim_end_matches('/'),
+        provider = provider.key(),
+    )
+}
+
+/// A [`Refresher`] that re-mints a near-expiry token through the WEBSITE broker
+/// instead of a locally-held OAuth client secret.
+///
+/// This is the hosted default. The GitLab client secret lives only on the
+/// website, so the CLI can't run the refresh grant itself; it POSTs its stored
+/// refresh token to `<web>/auth/<provider>/refresh`, and the website performs the
+/// secret-bearing grant and returns the rotated [`Credential`], which
+/// [`refresh_before_use`](darkrun_vcs::refresh_before_use) then persists. The
+/// self-hosted/desktop path that DOES hold the secret uses
+/// [`OauthClient`](darkrun_vcs::OauthClient) directly instead.
+pub struct BrokerRefresher {
+    web_base: String,
+}
+
+impl BrokerRefresher {
+    /// A refresher that brokers through `web_base` (e.g. `https://darkrun.ai`).
+    pub fn new(web_base: impl Into<String>) -> Self {
+        Self {
+            web_base: web_base.into(),
+        }
+    }
+}
+
+impl Refresher for BrokerRefresher {
+    fn refresh(
+        &self,
+        transport: &dyn HttpTransport,
+        credential: &Credential,
+    ) -> darkrun_vcs::Result<Credential> {
+        // A refresh needs a refresh token — mirror the direct grant's precondition.
+        let refresh_token = credential
+            .refresh_token
+            .as_deref()
+            .ok_or(darkrun_vcs::VcsError::MissingField("refresh_token"))?;
+
+        let url = refresh_url(&self.web_base, credential.provider);
+        let body = serde_json::json!({ "refresh_token": refresh_token });
+        let request = HttpRequest::post(url)
+            .header("Accept", "application/json")
+            .json_body(&body)?;
+        let response = transport.execute(request)?;
+        if !response.is_success() {
+            return Err(darkrun_vcs::VcsError::Api {
+                provider: credential.provider.display_name(),
+                status: response.status,
+                message: response.text().unwrap_or_default(),
+            });
+        }
+        // The website returns the rotated credential in `Credential` wire shape.
+        let fresh: Credential = response.json()?;
+        Ok(fresh)
+    }
 }
 
 /// Generate a URL-safe random nonce. The nonce doubles as the OAuth `state`
@@ -578,6 +641,102 @@ mod tests {
             broker_url("https://darkrun.ai", "nonce-1"),
             "https://darkrun.ai/auth/broker/nonce-1"
         );
+    }
+
+    #[test]
+    fn refresh_url_is_provider_scoped() {
+        assert_eq!(
+            refresh_url("https://darkrun.ai", Provider::GitLab),
+            "https://darkrun.ai/auth/gitlab/refresh"
+        );
+        // Trailing slash is trimmed so the path joins cleanly.
+        assert_eq!(
+            refresh_url("https://darkrun.ai/", Provider::GitHub),
+            "https://darkrun.ai/auth/github/refresh"
+        );
+    }
+
+    #[test]
+    fn broker_refresher_posts_refresh_token_and_returns_rotated_credential() {
+        // The website returns the rotated credential in `Credential` wire shape;
+        // the refresher deserializes it and hands it back for persistence.
+        let mock = MockTransport::new();
+        let rotated = Credential {
+            provider: Provider::GitLab,
+            access_token: "new-access".into(),
+            refresh_token: Some("new-refresh".into()),
+            expires_in: Some(7200),
+            token_type: Some("bearer".into()),
+        };
+        mock.expect(
+            Method::Post,
+            "https://darkrun.ai/auth/gitlab/refresh",
+            HttpResponse::new(200, serde_json::to_vec(&rotated).unwrap()),
+        );
+
+        let stale = Credential {
+            provider: Provider::GitLab,
+            access_token: "old-access".into(),
+            refresh_token: Some("old-refresh".into()),
+            expires_in: Some(7200),
+            token_type: Some("bearer".into()),
+        };
+        let broker = BrokerRefresher::new("https://darkrun.ai");
+        let fresh = broker.refresh(&mock, &stale).expect("refresh succeeds");
+
+        assert_eq!(fresh.access_token, "new-access");
+        assert_eq!(fresh.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(fresh.expires_in, Some(7200));
+
+        // Exactly one POST to the website carrying the OLD refresh token — the
+        // client secret is never sent (it lives on the website).
+        let req = mock.single_request();
+        assert_eq!(req.method, Method::Post);
+        assert_eq!(req.url, "https://darkrun.ai/auth/gitlab/refresh");
+        let body: serde_json::Value =
+            serde_json::from_slice(req.body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["refresh_token"], "old-refresh");
+        assert!(body.get("client_secret").is_none());
+    }
+
+    #[test]
+    fn broker_refresher_errors_without_a_refresh_token() {
+        // Nothing to exchange → the same MissingField the direct grant reports,
+        // and no request is made.
+        let mock = MockTransport::new();
+        let cred = Credential::new(Provider::GitLab, "access-only");
+        let broker = BrokerRefresher::new("https://darkrun.ai");
+        let err = broker.refresh(&mock, &cred).unwrap_err();
+        assert!(matches!(
+            err,
+            darkrun_vcs::VcsError::MissingField("refresh_token")
+        ));
+        assert!(mock.requests().is_empty());
+    }
+
+    #[test]
+    fn broker_refresher_surfaces_a_website_failure() {
+        // A non-2xx from the website (e.g. the grant was rejected upstream)
+        // surfaces as an Api error rather than a bogus credential.
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Post,
+            "https://darkrun.ai/auth/gitlab/refresh",
+            HttpResponse::new(502, br#"{"error":"refresh failed"}"#.to_vec()),
+        );
+        let cred = Credential {
+            provider: Provider::GitLab,
+            access_token: "old".into(),
+            refresh_token: Some("r".into()),
+            expires_in: Some(7200),
+            token_type: None,
+        };
+        let broker = BrokerRefresher::new("https://darkrun.ai");
+        let err = broker.refresh(&mock, &cred).unwrap_err();
+        match err {
+            darkrun_vcs::VcsError::Api { status, .. } => assert_eq!(status, 502),
+            other => panic!("expected Api error, got {other:?}"),
+        }
     }
 
     #[test]

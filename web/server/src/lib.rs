@@ -46,7 +46,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::{routing::get, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use tower_http::services::{ServeDir, ServeFile};
 
 pub use broker::{Broker, Clock, SystemClock, DEFAULT_TTL};
@@ -81,7 +84,7 @@ pub use transport::ReqwestTransport;
 /// overridable via `DARKRUN_SITE_DIR`.
 pub const DEFAULT_SITE_DIR: &str = "web/site/dist";
 
-/// Build the OAuth sub-router (the three `/auth/...` endpoints).
+/// Build the OAuth sub-router (the `/auth/...` endpoints).
 ///
 /// Public so tests can mount just the OAuth surface without a site directory.
 pub fn oauth_router(state: WebState) -> Router {
@@ -89,6 +92,8 @@ pub fn oauth_router(state: WebState) -> Router {
         .route("/auth/{provider}/start", get(oauth_routes::start))
         .route("/auth/{provider}/callback", get(oauth_routes::callback))
         .route("/auth/broker/{nonce}", get(oauth_routes::broker_claim))
+        // Re-mint a near-expiry token from a refresh token (hosted GitLab flow).
+        .route("/auth/{provider}/refresh", post(oauth_routes::refresh))
         .with_state(state)
 }
 
