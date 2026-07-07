@@ -2,6 +2,32 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.9.0](https://github.com/darkrun-ai/darkrun/compare/v0.8.0...v0.9.0) (2026-07-07)
+
+
+### Features
+
+* **infra:** capture Firebase Auth sign-in config as code ([79ed568](https://github.com/darkrun-ai/darkrun/commit/79ed568c11d99e5a3b48a437991edb775a8f8728))
+* **relay:** remote reachability (Wave 2 crit [#5](https://github.com/darkrun-ai/darkrun/issues/5)) ([463654a](https://github.com/darkrun-ai/darkrun/commit/463654aa663ef458a7b6c7d70623c7973de55a94))
+* **relay:** self-refreshing relay credential (Wave 2 crit [#6](https://github.com/darkrun-ai/darkrun/issues/6)) ([aea50fd](https://github.com/darkrun-ai/darkrun/commit/aea50fd95a2d13e75e467356cdbd08c6896cab86))
+* **remote:** Decide command, direction/picker routing, exactly-once client retry ([ae69714](https://github.com/darkrun-ai/darkrun/commit/ae697147c6d7e61e1bdf2ceabf640969ed52a540))
+* **sim:** protocol-fidelity harness — a dumb agent that must follow rendered prompts ([ffe29d5](https://github.com/darkrun-ai/darkrun/commit/ffe29d57064ee17d6ad578c6d71020e61c220b5b))
+* **tunnel:** host-side command dedupe (Wave 2 Step 1d) ([c6395bf](https://github.com/darkrun-ai/darkrun/commit/c6395bf101f15a6c709b51c15b2add99d959506c))
+* **web/server:** Firestore session registry (Wave 2 Step 1b) ([44f2db3](https://github.com/darkrun-ai/darkrun/commit/44f2db3a2e70e03af954be95e9ac05f16897953d))
+* **web/server:** Firestore-backed relay-token broker (Wave 2 Step 1a) ([5c1da13](https://github.com/darkrun-ai/darkrun/commit/5c1da131eaa58f443bf78d91b460f96ad8fe53a0))
+* **web/server:** Pub/Sub cross-instance frame bus (Wave 2 Step 1c) ([f61b54c](https://github.com/darkrun-ai/darkrun/commit/f61b54cb233b5afeefce22298683f11095c840f9))
+
+
+### Bug Fixes
+
+* **auth:** refresh hosted GitLab tokens via a website broker route ([1c03df1](https://github.com/darkrun-ai/darkrun/commit/1c03df13defd5a46046649162d67addcdeb619e8))
+* **engine:** close engine-minor gap findings (mode-picker copy, await/pure-read docs) ([8983893](https://github.com/darkrun-ai/darkrun/commit/89838936eea37267b5bf62244cf65f8774618709))
+* **prompts:** drop the dead darkrun_checkpoint_choose reference ([ad3c911](https://github.com/darkrun-ai/darkrun/commit/ad3c9111f859d2f3cde1e83f25b1c00c3bf20c6a))
+* **vcs:** refresh GitLab OAuth token before hosting/PR requests ([b1f0edc](https://github.com/darkrun-ai/darkrun/commit/b1f0edc5739d711409b1f0167adcd25f673d0527))
+* **web:** paginate portfolio + run discovery so &gt;100 items aren't dropped ([6bfcab2](https://github.com/darkrun-ai/darkrun/commit/6bfcab233f250376bf42da491e956d1591febc90))
+* **web:** serve robots.txt + sitemap + feeds (run the SEO generator in the image) ([03da11f](https://github.com/darkrun-ai/darkrun/commit/03da11fd5b434c77cbb2eacd328bfaddb73234ee))
+* **web:** serve robots.txt + sitemap + feeds (run the SEO generator in the image) ([#203](https://github.com/darkrun-ai/darkrun/issues/203)) ([5acc680](https://github.com/darkrun-ai/darkrun/commit/5acc680ceb3ab8b1166e218dd58dd051e3119784))
+
 ## [0.8.0](https://github.com/darkrun-ai/darkrun/compare/v0.7.0...v0.8.0) (2026-07-06)
 
 
