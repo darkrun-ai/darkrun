@@ -19,6 +19,7 @@ infra/
     sentry/          # one Sentry project per surface (web/cli/desktop/site) + DSNs
     registry/        # Artifact Registry Docker repo
     web/             # SA + secret refs/IAM + Cloud Run service + domain mapping
+    auth/            # Firebase Auth / Identity Platform sign-in config as code
 ```
 
 ### Module graph
@@ -28,6 +29,7 @@ main.tf
 ├── google_project_service ×4        (run, artifactregistry, secretmanager, iam)
 ├── module.sentry                    → dsns { web, cli, desktop, site }
 ├── module.registry                  → registry_path
+├── module.auth                      → identity_platform_config + (opt-in) idp configs
 └── module.web   (sentry_dsn ← module.sentry.dsns["web"])
         ├── google_service_account "web"
         ├── data google_secret_manager_secret  (the 4 OAuth secrets, referenced)
@@ -48,6 +50,25 @@ main.tf
   environment (a TFC workspace variable). Never a Terraform variable.
 - **Web Sentry DSN** — a *public* ingest key, derived from the sentry module and
   written into Secret Manager by Terraform. A public DSN in state is not a leak.
+
+### Firebase Auth sign-in config (the `auth` module)
+
+The sign-in surface (Firebase Auth authorized domains + the GitHub / `oidc.gitlab`
+providers) used to live only in the Firebase console, so a stray console edit could
+silently break sign-in with no source of truth. The `auth` module tracks it as code:
+
+- **Authorized domains** are always managed (`google_identity_platform_config`).
+  No secret is involved, so a console deletion of, say, `app.darkrun.ai` reappears
+  as a plan diff. Adjust the list via `auth_authorized_domains`.
+- **The GitHub + GitLab providers** are **opt-in** behind `manage_auth_idp`
+  (default `false`). Those resources require the OAuth client **secret**, which
+  Terraform would persist to state, contrary to this repo's keep-secrets-out-of-state
+  rule. With `manage_auth_idp = false` the two providers stay console-managed and
+  Terraform tracks only their authorized-domain surface. If you accept the
+  secret-in-state tradeoff, set `manage_auth_idp = true` and supply the ids/secrets
+  via **sensitive env vars** (`TF_VAR_github_oauth_client_secret`,
+  `TF_VAR_gitlab_oauth_client_secret`, and the matching `*_client_id`) or TFC
+  sensitive workspace variables, never `terraform.tfvars`.
 
 ## First-time setup
 
