@@ -41,7 +41,7 @@ pub mod transport;
 pub use error::{Result, VcsError};
 pub use oauth::{
     authorize_url, exchange_code, percent_encode, refresh_access_token, refresh_before_use,
-    OauthClient,
+    OauthClient, Refresher,
 };
 pub use provider::{Credential, Provider, REFRESH_SKEW_SECS};
 
