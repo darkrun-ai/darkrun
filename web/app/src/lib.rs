@@ -11,6 +11,7 @@ mod firebase;
 mod login;
 mod register;
 mod remote;
+mod runs;
 mod workspace;
 
 use darkrun_api::session::{
@@ -42,9 +43,25 @@ fn is_login_path() -> bool {
 /// (see `desktop/Dioxus.toml [deep_links]`). On the web (the fallback when the
 /// native app isn't installed) it renders the review by id below.
 fn review_id_from_path() -> Option<String> {
+    single_segment_after("/review/")
+}
+
+/// The run slug in the current `/runs/:slug` path, if that's where we are.
+///
+/// This is the CLEAN run link the engine mints (`run_web_url` →
+/// `https://app.darkrun.ai/runs/<slug>`): no secret in the URL. The
+/// [`runs::RunView`] below resolves the relay/session/token from an
+/// authenticated API and drives the live surface.
+fn run_slug_from_path() -> Option<String> {
+    single_segment_after("/runs/")
+}
+
+/// The single, non-empty path segment right after `prefix` in the current URL
+/// path (e.g. the id in `/review/<id>` or the slug in `/runs/<slug>`), or `None`
+/// when the path isn't that shape.
+fn single_segment_after(prefix: &str) -> Option<String> {
     let path = web_sys::window()?.location().pathname().ok()?;
-    let rest = path.trim_end_matches('/').strip_prefix("/review/")?;
-    // Only a single, non-empty segment is a review id.
+    let rest = path.trim_end_matches('/').strip_prefix(prefix)?;
     if rest.is_empty() || rest.contains('/') {
         return None;
     }
@@ -60,6 +77,17 @@ pub fn App() -> Element {
         return rsx! {
             style { "{tokens::THEME_CSS}" }
             LoginPage {}
+        };
+    }
+
+    // `/runs/:slug` — the CLEAN run link the engine mints. No secret in the URL:
+    // [`runs::RunView`] restores the persisted Firebase token, resolves the relay
+    // descriptor from an authenticated API, and drives the live surface (or a
+    // clear "not live" state). A distinct branch so the hook order stays stable.
+    if let Some(slug) = run_slug_from_path() {
+        return rsx! {
+            style { "{tokens::THEME_CSS}" }
+            runs::RunView { slug }
         };
     }
 
@@ -208,7 +236,7 @@ fn PushPrompt() -> Element {
 
 /// The brand header.
 #[component]
-fn Header() -> Element {
+pub(crate) fn Header() -> Element {
     let bar = format!(
         "display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid {};",
         tokens::BORDER,
@@ -229,7 +257,7 @@ fn Header() -> Element {
 
 /// A centered status line (connecting / reconnecting).
 #[component]
-fn Status(text: String) -> Element {
+pub(crate) fn Status(text: String) -> Element {
     rsx! {
         p {
             style: format!(
@@ -308,7 +336,7 @@ fn ReviewLanding(id: String) -> Element {
 /// the run feed (so a dark-mode run parked on a question is actionable, not
 /// stale). A plain function (not a `#[component]`) because the payload isn't
 /// `PartialEq` — it's re-rendered on every live update.
-fn live_view(
+pub(crate) fn live_view(
     payload: &SessionPayload,
     commands: Coroutine<ClientCommand>,
     cmd_outcome: Signal<CommandOutcome>,

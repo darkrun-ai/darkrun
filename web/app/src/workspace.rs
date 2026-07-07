@@ -296,6 +296,21 @@ fn RunDetail(run: CommittedRun) -> Element {
                     }
                     MetaChip { icon: "fa-solid fa-code-branch".to_string(), text: "read-only \u{b7} from git".to_string() }
                 }
+                // Open the LIVE run: the clean `/runs/{slug}` link resolves the
+                // relay attach from an authenticated API and drives the live
+                // surface (or a "not live" state). Turns the committed detail from
+                // a dead end into a way into the running session.
+                a {
+                    href: "/runs/{run.run_id}",
+                    style: format!(
+                        "display:inline-flex;align-items:center;gap:8px;margin-top:14px;\
+                         padding:8px 16px;border-radius:6px;text-decoration:none;\
+                         background:{};color:{};font-family:{};font-size:14px;font-weight:600;",
+                        tokens::ACCENT, tokens::ON_ACCENT, tokens::FONT_SANS,
+                    ),
+                    i { class: "fa-solid fa-tower-broadcast", style: "font-size:12px;" }
+                    "Open live"
+                }
             }
 
             // The station status list (the committed record). Empty is fine — a

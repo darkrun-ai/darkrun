@@ -190,15 +190,25 @@ pub(crate) fn StandaloneLogin() -> Element {
     use_effect(move || {
         spawn(async move {
             // 1. "Remember me": a persisted Firebase session goes straight to the
-            //    workspace with its durable ID token (no provider re-auth).
+            //    workspace with its durable ID token (no provider re-auth). But if
+            //    a run link bounced us here with a `return_to`, land back there.
             if let Some(token) = firebase::restore_session().await {
+                if land_return_to() {
+                    return; // navigating away to the return target
+                }
                 session_token.set(Some(token));
                 return;
             }
             // 2. Otherwise, consume a pending redirect (we may have just returned
-            //    from a provider). The minted ID token is the workspace bearer.
+            //    from a provider). The minted ID token is the workspace bearer —
+            //    unless a `return_to` sends us back to the run we came from.
             match firebase::consume_redirect().await {
-                Ok(Some(session)) => session_token.set(Some(session.id_token)),
+                Ok(Some(session)) => {
+                    if land_return_to() {
+                        return;
+                    }
+                    session_token.set(Some(session.id_token));
+                }
                 Ok(None) => {
                     if pending.peek().is_none() {
                         step.set(Step::Idle);
@@ -272,4 +282,46 @@ fn ProviderButtons(step: Signal<Step>, pending: Signal<Option<&'static str>>) ->
 fn start_sign_in(provider: &'static str, mut step: Signal<Step>, mut pending: Signal<Option<&'static str>>) {
     step.set(Step::Working);
     pending.set(Some(provider));
+}
+
+/// If the URL carries a safe internal `return_to`, navigate there and report
+/// `true` (the caller should stop — we're leaving this page). This is how a
+/// `/runs/:slug` link that bounced here to sign in lands the user back on the
+/// live run, not the bare workspace.
+fn land_return_to() -> bool {
+    let Some(dest) = firebase::query_param("return_to").and_then(|r| sanitize_return_to(&r)) else {
+        return false;
+    };
+    if let Some(win) = web_sys::window() {
+        let _ = win.location().set_href(&dest);
+        return true;
+    }
+    false
+}
+
+/// Accept only a safe SAME-ORIGIN path as a return target: it must start with a
+/// single `/` (not `//`, a protocol-relative URL to another origin) and carry no
+/// scheme. Guards against an open-redirect through `return_to`.
+fn sanitize_return_to(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    (t.starts_with('/') && !t.starts_with("//") && !t.contains("://")).then(|| t.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_return_to;
+
+    #[test]
+    fn return_to_accepts_internal_paths_and_rejects_offsite() {
+        assert_eq!(
+            sanitize_return_to("/runs/quiet-canyon").as_deref(),
+            Some("/runs/quiet-canyon")
+        );
+        // Protocol-relative and absolute URLs are open-redirect vectors → rejected.
+        assert_eq!(sanitize_return_to("//evil.example.com"), None);
+        assert_eq!(sanitize_return_to("https://evil.example.com"), None);
+        assert_eq!(sanitize_return_to("javascript:alert(1)"), None);
+        // A bare (non-rooted) path isn't a valid app route target here.
+        assert_eq!(sanitize_return_to("runs/x"), None);
+    }
 }

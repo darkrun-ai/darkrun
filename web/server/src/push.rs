@@ -138,10 +138,16 @@ pub type PushFuture<'a> = Pin<Box<dyn Future<Output = usize> + Send + 'a>>;
 /// successfully. Behind a trait so the relay fan-out is tested with a recording
 /// sender and the FCM HTTP v1 sender wires in for production.
 pub trait PushSender: Send + Sync {
-    /// Push `title`/`body` to every device in `devices`. Best-effort: a failed
-    /// device send is skipped, not fatal — the count returned is the successes.
-    fn push<'a>(&'a self, devices: &'a [DeviceToken], title: &'a str, body: &'a str)
-        -> PushFuture<'a>;
+    /// Push `title`/`body` to every device in `devices`, with an optional `link`
+    /// click target (the run's web view). Best-effort: a failed device send is
+    /// skipped, not fatal — the count returned is the successes.
+    fn push<'a>(
+        &'a self,
+        devices: &'a [DeviceToken],
+        title: &'a str,
+        body: &'a str,
+        link: Option<&'a str>,
+    ) -> PushFuture<'a>;
 }
 
 /// A sender that drops every push — the safe default when no FCM credentials are
@@ -155,6 +161,7 @@ impl PushSender for NoopPushSender {
         _devices: &'a [DeviceToken],
         _title: &'a str,
         _body: &'a str,
+        _link: Option<&'a str>,
     ) -> PushFuture<'a> {
         Box::pin(async { 0 })
     }
@@ -163,13 +170,27 @@ impl PushSender for NoopPushSender {
 /// Build the FCM HTTP v1 message body for one device. Pure, so the wire shape is
 /// unit-tested without sending anything. Shape per the FCM v1 `Message`:
 /// `{ "message": { "token": ..., "notification": { "title", "body" } } }`.
-pub fn fcm_message(token: &str, title: &str, body: &str) -> serde_json::Value {
-    serde_json::json!({
-        "message": {
-            "token": token,
-            "notification": { "title": title, "body": body },
-        }
-    })
+///
+/// When `link` is set, the notification carries a click target: `webpush`
+/// `fcm_options.link` (the web SW opens it on `notificationclick`, and it's also
+/// mirrored into `webpush.data.link` so the SW can read it directly) and
+/// `android.notification.click_action` (the native analogue). Absent a link the
+/// message is exactly the prior title/body-only shape.
+pub fn fcm_message(token: &str, title: &str, body: &str, link: Option<&str>) -> serde_json::Value {
+    let mut message = serde_json::json!({
+        "token": token,
+        "notification": { "title": title, "body": body },
+    });
+    if let Some(link) = link {
+        message["webpush"] = serde_json::json!({
+            "fcm_options": { "link": link },
+            "data": { "link": link },
+        });
+        message["android"] = serde_json::json!({
+            "notification": { "click_action": link },
+        });
+    }
+    serde_json::json!({ "message": message })
 }
 
 /// The FCM HTTP v1 send endpoint for a project.
@@ -222,6 +243,7 @@ impl<T: AccessTokenSource> PushSender for FcmPushSender<T> {
         devices: &'a [DeviceToken],
         title: &'a str,
         body: &'a str,
+        link: Option<&'a str>,
     ) -> PushFuture<'a> {
         Box::pin(async move {
             if devices.is_empty() {
@@ -237,7 +259,7 @@ impl<T: AccessTokenSource> PushSender for FcmPushSender<T> {
             let endpoint = fcm_endpoint(&self.project_id);
             let mut sent = 0;
             for device in devices {
-                let body_json = fcm_message(&device.token, title, body);
+                let body_json = fcm_message(&device.token, title, body, link);
                 match self
                     .http
                     .post(&endpoint)
@@ -260,8 +282,9 @@ impl<T: AccessTokenSource> PushSender for FcmPushSender<T> {
 }
 
 /// Fan a notification out to every device registered to `account`: look the
-/// devices up in `registry` and hand them to `sender`. Returns the number of
-/// devices the sender reports delivered. The shared helper behind the relay's
+/// devices up in `registry` and hand them to `sender`, with an optional `link`
+/// click target (the run's web view). Returns the number of devices the sender
+/// reports delivered. The shared helper behind the relay's
 /// [`HostCmd::Notify`](darkrun_api::tunnel::HostCmd::Notify) handling.
 pub async fn fan_out(
     registry: &Arc<dyn DeviceRegistry>,
@@ -269,12 +292,13 @@ pub async fn fan_out(
     account: &str,
     title: &str,
     body: &str,
+    link: Option<&str>,
 ) -> usize {
     let devices = registry.devices_for(account).await;
     if devices.is_empty() {
         return 0;
     }
-    sender.push(&devices, title, body).await
+    sender.push(&devices, title, body, link).await
 }
 
 #[cfg(test)]
@@ -285,10 +309,19 @@ mod tests {
         DeviceToken { token: token.into(), platform: platform.into() }
     }
 
+    /// One recorded fan-out: the device tokens, title, body, and click link.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedPush {
+        tokens: Vec<String>,
+        title: String,
+        body: String,
+        link: Option<String>,
+    }
+
     /// A sender that records every fan-out it's asked to perform.
     #[derive(Default)]
     struct RecordingPushSender {
-        calls: Mutex<Vec<(Vec<String>, String, String)>>,
+        calls: Mutex<Vec<RecordedPush>>,
     }
 
     impl PushSender for RecordingPushSender {
@@ -297,12 +330,15 @@ mod tests {
             devices: &'a [DeviceToken],
             title: &'a str,
             body: &'a str,
+            link: Option<&'a str>,
         ) -> PushFuture<'a> {
             let tokens: Vec<String> = devices.iter().map(|d| d.token.clone()).collect();
-            self.calls
-                .lock()
-                .unwrap()
-                .push((tokens.clone(), title.to_string(), body.to_string()));
+            self.calls.lock().unwrap().push(RecordedPush {
+                tokens: tokens.clone(),
+                title: title.to_string(),
+                body: body.to_string(),
+                link: link.map(str::to_string),
+            });
             Box::pin(async move { tokens.len() })
         }
     }
@@ -354,10 +390,25 @@ mod tests {
 
     #[test]
     fn fcm_message_has_the_v1_shape() {
-        let m = fcm_message("tok-1", "darkrun · run", "Build needs you.");
+        let m = fcm_message("tok-1", "darkrun · run", "Build needs you.", None);
         assert_eq!(m["message"]["token"], "tok-1");
         assert_eq!(m["message"]["notification"]["title"], "darkrun · run");
         assert_eq!(m["message"]["notification"]["body"], "Build needs you.");
+        // No link → no webpush/android click blocks (the prior shape, unchanged).
+        assert!(m["message"].get("webpush").is_none());
+        assert!(m["message"].get("android").is_none());
+    }
+
+    #[test]
+    fn fcm_message_carries_the_click_link_when_present() {
+        let link = "https://app.darkrun.ai/runs/quiet-canyon";
+        let m = fcm_message("tok-1", "darkrun · run", "Build needs you.", Some(link));
+        // webpush fcm_options.link is the click target the web SW opens; it's also
+        // mirrored into webpush.data.link so the SW can read it directly.
+        assert_eq!(m["message"]["webpush"]["fcm_options"]["link"], link);
+        assert_eq!(m["message"]["webpush"]["data"]["link"], link);
+        // android click_action is the native analogue.
+        assert_eq!(m["message"]["android"]["notification"]["click_action"], link);
     }
 
     #[test]
@@ -377,15 +428,18 @@ mod tests {
         let recorder = Arc::new(RecordingPushSender::default());
         let sender: Arc<dyn PushSender> = recorder.clone();
 
-        let n = fan_out(&registry, &sender, "owner", "T", "B").await;
+        let link = "https://app.darkrun.ai/runs/r";
+        let n = fan_out(&registry, &sender, "owner", "T", "B", Some(link)).await;
         assert_eq!(n, 2, "both of owner's devices, none of other's");
 
         let calls = recorder.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        let mut tokens = calls[0].0.clone();
+        let mut tokens = calls[0].tokens.clone();
         tokens.sort();
         assert_eq!(tokens, vec!["t1".to_string(), "t2".to_string()]);
-        assert_eq!((calls[0].1.as_str(), calls[0].2.as_str()), ("T", "B"));
+        assert_eq!((calls[0].title.as_str(), calls[0].body.as_str()), ("T", "B"));
+        // The click link is threaded through to the sender.
+        assert_eq!(calls[0].link.as_deref(), Some(link));
     }
 
     #[tokio::test]
@@ -394,14 +448,14 @@ mod tests {
         let recorder = Arc::new(RecordingPushSender::default());
         let sender: Arc<dyn PushSender> = recorder.clone();
 
-        assert_eq!(fan_out(&registry, &sender, "ghost", "T", "B").await, 0);
+        assert_eq!(fan_out(&registry, &sender, "ghost", "T", "B", None).await, 0);
         assert!(recorder.calls.lock().unwrap().is_empty(), "no devices → no send");
     }
 
     #[tokio::test]
     async fn noop_sender_delivers_nothing() {
         let sender = NoopPushSender;
-        assert_eq!(sender.push(&[dev("t", "ios")], "T", "B").await, 0);
+        assert_eq!(sender.push(&[dev("t", "ios")], "T", "B", None).await, 0);
     }
 
     #[tokio::test]

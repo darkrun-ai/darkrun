@@ -68,8 +68,9 @@ pub use push::{
     FcmPushSender, InMemoryDeviceRegistry, NoopPushSender, PushSender, StaticTokenSource,
 };
 pub use relay::{
-    device_router, relay_router, AttachError, DevTokenAuth, Frame, HostCmd, HostEvent,
-    RegisterDevice, Relay, RelayAuth, RelayState,
+    device_router, relay_descriptor_router, relay_router, AttachError, DevTokenAuth, Frame, HostCmd,
+    HostEvent, RegisterDevice, Relay, RelayAuth, RelayDescriptor, RelayState,
+    DEFAULT_RELAY_PUBLIC_URL,
 };
 pub use relay_bus::{BusFrame, FrameBus, NoopFrameBus, PubSubFrameBus};
 pub use relay_registry::{FirestoreSessionRegistry, SessionRegistry, SESSION_TTL};
@@ -248,7 +249,7 @@ pub async fn relay_router_from_env() -> Option<Router> {
             }
             None => Arc::new(Relay::new()),
         };
-        let mut state = RelayState::new(relay, auth);
+        let mut state = RelayState::new(relay, auth).with_relay_url(relay_public_url_from_env());
         if let Some(account) = account {
             tracing::info!(
                 "FCM remote push enabled + session registry backed by Firestore \
@@ -267,13 +268,32 @@ pub async fn relay_router_from_env() -> Option<Router> {
                  (local notifications still fire; relay is single-instance)"
             );
         }
-        return Some(relay_router(state.clone()).merge(device_router(state)));
+        return Some(
+            relay_router(state.clone())
+                .merge(device_router(state.clone()))
+                .merge(relay_descriptor_router(state)),
+        );
     }
     if std::env::var("DARKRUN_RELAY_DEV_AUTH").ok().as_deref() == Some("1") {
-        let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth));
-        return Some(relay_router(state.clone()).merge(device_router(state)));
+        let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth))
+            .with_relay_url(relay_public_url_from_env());
+        return Some(
+            relay_router(state.clone())
+                .merge(device_router(state.clone()))
+                .merge(relay_descriptor_router(state)),
+        );
     }
     None
+}
+
+/// The public relay base URL the descriptor API hands clients, from
+/// `DARKRUN_RELAY_PUBLIC_URL` (default [`DEFAULT_RELAY_PUBLIC_URL`] —
+/// `wss://relay.darkrun.ai`, the same base the engine dials).
+fn relay_public_url_from_env() -> String {
+    std::env::var("DARKRUN_RELAY_PUBLIC_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_RELAY_PUBLIC_URL.to_string())
 }
 
 /// Build the Firestore-backed relay-token store from the environment, or `None`

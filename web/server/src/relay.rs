@@ -39,7 +39,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -57,6 +57,17 @@ use crate::relay_registry::SessionRegistry;
 /// [`SESSION_TTL`](crate::relay_registry::SESSION_TTL) so a missed beat or two
 /// doesn't expire a live session.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The public relay base URL the descriptor API hands clients — the same
+/// `wss://relay.darkrun.ai` the engine dials by default (see
+/// `darkrun_mcp::server::DEFAULT_RELAY_URL`). Overridable via
+/// `DARKRUN_RELAY_PUBLIC_URL` for dev/staging.
+pub const DEFAULT_RELAY_PUBLIC_URL: &str = "wss://relay.darkrun.ai";
+
+/// The app host whose `/runs/{slug}` route the descriptor targets and the push
+/// click URL opens (the universal link the native apps claim; the web app is the
+/// fallback). Matches `darkrun_mcp`'s `APP_BASE_URL`.
+pub(crate) const APP_BASE_URL: &str = "https://app.darkrun.ai";
 
 /// One opaque review frame shuttled across the bridge. The relay never parses the
 /// payload — both kinds are carried verbatim.
@@ -637,6 +648,30 @@ impl Relay {
     pub fn has_host(&self, session: &str) -> bool {
         self.sessions.lock().unwrap().contains_key(session)
     }
+
+    /// Whether a LIVE host owned by `owner` holds `session` — the reachability
+    /// check behind the descriptor API (`GET /api/runs/{slug}/relay`). It reuses
+    /// the exact owner-scoping the attach path enforces:
+    ///
+    /// * with a shared [`SessionRegistry`] → read the owner-scoped
+    ///   `(owner, session)` doc (the cross-instance source of truth); a live doc
+    ///   means reachable, a missing/expired one means not;
+    /// * absent a registry (single-instance/dev) → the local map's `owner` field,
+    ///   so a session hosted here by a DIFFERENT account never reads as reachable.
+    ///
+    /// Owner-match is the security boundary: this never reports a run the caller
+    /// doesn't own as reachable.
+    pub async fn host_owned_by(&self, session: &str, owner: &str) -> bool {
+        if let Some(shared) = &self.shared {
+            return shared.lookup_owner(session, owner).await.is_some();
+        }
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(session)
+            .map(|conn| conn.owner == owner)
+            .unwrap_or(false)
+    }
 }
 
 /// A per-process instance id, unique for this process's lifetime.
@@ -686,6 +721,9 @@ pub struct RelayState {
     auth: Arc<dyn RelayAuth>,
     devices: Arc<dyn DeviceRegistry>,
     push: Arc<dyn PushSender>,
+    /// The public relay base URL the descriptor API echoes to clients (e.g.
+    /// `wss://relay.darkrun.ai`). Defaults to [`DEFAULT_RELAY_PUBLIC_URL`].
+    relay_public_url: String,
 }
 
 impl RelayState {
@@ -693,12 +731,14 @@ impl RelayState {
     /// **disabled** — an in-memory registry plus a no-op sender. The host's
     /// local OS notification still fires; only the remote (FCM) half is dark
     /// until [`with_push`](Self::with_push) wires it. Safe default for dev/tests.
+    /// The public relay URL defaults to [`DEFAULT_RELAY_PUBLIC_URL`].
     pub fn new(relay: Arc<Relay>, auth: Arc<dyn RelayAuth>) -> Self {
         Self {
             relay,
             auth,
             devices: Arc::new(InMemoryDeviceRegistry::new()),
             push: Arc::new(NoopPushSender),
+            relay_public_url: DEFAULT_RELAY_PUBLIC_URL.to_string(),
         }
     }
 
@@ -714,10 +754,25 @@ impl RelayState {
         self
     }
 
+    /// Set the public relay base URL the descriptor API hands clients (the same
+    /// `wss://…` base the engine dials). Returns `self` for chaining.
+    pub fn with_relay_url(mut self, relay_public_url: impl Into<String>) -> Self {
+        self.relay_public_url = relay_public_url.into().trim_end_matches('/').to_string();
+        self
+    }
+
     /// Fan a notification out to `owner`'s registered devices — the relay's
-    /// [`HostCmd::Notify`] handling. Returns how many devices were pushed.
-    pub async fn notify_owner(&self, owner: &str, title: &str, body: &str) -> usize {
-        crate::push::fan_out(&self.devices, &self.push, owner, title, body).await
+    /// [`HostCmd::Notify`] handling. `link` is the run's web view, threaded into
+    /// the push so tapping the notification opens the live run. Returns how many
+    /// devices were pushed.
+    pub async fn notify_owner(
+        &self,
+        owner: &str,
+        title: &str,
+        body: &str,
+        link: Option<&str>,
+    ) -> usize {
+        crate::push::fan_out(&self.devices, &self.push, owner, title, body, link).await
     }
 
     /// Resolve a bearer token to its account via the configured verifier.
@@ -783,6 +838,90 @@ pub fn device_router(state: RelayState) -> Router {
         .route("/devices/{token}", axum::routing::delete(unregister_device))
         .layer(cors)
         .with_state(state)
+}
+
+/// The relay-attach descriptor the web client needs to reach a live run — the
+/// CLEAN-link resolution behind `GET /api/runs/{slug}/relay`. It carries NO
+/// secret in the URL: the client fetches this from an AUTHENTICATED endpoint,
+/// then assembles `{relay_url}/relay/client/{session}?token={client_token}`.
+#[derive(Debug, Serialize)]
+pub struct RelayDescriptor {
+    /// The public relay base URL (e.g. `wss://relay.darkrun.ai`).
+    pub relay_url: String,
+    /// The relay session id to attach to — the run slug.
+    pub session: String,
+    /// The bearer token the client authenticates the relay attach with. The
+    /// caller's own verified Firebase ID token, echoed back: the relay's
+    /// owner-scoped attach already binds a client to a session owned by the same
+    /// uid, so reusing the caller's token is safe (and nothing new leaks).
+    pub client_token: String,
+}
+
+/// Mount the run-reachability descriptor endpoint:
+/// - `GET /api/runs/{slug}/relay` — resolve the relay/session/token a web client
+///   needs to reach the caller's live run.
+///
+/// CORS mirrors [`device_router`] (the web app on `app.darkrun.ai` calls this
+/// cross-origin to the relay host), allowing the `Authorization` header on a
+/// `GET`.
+pub fn relay_descriptor_router(state: RelayState) -> Router {
+    use axum::http::{header, HeaderValue, Method};
+    use tower_http::cors::CorsLayer;
+
+    let origins: Vec<HeaderValue> = APP_ORIGINS
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
+    let cors = CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
+    Router::new()
+        .route("/api/runs/{slug}/relay", get(run_relay_descriptor))
+        .layer(cors)
+        .with_state(state)
+}
+
+/// `GET /api/runs/{slug}/relay` — mint the relay-attach descriptor for a live
+/// run the caller owns.
+///
+/// 1. verify the caller's Firebase ID token → `uid` (a missing/invalid token is
+///    `401`);
+/// 2. confirm a LIVE host owned by that `uid` holds `slug` in the session
+///    registry ([`Relay::host_owned_by`]); if none, `404` — there's nothing to
+///    reach, and owner-match is the security boundary (never a descriptor for a
+///    run the caller doesn't own);
+/// 3. return `{ relay_url, session, client_token }`, where `client_token` is the
+///    caller's own verified token (the relay's owner-scoped attach enforces the
+///    same-uid boundary, so reuse is safe).
+async fn run_relay_descriptor(
+    State(state): State<RelayState>,
+    Path(slug): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some(token) = bearer(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "a Firebase ID token is required").into_response();
+    };
+    let Some(uid) = state.account_for(token) else {
+        return (StatusCode::UNAUTHORIZED, "invalid or expired token").into_response();
+    };
+    if !state.relay.host_owned_by(&slug, &uid).await {
+        // No live host for (uid, slug): the run isn't reachable — or isn't the
+        // caller's. Either way there's nothing to hand back.
+        return (StatusCode::NOT_FOUND, "no live host for this run").into_response();
+    }
+    // The descriptor carries a bearer token, so it must never be cached by the
+    // browser or any intermediary.
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        axum::Json(RelayDescriptor {
+            relay_url: state.relay_public_url.clone(),
+            session: slug,
+            client_token: token.to_string(),
+        }),
+    )
+        .into_response()
 }
 
 /// Read the `Authorization: Bearer <token>` header, if present and well-formed.
@@ -890,9 +1029,12 @@ async fn run_host(state: RelayState, session: String, owner: String, socket: Web
                     Ok(HostCmd::To { client, data }) => {
                         relay.to_client(&session, client, Frame::Text(data)).await;
                     }
-                    // Fan a notification out to the owner's remote devices.
+                    // Fan a notification out to the owner's remote devices. The
+                    // session id IS the run slug, so the click target is the run's
+                    // web view — tapping the push opens the live run.
                     Ok(HostCmd::Notify { title, body }) => {
-                        let n = state.notify_owner(&owner, &title, &body).await;
+                        let link = format!("{APP_BASE_URL}/runs/{session}");
+                        let n = state.notify_owner(&owner, &title, &body, Some(&link)).await;
                         tracing::debug!(session = %session, devices = n, "relayed push");
                     }
                     Err(_) => { /* not a known envelope — ignore */ }
@@ -970,6 +1112,7 @@ mod tests {
             devices: &'a [DeviceToken],
             _title: &'a str,
             _body: &'a str,
+            _link: Option<&'a str>,
         ) -> crate::push::PushFuture<'a> {
             let toks: Vec<String> = devices.iter().map(|d| d.token.clone()).collect();
             self.pushed.lock().unwrap().extend(toks.iter().cloned());
@@ -987,10 +1130,76 @@ mod tests {
         let state = RelayState::new(Arc::new(Relay::new()), Arc::new(DevTokenAuth))
             .with_push(registry, sender.clone());
 
-        assert_eq!(state.notify_owner("owner", "T", "B").await, 1);
+        let link = "https://app.darkrun.ai/runs/r";
+        assert_eq!(state.notify_owner("owner", "T", "B", Some(link)).await, 1);
         assert_eq!(*sender.pushed.lock().unwrap(), vec!["t1".to_string()]);
         // An owner with no devices pushes nothing.
-        assert_eq!(state.notify_owner("ghost", "T", "B").await, 0);
+        assert_eq!(state.notify_owner("ghost", "T", "B", Some(link)).await, 0);
+    }
+
+    // ── Descriptor API (GET /api/runs/{slug}/relay) ──────────────────────────
+
+    #[tokio::test]
+    async fn descriptor_returns_the_attach_for_the_owner_and_404s_for_everyone_else() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let relay = Arc::new(Relay::new());
+        // acct-a hosts run "quiet-canyon" locally (owner fixed at registration).
+        let _host_rx = relay.register_host("quiet-canyon", "acct-a").await.unwrap();
+        let state = RelayState::new(relay, Arc::new(DevTokenAuth))
+            // Trailing slash trimmed by with_relay_url.
+            .with_relay_url("wss://relay.darkrun.ai/");
+        let app = relay_descriptor_router(state);
+
+        let get = |slug: &str, auth: Option<&str>| {
+            let mut req = axum::http::Request::get(format!("/api/runs/{slug}/relay"));
+            if let Some(a) = auth {
+                req = req.header("authorization", format!("Bearer {a}"));
+            }
+            req.body(axum::body::Body::empty()).unwrap()
+        };
+
+        // The OWNER gets a 200 with the relay base, the session (== slug), and the
+        // caller's own token echoed back as the client token.
+        let res = app.clone().oneshot(get("quiet-canyon", Some("acct-a"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["relay_url"], "wss://relay.darkrun.ai");
+        assert_eq!(v["session"], "quiet-canyon");
+        assert_eq!(v["client_token"], "acct-a");
+
+        // A DIFFERENT account (authenticated, but not the owner) → 404, never a
+        // descriptor for a run it doesn't own.
+        let res = app.clone().oneshot(get("quiet-canyon", Some("acct-b"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let _ = res.into_body().collect().await;
+
+        // A run with no live host → 404.
+        let res = app.clone().oneshot(get("ghost", Some("acct-a"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let _ = res.into_body().collect().await;
+
+        // No bearer token → 401.
+        let res = app.oneshot(get("quiet-canyon", None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn host_owned_by_reads_the_registry_owner_scoped_doc_when_shared() {
+        // With a shared registry, reachability comes off the owner-scoped
+        // `(owner, session)` doc — the same source the attach path authorizes on.
+        let registry: Arc<dyn SessionRegistry> = Arc::new(FakeRegistry::default());
+        let relay = Relay::new().with_registry(registry);
+        let _host_rx = relay.register_host("s1", "acct-a").await.unwrap();
+
+        assert!(relay.host_owned_by("s1", "acct-a").await, "the owner is reachable");
+        assert!(
+            !relay.host_owned_by("s1", "acct-b").await,
+            "a different owner's doc is absent → not reachable"
+        );
+        assert!(!relay.host_owned_by("ghost", "acct-a").await, "no host → not reachable");
     }
 
     #[tokio::test]
