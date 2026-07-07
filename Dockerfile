@@ -28,6 +28,14 @@ RUN set -eux; \
     if [ -z "$src" ] && [ -d web/site/dist ]; then src=web/site/dist; fi; \
     mkdir -p /app/site && cp -r "$src/." /app/site/
 
+# Generate the SEO artifacts (robots.txt, sitemap.xml, feed.xml, atom.xml,
+# feed.json, routes.txt) INTO the served bundle. `dx bundle` doesn't emit these
+# (they come from the darkrun-site-gen binary), so without this step /robots.txt
+# and /sitemap.xml fell through to the SPA fallback and served index.html — a
+# crawler asking for robots.txt got HTML, which breaks SEO/crawler readouts.
+# Same failure mode the /assets copy below fixes, for the SEO files.
+RUN cargo run --release --package darkrun-site --bin darkrun-site-gen -- /app/site
+
 # Ensure the literal /assets/* paths resolve. index.html references the social
 # card, favicon, and desktop screenshots by fixed path (/assets/og.png, …), but
 # `dx bundle` doesn't copy web/site/assets into the public bundle — so those URLs
