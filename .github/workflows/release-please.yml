@@ -36,6 +36,31 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      # release-please with `draft: true` creates a DRAFT GitHub Release but NOT a
+      # git tag ref (GitHub only creates the tag when a release is PUBLISHED).
+      # release.yml triggers on `push: tags`, so without a real tag it never fires
+      # and the draft sits empty forever — this was the crit#3 release wedge
+      # (v0.7.0 and v0.8.0 both drafted, never tagged, never shipped). Create the
+      # tag ref explicitly via the API, authenticated with the PAT so it triggers
+      # release.yml (a ref created with the default GITHUB_TOKEN would NOT).
+      # Idempotent: skip if the tag already exists.
+      - name: Push the release tag (fires release.yml)
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+          SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG already exists — nothing to do"; exit 0
+          fi
+          gh api -X POST "repos/$REPO/git/refs" \
+            -f ref="refs/tags/$TAG" -f sha="$SHA"
+          echo "created tag $TAG -> $SHA (release.yml will build + publish)"

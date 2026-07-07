@@ -87,7 +87,12 @@ platform :ios do
       automatic_release: false,
       force: true, # skip the HTML metadata-preview confirmation (non-interactive)
       skip_screenshots: true, # screenshots have their own lane
-      skip_metadata: false,
+      # Binary only, like mac_release: the build itself is already in App Store
+      # Connect (ios-testflight uploaded it on the push to main), and deliver's
+      # first-version metadata upload throws when the App Store listing metadata
+      # isn't fully populated yet. The listing + submission stay a human step in
+      # App Store Connect; this lane just makes the GA build available there.
+      skip_metadata: true,
       precheck_include_in_app_purchases: false,
       run_precheck_before_submit: false,
     )
