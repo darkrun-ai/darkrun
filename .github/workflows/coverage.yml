@@ -71,7 +71,9 @@ jobs:
       #     thousands of times, so llvm instrumentation emits thousands of
       #     .profraw files and the merge step hangs (the original 21-min cancel).
       #   - darkrun-desktop: links the native webview, not unit-tested.
-      #   - darkrun-site / darkrun-app: wasm-only, no meaningful native tests.
+      #   - darkrun-site: wasm-only content, no meaningful native tests.
+      # darkrun-app IS included: its routing/frame/URL helpers have native #[test]
+      # coverage (the wasm-app CI job proves it builds+tests native).
       # What's left — core / mcp / http / api / git / content / prompts / vcs /
       # harness / verify — is the engine, where coverage actually matters.
       # `--lib` skips integration tests (the other subprocess source).
@@ -82,7 +84,6 @@ jobs:
             --exclude darkrun-e2e \
             --exclude darkrun-desktop \
             --exclude darkrun-site \
-            --exclude darkrun-app \
             --lib \
             --engine llvm \
             --out Xml --output-dir target/tarpaulin \

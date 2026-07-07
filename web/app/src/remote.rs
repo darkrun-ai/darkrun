@@ -555,7 +555,7 @@ mod tests {
         let ok = ServerFrame::Ack { id: "c1".into(), ok: true, error: None };
         assert_eq!(
             command_ack(&serde_json::to_string(&ok).unwrap()),
-            Some((true, None))
+            Some(("c1".to_string(), true, None))
         );
 
         let bad = ServerFrame::Ack {
@@ -565,7 +565,7 @@ mod tests {
         };
         assert_eq!(
             command_ack(&serde_json::to_string(&bad).unwrap()),
-            Some((false, Some("host rejected".into())))
+            Some(("c2".to_string(), false, Some("host rejected".into())))
         );
     }
 
