@@ -16,8 +16,8 @@ use darkrun_core::StateStore;
 use darkrun_mcp::change_request_intent;
 use darkrun_vcs::{
     github_create_pull_request, github_get_repo, gitlab_create_merge_request,
-    gitlab_resolve_project, parse_remote_url, ChangeRequest, Credential, CredentialStore,
-    HttpTransport, Provider, RepoCoords,
+    gitlab_resolve_project, parse_remote_url, refresh_before_use, ChangeRequest, Credential,
+    CredentialStore, HttpTransport, OauthClient, Provider, RepoCoords,
 };
 
 /// The git facts the PR/MR path needs, behind a seam for testing.
@@ -98,13 +98,24 @@ pub fn create_for_run(
     let provider = resolve_provider(&coords)?;
 
     // 2. Stored credential for that provider.
-    let cred: Credential = cred_store.get(provider)?.ok_or_else(|| {
+    let mut cred: Credential = cred_store.get(provider)?.ok_or_else(|| {
         format!(
             "no {} credential — run `darkrun auth login --provider {}` first",
             provider.display_name(),
             provider.key()
         )
     })?;
+    // Re-mint a near-expiry GitLab token before opening the PR/MR, when the
+    // client holds its OAuth app credentials (best-effort: the brokered flow
+    // normally keeps the secret server-side, and GitHub tokens never expire).
+    // On any refresh failure the stored token is used as-is.
+    if let Some(oauth) = OauthClient::from_env(provider) {
+        if let Ok(Some(fresh)) =
+            refresh_before_use(cred_store, transport, &oauth, provider, darkrun_vcs::now_unix())
+        {
+            cred = fresh;
+        }
+    }
 
     // 3. The pure intent (title/body/head) from the manager.
     //    Prefer an explicit head; else the live git branch; else the convention.

@@ -39,8 +39,24 @@ pub mod store;
 pub mod transport;
 
 pub use error::{Result, VcsError};
-pub use oauth::{authorize_url, exchange_code, percent_encode, refresh_access_token};
+pub use oauth::{
+    authorize_url, exchange_code, percent_encode, refresh_access_token, refresh_before_use,
+    OauthClient,
+};
 pub use provider::{Credential, Provider, REFRESH_SKEW_SECS};
+
+/// Current wall-clock time in whole unix seconds.
+///
+/// The single time source for credential-expiry bookkeeping: the store stamps
+/// it as a credential's `obtained_at` on save, and the refresh-before-use guard
+/// ([`refresh_before_use`]) compares it against the token's lifetime. Clamped to
+/// `0` for the (unreachable in practice) pre-epoch case.
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 pub use remote::{parse_remote_url, RepoCoords};
 pub use rest::{
     create_change_request, github_create_comment, github_create_pull_request,
