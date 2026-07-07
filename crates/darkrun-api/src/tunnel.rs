@@ -16,15 +16,19 @@
 //!      state, so a reconnect never loses state;
 //!    - heartbeats ([`ClientFrame::Ping`] / [`ServerFrame::Pong`]) detect a dead
 //!      peer fast; the client reconnects with backoff;
-//!    - writes are [`ClientFrame::Cmd`] with a client-generated `id`; the host
+//!    - writes are [`ClientFrame::Cmd`] carrying a stable `instance` id (the
+//!      client's page load) plus a client-generated `id`; the host
 //!      [`ServerFrame::Ack`]s it. The client retries unacked commands on
-//!      reconnect, and the `id` makes them idempotent (at-least-once delivery +
-//!      dedup = exactly-once effect).
+//!      reconnect, and the host de-dupes on `(instance, id)` — stable across
+//!      reconnects, so a resend on a FRESH socket collapses to one effect
+//!      (at-least-once delivery + dedup = exactly-once effect).
 //!
 //! [`Reachability`] expresses the **local-vs-remote** choice: a host publishes a
 //! local candidate (loopback/LAN, tried first) and/or the relay candidate
 //! (remote fallback). The same app protocol rides either transport, so the
 //! client just races local-first then relay — the ICE-lite of our relay model.
+
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -104,7 +108,17 @@ pub enum ClientFrame {
     Ping,
     /// A write command, with a client-generated `id` for ack + idempotency.
     Cmd {
-        /// Idempotency / ack key (client-generated, unique per command).
+        /// The client's STABLE per-page-load instance id (one browser tab / app
+        /// launch): unique per client, kept across reconnects. It — not the
+        /// relay's per-socket connection id — anchors the host's dedup, so a
+        /// resend on a FRESH socket after a drop still collapses to one effect,
+        /// while two tabs (each numbering `id` from zero) never collide.
+        /// `#[serde(default)]` so a pre-`instance` frame degrades to the empty
+        /// instance rather than failing to parse.
+        #[serde(default)]
+        instance: String,
+        /// Idempotency / ack key (client-generated, unique per command within an
+        /// `instance`).
         id: String,
         /// The write to apply.
         command: ClientCommand,
@@ -171,6 +185,98 @@ pub enum ClientCommand {
         /// The feedback body.
         body: String,
     },
+    /// Decide a checkpoint gate (`POST /review/:session/decide`) — approve to
+    /// clear it, or request changes with a note to route the station back as
+    /// rework. The remote mirror of the desktop's checkpoint decision, so a
+    /// remote operator can clear a gate or send it back.
+    Decide {
+        /// The review session id the gate belongs to.
+        session: String,
+        /// The raw decision: `approved` clears the gate; anything else the
+        /// engine canonicalizes to `changes_requested`.
+        decision: String,
+        /// Optional reviewer note shipped with a request-changes decision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// Choose a design DIRECTION archetype (`POST /direction/:session/select`).
+    /// The direction half of the interactive round-trip — the operator's choice
+    /// is routed to the direction-select endpoint, not the question one.
+    Direction {
+        /// The direction session id.
+        session: String,
+        /// The chosen archetype id (must match one of the session's archetypes).
+        archetype: String,
+    },
+    /// Select a blocking PICKER option (`POST /picker/:session/select`). The
+    /// picker half of the interactive round-trip.
+    Picker {
+        /// The picker session id.
+        session: String,
+        /// The chosen option id (must match one of the session's options).
+        option: String,
+    },
+}
+
+/// Client-side retry policy for an unacked [`ClientFrame::Cmd`]. A client resends
+/// a command with its ORIGINAL `id` (and its stable `instance`) after an ack times
+/// out — bounded exponential backoff, capped total attempts. Combined with the
+/// host's `(instance, id)` dedup — keyed on the client's STABLE page-load
+/// `instance`, NOT the relay's per-socket connection id — a resend even on a fresh
+/// socket after a reconnect runs **at most once** but **at least once**:
+/// exactly-once in effect.
+///
+/// Pure timing math (no clock, no I/O), so every client — web, mobile, desktop —
+/// shares one tested decision core rather than reinventing the backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// The wait before the FIRST resend; each further resend doubles it.
+    pub base: Duration,
+    /// The backoff ceiling — the doubling never exceeds this.
+    pub cap: Duration,
+    /// Total sends allowed for one command (the first send plus its resends). A
+    /// command sent this many times with no ack is given up on.
+    pub max_attempts: u32,
+}
+
+impl RetryPolicy {
+    /// The default client policy: 1s base, 8s ceiling, 5 total sends.
+    pub const DEFAULT: RetryPolicy = RetryPolicy {
+        base: Duration::from_secs(1),
+        cap: Duration::from_secs(8),
+        max_attempts: 5,
+    };
+
+    /// Decide what to do after a command has been sent `attempts` times (`>= 1`)
+    /// without an ack: [`RetryStep::Resend`] with the backoff to wait before the
+    /// next send, or [`RetryStep::GiveUp`] once the attempt cap is reached (or on
+    /// the degenerate `attempts == 0`).
+    pub fn step(&self, attempts: u32) -> RetryStep {
+        if attempts == 0 || attempts >= self.max_attempts {
+            return RetryStep::GiveUp;
+        }
+        // Exponential: base, base·2, base·4, … clamped to `cap`. Work in u64
+        // milliseconds so the shift can never overflow.
+        let base_ms = self.base.as_millis().min(u128::from(u64::MAX)) as u64;
+        let cap_ms = self.cap.as_millis().min(u128::from(u64::MAX)) as u64;
+        let shift = (attempts - 1).min(20);
+        let ms = base_ms.saturating_mul(1u64 << shift).min(cap_ms);
+        RetryStep::Resend {
+            backoff: Duration::from_millis(ms),
+        }
+    }
+}
+
+/// The decision from [`RetryPolicy::step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryStep {
+    /// Resend the command (with the SAME id) after waiting `backoff`.
+    Resend {
+        /// The delay before the next send.
+        backoff: Duration,
+    },
+    /// The attempt cap is reached — stop retrying and surface a failure.
+    GiveUp,
 }
 
 // ─── Local-vs-remote reachability ────────────────────────────────────────────
@@ -308,11 +414,25 @@ mod tests {
         assert_eq!(serde_json::to_string(&ClientFrame::Ping).unwrap(), r#"{"t":"ping"}"#);
 
         let cmd = ClientFrame::Cmd {
+            instance: "i1".into(),
             id: "c1".into(),
             command: ClientCommand::Advance { run: "r".into() },
         };
         let c = serde_json::to_string(&cmd).unwrap();
+        assert!(c.contains(r#""instance":"i1""#));
         assert_eq!(serde_json::from_str::<ClientFrame>(&c).unwrap(), cmd);
+
+        // A pre-`instance` frame (no `instance` field) degrades to the empty
+        // instance rather than failing to parse.
+        let legacy = r#"{"t":"cmd","id":"c1","command":{"kind":"advance","run":"r"}}"#;
+        assert_eq!(
+            serde_json::from_str::<ClientFrame>(legacy).unwrap(),
+            ClientFrame::Cmd {
+                instance: String::new(),
+                id: "c1".into(),
+                command: ClientCommand::Advance { run: "r".into() },
+            }
+        );
 
         let snap = ServerFrame::Snapshot { seq: 1, payload: serde_json::json!({"x": 1}) };
         let s = serde_json::to_string(&snap).unwrap();
@@ -335,6 +455,87 @@ mod tests {
         let j = serde_json::to_string(&fb).unwrap();
         assert!(j.contains(r#""kind":"feedback""#));
         assert_eq!(serde_json::from_str::<ClientCommand>(&j).unwrap(), fb);
+    }
+
+    #[test]
+    fn decide_command_round_trips_and_is_kind_tagged() {
+        // Approve carries no note — the field is skipped on the wire.
+        let approve = ClientCommand::Decide {
+            session: "s1".into(),
+            decision: "approved".into(),
+            note: None,
+        };
+        let a = serde_json::to_string(&approve).unwrap();
+        assert!(a.contains(r#""kind":"decide""#));
+        assert!(!a.contains("note"), "an approve omits the empty note");
+        assert_eq!(serde_json::from_str::<ClientCommand>(&a).unwrap(), approve);
+
+        // Request-changes ships the reviewer note.
+        let changes = ClientCommand::Decide {
+            session: "s1".into(),
+            decision: "changes_requested".into(),
+            note: Some("fix the header".into()),
+        };
+        let c = serde_json::to_string(&changes).unwrap();
+        assert!(c.contains("fix the header"));
+        assert_eq!(serde_json::from_str::<ClientCommand>(&c).unwrap(), changes);
+    }
+
+    #[test]
+    fn direction_and_picker_commands_round_trip() {
+        let dir = ClientCommand::Direction {
+            session: "d1".into(),
+            archetype: "bold".into(),
+        };
+        let d = serde_json::to_string(&dir).unwrap();
+        assert!(d.contains(r#""kind":"direction""#));
+        assert_eq!(serde_json::from_str::<ClientCommand>(&d).unwrap(), dir);
+
+        let pick = ClientCommand::Picker {
+            session: "p1".into(),
+            option: "quick".into(),
+        };
+        let p = serde_json::to_string(&pick).unwrap();
+        assert!(p.contains(r#""kind":"picker""#));
+        assert_eq!(serde_json::from_str::<ClientCommand>(&p).unwrap(), pick);
+    }
+
+    #[test]
+    fn retry_policy_backs_off_exponentially_then_gives_up() {
+        let p = RetryPolicy {
+            base: Duration::from_secs(1),
+            cap: Duration::from_secs(8),
+            max_attempts: 5,
+        };
+        // attempts 1..4 resend with a doubling backoff, clamped to the cap.
+        assert_eq!(p.step(1), RetryStep::Resend { backoff: Duration::from_secs(1) });
+        assert_eq!(p.step(2), RetryStep::Resend { backoff: Duration::from_secs(2) });
+        assert_eq!(p.step(3), RetryStep::Resend { backoff: Duration::from_secs(4) });
+        // 8s (would be 8s) hits the cap exactly.
+        assert_eq!(p.step(4), RetryStep::Resend { backoff: Duration::from_secs(8) });
+        // The 5th send reaches the cap → give up (no 6th send).
+        assert_eq!(p.step(5), RetryStep::GiveUp);
+        assert_eq!(p.step(6), RetryStep::GiveUp);
+        // The degenerate zero-attempts case gives up rather than resending.
+        assert_eq!(p.step(0), RetryStep::GiveUp);
+    }
+
+    #[test]
+    fn retry_policy_backoff_never_exceeds_the_cap() {
+        // A tiny cap clamps every backoff, and a huge attempt can't overflow.
+        let p = RetryPolicy {
+            base: Duration::from_millis(500),
+            cap: Duration::from_secs(2),
+            max_attempts: 100,
+        };
+        for attempts in 1..20u32 {
+            if let RetryStep::Resend { backoff } = p.step(attempts) {
+                assert!(backoff <= p.cap, "backoff {backoff:?} exceeded cap");
+            } else {
+                panic!("attempts {attempts} under the cap must resend");
+            }
+        }
+        assert_eq!(p.step(100), RetryStep::GiveUp);
     }
 
     #[test]

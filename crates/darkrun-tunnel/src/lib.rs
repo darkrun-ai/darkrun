@@ -18,8 +18,10 @@
 //! Durability: the relay connection runs under [`run`], which reconnects with a
 //! fixed backoff after any drop; a periodic WS ping detects a dead peer. On
 //! reconnect every client re-attaches and gets a fresh snapshot, so no state is
-//! lost. Command acks + client-side retry (the protocol's idempotent ids) make
-//! writes exactly-once in effect.
+//! lost. Command acks + client-side retry make writes exactly-once in effect: the
+//! host de-dupes on `(instance, id)` — the client's STABLE page-load instance,
+//! not the relay's per-socket connection id — so a resend on a fresh socket after
+//! a reconnect collapses to one exec.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -88,6 +90,34 @@ fn command_request(cmd: &ClientCommand) -> LocalRequest {
             method: Method::POST,
             path: format!("/api/feedback/{run}/{station}"),
             body: Some(serde_json::json!({ "body": body })),
+        },
+        // A checkpoint decision — the `ReviewDecisionRequest` shape the
+        // `/review/:id/decide` endpoint expects. An approve omits the feedback
+        // field; request-changes carries the operator's note.
+        ClientCommand::Decide { session, decision, note } => {
+            let mut body = serde_json::json!({ "decision": decision });
+            if let Some(note) = note {
+                body["feedback"] = Value::String(note.clone());
+            }
+            LocalRequest {
+                method: Method::POST,
+                path: format!("/review/{session}/decide"),
+                body: Some(body),
+            }
+        }
+        // A design-direction choice routes to the direction-select endpoint (the
+        // `DirectionSelectRequest` body), NOT the question one.
+        ClientCommand::Direction { session, archetype } => LocalRequest {
+            method: Method::POST,
+            path: format!("/direction/{session}/select"),
+            body: Some(serde_json::json!({ "archetype": archetype })),
+        },
+        // A picker selection routes to the picker-select endpoint (the
+        // `PickerSelectRequest` body).
+        ClientCommand::Picker { session, option } => LocalRequest {
+            method: Method::POST,
+            path: format!("/picker/{session}/select"),
+            body: Some(serde_json::json!({ "id": option })),
         },
     }
 }
@@ -296,9 +326,10 @@ async fn serve_once(
     // attached (the operator is away; that's the point).
     let monitor = spawn_gate_monitor(cfg.local_ws_url(), out_tx.clone());
 
-    // The command-dedup cache (`(client, id)` -> state) is owned by `run` and
-    // shared across reconnects, so an at-least-once bus redelivery never re-runs
-    // a non-idempotent command even if it straddles a reconnect.
+    // The command-dedup cache (`(instance, id)` -> state) is owned by `run` and
+    // shared across reconnects, so an at-least-once bus redelivery — OR a
+    // client's cross-reconnect resend under a fresh relay connection id — never
+    // re-runs a non-idempotent command even when it straddles a reconnect.
 
     let mut clients: HashMap<u64, JoinHandle<()>> = HashMap::new();
     // A drop mid-stream is always transient — the handshake already succeeded, so
@@ -414,9 +445,14 @@ fn spawn_client_subscription(
     })
 }
 
-/// The dedup key for a command: `(client, id)`. Different clients may reuse the
-/// same client-generated `id`, so the client id is part of the key.
-type CmdKey = (u64, String);
+/// The dedup key for a command: `(instance, id)`. The `instance` is the client's
+/// STABLE per-page-load id (one browser tab / app launch), carried in each
+/// [`ClientFrame::Cmd`] — NOT the relay's per-socket connection id, which is minted
+/// fresh on every (re)connect. Keying on the instance means a client's resend on a
+/// FRESH relay connection after a drop collapses to the same key (so a
+/// non-idempotent write applies once), while two tabs — each numbering its `id`
+/// from zero — get distinct instances and never collide.
+type CmdKey = (String, String);
 
 /// Cap on retained command-dedup entries. Commands are human-paced gate
 /// decisions, so a few thousand is far above any real session's volume; the cap
@@ -431,8 +467,9 @@ const DEDUP_TTL: Duration = Duration::from_secs(300);
 
 /// A command's lifecycle in the per-connector dedup cache.
 enum CmdState {
-    /// `exec_command` is running for this key; a duplicate must NOT start a
-    /// second one (the original will ack the same client).
+    /// `exec_command` is running for this `(instance, id)`; a duplicate must NOT
+    /// start a second one. The in-flight exec caches its ack on completion, which
+    /// a later retry replays to the client's current socket.
     InFlight,
     /// Completed — the cached ack to replay to a redelivered duplicate.
     Done(ServerFrame),
@@ -450,20 +487,27 @@ enum CmdAction {
     Execute,
     /// Already completed — replay the cached ack; do NOT execute.
     Replay(ServerFrame),
-    /// A duplicate still InFlight — drop it; the original acks this same client.
+    /// A duplicate still InFlight — drop it. The original exec is running and
+    /// caches its ack on completion; the client's next retry then hits the
+    /// `Replay` path and gets that ack on its CURRENT socket. (Across a reconnect
+    /// the original was dialed on a now-dead socket, so its direct ack may not
+    /// land — the retry + replay recovers it, and the write still ran once.)
     Drop,
 }
 
 /// Per-connector command DEDUP.
 ///
-/// The relay's cross-instance frame bus is Pub/Sub (at-least-once), so a
-/// `ClientFrame::Cmd { id, command }` can reach this host connector MORE THAN
-/// ONCE. advance/answer/feedback are NOT idempotent, so the invariant is: for
-/// each `(client, id)` key, `exec_command` runs **at most once**; every
-/// duplicate is either dropped (the original is still in flight and will ack the
-/// same client) or answered from the cached ack. Bounded by capacity + TTL so a
-/// long or abusive session can't grow it without limit; eviction only ever
-/// affects replays older than the (seconds-wide) redelivery window.
+/// A duplicate `ClientFrame::Cmd { instance, id, command }` can reach this host
+/// connector MORE THAN ONCE — from the relay's at-least-once Pub/Sub bus, OR from
+/// the client resending its pending set on a fresh socket after a reconnect.
+/// advance/answer/feedback are NOT idempotent, so the invariant is: for each
+/// `(instance, id)` key, `exec_command` runs **at most once**; every duplicate is
+/// either dropped (the original is still in flight) or answered from the cached
+/// ack. Keying on the client's STABLE `instance` (not the relay's per-socket
+/// connection id, which is fresh on every reconnect) is what makes the
+/// cross-reconnect resend collapse rather than double-apply. Bounded by capacity +
+/// TTL so a long or abusive session can't grow it without limit; eviction only
+/// ever affects replays older than the (seconds-wide) redelivery window.
 struct CommandDedup {
     entries: HashMap<CmdKey, CmdEntry>,
     /// Keys in first-seen order — the front is the oldest, popped on eviction /
@@ -569,14 +613,18 @@ fn handle_client_frame(
         ClientFrame::Ping => route_to_client(client, &ServerFrame::Pong, &out),
         // The subscription opened on Join already streams the snapshot.
         ClientFrame::Hello { .. } => {}
-        ClientFrame::Cmd { id, command } => {
-            // Host-side command DEDUP. The relay's cross-instance frame bus is
-            // at-least-once, so this `Cmd` may be a redelivered duplicate. INVARIANT:
-            // for each (client, id) key, `exec_command` runs AT MOST ONCE — a repeat
-            // that already completed replays the CACHED ack, and a repeat still in
-            // flight is dropped (the original acks this same client). This protects
-            // advance/answer/feedback, which are not idempotent, from a double submit.
-            let key: CmdKey = (client, id.clone());
+        ClientFrame::Cmd { instance, id, command } => {
+            // Host-side command DEDUP, keyed on the client's STABLE page-load
+            // `instance` + its `id` — NOT the relay's per-socket `client`, which is
+            // minted fresh on every reconnect. This `Cmd` may be a redelivered
+            // duplicate: from the at-least-once relay bus, OR from the client
+            // resending its pending set on a FRESH socket after a drop (a new
+            // `client`, same `instance`). INVARIANT: for each (instance, id) key,
+            // `exec_command` runs AT MOST ONCE — a repeat that already completed
+            // replays the CACHED ack (to this delivery's `client`), and a repeat
+            // still in flight is dropped. This protects advance/answer/feedback,
+            // which are not idempotent, from a double submit across a reconnect.
+            let key: CmdKey = (instance, id.clone());
             let action = dedup.lock().unwrap().begin(key.clone(), Instant::now());
             match action {
                 CmdAction::Replay(ack) => route_to_client(client, &ack, &out),
@@ -692,6 +740,67 @@ mod tests {
         assert_eq!(fb.body, Some(serde_json::json!({"body": "fix"})));
     }
 
+    #[test]
+    fn command_request_maps_decide_to_the_review_decide_endpoint() {
+        // Approve → decide with no feedback field.
+        let approve = command_request(&ClientCommand::Decide {
+            session: "sess".into(),
+            decision: "approved".into(),
+            note: None,
+        });
+        assert_eq!(approve.method, Method::POST);
+        assert_eq!(approve.path, "/review/sess/decide");
+        assert_eq!(approve.body, Some(serde_json::json!({"decision": "approved"})));
+
+        // Request-changes → decide with the reviewer note in `feedback`, the
+        // exact shape `ReviewDecisionRequest` deserializes.
+        let changes = command_request(&ClientCommand::Decide {
+            session: "sess".into(),
+            decision: "changes_requested".into(),
+            note: Some("tighten the copy".into()),
+        });
+        assert_eq!(changes.path, "/review/sess/decide");
+        assert_eq!(
+            changes.body,
+            Some(serde_json::json!({
+                "decision": "changes_requested",
+                "feedback": "tighten the copy",
+            }))
+        );
+        // The body round-trips into the real request type the handler expects.
+        let parsed: darkrun_api::ReviewDecisionRequest =
+            serde_json::from_value(changes.body.unwrap()).unwrap();
+        assert_eq!(parsed.decision, "changes_requested");
+        assert_eq!(parsed.feedback.as_deref(), Some("tighten the copy"));
+    }
+
+    #[test]
+    fn command_request_maps_direction_and_picker_to_their_select_endpoints() {
+        let dir = command_request(&ClientCommand::Direction {
+            session: "d1".into(),
+            archetype: "bold".into(),
+        });
+        assert_eq!(dir.method, Method::POST);
+        assert_eq!(dir.path, "/direction/d1/select");
+        assert_eq!(dir.body, Some(serde_json::json!({"archetype": "bold"})));
+        // The body matches the `DirectionSelectRequest` shape.
+        let parsed: darkrun_api::DirectionSelectRequest =
+            serde_json::from_value(dir.body.unwrap()).unwrap();
+        assert_eq!(parsed.archetype, "bold");
+
+        let pick = command_request(&ClientCommand::Picker {
+            session: "p1".into(),
+            option: "quick".into(),
+        });
+        assert_eq!(pick.method, Method::POST);
+        assert_eq!(pick.path, "/picker/p1/select");
+        assert_eq!(pick.body, Some(serde_json::json!({"id": "quick"})));
+        // The body matches the `PickerSelectRequest` shape.
+        let parsed: darkrun_api::PickerSelectRequest =
+            serde_json::from_value(pick.body.unwrap()).unwrap();
+        assert_eq!(parsed.id, "quick");
+    }
+
     use darkrun_api::common::GateType;
     use darkrun_api::session::{ReviewSessionPayload, StationStateInfo};
 
@@ -785,24 +894,25 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// The decision core: a new key executes, a re-seen COMPLETED key replays the
-    /// cached ack, and the client id is part of the key.
+    /// cached ack, and the client's stable INSTANCE is part of the key.
     #[test]
-    fn completed_command_replays_cached_ack_and_keys_on_client() {
+    fn completed_command_replays_cached_ack_and_keys_on_instance() {
         let mut d = CommandDedup::new();
         let now = Instant::now();
-        let key = (1u64, "c1".to_string());
+        let key = ("i1".to_string(), "c1".to_string());
         assert!(matches!(d.begin(key.clone(), now), CmdAction::Execute));
 
         let ack = ServerFrame::Ack { id: "c1".into(), ok: true, error: None };
         d.complete(key.clone(), ack.clone(), now);
 
-        // A redelivery of the same (client, id) replays the cached ack.
+        // A redelivery of the same (instance, id) replays the cached ack.
         match d.begin(key, now) {
             CmdAction::Replay(f) => assert_eq!(f, ack),
             _ => panic!("a completed key must replay its cached ack, not execute"),
         }
-        // A DIFFERENT client reusing the same id still executes.
-        assert!(matches!(d.begin((2, "c1".into()), now), CmdAction::Execute));
+        // A DIFFERENT instance (a second tab) reusing the same id still executes —
+        // two tabs both starting their ids at `c0` must not collide.
+        assert!(matches!(d.begin(("i2".into(), "c1".into()), now), CmdAction::Execute));
     }
 
     /// A duplicate that arrives while the original is still InFlight is dropped —
@@ -811,10 +921,10 @@ mod tests {
     fn inflight_duplicate_is_dropped_not_re_executed() {
         let mut d = CommandDedup::new();
         let now = Instant::now();
-        assert!(matches!(d.begin((1, "c1".into()), now), CmdAction::Execute));
-        assert!(matches!(d.begin((1, "c1".into()), now), CmdAction::Drop));
+        assert!(matches!(d.begin(("i1".into(), "c1".into()), now), CmdAction::Execute));
+        assert!(matches!(d.begin(("i1".into(), "c1".into()), now), CmdAction::Drop));
         // Distinct ids each execute.
-        assert!(matches!(d.begin((1, "c2".into()), now), CmdAction::Execute));
+        assert!(matches!(d.begin(("i1".into(), "c2".into()), now), CmdAction::Execute));
     }
 
     /// The cache is bounded: past capacity, the oldest entries are evicted.
@@ -823,12 +933,12 @@ mod tests {
         let mut d = CommandDedup::with_limits(3, DEDUP_TTL);
         let now = Instant::now();
         for i in 0..10u64 {
-            d.begin((i, "c".into()), now);
+            d.begin((format!("i{i}"), "c".into()), now);
         }
         assert_eq!(d.len(), 3, "cache never exceeds its capacity");
-        // The oldest key (0) was evicted, so re-seeing it executes rather than
+        // The oldest key (i0) was evicted, so re-seeing it executes rather than
         // replaying — eviction only affects replays outside the redelivery window.
-        assert!(matches!(d.begin((0, "c".into()), now), CmdAction::Execute));
+        assert!(matches!(d.begin(("i0".into(), "c".into()), now), CmdAction::Execute));
     }
 
     /// Entries older than the TTL are pruned on the next command.
@@ -837,16 +947,16 @@ mod tests {
         let ttl = Duration::from_secs(300);
         let mut d = CommandDedup::with_limits(4096, ttl);
         let t0 = Instant::now();
-        d.begin((1, "a".into()), t0);
-        d.begin((2, "b".into()), t0);
+        d.begin(("i1".into(), "a".into()), t0);
+        d.begin(("i2".into(), "b".into()), t0);
         assert_eq!(d.len(), 2);
 
         // A command far past the TTL prunes the two stale entries first.
         let later = t0 + ttl + Duration::from_secs(1);
-        d.begin((3, "c".into()), later);
+        d.begin(("i3".into(), "c".into()), later);
         assert_eq!(d.len(), 1, "entries older than the TTL are pruned");
         // The pruned key executes again rather than replaying a stale ack.
-        assert!(matches!(d.begin((1, "a".into()), later), CmdAction::Execute));
+        assert!(matches!(d.begin(("i1".into(), "a".into()), later), CmdAction::Execute));
     }
 
     /// A counting local engine: every request bumps `counter`, so a test can
@@ -885,15 +995,16 @@ mod tests {
         }
     }
 
-    fn cmd_frame(id: &str) -> String {
+    fn cmd_frame(instance: &str, id: &str) -> String {
         serde_json::to_string(&ClientFrame::Cmd {
+            instance: instance.into(),
             id: id.into(),
             command: ClientCommand::Advance { run: "r".into() },
         })
         .unwrap()
     }
 
-    /// A duplicate (client, id) executes EXACTLY ONCE, yet BOTH deliveries are
+    /// A duplicate (instance, id) executes EXACTLY ONCE, yet BOTH deliveries are
     /// acked (the replay serves the cached ack).
     #[tokio::test]
     async fn duplicate_command_executes_once_and_acks_both() {
@@ -903,7 +1014,7 @@ mod tests {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
         let dedup = Arc::new(Mutex::new(CommandDedup::new()));
 
-        let frame = cmd_frame("c1");
+        let frame = cmd_frame("i1", "c1");
 
         // First delivery executes and acks.
         handle_client_frame(7, &frame, &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
@@ -917,7 +1028,39 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 1, "exec_command must run exactly once");
     }
 
-    /// Two DISTINCT ids each execute and each ack.
+    /// The cross-reconnect regression test. The SAME (instance, id) arriving under
+    /// DIFFERENT relay client ids — exactly what a client's resend of its pending
+    /// set on a FRESH socket after a drop looks like — de-dupes to a SINGLE exec.
+    /// The old key (the relay's per-socket client id) would have keyed the resend
+    /// under a new id and double-applied the write; the stable instance closes the
+    /// hole.
+    #[tokio::test]
+    async fn same_instance_across_reconnect_executes_once() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let base = counting_engine(Arc::clone(&counter)).await;
+        let http = reqwest::Client::new();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
+        let dedup = Arc::new(Mutex::new(CommandDedup::new()));
+
+        // Same page load (instance "i1") and command id "c0", delivered on two
+        // DIFFERENT relay connections: client 1, then client 2 after a reconnect.
+        let frame = cmd_frame("i1", "c0");
+        handle_client_frame(1, &frame, &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
+
+        // The reconnect resend under the NEW client id must NOT re-execute — the
+        // stable instance collapses it to the cached ack.
+        handle_client_frame(2, &frame, &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "a resend on a fresh relay connection must not double-apply"
+        );
+    }
+
+    /// Two DISTINCT ids from the same instance each execute and each ack.
     #[tokio::test]
     async fn two_distinct_ids_each_execute() {
         let counter = Arc::new(AtomicUsize::new(0));
@@ -926,11 +1069,30 @@ mod tests {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
         let dedup = Arc::new(Mutex::new(CommandDedup::new()));
 
-        handle_client_frame(7, &cmd_frame("c1"), &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        handle_client_frame(7, &cmd_frame("i1", "c1"), &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
         assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
-        handle_client_frame(7, &cmd_frame("c2"), &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        handle_client_frame(7, &cmd_frame("i1", "c2"), &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
         assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
 
         assert_eq!(counter.load(Ordering::SeqCst), 2, "distinct ids each execute");
+    }
+
+    /// Two DISTINCT instances (two browser tabs) emitting the SAME command id —
+    /// both number their ids from `c0` — each execute; the instance keeps them
+    /// apart, so id reuse across tabs never swallows the second write.
+    #[tokio::test]
+    async fn two_tabs_reusing_the_same_id_each_execute() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let base = counting_engine(Arc::clone(&counter)).await;
+        let http = reqwest::Client::new();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
+        let dedup = Arc::new(Mutex::new(CommandDedup::new()));
+
+        handle_client_frame(1, &cmd_frame("tab-a", "c0"), &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
+        handle_client_frame(2, &cmd_frame("tab-b", "c0"), &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
+
+        assert_eq!(counter.load(Ordering::SeqCst), 2, "distinct instances each execute");
     }
 }

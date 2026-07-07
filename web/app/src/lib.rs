@@ -381,54 +381,15 @@ fn session_view(
                 StationPipeline { dots: strip_for(phase), labels: true }
             }
 
-            // Gate — what needs the operator now, with the Approve action that
-            // advances the run past it (pushed to the host over the tunnel).
+            // Gate — the checkpoint controls: Approve clears it, Request changes
+            // routes the station back as rework. Both push a Decide command to
+            // the host over the tunnel, mirroring the desktop checkpoint.
             if let Some(gate) = payload.gate_type {
-                {
-                    let run_slug = run_slug.clone();
-                    rsx! {
-                        div {
-                            style: format!(
-                                "display:flex;align-items:center;gap:14px;flex-wrap:wrap;\
-                                 padding:14px 16px;border:1px solid {};border-radius:8px;background:{};",
-                                tokens::ACCENT_STRONG, tokens::SURFACE_RAISED,
-                            ),
-                            span {
-                                style: format!(
-                                    "flex:1;min-width:200px;font-family:{};font-size:14px;color:{};",
-                                    tokens::FONT_SANS, tokens::TEXT,
-                                ),
-                                { format!("A {gate:?} checkpoint is waiting for your decision.") }
-                            }
-                            match run_slug {
-                                Some(run) => rsx! {
-                                    button {
-                                        style: format!(
-                                            "padding:8px 18px;border:none;border-radius:6px;cursor:pointer;\
-                                             background:{};color:{};font-family:{};font-size:14px;font-weight:600;",
-                                            tokens::ACCENT, tokens::ON_ACCENT, tokens::FONT_SANS,
-                                        ),
-                                        onclick: move |_| {
-                                            let mut cmd_outcome = cmd_outcome;
-                                            cmd_outcome.set(CommandOutcome::Pending);
-                                            commands.send(ClientCommand::Advance { run: run.clone() });
-                                        },
-                                        "Approve"
-                                    }
-                                },
-                                None => rsx! {
-                                    span {
-                                        style: format!(
-                                            "font-family:{};font-size:13px;color:{};",
-                                            tokens::FONT_SANS, tokens::STATUS_WARN,
-                                        ),
-                                        "This run's id didn't come through — approve it from the desktop or CLI."
-                                    }
-                                },
-                            }
-                        }
-                        { command_outcome_note(cmd_outcome) }
-                    }
+                CheckpointGate {
+                    session: payload.session_id.clone(),
+                    gate_label: format!("A {gate:?} checkpoint is waiting for your decision."),
+                    commands,
+                    cmd_outcome,
                 }
             }
 
@@ -504,6 +465,110 @@ fn session_view(
     }
 }
 
+/// The checkpoint gate controls for a live review: **Approve** clears the gate,
+/// **Request changes** routes the station back as rework with an optional note.
+/// Each pushes a [`ClientCommand::Decide`] to the host over the tunnel — the
+/// remote mirror of the desktop checkpoint. A `#[component]` so its note signal
+/// stays isolated (safe to mount only while a gate is open) instead of adding a
+/// hook to the conditionally-rendered review body.
+#[component]
+fn CheckpointGate(
+    session: String,
+    gate_label: String,
+    commands: Coroutine<ClientCommand>,
+    cmd_outcome: Signal<CommandOutcome>,
+) -> Element {
+    let mut note = use_signal(String::new);
+
+    let gate_box = format!(
+        "display:flex;flex-direction:column;gap:12px;\
+         padding:14px 16px;border:1px solid {};border-radius:8px;background:{};",
+        tokens::ACCENT_STRONG, tokens::SURFACE_RAISED,
+    );
+    let prompt_style = format!(
+        "font-family:{};font-size:14px;color:{};",
+        tokens::FONT_SANS, tokens::TEXT,
+    );
+
+    // Without a session id the decide endpoint has nothing to target — nudge the
+    // operator to the desktop/CLI, as the old approve-only gate did.
+    if session.is_empty() {
+        return rsx! {
+            div { style: "{gate_box}",
+                span { style: "{prompt_style}", "{gate_label}" }
+                span {
+                    style: format!(
+                        "font-family:{};font-size:13px;color:{};",
+                        tokens::FONT_SANS, tokens::STATUS_WARN,
+                    ),
+                    "This run's id didn't come through — decide it from the desktop or CLI."
+                }
+            }
+        };
+    }
+
+    let approve_btn = format!(
+        "padding:8px 18px;border:none;border-radius:6px;cursor:pointer;\
+         background:{};color:{};font-family:{};font-size:14px;font-weight:600;",
+        tokens::ACCENT, tokens::ON_ACCENT, tokens::FONT_SANS,
+    );
+    let changes_btn = format!(
+        "padding:8px 18px;border:1px solid {};border-radius:6px;cursor:pointer;\
+         background:transparent;color:{};font-family:{};font-size:14px;font-weight:600;",
+        tokens::STATUS_DANGER, tokens::STATUS_DANGER, tokens::FONT_SANS,
+    );
+    let note_area = format!(
+        "width:100%;box-sizing:border-box;min-height:52px;padding:9px 12px;\
+         border-radius:6px;border:1px solid {};background:{};color:{};\
+         font-family:{};font-size:13px;resize:vertical;",
+        tokens::BORDER, tokens::SURFACE_BASE, tokens::TEXT, tokens::FONT_SANS,
+    );
+
+    let approve_session = session.clone();
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:12px;",
+            div { style: "{gate_box}",
+                span { style: "{prompt_style}", "{gate_label}" }
+                textarea {
+                    style: "{note_area}",
+                    placeholder: "Note for request changes (optional)\u{2026}",
+                    oninput: move |evt| note.set(evt.value()),
+                }
+                div { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
+                    button {
+                        style: "{approve_btn}",
+                        onclick: move |_| {
+                            let mut cmd_outcome = cmd_outcome;
+                            cmd_outcome.set(CommandOutcome::Pending);
+                            commands.send(ClientCommand::Decide {
+                                session: approve_session.clone(),
+                                decision: "approved".to_string(),
+                                note: None,
+                            });
+                        },
+                        "Approve"
+                    }
+                    button {
+                        style: "{changes_btn}",
+                        onclick: move |_| {
+                            let mut cmd_outcome = cmd_outcome;
+                            cmd_outcome.set(CommandOutcome::Pending);
+                            let n = note.read().trim().to_string();
+                            commands.send(ClientCommand::Decide {
+                                session: session.clone(),
+                                decision: "changes_requested".to_string(),
+                                note: (!n.is_empty()).then_some(n),
+                            });
+                        },
+                        "Request changes"
+                    }
+                }
+            }
+            { command_outcome_note(cmd_outcome) }
+        }
+    }
+}
+
 /// A visual Question the agent posed mid-run: the prompt plus its options. The
 /// operator picks one, which sends the [`ClientCommand::Answer`] the engine
 /// resolves the session with. (Single-pick per click covers the common case; the
@@ -570,9 +635,9 @@ fn question_view(
 }
 
 /// A design Direction the agent asked for: the prompt plus image-backed
-/// archetype cards. Picking one sends [`ClientCommand::Answer`] with
-/// `{ "archetype": id }`. (Host routing of the Answer command beyond the
-/// question endpoint is a later, server-side wave.)
+/// archetype cards. Picking one sends a [`ClientCommand::Direction`] the host
+/// routes to `POST /direction/:id/select` — the direction half of the
+/// interactive round-trip, no longer misrouted through the question endpoint.
 fn direction_view(
     payload: &DirectionSessionPayload,
     commands: Coroutine<ClientCommand>,
@@ -602,9 +667,9 @@ fn direction_view(
                                 onpick: move |_| {
                                     let mut cmd_outcome = cmd_outcome;
                                     cmd_outcome.set(CommandOutcome::Pending);
-                                    commands.send(ClientCommand::Answer {
+                                    commands.send(ClientCommand::Direction {
                                         session: session.clone(),
-                                        answer: serde_json::json!({ "archetype": id.clone() }),
+                                        archetype: id.clone(),
                                     });
                                 },
                             }
@@ -621,9 +686,9 @@ fn direction_view(
 }
 
 /// A blocking Picker the agent raised (factory / mode / size / …): the prompt
-/// plus its options. Picking one sends [`ClientCommand::Answer`] with
-/// `{ "id": id }`. (As with Direction, host routing of the Answer command beyond
-/// the question endpoint is a later, server-side wave.)
+/// plus its options. Picking one sends a [`ClientCommand::Picker`] the host
+/// routes to `POST /picker/:id/select` — the picker half of the interactive
+/// round-trip.
 fn picker_view(
     payload: &PickerSessionPayload,
     commands: Coroutine<ClientCommand>,
@@ -653,9 +718,9 @@ fn picker_view(
                                 onpick: move |_| {
                                     let mut cmd_outcome = cmd_outcome;
                                     cmd_outcome.set(CommandOutcome::Pending);
-                                    commands.send(ClientCommand::Answer {
+                                    commands.send(ClientCommand::Picker {
                                         session: session.clone(),
-                                        answer: serde_json::json!({ "id": id.clone() }),
+                                        option: id.clone(),
                                     });
                                 },
                             }
