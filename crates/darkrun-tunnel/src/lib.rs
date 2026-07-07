@@ -21,8 +21,9 @@
 //! lost. Command acks + client-side retry (the protocol's idempotent ids) make
 //! writes exactly-once in effect.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use darkrun_api::notify::gate_message;
 use darkrun_api::session::SessionPayload;
@@ -177,8 +178,15 @@ impl GateWatcher {
 /// if the task is cancelled by the caller.
 pub async fn run(cfg: ConnectorConfig) {
     let http = reqwest::Client::new();
+    // One command-dedup cache for the whole SESSION, hoisted above the reconnect
+    // loop. A gate command can be redelivered across a reconnect (both the bus's
+    // at-least-once window and a reconnect are seconds-wide); a per-connection
+    // cache would be empty after the reconnect and re-run the command, so this
+    // must survive reconnects to never double-submit advance/answer/feedback. Its
+    // TTL still bounds it.
+    let dedup = Arc::new(Mutex::new(CommandDedup::new()));
     loop {
-        if let Err(e) = serve_once(&cfg, &http).await {
+        if let Err(e) = serve_once(&cfg, &http, &dedup).await {
             tracing::warn!("darkrun-tunnel: relay connection ended: {e}");
         }
         tokio::time::sleep(cfg.reconnect).await;
@@ -187,7 +195,11 @@ pub async fn run(cfg: ConnectorConfig) {
 
 /// One relay connection's lifetime: register, then bridge clients until the
 /// socket closes or errors.
-async fn serve_once(cfg: &ConnectorConfig, http: &reqwest::Client) -> Result<(), String> {
+async fn serve_once(
+    cfg: &ConnectorConfig,
+    http: &reqwest::Client,
+    dedup: &Arc<Mutex<CommandDedup>>,
+) -> Result<(), String> {
     let (ws, _) = connect_async(&cfg.relay_host_url)
         .await
         .map_err(|e| format!("dialing relay: {e}"))?;
@@ -223,8 +235,12 @@ async fn serve_once(cfg: &ConnectorConfig, http: &reqwest::Client) -> Result<(),
     // attached (the operator is away; that's the point).
     let monitor = spawn_gate_monitor(cfg.local_ws_url(), out_tx.clone());
 
+    // The command-dedup cache (`(client, id)` -> state) is owned by `run` and
+    // shared across reconnects, so an at-least-once bus redelivery never re-runs
+    // a non-idempotent command even if it straddles a reconnect.
+
     let mut clients: HashMap<u64, JoinHandle<()>> = HashMap::new();
-    let result = read_loop(cfg, http, &mut stream, &out_tx, &mut clients).await;
+    let result = read_loop(cfg, http, &mut stream, &out_tx, &mut clients, dedup).await;
 
     // Tear everything down — clients re-attach (with fresh snapshots) on reconnect.
     for (_, handle) in clients {
@@ -264,6 +280,7 @@ async fn read_loop(
               + Unpin),
     out_tx: &mpsc::UnboundedSender<Message>,
     clients: &mut HashMap<u64, JoinHandle<()>>,
+    dedup: &Arc<Mutex<CommandDedup>>,
 ) -> Result<(), String> {
     while let Some(msg) = stream.next().await {
         let msg = msg.map_err(|e| format!("relay read: {e}"))?;
@@ -293,7 +310,14 @@ async fn read_loop(
                 }
             }
             HostEvent::Msg { client, data } => {
-                handle_client_frame(client, &data, &cfg.local_http_base, http.clone(), out_tx.clone());
+                handle_client_frame(
+                    client,
+                    &data,
+                    &cfg.local_http_base,
+                    http.clone(),
+                    out_tx.clone(),
+                    Arc::clone(dedup),
+                );
             }
         }
     }
@@ -325,6 +349,145 @@ fn spawn_client_subscription(
     })
 }
 
+/// The dedup key for a command: `(client, id)`. Different clients may reuse the
+/// same client-generated `id`, so the client id is part of the key.
+type CmdKey = (u64, String);
+
+/// Cap on retained command-dedup entries. Commands are human-paced gate
+/// decisions, so a few thousand is far above any real session's volume; the cap
+/// only bounds memory against a misbehaving or abusive peer.
+const DEDUP_CAPACITY: usize = 4096;
+
+/// How long a completed command's ack stays cached for replay. A genuine bus
+/// redelivery arrives within seconds, so evicting entries older than this only
+/// ever drops replays far outside the redelivery window — never a correctness
+/// loss for a real duplicate.
+const DEDUP_TTL: Duration = Duration::from_secs(300);
+
+/// A command's lifecycle in the per-connector dedup cache.
+enum CmdState {
+    /// `exec_command` is running for this key; a duplicate must NOT start a
+    /// second one (the original will ack the same client).
+    InFlight,
+    /// Completed — the cached ack to replay to a redelivered duplicate.
+    Done(ServerFrame),
+}
+
+/// A dedup-cache entry: its state plus when it was first seen (for TTL pruning).
+struct CmdEntry {
+    state: CmdState,
+    inserted: Instant,
+}
+
+/// What to do with an incoming `Cmd`, decided atomically under the dedup lock.
+enum CmdAction {
+    /// First sighting of this key — reserved InFlight; run `exec_command`.
+    Execute,
+    /// Already completed — replay the cached ack; do NOT execute.
+    Replay(ServerFrame),
+    /// A duplicate still InFlight — drop it; the original acks this same client.
+    Drop,
+}
+
+/// Per-connector command DEDUP.
+///
+/// The relay's cross-instance frame bus is Pub/Sub (at-least-once), so a
+/// `ClientFrame::Cmd { id, command }` can reach this host connector MORE THAN
+/// ONCE. advance/answer/feedback are NOT idempotent, so the invariant is: for
+/// each `(client, id)` key, `exec_command` runs **at most once**; every
+/// duplicate is either dropped (the original is still in flight and will ack the
+/// same client) or answered from the cached ack. Bounded by capacity + TTL so a
+/// long or abusive session can't grow it without limit; eviction only ever
+/// affects replays older than the (seconds-wide) redelivery window.
+struct CommandDedup {
+    entries: HashMap<CmdKey, CmdEntry>,
+    /// Keys in first-seen order — the front is the oldest, popped on eviction /
+    /// TTL prune. Insertion order equals time order, so it doubles as the TTL
+    /// queue.
+    order: VecDeque<CmdKey>,
+    capacity: usize,
+    ttl: Duration,
+}
+
+impl CommandDedup {
+    fn new() -> Self {
+        Self::with_limits(DEDUP_CAPACITY, DEDUP_TTL)
+    }
+
+    fn with_limits(capacity: usize, ttl: Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+            ttl,
+        }
+    }
+
+    /// Drop entries first seen more than `ttl` ago. The `order` queue is in
+    /// first-seen (time) order, so expired entries are always at the front.
+    fn prune(&mut self, now: Instant) {
+        while let Some(front) = self.order.front() {
+            let expired = self
+                .entries
+                .get(front)
+                .is_none_or(|e| now.duration_since(e.inserted) > self.ttl);
+            if !expired {
+                break;
+            }
+            if let Some(key) = self.order.pop_front() {
+                self.entries.remove(&key);
+            }
+        }
+    }
+
+    /// Evict the oldest entries until the cache is within `capacity`.
+    fn evict_over_capacity(&mut self) {
+        while self.entries.len() > self.capacity {
+            let Some(key) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&key);
+        }
+    }
+
+    /// Decide what to do with an incoming command for `key`, reserving the key
+    /// InFlight on its first sighting.
+    fn begin(&mut self, key: CmdKey, now: Instant) -> CmdAction {
+        self.prune(now);
+        match self.entries.get(&key) {
+            Some(CmdEntry { state: CmdState::Done(ack), .. }) => CmdAction::Replay(ack.clone()),
+            Some(CmdEntry { state: CmdState::InFlight, .. }) => CmdAction::Drop,
+            None => {
+                self.entries
+                    .insert(key.clone(), CmdEntry { state: CmdState::InFlight, inserted: now });
+                self.order.push_back(key);
+                self.evict_over_capacity();
+                CmdAction::Execute
+            }
+        }
+    }
+
+    /// Record a command's completed ack so a later duplicate replays it instead
+    /// of re-executing.
+    fn complete(&mut self, key: CmdKey, ack: ServerFrame, now: Instant) {
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.state = CmdState::Done(ack);
+        } else {
+            // Evicted while in flight (only under extreme volume) — re-cache so a
+            // late duplicate still replays rather than re-executing.
+            self.entries
+                .insert(key.clone(), CmdEntry { state: CmdState::Done(ack), inserted: now });
+            self.order.push_back(key);
+            self.evict_over_capacity();
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// Handle one [`ClientFrame`] from a client: heartbeat or a write command.
 fn handle_client_frame(
     client: u64,
@@ -332,6 +495,7 @@ fn handle_client_frame(
     local_http_base: &str,
     http: reqwest::Client,
     out: mpsc::UnboundedSender<Message>,
+    dedup: Arc<Mutex<CommandDedup>>,
 ) {
     let Ok(frame) = serde_json::from_str::<ClientFrame>(data) else {
         return;
@@ -341,22 +505,30 @@ fn handle_client_frame(
         // The subscription opened on Join already streams the snapshot.
         ClientFrame::Hello { .. } => {}
         ClientFrame::Cmd { id, command } => {
-            // TODO(Step 1c/1d): host-side command DEDUPE belongs here. The relay's
-            // cross-instance frame bus (web/server/src/relay_bus.rs) is Pub/Sub —
-            // at-least-once — so a `Cmd` can arrive at this host MORE THAN ONCE (a
-            // redelivered bus frame). `id` is the idempotency key; before executing,
-            // check a per-session seen-id set and, on a repeat, re-`Ack` WITHOUT
-            // re-running `exec_command` (advance/answer/feedback are not naturally
-            // idempotent). Single-instance today can't double-deliver, so this is a
-            // required follow-up that couples to the bus landing, not a regression.
-            let base = local_http_base.to_string();
-            tokio::spawn(async move {
-                let ack = match exec_command(&http, &base, &command).await {
-                    Ok(()) => ServerFrame::Ack { id, ok: true, error: None },
-                    Err(e) => ServerFrame::Ack { id, ok: false, error: Some(e) },
-                };
-                route_to_client(client, &ack, &out);
-            });
+            // Host-side command DEDUP. The relay's cross-instance frame bus is
+            // at-least-once, so this `Cmd` may be a redelivered duplicate. INVARIANT:
+            // for each (client, id) key, `exec_command` runs AT MOST ONCE — a repeat
+            // that already completed replays the CACHED ack, and a repeat still in
+            // flight is dropped (the original acks this same client). This protects
+            // advance/answer/feedback, which are not idempotent, from a double submit.
+            let key: CmdKey = (client, id.clone());
+            let action = dedup.lock().unwrap().begin(key.clone(), Instant::now());
+            match action {
+                CmdAction::Replay(ack) => route_to_client(client, &ack, &out),
+                CmdAction::Drop => {}
+                CmdAction::Execute => {
+                    let base = local_http_base.to_string();
+                    let dedup = Arc::clone(&dedup);
+                    tokio::spawn(async move {
+                        let ack = match exec_command(&http, &base, &command).await {
+                            Ok(()) => ServerFrame::Ack { id, ok: true, error: None },
+                            Err(e) => ServerFrame::Ack { id, ok: false, error: Some(e) },
+                        };
+                        dedup.lock().unwrap().complete(key, ack.clone(), Instant::now());
+                        route_to_client(client, &ack, &out);
+                    });
+                }
+            }
         }
     }
 }
@@ -505,5 +677,159 @@ mod tests {
             wrap_payload(2, "not json", false),
             ServerFrame::Update { seq: 2, payload: Value::Null }
         );
+    }
+
+    // ─── Command dedup ────────────────────────────────────────────────────────
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The decision core: a new key executes, a re-seen COMPLETED key replays the
+    /// cached ack, and the client id is part of the key.
+    #[test]
+    fn completed_command_replays_cached_ack_and_keys_on_client() {
+        let mut d = CommandDedup::new();
+        let now = Instant::now();
+        let key = (1u64, "c1".to_string());
+        assert!(matches!(d.begin(key.clone(), now), CmdAction::Execute));
+
+        let ack = ServerFrame::Ack { id: "c1".into(), ok: true, error: None };
+        d.complete(key.clone(), ack.clone(), now);
+
+        // A redelivery of the same (client, id) replays the cached ack.
+        match d.begin(key, now) {
+            CmdAction::Replay(f) => assert_eq!(f, ack),
+            _ => panic!("a completed key must replay its cached ack, not execute"),
+        }
+        // A DIFFERENT client reusing the same id still executes.
+        assert!(matches!(d.begin((2, "c1".into()), now), CmdAction::Execute));
+    }
+
+    /// A duplicate that arrives while the original is still InFlight is dropped —
+    /// it must not start a second exec.
+    #[test]
+    fn inflight_duplicate_is_dropped_not_re_executed() {
+        let mut d = CommandDedup::new();
+        let now = Instant::now();
+        assert!(matches!(d.begin((1, "c1".into()), now), CmdAction::Execute));
+        assert!(matches!(d.begin((1, "c1".into()), now), CmdAction::Drop));
+        // Distinct ids each execute.
+        assert!(matches!(d.begin((1, "c2".into()), now), CmdAction::Execute));
+    }
+
+    /// The cache is bounded: past capacity, the oldest entries are evicted.
+    #[test]
+    fn dedup_map_is_bounded_by_capacity() {
+        let mut d = CommandDedup::with_limits(3, DEDUP_TTL);
+        let now = Instant::now();
+        for i in 0..10u64 {
+            d.begin((i, "c".into()), now);
+        }
+        assert_eq!(d.len(), 3, "cache never exceeds its capacity");
+        // The oldest key (0) was evicted, so re-seeing it executes rather than
+        // replaying — eviction only affects replays outside the redelivery window.
+        assert!(matches!(d.begin((0, "c".into()), now), CmdAction::Execute));
+    }
+
+    /// Entries older than the TTL are pruned on the next command.
+    #[test]
+    fn dedup_prunes_entries_past_ttl() {
+        let ttl = Duration::from_secs(300);
+        let mut d = CommandDedup::with_limits(4096, ttl);
+        let t0 = Instant::now();
+        d.begin((1, "a".into()), t0);
+        d.begin((2, "b".into()), t0);
+        assert_eq!(d.len(), 2);
+
+        // A command far past the TTL prunes the two stale entries first.
+        let later = t0 + ttl + Duration::from_secs(1);
+        d.begin((3, "c".into()), later);
+        assert_eq!(d.len(), 1, "entries older than the TTL are pruned");
+        // The pruned key executes again rather than replaying a stale ack.
+        assert!(matches!(d.begin((1, "a".into()), later), CmdAction::Execute));
+    }
+
+    /// A counting local engine: every request bumps `counter`, so a test can
+    /// observe exactly how many times `exec_command` actually hit the engine.
+    async fn counting_engine(counter: Arc<AtomicUsize>) -> String {
+        let app = axum::Router::new().fallback(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                "ok"
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// Drain the outbound queue until an `Ack` frame surfaces (unwrapping the
+    /// relay `HostCmd::To` envelope), returning it.
+    async fn recv_ack(out_rx: &mut mpsc::UnboundedReceiver<Message>) -> ServerFrame {
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+                .await
+                .expect("an ack should be routed")
+                .expect("the out channel stays open");
+            let Message::Text(t) = msg else { continue };
+            let Ok(HostCmd::To { data, .. }) = serde_json::from_str::<HostCmd>(&t) else {
+                continue;
+            };
+            if let Ok(frame @ ServerFrame::Ack { .. }) = serde_json::from_str::<ServerFrame>(&data) {
+                return frame;
+            }
+        }
+    }
+
+    fn cmd_frame(id: &str) -> String {
+        serde_json::to_string(&ClientFrame::Cmd {
+            id: id.into(),
+            command: ClientCommand::Advance { run: "r".into() },
+        })
+        .unwrap()
+    }
+
+    /// A duplicate (client, id) executes EXACTLY ONCE, yet BOTH deliveries are
+    /// acked (the replay serves the cached ack).
+    #[tokio::test]
+    async fn duplicate_command_executes_once_and_acks_both() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let base = counting_engine(Arc::clone(&counter)).await;
+        let http = reqwest::Client::new();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
+        let dedup = Arc::new(Mutex::new(CommandDedup::new()));
+
+        let frame = cmd_frame("c1");
+
+        // First delivery executes and acks.
+        handle_client_frame(7, &frame, &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
+
+        // Awaiting the first ack guarantees `complete` ran, so the redelivery hits
+        // the Done path: it replays the cached ack and does NOT execute again.
+        handle_client_frame(7, &frame, &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "exec_command must run exactly once");
+    }
+
+    /// Two DISTINCT ids each execute and each ack.
+    #[tokio::test]
+    async fn two_distinct_ids_each_execute() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let base = counting_engine(Arc::clone(&counter)).await;
+        let http = reqwest::Client::new();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
+        let dedup = Arc::new(Mutex::new(CommandDedup::new()));
+
+        handle_client_frame(7, &cmd_frame("c1"), &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
+        handle_client_frame(7, &cmd_frame("c2"), &base, http.clone(), out_tx.clone(), Arc::clone(&dedup));
+        assert!(matches!(recv_ack(&mut out_rx).await, ServerFrame::Ack { ok: true, .. }));
+
+        assert_eq!(counter.load(Ordering::SeqCst), 2, "distinct ids each execute");
     }
 }
