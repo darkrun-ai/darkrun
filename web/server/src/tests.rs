@@ -788,7 +788,8 @@ fn repos_state(method_url: &str, body: serde_json::Value) -> WebState {
 #[tokio::test]
 async fn repos_lists_github_normalized() {
     let state = repos_state(
-        "https://api.github.com/user/repos?per_page=100&sort=updated",
+        // The fetch now paginates with `&page=N`; a single short page ends it.
+        "https://api.github.com/user/repos?per_page=100&sort=updated&page=1",
         serde_json::json!([
             { "name": "darkrun", "full_name": "jwaldrip/darkrun", "html_url": "https://github.com/jwaldrip/darkrun" },
         ]),
@@ -817,7 +818,8 @@ async fn repos_lists_github_normalized() {
 #[tokio::test]
 async fn repos_lists_gitlab_normalized() {
     let state = repos_state(
-        "https://gitlab.com/api/v4/projects?membership=true&per_page=100&order_by=last_activity_at",
+        // The fetch now paginates with `&page=N`; a single short page ends it.
+        "https://gitlab.com/api/v4/projects?membership=true&per_page=100&order_by=last_activity_at&page=1",
         serde_json::json!([
             { "name": "darkrun", "path_with_namespace": "jwaldrip/darkrun", "web_url": "https://gitlab.com/jwaldrip/darkrun" },
         ]),
@@ -945,7 +947,8 @@ async fn sessions_lists_github_runs_from_the_tree() {
 #[tokio::test]
 async fn sessions_lists_gitlab_runs_from_the_subtree() {
     let state = sessions_state(
-        "https://gitlab.com/api/v4/projects/jwaldrip%2Fdarkrun/repository/tree?path=.darkrun&recursive=true&per_page=100",
+        // The GitLab tree fetch now paginates with `&page=N`; a short page ends it.
+        "https://gitlab.com/api/v4/projects/jwaldrip%2Fdarkrun/repository/tree?path=.darkrun&recursive=true&per_page=100&page=1",
         200,
         serde_json::json!([
             { "path": ".darkrun/run-1/run.md", "type": "blob" },

@@ -31,6 +31,18 @@ use crate::state::WebState;
 /// A user-agent string. GitHub rejects API requests without one.
 const USER_AGENT: &str = "darkrun-web";
 
+/// Repositories per page. Both providers cap the list endpoints at 100 and
+/// paginate with `?page=N` over a bare array, so the same page-walk covers both;
+/// this mirrors the `per_page=100` baked into [`repos_url`]. A page shorter than
+/// this is the last one.
+const REPOS_PER_PAGE: usize = 100;
+
+/// The most pages of repositories we walk before stopping. At [`REPOS_PER_PAGE`]
+/// per page this covers 5,000 repos; the cap is a safety bound so a misbehaving
+/// remote can never spin us forever. If hit, it is logged; repos past it are
+/// unseen.
+const REPOS_MAX_PAGES: u32 = 50;
+
 /// Query for `GET /api/repos` — which provider the bearer token belongs to.
 #[derive(Debug, Deserialize)]
 pub struct ReposQuery {
@@ -115,23 +127,46 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
 }
 
 /// List the caller's repositories from `provider` using `cred`, normalized.
+///
+/// Both GitHub (`/user/repos`) and GitLab (`/projects`) return a bare array and
+/// paginate with `?page=N`, so this walks every page until a short page ends the
+/// list (bounded by [`REPOS_MAX_PAGES`]) — a portfolio of more than one page of
+/// repos is fully returned rather than truncated at the first 100.
 fn fetch_repos(
     transport: &dyn darkrun_vcs::HttpTransport,
     provider: Provider,
     cred: &Credential,
 ) -> darkrun_vcs::Result<Vec<Repo>> {
-    let url = repos_url(provider);
-    let request = authorize(HttpRequest::get(url), provider, cred);
-    let response = transport.execute(request)?;
-    if !response.is_success() {
-        return Err(darkrun_vcs::VcsError::Api {
-            provider: provider.display_name(),
-            status: response.status,
-            message: response.text().unwrap_or_default(),
-        });
+    let mut repos = Vec::new();
+    for page in 1..=REPOS_MAX_PAGES {
+        let url = format!("{}&page={}", repos_url(provider), page);
+        let request = authorize(HttpRequest::get(url), provider, cred);
+        let response = transport.execute(request)?;
+        if !response.is_success() {
+            return Err(darkrun_vcs::VcsError::Api {
+                provider: provider.display_name(),
+                status: response.status,
+                message: response.text().unwrap_or_default(),
+            });
+        }
+        let value: serde_json::Value = response.json()?;
+        // Short-page detection reads the RAW array length (before normalization,
+        // which may drop nameless entries) so a full page is never mistaken for
+        // the last one.
+        let page_len = value.as_array().map(Vec::len).unwrap_or(0);
+        repos.extend(parse_repos(provider, &value));
+        if page_len < REPOS_PER_PAGE {
+            break;
+        }
+        if page == REPOS_MAX_PAGES {
+            tracing::warn!(
+                provider = provider.key(),
+                pages = REPOS_MAX_PAGES,
+                "repo portfolio hit the pagination cap; repos past it are unseen",
+            );
+        }
     }
-    let value: serde_json::Value = response.json()?;
-    Ok(parse_repos(provider, &value))
+    Ok(repos)
 }
 
 /// The list-repos endpoint URL for `provider`.
@@ -208,6 +243,7 @@ fn json_error(status: StatusCode, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use darkrun_vcs::{HttpResponse, Method, MockTransport};
 
     #[test]
     fn github_repos_normalize() {
@@ -270,5 +306,106 @@ mod tests {
         assert_eq!(bearer_token(&headers), Some("xyz".to_string()));
         // No header → None.
         assert_eq!(bearer_token(&axum::http::HeaderMap::new()), None);
+    }
+
+    // ---- multi-page fetch (offline via the mock transport) ------------------
+
+    /// The list-repos URL for a page — `repos_url` plus `&page=N`, exactly as
+    /// [`fetch_repos`] builds it, so the mock keys line up.
+    fn repos_page_url(provider: Provider, page: u32) -> String {
+        format!("{}&page={}", repos_url(provider), page)
+    }
+
+    /// A GitLab `/projects` page body: a bare array of project objects.
+    fn gitlab_projects_body(names: &[String]) -> Vec<u8> {
+        let arr: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "name": n,
+                    "path_with_namespace": format!("jwaldrip/{n}"),
+                    "web_url": format!("https://gitlab.com/jwaldrip/{n}"),
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::Value::Array(arr)).unwrap()
+    }
+
+    #[test]
+    fn gitlab_projects_are_walked_across_pages() {
+        let cred = Credential::new(Provider::GitLab, "glpat");
+        let mock = MockTransport::new();
+        // A full first page (100 projects) forces page 2; the short second page
+        // (1 project) ends pagination.
+        let page1: Vec<String> = (0..REPOS_PER_PAGE).map(|i| format!("p-{i}")).collect();
+        mock.expect(
+            Method::Get,
+            repos_page_url(Provider::GitLab, 1),
+            HttpResponse::new(200, gitlab_projects_body(&page1)),
+        );
+        mock.expect(
+            Method::Get,
+            repos_page_url(Provider::GitLab, 2),
+            HttpResponse::new(200, gitlab_projects_body(&["last".to_string()])),
+        );
+        let repos = fetch_repos(&mock, Provider::GitLab, &cred).unwrap();
+        // Both pages are concatenated.
+        assert_eq!(repos.len(), REPOS_PER_PAGE + 1);
+        assert_eq!(repos[0].full_name, "jwaldrip/p-0");
+        assert_eq!(repos.last().unwrap().name, "last");
+        // Exactly two pages fetched (the short second page stops paging).
+        assert_eq!(mock.requests().len(), 2);
+    }
+
+    #[test]
+    fn gitlab_projects_single_short_page_makes_one_request() {
+        let cred = Credential::new(Provider::GitLab, "glpat");
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Get,
+            repos_page_url(Provider::GitLab, 1),
+            HttpResponse::new(200, gitlab_projects_body(&["a".to_string(), "b".to_string()])),
+        );
+        let repos = fetch_repos(&mock, Provider::GitLab, &cred).unwrap();
+        assert_eq!(repos.len(), 2);
+        // A short first page ends pagination immediately — exactly one request.
+        assert_eq!(mock.requests().len(), 1);
+    }
+
+    #[test]
+    fn github_repos_are_walked_across_pages() {
+        // GitHub `/user/repos` is the same bare-array + `?page=N` model, so it is
+        // walked identically.
+        let cred = Credential::new(Provider::GitHub, "gho");
+        let mock = MockTransport::new();
+        let page1: Vec<serde_json::Value> = (0..REPOS_PER_PAGE)
+            .map(|i| {
+                serde_json::json!({
+                    "name": format!("g-{i}"),
+                    "full_name": format!("acme/g-{i}"),
+                    "html_url": format!("https://github.com/acme/g-{i}"),
+                })
+            })
+            .collect();
+        mock.expect(
+            Method::Get,
+            repos_page_url(Provider::GitHub, 1),
+            HttpResponse::new(200, serde_json::to_vec(&serde_json::Value::Array(page1)).unwrap()),
+        );
+        mock.expect(
+            Method::Get,
+            repos_page_url(Provider::GitHub, 2),
+            HttpResponse::new(
+                200,
+                serde_json::to_vec(&serde_json::json!([
+                    { "name": "tail", "full_name": "acme/tail", "html_url": "https://github.com/acme/tail" }
+                ]))
+                .unwrap(),
+            ),
+        );
+        let repos = fetch_repos(&mock, Provider::GitHub, &cred).unwrap();
+        assert_eq!(repos.len(), REPOS_PER_PAGE + 1);
+        assert_eq!(repos.last().unwrap().name, "tail");
+        assert_eq!(mock.requests().len(), 2);
     }
 }
