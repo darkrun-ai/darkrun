@@ -163,9 +163,17 @@ pub fn web_base() -> String {
     query_param("web").unwrap_or_else(|| DEFAULT_WEB_BASE.to_string())
 }
 
-/// Read a query param from the page URL.
+/// Read a query param from the page URL. Reads `location.search`; the parsing
+/// lives in the pure [`query_param_in`] so it is unit-tested off-browser.
 pub fn query_param(key: &str) -> Option<String> {
     let search = web_sys::window()?.location().search().ok()?;
+    query_param_in(&search, key)
+}
+
+/// Read `key` from a raw query string (`?a=1&b=2`, leading `?` optional),
+/// percent-decoding the `:` and `/` the app's params carry. Returns the first
+/// match, or `None`. Pure (no `web_sys`) so the query parsing is unit-tested.
+fn query_param_in(search: &str, key: &str) -> Option<String> {
     let query = search.trim_start_matches('?');
     for pair in query.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
@@ -182,4 +190,51 @@ pub(crate) fn js_error(e: &JsValue) -> String {
     e.as_string()
         .or_else(|| js_sys::Reflect::get(e, &JsValue::from_str("message")).ok()?.as_string())
         .unwrap_or_else(|| "sign-in failed or was cancelled".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Native (`#[test]`) coverage of the query-param parser and the sign-in
+    //! result (`Session`) descriptor parsing. Both are pure serde/string logic,
+    //! so they run under `cargo test -p darkrun-app`.
+    use super::*;
+
+    #[test]
+    fn query_param_in_reads_a_present_key() {
+        assert_eq!(query_param_in("?provider=github&nonce=abc", "provider"), Some("github".into()));
+        assert_eq!(query_param_in("?provider=github&nonce=abc", "nonce"), Some("abc".into()));
+        // Leading `?` is optional.
+        assert_eq!(query_param_in("web=https://x", "web"), Some("https://x".into()));
+    }
+
+    #[test]
+    fn query_param_in_is_none_for_a_missing_key() {
+        assert_eq!(query_param_in("?provider=github", "nonce"), None);
+        assert_eq!(query_param_in("", "provider"), None);
+    }
+
+    #[test]
+    fn query_param_in_percent_decodes_scheme_and_slashes() {
+        // A `?web=` override arrives percent-encoded; the base is restored.
+        assert_eq!(
+            query_param_in("web=https%3A%2F%2Fdarkrun.ai", "web"),
+            Some("https://darkrun.ai".into())
+        );
+        assert_eq!(query_param_in("p=a%2fb", "p"), Some("a/b".into())); // lowercase %2f
+    }
+
+    #[test]
+    fn session_parses_the_id_token_and_ignores_extra_fields() {
+        // The JS glue reports `{ mode, idToken, accessToken, provider }`; the
+        // workspace keys off the Firebase ID token alone, so the rest is ignored.
+        let json = r#"{"mode":"signIn","idToken":"tok-123","accessToken":"gho_x","provider":"github"}"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.id_token, "tok-123");
+    }
+
+    #[test]
+    fn session_requires_the_id_token() {
+        // Without the load-bearing field, the result is not a usable session.
+        assert!(serde_json::from_str::<Session>(r#"{"mode":"signIn"}"#).is_err());
+    }
 }
