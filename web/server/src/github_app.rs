@@ -53,7 +53,7 @@ use darkrun_vcs::{HttpRequest, Provider};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
-use crate::sessions::{parse_sessions, tree_url, DiscoveredSession};
+use crate::sessions::{parse_sessions, tree_truncated, tree_url, DiscoveredSession};
 
 /// A user-agent string. GitHub rejects API requests without one.
 const USER_AGENT: &str = "darkrun-web";
@@ -76,6 +76,19 @@ const MEMBERS_PER_PAGE: u32 = 100;
 /// are capped and logged (a member past the cap is treated as not-a-member, so
 /// the fail-safe direction is to *exclude*, never over-include).
 const MEMBERS_MAX_PAGES: u32 = 50;
+
+/// Items per page when listing App installations (`GET /app/installations`) and
+/// an installation's repositories (`GET /installation/repositories`). GitHub
+/// caps both at 100. Both endpoints paginate with `?page=N`; we walk pages until
+/// a page returns fewer than this (the last page).
+const APP_LIST_PER_PAGE: u32 = 100;
+
+/// The most pages we walk for the App installation list and for each
+/// installation's repository list before stopping. At [`APP_LIST_PER_PAGE`] per
+/// page this covers 5,000 items each; the cap is a safety bound so a misbehaving
+/// remote (one that never returns a short page) can never spin us forever. If
+/// the cap is hit it is logged; items past it are unseen.
+const APP_LIST_MAX_PAGES: u32 = 50;
 
 /// The darkrun GitHub App: its numeric App id and RSA private key (PEM).
 ///
@@ -315,22 +328,47 @@ fn token_authorize(request: HttpRequest, token: &str) -> HttpRequest {
         .header("X-GitHub-Api-Version", "2022-11-28")
 }
 
-/// List every installation of the App (`GET /app/installations`).
+/// List every installation of the App (`GET /app/installations`), walking every
+/// `?page=N` until a short page ends the list (bounded by [`APP_LIST_MAX_PAGES`]).
+/// The response is a bare array; a user with the App on more than one page of
+/// installations is fully covered.
 fn list_installations(
     transport: &dyn darkrun_vcs::HttpTransport,
     jwt: &str,
 ) -> Result<Vec<Installation>, String> {
-    let url = format!("{}/app/installations?per_page=100", Provider::GitHub.api_base());
-    let request = app_authorize(HttpRequest::get(url), jwt);
-    let response = transport.execute(request).map_err(|e| e.to_string())?;
-    if !response.is_success() {
-        return Err(format!(
-            "listing App installations failed ({})",
-            response.status
-        ));
+    let mut installations = Vec::new();
+    for page in 1..=APP_LIST_MAX_PAGES {
+        let url = format!(
+            "{}/app/installations?per_page={}&page={}",
+            Provider::GitHub.api_base(),
+            APP_LIST_PER_PAGE,
+            page,
+        );
+        let request = app_authorize(HttpRequest::get(url), jwt);
+        let response = transport.execute(request).map_err(|e| e.to_string())?;
+        if !response.is_success() {
+            return Err(format!(
+                "listing App installations failed ({})",
+                response.status
+            ));
+        }
+        let value: serde_json::Value = response.json().map_err(|e| e.to_string())?;
+        // Short-page detection reads the RAW array length (before normalization,
+        // which may drop malformed entries) so a full page is never mistaken for
+        // the last one.
+        let page_len = value.as_array().map(Vec::len).unwrap_or(0);
+        installations.extend(parse_installations(&value));
+        if page_len < APP_LIST_PER_PAGE as usize {
+            break;
+        }
+        if page == APP_LIST_MAX_PAGES {
+            tracing::warn!(
+                pages = APP_LIST_MAX_PAGES,
+                "App installation list hit the pagination cap; installations past it are unseen",
+            );
+        }
     }
-    let value: serde_json::Value = response.json().map_err(|e| e.to_string())?;
-    Ok(parse_installations(&value))
+    Ok(installations)
 }
 
 /// Mint an installation access token
@@ -362,25 +400,52 @@ fn installation_token(
 }
 
 /// List an installation's repositories (`GET /installation/repositories`),
-/// normalized (runs left empty; the caller fills them per repo).
+/// normalized (runs left empty; the caller fills them per repo). Walks every
+/// `?page=N` until a short page ends the list (bounded by [`APP_LIST_MAX_PAGES`])
+/// so an installation with more than one page of repos is fully listed.
+///
+/// The response is an OBJECT `{ total_count, repositories: [...] }` (not a bare
+/// array), so both the accumulation and the short-page test read `.repositories`.
 fn list_installation_repos(
     transport: &dyn darkrun_vcs::HttpTransport,
     token: &str,
 ) -> Result<Vec<WorkspaceRepo>, String> {
-    let url = format!(
-        "{}/installation/repositories?per_page=100",
-        Provider::GitHub.api_base(),
-    );
-    let request = token_authorize(HttpRequest::get(url), token);
-    let response = transport.execute(request).map_err(|e| e.to_string())?;
-    if !response.is_success() {
-        return Err(format!(
-            "listing installation repositories failed ({})",
-            response.status
-        ));
+    let mut repos = Vec::new();
+    for page in 1..=APP_LIST_MAX_PAGES {
+        let url = format!(
+            "{}/installation/repositories?per_page={}&page={}",
+            Provider::GitHub.api_base(),
+            APP_LIST_PER_PAGE,
+            page,
+        );
+        let request = token_authorize(HttpRequest::get(url), token);
+        let response = transport.execute(request).map_err(|e| e.to_string())?;
+        if !response.is_success() {
+            return Err(format!(
+                "listing installation repositories failed ({})",
+                response.status
+            ));
+        }
+        let value: serde_json::Value = response.json().map_err(|e| e.to_string())?;
+        // Short-page detection reads the RAW `.repositories` length (before
+        // normalization, which may drop nameless entries).
+        let page_len = value
+            .get("repositories")
+            .and_then(|r| r.as_array())
+            .map(Vec::len)
+            .unwrap_or(0);
+        repos.extend(parse_installation_repos(&value));
+        if page_len < APP_LIST_PER_PAGE as usize {
+            break;
+        }
+        if page == APP_LIST_MAX_PAGES {
+            tracing::warn!(
+                pages = APP_LIST_MAX_PAGES,
+                "installation repository list hit the pagination cap; repos past it are unseen",
+            );
+        }
     }
-    let value: serde_json::Value = response.json().map_err(|e| e.to_string())?;
-    Ok(parse_installation_repos(&value))
+    Ok(repos)
 }
 
 /// Read a repo's `.darkrun/` runs via the installation token — the same
@@ -401,6 +466,16 @@ fn read_runs(
         return Err(format!("reading `.darkrun/` tree failed ({})", response.status));
     }
     let value: serde_json::Value = response.json().map_err(|e| e.to_string())?;
+    // GitHub returns the whole recursive tree in one response but caps it
+    // (100k entries / 7MB), setting `"truncated": true` when it does. That is NOT
+    // page-based, so we cannot walk it; a truncated tree means some `.darkrun/`
+    // runs may be unseen. Never let that pass silently — surface it.
+    if tree_truncated(&value) {
+        tracing::warn!(
+            repo = %full_name,
+            "GitHub git tree was truncated (>100k entries / 7MB); some `.darkrun/` runs may be missing from discovery",
+        );
+    }
     Ok(parse_sessions(Provider::GitHub, full_name, &value))
 }
 
@@ -1107,6 +1182,122 @@ mod tests {
     #[test]
     fn parse_installation_repos_tolerates_missing_key() {
         assert!(parse_installation_repos(&serde_json::json!({ "message": "Bad" })).is_empty());
+    }
+
+    /// The `GET /installation/repositories` URL for a page — must match how
+    /// [`list_installation_repos`] builds it so the mock keys line up.
+    fn installation_repos_url(page: u32) -> String {
+        format!(
+            "{}/installation/repositories?per_page={}&page={}",
+            Provider::GitHub.api_base(),
+            APP_LIST_PER_PAGE,
+            page,
+        )
+    }
+
+    /// An installation-repositories page body: the `{ total_count, repositories }`
+    /// OBJECT shape GitHub returns (NOT a bare array).
+    fn installation_repos_body(names: &[&str]) -> Vec<u8> {
+        let repos: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "name": n,
+                    "full_name": format!("acme/{n}"),
+                    "html_url": format!("https://github.com/acme/{n}"),
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({
+            "total_count": repos.len(),
+            "repositories": repos,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn list_installation_repos_concatenates_pages_until_a_short_page() {
+        let mock = MockTransport::new();
+        // A full first page (100 repos) forces page 2; the second page is short
+        // (2 repos), ending pagination.
+        let full: Vec<String> = (0..APP_LIST_PER_PAGE).map(|i| format!("r-{i}")).collect();
+        let full_refs: Vec<&str> = full.iter().map(String::as_str).collect();
+        mock.expect(
+            Method::Get,
+            installation_repos_url(1),
+            HttpResponse::new(200, installation_repos_body(&full_refs)),
+        );
+        mock.expect(
+            Method::Get,
+            installation_repos_url(2),
+            HttpResponse::new(200, installation_repos_body(&["last-a", "last-b"])),
+        );
+        let repos = list_installation_repos(&mock, "inst-tok").unwrap();
+        // Both pages are concatenated.
+        assert_eq!(repos.len(), APP_LIST_PER_PAGE as usize + 2);
+        assert_eq!(repos[0].name, "r-0");
+        assert_eq!(repos.last().unwrap().name, "last-b");
+        // Exactly two pages were fetched (the short second page stops paging).
+        assert_eq!(mock.requests().len(), 2);
+    }
+
+    #[test]
+    fn list_installation_repos_single_short_page_makes_one_request() {
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Get,
+            installation_repos_url(1),
+            HttpResponse::new(200, installation_repos_body(&["only-a", "only-b"])),
+        );
+        let repos = list_installation_repos(&mock, "inst-tok").unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].name, "only-a");
+        // A short first page ends pagination immediately — exactly one request.
+        assert_eq!(mock.requests().len(), 1);
+    }
+
+    /// The `GET /app/installations` URL for a page.
+    fn installations_url(page: u32) -> String {
+        format!(
+            "{}/app/installations?per_page={}&page={}",
+            Provider::GitHub.api_base(),
+            APP_LIST_PER_PAGE,
+            page,
+        )
+    }
+
+    /// An `/app/installations` page body: a bare array of `count` User
+    /// installations with ids counting up from `start_id`.
+    fn installations_body(count: usize, start_id: u64) -> Vec<u8> {
+        let arr: Vec<serde_json::Value> = (0..count)
+            .map(|i| {
+                let id = start_id + i as u64;
+                serde_json::json!({
+                    "id": id,
+                    "account": { "login": format!("u{id}"), "id": id, "type": "User" },
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::Value::Array(arr)).unwrap()
+    }
+
+    #[test]
+    fn list_installations_walks_pages_until_a_short_page() {
+        let mock = MockTransport::new();
+        // A full first page forces page 2; the short second page ends paging.
+        mock.expect(
+            Method::Get,
+            installations_url(1),
+            HttpResponse::new(200, installations_body(APP_LIST_PER_PAGE as usize, 1)),
+        );
+        mock.expect(
+            Method::Get,
+            installations_url(2),
+            HttpResponse::new(200, installations_body(3, 1_000)),
+        );
+        let insts = list_installations(&mock, "app-jwt").unwrap();
+        assert_eq!(insts.len(), APP_LIST_PER_PAGE as usize + 3);
+        assert_eq!(mock.requests().len(), 2);
     }
 
     #[test]
