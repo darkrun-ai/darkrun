@@ -93,18 +93,12 @@ fn reachable_prompts_name_only_registered_tools() {
 }
 
 /// A corpus-wide static scan: every `darkrun_*` referenced by **any** prompt
-/// template — including conditional branches a linear walk never renders — must
-/// be a registered tool, save one documented gap.
-///
-/// The documented gap: `phases/checkpoint.md`'s compound-gate block references
-/// `darkrun_checkpoint_choose`, which is **not** a registered MCP tool. That
-/// block only renders when the manager populates `checkpoint_options`, which it
-/// never does today, so no live tick surfaces it — it is a latent stale
-/// reference, not an active unfollowable instruction. It is out of this crate's
-/// scope to fix (the template belongs to the engine corpus), so the baseline
-/// pins it as a *ceiling*: a NEW stale reference fails this test, and if the
-/// engine later wires `checkpoint_options` up or drops the reference, the
-/// baseline can shrink.
+/// template (including conditional branches a linear walk never renders) must
+/// be a registered MCP tool. No exceptions: a stale or renamed reference (a
+/// template naming a tool that no longer exists), or a new but unregistered
+/// tool, fails this test. The former `darkrun_checkpoint_choose` compound-gate
+/// reference has been dropped from `phases/checkpoint.md`, so the baseline is
+/// now empty.
 #[test]
 fn corpus_references_only_registered_tools_except_documented_gaps() {
     let known = known_tool_names();
@@ -121,13 +115,10 @@ fn corpus_references_only_registered_tools_except_documented_gaps() {
 
     let unregistered: BTreeSet<String> = referenced.difference(&known).cloned().collect();
 
-    // The documented ceiling of known-stale references (see the doc comment).
-    let baseline: BTreeSet<String> = ["darkrun_checkpoint_choose"]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-
-    let novel: Vec<String> = unregistered.difference(&baseline).cloned().collect();
+    // No documented-stale ceiling remains: the former `darkrun_checkpoint_choose`
+    // reference has been dropped from the corpus, so every referenced tool must
+    // now resolve to a registered MCP tool.
+    let novel: Vec<String> = unregistered.iter().cloned().collect();
     assert!(
         novel.is_empty(),
         "prompt corpus references tool name(s) that are not registered MCP tools \

@@ -58,7 +58,7 @@ by what they touch:
 :::
 
 :::keypoints title="Gates, feedback, and evidence"
-- **darkrun_checkpoint_decide** / **darkrun_checkpoint_choose** — resolve a station's gate.
+- **darkrun_checkpoint_decide** — resolve a station's gate.
 - **darkrun_gate_review** — the pre-checkpoint multi-reviewer code-review pass.
 - **darkrun_feedback_create** / **_list** / **_move** / **_resolve** / **_reject** — the feedback track that routes rework as drift.
 - **darkrun_review_stamp** / **darkrun_run_review_stamp** — a reviewer's per-role sign-off.

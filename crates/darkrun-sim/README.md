@@ -90,12 +90,11 @@ Scenario {
 },
 ```
 
-## Known gap this harness surfaces
+## Prompt/tool-registry drift guard
 
-`phases/checkpoint.md`'s compound-gate block references `darkrun_checkpoint_choose`,
-which is **not** a registered MCP tool. That block only renders when the manager
-populates `checkpoint_options`, which it never does today, so no live tick surfaces
-it — a latent stale reference, not an active unfollowable instruction. The
-corpus-wide scan pins it as a documented baseline (a *ceiling*): a new stale
-reference fails the test, and the baseline can shrink once the engine wires the
-option up or drops the reference.
+The corpus-wide scan asserts that every `darkrun_*` named by any prompt template
+resolves to a registered MCP tool, with no baseline exceptions. (A former stale
+reference to `darkrun_checkpoint_choose` in `phases/checkpoint.md`'s never-rendered
+compound-gate block has been removed.) A renamed or dropped tool that leaves a
+template pointing at a nonexistent tool, or a new tool a template names before it
+is registered, now fails the test.
