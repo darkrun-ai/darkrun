@@ -183,27 +183,109 @@ pub async fn serve_stdio_on(
 
     // Dial the relay when remote access is enabled: the host connector parks an
     // outbound WebSocket and bridges remote clients to this loopback server.
-    if let (Some(cand), Some(run)) = (relay_candidate, active_run.as_deref()) {
-        if let Some(token) = resolve_relay_token() {
-            let cfg = darkrun_tunnel::ConnectorConfig {
-                relay_host_url: format!(
-                    "{}/relay/host/{}?token={}",
-                    cand.url.trim_end_matches('/'),
-                    cand.session,
-                    token
-                ),
-                local_http_base: format!("http://{bound}"),
-                run: run.to_string(),
-                reconnect: std::time::Duration::from_secs(3),
-            };
-            eprintln!("darkrun: remote access enabled — dialing relay {}", cand.url);
-            tokio::spawn(darkrun_tunnel::run(cfg));
-        } else {
-            eprintln!(
-                "darkrun: DARKRUN_RELAY_URL set but no DARKRUN_RELAY_TOKEN — \
-                 run /darkrun:darkrun-login to enable remote access (staying local-only)"
-            );
-        }
+    //
+    // The candidate is RE-RESOLVED as the active run changes — a supervisor
+    // watches the active-run pointer and dials each new run once. This is what
+    // reaches a run STARTED AFTER boot (the common case: the engine comes up
+    // with no active run, then `darkrun_run_new` starts one); the boot snapshot
+    // alone would never dial it. Remote engages once the operator has logged in
+    // (a dial token is present); until then the engine stays local-only.
+    {
+        let relay_store = state.store.clone();
+        tokio::spawn(async move {
+            // The currently-dialed run, the exact token it was dialed with, and
+            // its connector task handle. The token is RE-RESOLVED (and refreshed
+            // if near expiry) every tick — see `resolve_relay_token` — instead of
+            // frozen at first dial, so the credential a long lights-out run dials
+            // with never goes stale.
+            //
+            // The connector task EXITS on an auth rejection (the relay 401s a
+            // stale token, see `darkrun_tunnel::run`); otherwise it reconnects in
+            // place. So a finished handle means "the dialed token was rejected".
+            // We then re-dial — but only once the resolved token has actually
+            // CHANGED (a refresh or a fresh login fixed it), so an unrefreshable
+            // legacy token that keeps 401ing doesn't spin: remote just waits for a
+            // re-login rather than hammering the relay with a dead token forever.
+            let mut dial: Option<DialState> = None;
+            let mut warned_missing_token = false;
+            // ONE refresh backoff latch across ticks: a dead refresh token is
+            // retried on a capped exponential backoff (or when a re-login replaces
+            // the file), NOT re-POSTed to securetoken every 5s. Held here so it
+            // also throttles the force-on-rejection refresh below.
+            let refresh_latch = std::sync::Arc::new(std::sync::Mutex::new(
+                crate::relay_token::RefreshLatch::new(),
+            ));
+            loop {
+                if let Some(run) = relay_store.active_run().ok().flatten() {
+                    if let Some(cand) = resolve_relay_candidate(Some(&run)) {
+                        // A FINISHED connector handle means the relay auth-REJECTED
+                        // the dialed token (see `darkrun_tunnel::run`). Feed that into
+                        // the resolve as `force_refresh`: the relay's 401 is the
+                        // authoritative refresh trigger, so a host clock skewed behind
+                        // real time or a missing `expires_at` (both of which pin the
+                        // clock heuristic to "still valid") can no longer strand a
+                        // genuinely-expired token — the crit#6 failure that must
+                        // self-heal.
+                        let rejected = dial.as_ref().is_some_and(|d| d.handle.is_finished());
+                        // Refresh-aware resolve is blocking (ureq + file I/O), so
+                        // keep it off the async worker.
+                        let latch = std::sync::Arc::clone(&refresh_latch);
+                        let token =
+                            tokio::task::spawn_blocking(move || resolve_relay_token(&latch, rejected))
+                                .await
+                                .ok()
+                                .flatten();
+                        if let Some(token) = token {
+                            let run_changed =
+                                dial.as_ref().map(|d| d.run.as_str()) != Some(run.as_str());
+                            let token_changed =
+                                dial.as_ref().map(|d| d.token.as_str()) != Some(token.as_str());
+                            let redial = match &dial {
+                                None => true,
+                                Some(_) if run_changed => true,
+                                // The dialed token was rejected: the forced refresh
+                                // above re-minted it, so re-dial ONLY when the resolved
+                                // token actually CHANGED. If it didn't — the latch is
+                                // backing off a dead refresh token — hold and wait for a
+                                // re-login rather than spin.
+                                Some(_) if rejected => token_changed,
+                                _ => false,
+                            };
+                            if redial {
+                                if let Some(prev) = dial.take() {
+                                    prev.handle.abort();
+                                }
+                                let cfg = darkrun_tunnel::ConnectorConfig {
+                                    relay_host_url: format!(
+                                        "{}/relay/host/{}?token={}",
+                                        cand.url.trim_end_matches('/'),
+                                        cand.session,
+                                        token
+                                    ),
+                                    local_http_base: format!("http://{bound}"),
+                                    run: run.clone(),
+                                    reconnect: std::time::Duration::from_secs(3),
+                                };
+                                eprintln!(
+                                    "darkrun: remote access enabled — dialing relay {} for run {run}",
+                                    cand.url
+                                );
+                                let handle = tokio::spawn(darkrun_tunnel::run(cfg));
+                                dial = Some(DialState { run, token, handle });
+                                warned_missing_token = false;
+                            }
+                        } else if !warned_missing_token {
+                            eprintln!(
+                                "darkrun: remote relay configured but no DARKRUN_RELAY_TOKEN — \
+                                 run /darkrun:darkrun-login to enable remote access (staying local-only)"
+                            );
+                            warned_missing_token = true;
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
     }
 
     // Spawn the axum HTTP/WS server on the same runtime, sharing the state, on
@@ -254,30 +336,66 @@ pub async fn serve_stdio_on(
     Ok(())
 }
 
+/// The live dial the supervisor is holding: the run being tunneled, the exact
+/// dial token in use, and the connector task's handle (a finished handle means
+/// the relay rejected that token — see the supervisor loop).
+struct DialState {
+    run: String,
+    token: String,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 /// The relay dial token (a Firebase ID token from `/darkrun:darkrun-login`):
-/// the `DARKRUN_RELAY_TOKEN` env override, else the token `darkrun login` stored
-/// at `~/.darkrun/relay-token`. `None` when not logged in (remote stays off).
-fn resolve_relay_token() -> Option<String> {
+/// the `DARKRUN_RELAY_TOKEN` env override, else the [`RelayToken`] blob
+/// `darkrun login` stored at `~/.darkrun/relay-token`. `None` when not logged in
+/// (remote stays off).
+///
+/// The stored blob is REFRESH-AWARE: when its `id_token` is within the refresh
+/// skew of expiry — OR `force_refresh` is set because the relay auth-rejected the
+/// last dial — this re-mints it from the parked refresh token (rewriting the
+/// file) and returns the FRESH `id_token`, so a run started or reconnecting after
+/// the ~1h ID-token lifetime dials a live token instead of 401ing forever.
+/// `latch` throttles a persistently-failing refresh (a dead refresh token is not
+/// re-POSTed to securetoken every tick). The env override is a bare token and is
+/// used verbatim (never refreshed, so the latch/force don't apply to it).
+///
+/// Blocking (network on refresh + file I/O) — the dial supervisor calls it from
+/// `spawn_blocking`.
+///
+/// [`RelayToken`]: crate::relay_token::RelayToken
+fn resolve_relay_token(
+    latch: &std::sync::Mutex<crate::relay_token::RefreshLatch>,
+    force_refresh: bool,
+) -> Option<String> {
     if let Ok(t) = std::env::var("DARKRUN_RELAY_TOKEN") {
         let t = t.trim().to_string();
         if !t.is_empty() {
             return Some(t);
         }
     }
-    let path = crate::registry::default_root()?.join("relay-token");
-    let t = std::fs::read_to_string(path).ok()?.trim().to_string();
-    (!t.is_empty()).then_some(t)
+    let mut latch = latch.lock().unwrap_or_else(|p| p.into_inner());
+    crate::relay_token::resolve_dial_id_token_with(&mut latch, force_refresh)
 }
 
-/// The relay candidate to advertise + dial, resolved from the environment.
-/// Remote access is enabled when `DARKRUN_RELAY_URL` is set AND there's an active
-/// run to tunnel into (its slug is the relay session id). Returns `None` for a
-/// local-only engine. The dial token is read separately — it's a secret and
-/// never enters the candidate (which is written to the public descriptor).
+/// The production relay endpoint the engine dials by default. `DARKRUN_RELAY_URL`
+/// overrides it (staging / self-hosted); nothing needs to SET it for remote
+/// access to work, so `darkrun login` (which stores the dial token) is
+/// sufficient to make a run reachable — the URL no longer has to be exported by
+/// hand, which nothing did.
+pub const DEFAULT_RELAY_URL: &str = "wss://relay.darkrun.ai";
+
+/// The relay candidate to advertise + dial. The base URL defaults to the
+/// production relay ([`DEFAULT_RELAY_URL`]) and is overridable via
+/// `DARKRUN_RELAY_URL`; the session is the active run's slug. Returns `None` only
+/// when there is no active run to tunnel into. The dial token is read separately
+/// — it's a secret and never enters the candidate (which is written to the
+/// public descriptor).
 fn resolve_relay_candidate(active_run: Option<&str>) -> Option<darkrun_api::tunnel::RelayCandidate> {
     let url = std::env::var("DARKRUN_RELAY_URL")
         .ok()
-        .filter(|u| !u.trim().is_empty())?;
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
     let session = active_run?.to_string();
     Some(darkrun_api::tunnel::RelayCandidate { url, session })
 }

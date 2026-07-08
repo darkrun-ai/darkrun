@@ -40,9 +40,11 @@ Station to Station without stopping for review.
 /darkrun:darkrun-dark
 ```
 
-It runs autonomously, pausing only on **external** or **await** gates — the ones
-that genuinely need something outside the loop — and on real ambiguity. This is
-lights-out operation: the floor runs dark, you stay in the control room.
+It runs autonomously, pausing only on **external** or **await** gates, the ones
+that genuinely need something outside the loop. It doesn't stop on ambiguity: with
+nobody on the loop to answer, it decides, records the assumption, and keeps moving
+(you can override that call later through feedback). This is lights-out operation:
+the floor runs dark, you stay in the control room.
 
 ## Pre-checkpoint gate-review
 

@@ -4,6 +4,15 @@
 //! can run a deliberate code review before a station's checkpoint locks. The
 //! manager stays a pure read; the diff is read in-process via the pure-Rust
 //! git backend (no `git` CLI).
+//!
+//! ADVISORY, NOT ENFORCED. This is agent-facing GUIDANCE: it computes the diff
+//! and returns instructions, but it writes NO stamp and nothing requires it to
+//! have run before [`crate::position::checkpoint_decide`]. A run can lock a
+//! checkpoint without ever calling it (dark/Auto mode never does). It is
+//! deliberately not a gate — the ENFORCED checkpoint guarantees live in the
+//! engine: the open-`must`/`should` severity gate and the Prove missing-proof
+//! hold, both in [`crate::position`]. Treat `gate_review` as a review AID the
+//! operator/agent may run, not a precondition the engine checks.
 
 use std::path::Path;
 

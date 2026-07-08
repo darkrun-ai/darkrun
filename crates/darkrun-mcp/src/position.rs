@@ -1,16 +1,26 @@
 //! The manager — a single virtual cursor over a Run's aggregate state.
 //!
-//! The manager is a **pure read** of on-disk state that returns ONE structured
-//! [`RunAction`] describing the next thing the caller (the agent) should do. It
-//! does NOT run LLM agents — it tells the caller what to do, the caller does it
-//! (writes artifacts / units / stamps), then calls `run_next` again.
+//! The manager derives ONE structured [`RunAction`] describing the next thing
+//! the caller (the agent) should do from on-disk state. It does NOT run LLM
+//! agents — it tells the caller what to do, the caller does it (writes artifacts
+//! / units / stamps), then calls `run_next` again.
+//!
+//! **Purity caveat (team mode).** [`derive_position`] itself is a pure read, and
+//! in `solo`/`dark` a whole tick is effectively read-only. In `team` mode,
+//! though, [`run_tick_with_hosting`] performs hosting **side effects** inline
+//! before it derives: [`resolve_discrete_gate`] pushes the station branch to
+//! origin, opens/polls the station PR/MR, posts the objective-proof comment, and
+//! files remote review notes as `external` feedback. So the "a wedged run is
+//! just a cursor you can force/reset" story is side-effect-free only in
+//! `solo`/`dark`; a `team`-mode tick can mutate the remote.
 //!
 //! ## Three-track priority (Drift -> Feedback -> Run)
 //!
-//! 1. **Drift** — witnessed artifact mutations preempt everything. (In this
-//!    slice drift is surfaced as a structured action; the sweep itself is a
-//!    `darkrun-core` concern not yet wired, so the track is a no-op until
-//!    drift entries exist.)
+//! 1. **Drift** — witnessed artifact mutations preempt everything. The sweep
+//!    ([`crate::drift::sweep`]) runs at the top of EVERY tick (see
+//!    [`run_tick_with_hosting`]): it re-hashes every locked artifact and files a
+//!    drift entry for any silent mutation, which Track C (inside
+//!    [`derive_position`]) then preempts on the same tick.
 //! 2. **Feedback** — any open feedback routes a fix-worker action before run
 //!    work proceeds.
 //! 3. **Run** — walk the factory's stations in order; the first incomplete
@@ -1649,13 +1659,30 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
         },
         StationPhase::Checkpoint => {
             let kind = effective_checkpoint_kind(&state);
-            // An `external` gate hands off to an external review surface (a
-            // PR/MR) rather than a local prompt — a distinct action so the
-            // agent gets focused "open/annotate the review" instructions. In
-            // DISCRETE mode the manager has typically already opened the
-            // station's draft PR (recorded on `Station.pr_ref`); surface it on
-            // the action's `target` so the agent/UI shows which PR to merge.
-            if matches!(kind, CheckpointKind::External) {
+            // Missing-proof hold — Prove's core guarantee ("carries numbers,
+            // not assertions"). The Prove station must not AUTO-lock on the
+            // agent's word alone: when the run is classified to a surface and
+            // the gate would auto-advance (dark/Auto mode) but no objective
+            // proof has been attached for the station, HOLD and escalate.
+            // Attaching a proof (`darkrun_proof_attach`) clears it on the next
+            // tick. Gated on Auto only — solo/team surface the missing proof to
+            // the human reviewer at their gate, so they are not force-held here.
+            if station.as_str() == darkrun_core::domain::Position::Prove.dir()
+                && matches!(kind, CheckpointKind::Auto)
+                && run.surface().is_some()
+                && crate::proof::station_proof_markdown(store, slug, &station).is_none()
+            {
+                RunAction::Escalate {
+                    run: slug.to_string(),
+                    station: station.clone(),
+                    reason: format!(
+                        "The '{station}' station cannot auto-lock without objective proof: \
+                         the run is classified to a surface but no measurement is attached. \
+                         Record the measured evidence with darkrun_proof_attach before the \
+                         checkpoint — Prove carries numbers, not assertions."
+                    ),
+                }
+            } else if matches!(kind, CheckpointKind::External) {
                 let target = state
                     .stations
                     .get(&station)
@@ -3101,6 +3128,20 @@ pub fn run_start(
         .first_station()
         .ok_or_else(|| McpError::UnknownFactory(factory_name.into()))?;
 
+    // Reject a typo'd `--size` rather than silently coercing it to the full plan
+    // (e.g. `qick` must NOT quietly become `full`). Empty/unset means full.
+    let size_norm = size.trim().to_ascii_lowercase();
+    if !size_norm.is_empty()
+        && !matches!(
+            size_norm.as_str(),
+            "quick" | "bugfix" | "refactor" | "full" | "standard"
+        )
+    {
+        return Err(McpError::InvalidInput(format!(
+            "unknown run size '{size}': expected one of quick, bugfix, refactor, or full"
+        )));
+    }
+
     // Right-size: the plan is the size's station subset (empty = full factory).
     let plan = resolve_size(size, &factory);
     let first_name = plan
@@ -3325,6 +3366,32 @@ fn enter_station_and_record(store: &StateStore, slug: &str, station: &str) -> Re
     Ok(())
 }
 
+/// Mint a feedback id that will NOT clobber the operator's STILL-PENDING rework.
+/// The gate-decision docs use stable base ids (`fb-checkpoint`, `fb-spec-gate`)
+/// so the common single-decision case is legible. A re-decide reuses the base id
+/// when it is free OR when the doc under it is already SETTLED (a finished slot
+/// is fair game). But when the base id still holds an OPEN (gate-blocking) item —
+/// the operator's earlier free-text hasn't been addressed yet — the base is
+/// preserved and the next free `{base}-N` suffix is minted, so the re-decide ADDS
+/// a new item instead of overwriting instructions that haven't been acted on.
+fn nonclobber_feedback_id(store: &StateStore, slug: &str, base: &str) -> Result<String> {
+    let base_still_open = crate::feedback::list(store, slug)?
+        .into_iter()
+        .any(|f| f.id == base && !crate::feedback::is_terminal(f.status));
+    if !base_still_open {
+        return Ok(base.to_string());
+    }
+    let existing = store.read_feedback_raw(slug)?;
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !existing.contains_key(&candidate) {
+            return Ok(candidate);
+        }
+        n += 1;
+    }
+}
+
 /// Apply an operator decision to the active station's Checkpoint.
 ///
 /// `approved == true` advances the station (mirrors an `auto`/approved gate);
@@ -3363,10 +3430,33 @@ pub fn checkpoint_decide(
             // preempts via Track B next tick, then the gate re-opens for a
             // re-decision once the spec is reworked.
             let doc = format!("---\nstatus: pending\nstation: {station}\n---\n{body}\n");
-            store.write_feedback_raw(slug, "fb-spec-gate", &doc)?;
+            let id = nonclobber_feedback_id(store, slug, "fb-spec-gate")?;
+            store.write_feedback_raw(slug, &id, &doc)?;
         }
         store.write_state(slug, &state)?;
         return run_tick(store, slug);
+    }
+
+    // ── Severity gate: open must/should annotations block a clean Approve ────
+    // "must blocks the checkpoint" is an engine guarantee, not merely a
+    // desktop-button affordance. Any decide path — the MCP tool, curl, or a
+    // remote relay — that tries to approve while a station carries an open
+    // `must`/`should` annotation is rejected here so the invariant holds
+    // everywhere, not only where the UI happens to disable the button.
+    if approved {
+        let station_annotations: Vec<_> = store
+            .list_annotations(slug)?
+            .into_iter()
+            .filter(|a| a.work_item.station == station)
+            .collect();
+        let open = darkrun_core::count_open_by_severity(&station_annotations);
+        if open.blocks_clean_approve() {
+            return Err(McpError::InvalidInput(format!(
+                "cannot approve station '{station}': {} open blocking annotation(s) ({}) — resolve them or request changes",
+                open.must + open.should,
+                open.bar_label().unwrap_or_default(),
+            )));
+        }
     }
 
     let mut landed_station: Option<String> = None;
@@ -3396,9 +3486,9 @@ pub fn checkpoint_decide(
             cp.outcome = Some(CheckpointOutcome::Blocked);
         }
         if let Some(body) = feedback {
-            let id = "fb-checkpoint";
+            let id = nonclobber_feedback_id(store, slug, "fb-checkpoint")?;
             let doc = format!("---\nstatus: pending\n---\n{body}\n");
-            store.write_feedback_raw(slug, id, &doc)?;
+            store.write_feedback_raw(slug, &id, &doc)?;
         }
         // Ship the station's OPEN annotations — the global station note leading,
         // then each per-artifact ask — as a feedback doc so the rework loop reads
@@ -4464,12 +4554,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_mode_falls_back_to_full_plan() {
+    fn unknown_size_is_rejected_and_full_keeps_the_whole_plan() {
         let (_d, store) = store();
-        run_start(&store, "u", "software", None, Mode::Solo, "nonsense-mode").expect("start");
+        // A valid `full` size keeps the whole factory plan (the empty sentinel).
+        run_start(&store, "u", "software", None, Mode::Solo, "full").expect("start");
         let state = store.read_state("u").unwrap().unwrap();
         assert!(state.plan.is_empty());
         assert_eq!(state.active_station, "frame");
+        // A typo'd size is REJECTED, not silently coerced to the full plan.
+        let err = run_start(&store, "u2", "software", None, Mode::Solo, "nonsense-size")
+            .expect_err("invalid size rejected");
+        assert!(format!("{err}").contains("unknown run size"), "{err}");
     }
 
     #[test]

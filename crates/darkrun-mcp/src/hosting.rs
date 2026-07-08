@@ -275,9 +275,25 @@ impl ApiHosting {
             })
             .and_then(|url| darkrun_vcs::parse_remote_url(&url).ok());
         let cred = provider.and_then(|p| {
-            darkrun_vcs::CredentialStore::default_path()
-                .ok()
-                .and_then(|store| store.get(p).ok().flatten())
+            let store = darkrun_vcs::CredentialStore::default_path().ok()?;
+            // Refresh a near-expiry GitLab token BEFORE the first REST call, when
+            // the client holds its own OAuth app credentials (the website-brokered
+            // flow keeps the secret server-side, so this is a best-effort escape
+            // hatch). Any refresh failure falls back to the stored token — hosting
+            // is best-effort and never crashes the tick. GitHub tokens report no
+            // `expires_in`, so this is a no-op for them.
+            if let Some(oauth) = darkrun_vcs::OauthClient::from_env(p) {
+                if let Ok(Some(fresh)) = darkrun_vcs::refresh_before_use(
+                    &store,
+                    transport.as_ref(),
+                    &oauth,
+                    p,
+                    darkrun_vcs::now_unix(),
+                ) {
+                    return Some(fresh);
+                }
+            }
+            store.get(p).ok().flatten()
         });
         Self {
             provider,
@@ -920,7 +936,7 @@ mod tests {
         let mock = MockTransport::new();
         mock.expect(
             VcsMethod::Get,
-            "https://api.github.com/repos/o/r/issues/7/comments",
+            "https://api.github.com/repos/o/r/issues/7/comments?per_page=100&page=1",
             json_resp(
                 200,
                 serde_json::json!([
@@ -931,7 +947,7 @@ mod tests {
         );
         mock.expect(
             VcsMethod::Get,
-            "https://api.github.com/repos/o/r/pulls/7/reviews",
+            "https://api.github.com/repos/o/r/pulls/7/reviews?per_page=100&page=1",
             json_resp(
                 200,
                 serde_json::json!([

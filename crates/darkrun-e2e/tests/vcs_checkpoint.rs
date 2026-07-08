@@ -1625,10 +1625,10 @@ fn provider_from_host_github_variants() {
 #[test]
 fn provider_from_host_gitlab_variants() {
     assert_eq!(Provider::from_host("gitlab.com"), Some(Provider::GitLab));
-    assert_eq!(
-        Provider::from_host("gitlab.example.org"),
-        Some(Provider::GitLab)
-    );
+    // Self-hosted GitLab is intentionally NOT inferred: its API base is not
+    // gitlab.com, so treating gitlab.example.org as GitLab would misroute every
+    // REST/OAuth call to gitlab.com. Rejected like GitHub Enterprise.
+    assert_eq!(Provider::from_host("gitlab.example.org"), None);
 }
 
 #[test]

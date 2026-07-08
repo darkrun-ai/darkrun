@@ -78,19 +78,32 @@ platform :ios do
 
   desc "App Store upload (no auto-submit). CI builds + signs the .ipa first."
   lane :release do
-    upload_to_app_store(
-      api_key: asc_api_key,
-      app_identifier: APP_ID,
-      platform: "ios", # else deliver prompts for it and dies in non-interactive CI
-      ipa: ENV.fetch("DARKRUN_IPA"),
-      submit_for_review: false,
-      automatic_release: false,
-      force: true, # skip the HTML metadata-preview confirmation (non-interactive)
-      skip_screenshots: true, # screenshots have their own lane
-      skip_metadata: false,
-      precheck_include_in_app_purchases: false,
-      run_precheck_before_submit: false,
-    )
+    # ios-testflight fires on the push to main and uploads this exact build
+    # (CFBundleVersion = git rev-list --count) BEFORE the tag-triggered release
+    # runs on the SAME release commit, so the GA binary is normally already in
+    # App Store Connect. A duplicate-version 409 here therefore means this lane's
+    # goal (the GA build is AVAILABLE in ASC) is already met, not a failure. Only
+    # a DIFFERENT error is real and re-raised.
+    begin
+      upload_to_app_store(
+        api_key: asc_api_key,
+        app_identifier: APP_ID,
+        platform: "ios", # else deliver prompts for it and dies in non-interactive CI
+        ipa: ENV.fetch("DARKRUN_IPA"),
+        submit_for_review: false,
+        automatic_release: false,
+        force: true, # skip the HTML metadata-preview confirmation (non-interactive)
+        skip_screenshots: true, # screenshots have their own lane
+        # Binary only, like mac_release: the listing + submission stay a human step
+        # in App Store Connect; this lane just makes the GA build available there.
+        skip_metadata: true,
+        precheck_include_in_app_purchases: false,
+        run_precheck_before_submit: false,
+      )
+    rescue => e
+      raise unless e.message =~ /bundle version must be higher|already been used|DUPLICATE/i
+      UI.important("iOS build already in App Store Connect (ios-testflight uploaded it on the release commit); nothing to re-upload.")
+    end
   end
 
   desc "One-time setup: create the App Store distribution cert + provisioning"

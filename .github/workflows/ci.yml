@@ -20,7 +20,7 @@ jobs:
     name: rust
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Reclaim disk before building. This job compiles the whole workspace TWICE
       # (release + debug test artifacts) over a heavy dep graph (dioxus + the full
@@ -69,9 +69,81 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # Clippy runs as a report but does NOT block merges yet: the codebase has
-      # never been linted under `-D warnings`, so cleaning it to zero is a
-      # separate follow-up. Flip `continue-on-error` off once that's done.
-      - name: Clippy (non-blocking)
-        continue-on-error: true
+      # Clippy is a BLOCKING gate: the workspace is linted under `-D warnings`,
+      # so any lint (or unused import / dead_code / unused_mut) fails the PR.
+      - name: Clippy (blocking, -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Cross-target compile gate. The `rust` job above only builds Linux, so a
+  # target-specific break (e.g. the E0282 type-inference failure that killed the
+  # v0.5.0 / v0.6.0 releases) would only surface at release time on the macOS /
+  # Windows binaries. Compile-check the SHIPPABLE surface (lib + bins) on both so
+  # those breaks fail the PR instead. Tests are intentionally excluded: some are
+  # inherently Unix-only (chmod 0o000, symlinks, PermissionsExt) and run on the
+  # Linux job; the release artifact is lib + bins, which is what must cross-build.
+  # `cargo check` (not test/build) keeps it fast; the native webview headers ship
+  # with the macOS / Windows runners, so no extra deps.
+  cross-check:
+    name: check ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Configure git identity (for fixture-touching builds)
+        shell: bash
+        run: |
+          git config --global user.email "ci@darkrun.ai"
+          git config --global user.name "darkrun ci"
+          git config --global init.defaultBranch main
+
+      - name: Check (lib + bins, the shippable surface)
+        run: cargo check --workspace --lib --bins
+
+  # The web app (app.darkrun.ai) is a wasm crate. The `rust` job's
+  # `cargo test --workspace` already runs its portable `#[test]`s on the Linux
+  # host, but this job makes the wasm surface an explicit gate: it runs the
+  # darkrun-app unit tests (the pure URL/route parsing, frame decoding, and
+  # workspace-response helpers — the reachability + remote command paths) AND
+  # lints the crate for `wasm32-unknown-unknown` under `-D warnings`, the exact
+  # target the deploy builds. A wasm-only break (or a lint the native pass
+  # misses) fails the PR here instead of at deploy time.
+  #
+  # The genuinely browser-only glue (the JS-interop extern blocks, the live relay
+  # socket loop) needs a browser + a relay to exercise, so it's integration-level,
+  # not covered by these unit tests; a full wasm-bindgen-test/headless-browser
+  # harness isn't wired (out of proportion for this surface). What's unit-testable
+  # without a browser is extracted into pure helpers and covered here.
+  wasm-app:
+    name: wasm-app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (+ wasm target)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: wasm-app
+
+      # The portable helpers run as native `#[test]`s (no browser needed).
+      - name: Test (darkrun-app, native)
+        run: cargo test -p darkrun-app
+
+      # Lint the crate for the deploy target — the wasm build's blocking gate.
+      - name: Clippy (wasm32, -D warnings)
+        run: cargo clippy -p darkrun-app --target wasm32-unknown-unknown -- -D warnings

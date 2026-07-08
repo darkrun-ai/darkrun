@@ -52,6 +52,10 @@ locals {
   # Where the Admin SDK key is mounted; GOOGLE_APPLICATION_CREDENTIALS points here.
   fcm_mount_dir = "/secrets/fcm"
   fcm_key_path  = "${local.fcm_mount_dir}/key.json"
+
+  # The cross-instance frame bus (Step 1c) is enabled when the relay is on AND a
+  # Pub/Sub topic is wired — then DARKRUN_PUBSUB_TOPIC turns it on in the service.
+  frame_bus_enabled = local.fcm_enabled && var.pubsub_topic != ""
 }
 
 # The FCM Admin SDK key (operator-managed; created by infra/set-fcm-env.sh). Like
@@ -87,8 +91,16 @@ resource "google_cloud_run_v2_service" "web" {
   template {
     service_account = google_service_account.web.email
 
+    # Long-lived WebSocket sessions (the relay host park + client attach) must not
+    # be cut at the 300s default. Raise the request timeout toward Cloud Run's
+    # 3600s max so a parked host socket survives.
+    timeout = "3600s"
+
     scaling {
       min_instance_count = var.min_instances
+      # With the cross-instance frame bus (Step 1c) a host on one instance and a
+      # client on another can now exchange frames, so max_instances can be raised
+      # safely — a split pair is no longer stranded. Left as-is here (var-driven).
       max_instance_count = var.max_instances
     }
 
@@ -119,6 +131,18 @@ resource "google_cloud_run_v2_service" "web" {
         for_each = local.fcm_enabled ? {
           DARKRUN_FIREBASE_PROJECT       = var.firebase_project
           GOOGLE_APPLICATION_CREDENTIALS = local.fcm_key_path
+        } : {}
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
+      # Cross-instance frame bus (Step 1c): the Pub/Sub topic the relay publishes
+      # host↔client frames to. Gated on the relay being on AND a topic being wired.
+      dynamic "env" {
+        for_each = local.frame_bus_enabled ? {
+          DARKRUN_PUBSUB_TOPIC = var.pubsub_topic
         } : {}
         content {
           name  = env.key

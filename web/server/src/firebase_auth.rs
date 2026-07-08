@@ -26,10 +26,39 @@ pub const FIREBASE_CERTS_URL: &str =
     "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
 
 /// The subset of an ID token's claims we need. Firebase puts the account id in
-/// `sub` (the stable Firebase `uid`).
+/// `sub` (the stable Firebase `uid`), and the linked provider identities under
+/// `firebase.identities` (a map of provider → array of provider subject ids).
 #[derive(Debug, Deserialize)]
 struct Claims {
     sub: String,
+    /// The Firebase-specific claim block (`firebase.identities`, `firebase.sign_in_provider`).
+    #[serde(default)]
+    firebase: FirebaseClaim,
+}
+
+/// The `firebase` claim block on a Firebase ID token.
+#[derive(Debug, Default, Deserialize)]
+struct FirebaseClaim {
+    /// Linked provider identities, keyed by provider (`github.com`, `oidc.gitlab`,
+    /// …); each value is the array of that provider's subject ids for the user.
+    #[serde(default)]
+    identities: std::collections::HashMap<String, Vec<serde_json::Value>>,
+}
+
+/// The Firebase claim key GitHub identities live under.
+const GITHUB_IDENTITY_KEY: &str = "github.com";
+
+/// A verified Firebase token: the account `uid` plus any linked GitHub identity.
+///
+/// The `uid` is the durable web-app session key; the GitHub identity (the numeric
+/// user id from `firebase.identities["github.com"][0]`) is what the GitHub-App
+/// workspace path keys installation selection on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedClaims {
+    /// The Firebase account id (`sub` / `uid`).
+    pub uid: String,
+    /// The GitHub numeric user id, if this account has a linked GitHub identity.
+    pub github_user_id: Option<String>,
 }
 
 /// Verifies Firebase ID tokens for a project, against a refreshable key cache.
@@ -96,6 +125,32 @@ impl FirebaseTokenAuth {
         v
     }
 
+    /// Verify `token` and return its account `uid` plus any linked GitHub
+    /// identity, or `None` if verification fails. This is the richer form of
+    /// [`RelayAuth::account_for`] the workspace endpoints use: they need the
+    /// GitHub identity (to select the App installation), not just the `uid`.
+    pub fn verify(&self, token: &str) -> Option<VerifiedClaims> {
+        let claims = self.decode_claims(token)?;
+        let github_user_id = github_user_id(&claims);
+        Some(VerifiedClaims {
+            uid: claims.sub,
+            github_user_id,
+        })
+    }
+
+    /// Decode + validate `token`, returning its claims (or `None`). Shared by
+    /// [`RelayAuth::account_for`] and [`verify`](Self::verify).
+    fn decode_claims(&self, token: &str) -> Option<Claims> {
+        let header = decode_header(token).ok()?;
+        let kid = header.kid?;
+        let key = {
+            let keys = self.keys.read().unwrap();
+            keys.get(&kid)?.clone()
+        };
+        let data = decode::<Claims>(token, &key, &self.validation()).ok()?;
+        (!data.claims.sub.is_empty()).then_some(data.claims)
+    }
+
     /// Test constructor: a verifier whose cache holds one key for `kid` under the
     /// given `algorithm` — so the claim-validation path is exercised without
     /// provisioning RSA.
@@ -113,16 +168,20 @@ impl FirebaseTokenAuth {
 
 impl RelayAuth for FirebaseTokenAuth {
     fn account_for(&self, token: &str) -> Option<String> {
-        // The header names the signing key; look it up in the refreshed cache.
-        let header = decode_header(token).ok()?;
-        let kid = header.kid?;
-        let key = {
-            let keys = self.keys.read().unwrap();
-            keys.get(&kid)?.clone()
-        };
-        let data = decode::<Claims>(token, &key, &self.validation()).ok()?;
-        let sub = data.claims.sub;
-        (!sub.is_empty()).then_some(sub)
+        self.decode_claims(token).map(|c| c.sub)
+    }
+}
+
+/// Extract the GitHub numeric user id from a token's `firebase.identities`
+/// (`firebase.identities["github.com"][0]`). Firebase stores the value as either
+/// a JSON string or number; both are normalized to the string form. `None` when
+/// no GitHub identity is linked.
+fn github_user_id(claims: &Claims) -> Option<String> {
+    let first = claims.firebase.identities.get(GITHUB_IDENTITY_KEY)?.first()?;
+    match first {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }
 
@@ -138,6 +197,10 @@ mod tests {
         iss: String,
         aud: String,
         exp: usize,
+        /// The `firebase` claim block — omitted from the wire when `None` so the
+        /// existing tokens exercise the default (no linked identities).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        firebase: Option<serde_json::Value>,
     }
 
     const SECRET: &[u8] = b"test-signing-secret";
@@ -172,8 +235,41 @@ mod tests {
             iss: format!("https://securetoken.google.com/{PROJECT}"),
             aud: PROJECT.into(),
             exp: future_exp(),
+            firebase: None,
         });
         assert_eq!(verifier().account_for(&t), Some("uid-123".to_string()));
+    }
+
+    #[test]
+    fn verify_extracts_the_github_identity() {
+        // A token carrying a linked GitHub identity resolves both uid + github id.
+        let t = token(&TestClaims {
+            sub: "uid-123".into(),
+            iss: format!("https://securetoken.google.com/{PROJECT}"),
+            aud: PROJECT.into(),
+            exp: future_exp(),
+            firebase: Some(serde_json::json!({
+                "identities": { "github.com": ["583231"], "email": ["x@y.z"] },
+                "sign_in_provider": "github.com",
+            })),
+        });
+        let claims = verifier().verify(&t).unwrap();
+        assert_eq!(claims.uid, "uid-123");
+        assert_eq!(claims.github_user_id.as_deref(), Some("583231"));
+    }
+
+    #[test]
+    fn verify_without_github_identity_yields_none_for_that_field() {
+        let t = token(&TestClaims {
+            sub: "uid-123".into(),
+            iss: format!("https://securetoken.google.com/{PROJECT}"),
+            aud: PROJECT.into(),
+            exp: future_exp(),
+            firebase: None,
+        });
+        let claims = verifier().verify(&t).unwrap();
+        assert_eq!(claims.uid, "uid-123");
+        assert!(claims.github_user_id.is_none());
     }
 
     #[test]
@@ -183,6 +279,7 @@ mod tests {
             iss: format!("https://securetoken.google.com/{PROJECT}"),
             aud: "some-other-project".into(),
             exp: future_exp(),
+            firebase: None,
         });
         assert_eq!(verifier().account_for(&t), None);
     }
@@ -194,6 +291,7 @@ mod tests {
             iss: "https://evil.example.com".into(),
             aud: PROJECT.into(),
             exp: future_exp(),
+            firebase: None,
         });
         assert_eq!(verifier().account_for(&t), None);
     }
@@ -205,6 +303,7 @@ mod tests {
             iss: format!("https://securetoken.google.com/{PROJECT}"),
             aud: PROJECT.into(),
             exp: 1, // 1970 — long expired
+            firebase: None,
         });
         assert_eq!(verifier().account_for(&t), None);
     }
@@ -221,6 +320,7 @@ mod tests {
                 iss: format!("https://securetoken.google.com/{PROJECT}"),
                 aud: PROJECT.into(),
                 exp: future_exp(),
+                firebase: None,
             },
             &EncodingKey::from_secret(SECRET),
         )

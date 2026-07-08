@@ -100,14 +100,48 @@ pub(crate) fn build_pack(
     Ok(buf)
 }
 
-/// Resolve HTTPS push credentials for `url`, or `None` for transports that
-/// don't need them (file://, ssh, or an unauthenticated remote).
+/// The token-as-password username convention for a provider's HTTPS git auth
+/// (`x-access-token` for GitHub, `oauth2` for GitLab).
+fn token_username(provider: darkrun_vcs::Provider) -> &'static str {
+    match provider {
+        darkrun_vcs::Provider::GitHub => "x-access-token",
+        darkrun_vcs::Provider::GitLab => "oauth2",
+    }
+}
+
+/// Look up the OAuth access token stored for `host` by `darkrun auth login` in
+/// `store`, returning `(token, default_username)`.
 ///
-/// Precedence: credentials embedded in the URL win; otherwise a token from the
-/// environment the engine exports from its credential store —
-/// `DARKRUN_GIT_TOKEN` first, then the host-conventional `GITHUB_TOKEN`/
-/// `GH_TOKEN` or `GITLAB_TOKEN`. The username is the provider's token-as-
-/// password convention (`x-access-token` for GitHub, `oauth2` for GitLab).
+/// `None` when the host maps to no recognized provider (self-hosted GitLab is
+/// deliberately rejected by [`darkrun_vcs::Provider::from_host`], since the
+/// stored gitlab.com token would not authenticate to it) or when no credential
+/// is stored for that provider.
+fn stored_account_for(
+    host: &str,
+    store: &darkrun_vcs::CredentialStore,
+) -> Option<(String, &'static str)> {
+    let provider = darkrun_vcs::Provider::from_host(host)?;
+    let cred = store.get(provider).ok().flatten()?;
+    if cred.access_token.is_empty() {
+        return None;
+    }
+    Some((cred.access_token, token_username(provider)))
+}
+
+/// Resolve HTTPS credentials for `url`, or `None` for transports that don't
+/// need them (file://, ssh, or an unauthenticated remote). Shared by push
+/// (send-pack) and fetch so both authenticate the same way.
+///
+/// Precedence:
+/// 1. Credentials embedded directly in the remote URL.
+/// 2. A token from the environment — `DARKRUN_GIT_TOKEN` first, then the
+///    host-conventional `GITHUB_TOKEN`/`GH_TOKEN` or `GITLAB_TOKEN`.
+/// 3. The OAuth token from the darkrun credential store (`~/.darkrun/credentials`,
+///    written by `darkrun auth login`) — the real source now that nothing
+///    exports the token as an environment variable.
+///
+/// The username is the provider's token-as-password convention
+/// (`x-access-token` for GitHub, `oauth2` for GitLab).
 pub(crate) fn credentials_for(url: &gix::Url) -> Option<gix::sec::identity::Account> {
     // Only HTTP(S) uses basic-auth identities here.
     if !matches!(url.scheme, gix::url::Scheme::Https | gix::url::Scheme::Http) {
@@ -127,7 +161,7 @@ pub(crate) fn credentials_for(url: &gix::Url) -> Option<gix::sec::identity::Acco
     }
 
     // 2) A token from the environment, by convention per host.
-    let token = std::env::var("DARKRUN_GIT_TOKEN")
+    let env_token = std::env::var("DARKRUN_GIT_TOKEN")
         .ok()
         .or_else(|| {
             if is_gitlab {
@@ -136,11 +170,26 @@ pub(crate) fn credentials_for(url: &gix::Url) -> Option<gix::sec::identity::Acco
                 std::env::var("GITHUB_TOKEN").ok().or_else(|| std::env::var("GH_TOKEN").ok())
             }
         })
-        .filter(|t| !t.is_empty())?;
+        .filter(|t| !t.is_empty());
+    if let Some(token) = env_token {
+        let username = url
+            .user()
+            .map(str::to_string)
+            .unwrap_or_else(|| if is_gitlab { "oauth2".into() } else { "x-access-token".into() });
+        return Some(gix::sec::identity::Account {
+            username,
+            password: token,
+            oauth_refresh_token: None,
+        });
+    }
+
+    // 3) The OAuth token from `darkrun auth login`.
+    let store = darkrun_vcs::CredentialStore::default_path().ok()?;
+    let (token, default_user) = stored_account_for(host, &store)?;
     let username = url
         .user()
         .map(str::to_string)
-        .unwrap_or_else(|| if is_gitlab { "oauth2".into() } else { "x-access-token".into() });
+        .unwrap_or_else(|| default_user.to_string());
     Some(gix::sec::identity::Account {
         username,
         password: token,
@@ -406,5 +455,60 @@ mod tests {
         assert!(out.success(), "unpack-objects accepted the incremental pack");
         // The new commit object now resolves in the remote-like clone.
         assert_eq!(git_out(&rroot, &["cat-file", "-t", &head]), "commit");
+    }
+
+    /// Credentials embedded in the remote URL win over everything else, and the
+    /// username defaults to the token-as-password convention when absent.
+    #[test]
+    fn credentials_prefer_url_embedded_userinfo() {
+        let url = gix::url::parse("https://user:secret@github.com/o/r.git".into()).unwrap();
+        let acct = credentials_for(&url).expect("url creds");
+        assert_eq!(acct.username, "user");
+        assert_eq!(acct.password, "secret");
+
+        let url = gix::url::parse("https://x-access-token:tok@github.com/o/r.git".into()).unwrap();
+        let acct = credentials_for(&url).expect("url creds");
+        assert_eq!(acct.username, "x-access-token");
+        assert_eq!(acct.password, "tok");
+    }
+
+    /// Non-HTTP transports carry no basic-auth identity.
+    #[test]
+    fn no_credentials_for_ssh_or_file() {
+        let ssh = gix::url::parse("ssh://git@github.com/o/r.git".into()).unwrap();
+        assert!(credentials_for(&ssh).is_none());
+        let file = gix::url::parse("file:///tmp/repo".into()).unwrap();
+        assert!(credentials_for(&file).is_none());
+    }
+
+    /// The stored-token bridge reads the `darkrun auth login` credential store,
+    /// picks the right provider by host, and applies the token-as-password
+    /// username convention. Self-hosted GitLab (no recognized provider) and an
+    /// empty store both yield nothing.
+    #[test]
+    fn stored_account_bridges_the_credential_store() {
+        use darkrun_vcs::{Credential, CredentialStore, Provider};
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::at(dir.path().join("credentials"));
+
+        store
+            .save(&Credential::new(Provider::GitHub, "gho_stored"))
+            .unwrap();
+        let (token, user) = stored_account_for("github.com", &store).expect("github token");
+        assert_eq!(token, "gho_stored");
+        assert_eq!(user, "x-access-token");
+
+        store
+            .save(&Credential::new(Provider::GitLab, "glpat_stored"))
+            .unwrap();
+        let (token, user) = stored_account_for("gitlab.com", &store).expect("gitlab token");
+        assert_eq!(token, "glpat_stored");
+        assert_eq!(user, "oauth2");
+
+        // Self-hosted GitLab maps to no provider → no stored token bridged.
+        assert!(stored_account_for("gitlab.example.org", &store).is_none());
+        // A store with no credential for the host.
+        let empty = CredentialStore::at(dir.path().join("empty"));
+        assert!(stored_account_for("github.com", &empty).is_none());
     }
 }

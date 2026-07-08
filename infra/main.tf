@@ -31,6 +31,19 @@ resource "google_project_service" "services" {
     # permanent and a stray `terraform destroy` must never be able to drop it,
     # the same reason the OAuth secrets + the Hosting site are operator-managed.
     "firestore.googleapis.com",
+    # Firestore Security Rules API: the deploy-app workflow publishes the
+    # committed firestore.rules via the Rules REST API so the repo is the source
+    # of truth for the ruleset (no console drift).
+    "firebaserules.googleapis.com",
+    # Pub/Sub: the relay's cross-instance frame bus (Step 1c). A host on one Cloud
+    # Run instance and a client on another exchange frames over the `relay_frames`
+    # topic (web/server/src/relay_bus.rs). Per-instance subscriptions are created
+    # at RUNTIME with an expiration policy — never in Terraform.
+    "pubsub.googleapis.com",
+    # Identity Platform: backs Firebase Auth. The auth module tracks the sign-in
+    # config (authorized domains + the GitHub/GitLab providers) as code so console
+    # drift can't silently break sign-in.
+    "identitytoolkit.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false
@@ -45,6 +58,18 @@ resource "google_project_service" "services" {
 resource "google_project_iam_member" "app_hosting_deployer" {
   project = var.gcp_project
   role    = "roles/firebasehosting.admin"
+  member  = "serviceAccount:cloudbuild-web@${var.gcp_project}.iam.gserviceaccount.com"
+
+  depends_on = [google_project_service.services]
+}
+
+# Let the same CI SA publish Firestore Security Rules (the deploy-app workflow
+# creates a ruleset from firestore.rules and points the cloud.firestore release
+# at it via the Rules REST API). Keeps the committed rules the source of truth,
+# keyless via WIF, scoped to just the rules-admin permission.
+resource "google_project_iam_member" "firestore_rules_deployer" {
+  project = var.gcp_project
+  role    = "roles/firebaserules.admin"
   member  = "serviceAccount:cloudbuild-web@${var.gcp_project}.iam.gserviceaccount.com"
 
   depends_on = [google_project_service.services]
@@ -67,6 +92,115 @@ resource "google_service_account_iam_member" "build_sa_actas_web_runtime" {
   service_account_id = "projects/${var.gcp_project}/serviceAccounts/${module.web.service_account}"
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:cloudbuild-web@${var.gcp_project}.iam.gserviceaccount.com"
+}
+
+# Native Firestore TTL for the relay-token broker's `relayBroker` collection: GC
+# each parked-token document once its `expiresAt` timestamp passes, server-side.
+# This replaces the in-memory broker's timer sweep for the Firestore-backed store
+# (web/server/src/relay_broker.rs) so abandoned deposits can't accumulate. Only
+# the FIELD TTL policy is Terraform-managed here; the `(default)` database itself
+# is operator-created (see the firestore.googleapis.com note above) and must never
+# be a destroyable resource. TTL GC is best-effort/lagging, so the store's
+# read-time `expiresAt` check stays authoritative regardless.
+resource "google_firestore_field" "relay_broker_ttl" {
+  project    = var.gcp_project
+  database   = "(default)"
+  collection = "relayBroker"
+  field      = "expiresAt"
+
+  ttl_config {}
+
+  depends_on = [google_project_service.services]
+}
+
+# Native Firestore TTL for the relay's `sessions` collection: GC each live-session
+# document once its `expiresAt` timestamp passes, server-side. A host heartbeat
+# renews `expiresAt` while it lives (web/server/src/relay_registry.rs); a
+# crashed/abandoned host's doc goes stale and this GCs it, so single-host-per-
+# session frees up. Same caveats as the relayBroker policy: the `(default)`
+# database is operator-created (never a destroyable resource here), and TTL GC is
+# best-effort/lagging, so the registry's read-time `expiresAt` check stays
+# authoritative regardless.
+resource "google_firestore_field" "sessions_ttl" {
+  project    = var.gcp_project
+  database   = "(default)"
+  collection = "sessions"
+  field      = "expiresAt"
+
+  ttl_config {}
+
+  depends_on = [google_project_service.services]
+}
+
+# The relay's cross-instance frame bus topic (Step 1c). Every relay instance
+# publishes host↔client frames here addressed by `to_instance`, and each instance
+# pulls from its OWN per-instance subscription (created at runtime with an
+# expiration_policy so a dead instance's subscription self-deletes — hence NO
+# subscription resource here). Storage is pinned in-region to keep frames close to
+# the Cloud Run service and avoid cross-region egress.
+resource "google_pubsub_topic" "relay_frames" {
+  project = var.gcp_project
+  name    = "relay_frames"
+
+  message_storage_policy {
+    allowed_persistence_regions = [var.gcp_region]
+  }
+
+  depends_on = [google_project_service.services]
+}
+
+# Let the darkrun-web runtime SA PUBLISH frames to the topic (topic-scoped — the
+# narrowest publish grant).
+resource "google_pubsub_topic_iam_member" "web_frame_publisher" {
+  project = var.gcp_project
+  topic   = google_pubsub_topic.relay_frames.name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${module.web.service_account}"
+}
+
+# The darkrun-web runtime SA creates its OWN per-instance subscription at boot
+# (web/server/src/relay_bus.rs — PubSubFrameBus::ensure_subscription does a runtime
+# PUT subscriptions.create) and then pulls/acks it. roles/pubsub.subscriber grants
+# consume/get/delete but NOT pubsub.subscriptions.create — that lives only in the
+# far-broader roles/pubsub.editor. Without create, the boot-time PUT 403s and the
+# whole receive path goes silently dark. Grant a LEAST-PRIVILEGE custom role with
+# exactly the subscription-lifecycle permissions the runtime needs, nothing more
+# (publish stays on the topic-scoped roles/pubsub.publisher above).
+resource "google_project_iam_custom_role" "relay_frame_subscriber" {
+  project     = var.gcp_project
+  role_id     = "relayFrameSubscriber"
+  title       = "Relay Frame Subscriber"
+  description = "Create, consume, and tear down the relay's per-instance Pub/Sub subscriptions at runtime."
+  permissions = [
+    "pubsub.subscriptions.create",
+    "pubsub.subscriptions.consume",
+    "pubsub.subscriptions.get",
+    "pubsub.subscriptions.delete",
+    "pubsub.topics.attachSubscription",
+  ]
+}
+
+# Bind the darkrun-web runtime SA to that custom role. Project-level because the
+# subscription name is derived per-instance at runtime, not a fixed Terraform
+# resource.
+resource "google_project_iam_member" "web_frame_subscriber" {
+  project = var.gcp_project
+  role    = google_project_iam_custom_role.relay_frame_subscriber.id
+  member  = "serviceAccount:${module.web.service_account}"
+
+  depends_on = [google_project_service.services]
+}
+
+# Let the darkrun-web runtime SA read+write Firestore (the relay's device
+# registry, relay-token broker, and session registry — Step 1a/1b — all write
+# `(default)` with this SA via the REST API). Was implicitly relied on; grant it
+# explicitly so the relay's Firestore access isn't dependent on a broader role.
+resource "google_project_iam_member" "web_datastore_user" {
+  project = var.gcp_project
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${module.web.service_account}"
+
+  depends_on = [google_project_service.services]
 }
 
 module "sentry" {
@@ -104,7 +238,33 @@ module "web" {
   # Relay + FCM remote push run on this Firebase project. Empty disables both.
   firebase_project = var.firebase_project
 
+  # The cross-instance frame bus topic (Step 1c) — turns DARKRUN_PUBSUB_TOPIC on in
+  # the service when the relay is enabled, so a split host/client pair can exchange
+  # frames across instances.
+  pubsub_topic = google_pubsub_topic.relay_frames.name
+
   manage_domain_mapping = var.manage_domain_mapping
+
+  depends_on = [google_project_service.services]
+}
+
+# Firebase Auth / Identity Platform sign-in config as code: the authorized
+# domains (always) and, opt-in, the GitHub + GitLab providers. Captures what used
+# to live only in the Firebase console so console drift surfaces as a plan diff.
+module "auth" {
+  source = "./modules/auth"
+
+  project            = var.firebase_project != "" ? var.firebase_project : var.gcp_project
+  authorized_domains = var.auth_authorized_domains
+
+  # Off by default: the provider resources require the OAuth client SECRET, which
+  # Terraform persists to state (the repo keeps OAuth secrets out of state). When
+  # off, only authorized_domains is tracked and the providers stay console-managed.
+  manage_idp           = var.manage_auth_idp
+  github_client_id     = var.github_oauth_client_id
+  github_client_secret = var.github_oauth_client_secret
+  gitlab_client_id     = var.gitlab_oauth_client_id
+  gitlab_client_secret = var.gitlab_oauth_client_secret
 
   depends_on = [google_project_service.services]
 }

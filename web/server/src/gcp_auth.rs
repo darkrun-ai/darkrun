@@ -28,6 +28,10 @@ pub const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging"
 /// The OAuth scope for the Firestore REST API (the persistent device registry).
 pub const DATASTORE_SCOPE: &str = "https://www.googleapis.com/auth/datastore";
 
+/// The OAuth scope for the Pub/Sub REST API (the cross-instance frame bus —
+/// publish + subscription-create + pull/ack).
+pub const PUBSUB_SCOPE: &str = "https://www.googleapis.com/auth/pubsub";
+
 /// The default OAuth token endpoint (a service-account JSON normally carries its
 /// own `token_uri`, but older keys may omit it).
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";

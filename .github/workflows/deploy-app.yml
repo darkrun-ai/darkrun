@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["web/app/**", "crates/darkrun-ui/**", "crates/darkrun-api/**", "firebase.json", "web/well-known/**"]
+    paths: ["web/app/**", "crates/darkrun-ui/**", "crates/darkrun-api/**", "firebase.json", "firestore.rules", "web/well-known/**"]
 
 concurrency:
   group: deploy-app-${{ github.ref }}
@@ -31,7 +31,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Free disk space
         run: |
@@ -54,6 +54,8 @@ jobs:
       # Assemble the deploy dir firebase.json points at (web/app/dist): the dx
       # web output + the universal-link well-known files served from /.well-known.
       - name: Assemble dist
+        env:
+          SENTRY_DSN: ${{ secrets.DARKRUN_WEB_SENTRY_DSN }}
         run: |
           rm -rf web/app/dist && mkdir -p web/app/dist/.well-known
           cp -r target/dx/darkrun-app/release/web/public/. web/app/dist/
@@ -62,6 +64,14 @@ jobs:
           # The FCM background service worker must be served from the app ROOT
           # (a service worker only controls its own path and below).
           cp web/app/firebase-messaging-sw.js web/app/dist/
+          # Inject the browser Sentry DSN (a public value) into the built
+          # index.html when provisioned. Unset leaves the placeholder token, which
+          # the init in index.html guards to a clean no-op. This mirrors the native
+          # surfaces' option_env! DSN wiring, so a build reports crashes only once
+          # the operator sets the DARKRUN_WEB_SENTRY_DSN secret.
+          if [ -n "${SENTRY_DSN}" ]; then
+            sed -i "s|__DARKRUN_SENTRY_DSN__|${SENTRY_DSN}|g" web/app/dist/index.html
+          fi
 
       # Keyless auth: federate the GitHub OIDC token to the cloudbuild-web SA.
       # Exports GOOGLE_APPLICATION_CREDENTIALS (the impersonated external_account).
@@ -124,3 +134,41 @@ jobs:
           curl -fsS -X PATCH "$API/$VER?updateMask=status" "${auth[@]}" -H "Content-Type: application/json" -d '{"status":"FINALIZED"}' >/dev/null
           curl -fsS -X POST "$API/sites/$SITE/releases?versionName=$VER" "${auth[@]}" >/dev/null
           echo "released $VER"
+
+      # Deploy firestore.rules so the COMMITTED rules are the source of truth
+      # (previously the rules had no deploy path — they lived only in the repo and
+      # had to be pushed by hand via `firebase deploy`). Keyless, reusing the same
+      # gcloud-minted token as the Hosting deploy above. Uses the Firebase Rules
+      # REST API: create a ruleset from firestore.rules, then point the
+      # `cloud.firestore` release at it.
+      #
+      # needs-owner: the cloudbuild-web SA must have roles/firebaserules.admin and
+      # the firebaserules.googleapis.com API must be enabled on the project (add
+      # both in infra/main.tf + `terraform apply`). Until then this step 403s.
+      - name: Deploy Firestore rules (REST, keyless)
+        run: |
+          set -euo pipefail
+          PROJECT=darkrun
+          API=https://firebaserules.googleapis.com/v1
+          TOKEN="$(gcloud auth print-access-token)"
+          auth=(-H "Authorization: Bearer $TOKEN")
+
+          # Build the ruleset payload, JSON-escaping the rules file content via jq.
+          body=$(jq -n --rawfile src firestore.rules \
+            '{source:{files:[{name:"firestore.rules",content:$src}]}}')
+          ruleset=$(curl -fsS -X POST "$API/projects/$PROJECT/rulesets" \
+            "${auth[@]}" -H "Content-Type: application/json" -d "$body" | jq -r .name)
+          echo "ruleset=$ruleset"; test -n "$ruleset" -a "$ruleset" != null
+
+          # Point the Firestore release at the new ruleset. The release exists after
+          # the first deploy — PATCH it; if it doesn't exist yet, create it (POST).
+          rel="projects/$PROJECT/releases/cloud.firestore"
+          patch=$(jq -n --arg n "$rel" --arg r "$ruleset" \
+            '{release:{name:$n,rulesetName:$r},updateMask:"rulesetName"}')
+          if ! curl -fsS -X PATCH "$API/$rel" "${auth[@]}" \
+                -H "Content-Type: application/json" -d "$patch" >/dev/null 2>&1; then
+            jq -n --arg n "$rel" --arg r "$ruleset" '{name:$n,rulesetName:$r}' \
+              | curl -fsS -X POST "$API/projects/$PROJECT/releases" "${auth[@]}" \
+                  -H "Content-Type: application/json" -d @- >/dev/null
+          fi
+          echo "released Firestore rules -> $ruleset"

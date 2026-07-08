@@ -328,6 +328,15 @@ pub fn create_external(
     if body.trim().is_empty() {
         return Ok(None);
     }
+    // Self-ingestion guard: the engine posts its OWN objective proof onto the
+    // change request as a comment (D5). When it then polls the PR's comments,
+    // that proof comment must NOT re-enter as external feedback — otherwise the
+    // engine dispatches a fix-worker against its own evidence and flips
+    // `has_review_activity` on a PR no human touched. Filter it out by its
+    // marker heading (author names vary by provider/bot config).
+    if body.trim_start().starts_with(crate::proof::PROOF_COMMENT_MARKER) {
+        return Ok(None);
+    }
     let id = external_feedback_id(external_id);
     // Dedup: this note already became feedback on an earlier poll → no-op.
     if store.read_feedback_raw(run)?.contains_key(&id) {

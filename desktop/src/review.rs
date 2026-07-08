@@ -7,8 +7,8 @@
 //!   - a compact phase subheader ([`StationPipeline`]) scoped to the current
 //!     station, now live off `current_state.phase`,
 //!   - a [`TabBar`] (Units / Outputs / Knowledge / Feedback / Overview) over the
-//!     station body, each unit/output row carrying view + review(annotate)
-//!     affordances and a feedback count,
+//!     station body, each unit/output row carrying a review(annotate) affordance
+//!     and a feedback count,
 //!   - a Feedback inbox listing every station annotation grouped by severity,
 //!     reachable from a persistent header button,
 //!   - the annotate surface ([`AnnotateToolbar`] + overlay + [`CommentPanel`])
@@ -17,9 +17,10 @@
 //!     review/final gate, whose primary action darkens to Request-changes when
 //!     open `should`/`must` annotations exist.
 //!
-//! Only the `Review` session variant is rendered in full; the other variants
-//! (question / direction / picker / view) show a compact placeholder so an
-//! unexpected payload never blanks the screen.
+//! Every session variant is rendered by its own surface — `Review` in full, and
+//! question / direction / picker / view / visual-review / proof each with a
+//! dedicated interactive screen — so an unexpected payload never blanks the
+//! screen.
 
 // Dioxus components are PascalCase by convention (the `rsx!` macro expects it);
 // clippy's non_snake_case doesn't apply to them.
@@ -90,20 +91,41 @@ pub fn ReviewApp(cfg: ConnConfig) -> Element {
 
     // Drive the session feed for the lifetime of the component. Each frame
     // updates the payload signal; a drop flips the link to Down.
+    //
+    // `run_session_feed` returns on every close/error, so a bare single call left
+    // the pane offline forever after a transient drop, an engine restart, or a
+    // failed initial dial. Wrap it in a reconnect loop with capped exponential
+    // backoff (matching the tunnel / web-app clients): a live payload resets the
+    // backoff so a healthy socket that blips reconnects fast, while a dead engine
+    // backs off to the cap instead of hot-looping.
     let feed_cfg = cfg.clone();
     use_future(move || {
         let cfg = feed_cfg.clone();
         async move {
-            wire::run_session_feed(&cfg, move |event| match event {
-                wire::FeedEvent::Payload(p) => {
-                    payload.set(Some(*p));
-                    link.set(Link::Live);
+            const MIN_BACKOFF_MS: u64 = 250;
+            const MAX_BACKOFF_MS: u64 = 5_000;
+            let mut backoff_ms = MIN_BACKOFF_MS;
+            loop {
+                let mut got_payload = false;
+                wire::run_session_feed(&cfg, |event| match event {
+                    wire::FeedEvent::Payload(p) => {
+                        got_payload = true;
+                        payload.set(Some(*p));
+                        link.set(Link::Live);
+                    }
+                    wire::FeedEvent::Disconnected(reason) => {
+                        link.set(Link::Down(reason));
+                    }
+                })
+                .await;
+                // A socket that delivered at least one frame was healthy — retry
+                // it promptly; otherwise grow the backoff toward the cap.
+                if got_payload {
+                    backoff_ms = MIN_BACKOFF_MS;
                 }
-                wire::FeedEvent::Disconnected(reason) => {
-                    link.set(Link::Down(reason));
-                }
-            })
-            .await;
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(MAX_BACKOFF_MS);
+            }
         }
     });
 
@@ -220,23 +242,31 @@ fn review_body(
     // Fetched off the feedback HTTP route for the current station; the annotation
     // model surfaces every artifact annotation here as a feedback item.
     let feedback = use_signal(Vec::<FeedbackItem>::new);
+    // Bumped after a fresh annotation is submitted so the severity gate re-reads
+    // live feedback — a dropped `must` must disable Approve immediately, not only
+    // after the next full remount.
+    let feedback_reload = use_signal(|| 0u32);
     {
         let cfg = cfg.clone();
         let run = run_slug.clone();
         let st = station.clone();
-        let mut feedback = feedback;
-        use_future(move || {
-            let cfg = cfg.clone();
-            let run = run.clone();
-            let st = st.clone();
-            async move {
-                if let (Some(run), Some(st)) = (run, st) {
-                    if let Ok(resp) = wire::fetch_feedback(&cfg, &run, &st).await {
-                        feedback.set(resp.items);
-                    }
+        let reload_n = feedback_reload();
+        // Refetch on EVERY run/station change (a station advance) or reload bump
+        // (a new annotation). The old one-shot fetch decided the gate on the
+        // feedback snapshot from first mount, so Approve stayed enabled after a
+        // dropped `must` or a station advance.
+        use_effect(use_reactive!(|cfg, run, st, reload_n| {
+            let _ = reload_n;
+            let mut feedback = feedback;
+            spawn(async move {
+                let (Some(run), Some(st)) = (run, st) else {
+                    return;
+                };
+                if let Ok(resp) = wire::fetch_feedback(&cfg, &run, &st).await {
+                    feedback.set(resp.items);
                 }
-            }
-        });
+            });
+        }));
     }
     let feedback_items = feedback.read().clone();
     let feedback_entries = map::feedback_entries(&feedback_items);
@@ -330,7 +360,7 @@ fn review_body(
                         },
                     })
                     .collect();
-                annotate_panel(cfg.clone(), run_slug.clone(), station.clone(), target, persisted, annotate_target)
+                annotate_panel(cfg.clone(), run_slug.clone(), station.clone(), target, persisted, annotate_target, feedback_reload)
             }
         }
 
@@ -355,7 +385,7 @@ fn review_body(
                         annotate_target,
                         inbox_open,
                     ));
-                    tab_body(&active, &units, &outputs, &knowledge, &unit_outputs, &feedback_entries, &review, annotate_target, inbox_open, fb_action)
+                    tab_body(&cfg, &active, &units, &outputs, &knowledge, &unit_outputs, &feedback_entries, &review, annotate_target, inbox_open, fb_action)
                 }
             }
         }
@@ -462,6 +492,7 @@ fn ReviewHeader(
 /// Render the body for the active tab.
 #[allow(clippy::too_many_arguments)]
 fn tab_body(
+    cfg: &ConnConfig,
     active: &str,
     units: &[map::UnitView],
     outputs: &[OutputArtifact],
@@ -474,7 +505,7 @@ fn tab_body(
     fb_action: EventHandler<(String, FeedbackAction)>,
 ) -> Element {
     match active {
-        "outputs" => output_tab(outputs, feedback, annotate_target),
+        "outputs" => output_tab(cfg, outputs, feedback, annotate_target),
         "knowledge" => knowledge_tab(knowledge),
         "feedback" => feedback_tab(feedback, inbox_open, fb_action),
         "overview" => overview_tab(review),
@@ -622,10 +653,11 @@ fn unit_tab(
     }
 }
 
-/// The Outputs tab: declared deliverables, each with view + review(annotate)
-/// affordances. Visual artifacts (image/html) open the spatial annotate surface;
+/// The Outputs tab: declared deliverables, each with a review(annotate)
+/// affordance. Visual artifacts (image/html) open the spatial annotate surface;
 /// the rest open the text surface.
 fn output_tab(
+    cfg: &ConnConfig,
     outputs: &[OutputArtifact],
     feedback: &[FeedbackEntry],
     annotate_target: Signal<Option<AnnotateTarget>>,
@@ -644,7 +676,14 @@ fn output_tab(
                     let visual = output_is_visual(&out);
                     let label = out.name.clone();
                     let path = out.run_relative_path.clone().unwrap_or_else(|| out.name.clone());
-                    let url = out.relative_path.clone();
+                    // Absolutize the fetch URL to the engine authority — a
+                    // host-relative `/api/output/…` never loads in the
+                    // custom-protocol webview.
+                    let url = out.relative_path.as_deref().map(|u| cfg.artifact_url(u));
+                    // A text/code artifact carries its body inline; hand it to the
+                    // annotate surface so the reviewer selects real spans instead
+                    // of a placeholder. Visual artifacts use the screenshot URL.
+                    let text = if visual { None } else { out.content.clone() };
                     let fb_n = feedback_count_for(feedback, &out.name);
                     rsx! {
                         div {
@@ -667,7 +706,7 @@ fn output_tab(
                                     work_id: label.clone(),
                                     visual,
                                     screenshot_url: url.clone(),
-                                    text: None,
+                                    text: text.clone(),
                                 }));
                             })}
                         }
@@ -678,8 +717,8 @@ fn output_tab(
     }
 }
 
-/// A small `view` + `review` action pair for a unit/output row. `on_review`
-/// fires the annotate affordance; `view` is a passive inline hint for now.
+/// A small `review` action chip for a unit/output row. `on_review` fires the
+/// annotate affordance (opening the artifact's annotate surface).
 fn row_actions(on_review: impl FnMut(MouseEvent) + 'static) -> Element {
     let chip = format!(
         "font-size:11px;color:{muted};border:1px solid {border};\
@@ -816,7 +855,7 @@ fn feedback_action_handler(
         // Jump is a surface action: focus the anchored artifact instead of
         // mutating the record.
         if action == FeedbackAction::Jump {
-            if let Some(target) = jump_target(&items, &id, &outputs) {
+            if let Some(target) = jump_target(&cfg, &items, &id, &outputs) {
                 // Switch to the owning tab, open the annotate surface on the
                 // anchored artifact, and close the inbox so it's in view.
                 active_tab.set(if target.visual {
@@ -907,6 +946,7 @@ fn feedback_inbox_panel(
 /// visual class + path + screenshot URL so the surface opens correctly; anything
 /// else falls back to a text target keyed on the locator (the unit/output id).
 fn jump_target(
+    cfg: &ConnConfig,
     items: &[FeedbackItem],
     id: &str,
     outputs: &[OutputArtifact],
@@ -933,8 +973,10 @@ fn jump_target(
             path: out.run_relative_path.clone().unwrap_or_else(|| out.name.clone()),
             work_id: out.name.clone(),
             visual,
-            screenshot_url: out.relative_path.clone(),
-            text: None,
+            // Absolutize the fetch URL so the visual surface actually loads it.
+            screenshot_url: out.relative_path.as_deref().map(|u| cfg.artifact_url(u)),
+            // A text/code output opens its inline body, not a placeholder.
+            text: if visual { None } else { out.content.clone() },
         });
     }
 
@@ -960,6 +1002,7 @@ fn annotate_panel(
     target: AnnotateTarget,
     persisted: Vec<TextMark>,
     mut annotate_target: Signal<Option<AnnotateTarget>>,
+    mut feedback_reload: Signal<u32>,
 ) -> Element {
     rsx! {
         AnnotateSurface {
@@ -974,6 +1017,10 @@ fn annotate_panel(
             text: target.text.clone(),
             persisted,
             on_close: move |_| annotate_target.set(None),
+            // A successful submit created a feedback item server-side; bump the
+            // reload counter so the station gate refetches and re-evaluates
+            // severity against the new annotation.
+            on_submitted: move |_| feedback_reload += 1,
         }
     }
 }
@@ -993,8 +1040,16 @@ fn AnnotateSurface(
     text: Option<String>,
     persisted: Vec<TextMark>,
     on_close: EventHandler<MouseEvent>,
+    /// Fired after a submit is accepted by the engine — the caller refetches
+    /// feedback so a new annotation re-evaluates the station gate. Defaults to a
+    /// no-op for standalone use (the visual-review render test).
+    #[props(default)]
+    on_submitted: EventHandler<()>,
 ) -> Element {
     let kind = if visual { SurfaceKind::Visual } else { SurfaceKind::Text };
+    // Markdown artifacts render as a formatted document in the stage (headings,
+    // lists, bold, code) rather than raw source.
+    let is_markdown = path.ends_with(".md") || path.ends_with(".markdown");
     let default_tool = if visual { AnnotateTool::Pin } else { AnnotateTool::Select };
     let tool = use_signal(|| default_tool);
     // The placed visual marks (pin/rect/arrow/path/highlight) over the surface.
@@ -1195,11 +1250,16 @@ fn AnnotateSurface(
                     wire::submit_annotation(&cfg, &run, &station, &req).await
                 };
                 match result {
-                    Ok(()) => submit.set(Submit::Sent(format!(
-                        "annotation recorded ({} marks · {} comments)",
-                        mark_list.len(),
-                        comment_list.len(),
-                    ))),
+                    Ok(()) => {
+                        // The engine minted a feedback item; tell the parent to
+                        // refetch so the station gate re-evaluates severity.
+                        on_submitted.call(());
+                        submit.set(Submit::Sent(format!(
+                            "annotation recorded ({} marks · {} comments)",
+                            mark_list.len(),
+                            comment_list.len(),
+                        )));
+                    }
                     Err(e) => submit.set(Submit::Failed(e.to_string())),
                 }
             });
@@ -1217,6 +1277,7 @@ fn AnnotateSurface(
 
     rsx! {
         Card {
+            style { "{darkrun_ui::markdown::CSS}" }
             div { style: "display:flex;align-items:center;gap:8px;margin-bottom:10px;",
                 Badge { tone: Tone::Info, if visual { "annotate · visual" } else { "annotate · text" } }
                 span {
@@ -1245,6 +1306,7 @@ fn AnnotateSurface(
                     display_marks.extend(text_marks.read().iter().cloned());
                     annotate_stage(
                         visual,
+                        is_markdown,
                         active_tool,
                         screenshot_url.clone(),
                         placed,
@@ -1254,7 +1316,7 @@ fn AnnotateSurface(
                         place,
                     )
                 }
-                div { style: "flex:1;min-width:0;",
+                div { style: if visual { "flex:1;min-width:0;" } else { "flex:0 0 320px;min-width:0;" },
                     CommentPanel {
                         comments: thread,
                         placeholder: "comment on this artifact…".to_string(),
@@ -1313,6 +1375,7 @@ fn norm_xy(px: f64, py: f64) -> (f64, f64) {
 #[allow(clippy::too_many_arguments)]
 fn annotate_stage(
     visual: bool,
+    markdown: bool,
     active: AnnotateTool,
     screenshot_url: Option<String>,
     marks: Vec<VisualMark>,
@@ -1326,14 +1389,24 @@ fn annotate_stage(
     let mut origin = use_signal(|| None::<(f64, f64)>);
     let mut stroke = use_signal(Vec::<(f64, f64)>::new);
 
-    let stage = format!(
-        "position:relative;flex:0 0 360px;min-height:220px;border-radius:8px;\
-         border:1px solid {border};background:{base};overflow:hidden;\
-         {cursor}",
-        border = tokens::var::BORDER,
-        base = tokens::var::SURFACE_BASE,
-        cursor = if visual { "cursor:crosshair;" } else { "" },
-    );
+    // Visual surfaces are a fixed 360px box (the gesture math normalizes against
+    // it). A text artifact is the PRIMARY content: let it grow wide and scroll,
+    // so a rendered doc reads like a document, not a cramped column.
+    let stage = if visual {
+        format!(
+            "position:relative;flex:0 0 360px;min-height:220px;border-radius:8px;\
+             border:1px solid {border};background:{base};overflow:hidden;cursor:crosshair;",
+            border = tokens::var::BORDER,
+            base = tokens::var::SURFACE_BASE,
+        )
+    } else {
+        format!(
+            "position:relative;flex:1;min-width:0;min-height:220px;max-height:72vh;\
+             overflow:auto;border-radius:8px;border:1px solid {border};background:{base};",
+            border = tokens::var::BORDER,
+            base = tokens::var::SURFACE_BASE,
+        )
+    };
     let is_pen = active == AnnotateTool::Pen;
     rsx! {
         div {
@@ -1406,7 +1479,22 @@ fn annotate_stage(
                     {render_mark(mark, i + 1)}
                 }
             } else if let Some(body) = text.as_deref() {
-                {render_text_with_marks(body, &text_marks)}
+                {
+                    // Markdown artifacts render as a formatted document (the primary
+                    // read); other text (code/json) stays raw with painted marks.
+                    // Either way the stage's mouseup captures the real selection.
+                    if markdown {
+                        rsx! {
+                            div {
+                                class: "dr-md",
+                                style: "padding:20px 24px;font-size:14px;",
+                                dangerous_inner_html: darkrun_ui::markdown::to_html(body),
+                            }
+                        }
+                    } else {
+                        render_text_with_marks(body, &text_marks)
+                    }
+                }
             } else {
                 div {
                     style: "padding:14px;color:var(--dr-text-muted);font-size:12px;\
@@ -1671,8 +1759,14 @@ fn checkpoint_section(
     // A global station note shipped with Request-changes.
     let note = use_signal(String::new);
 
+    // Pin the decision POST to the payload's OWN session id (the run actually on
+    // screen), not the channel we happen to be subscribed to — the question /
+    // direction / picker paths pin the same way. Belt-and-suspenders with keying
+    // ReviewApp by run: even if a stale feed streams a different run than we
+    // subscribed to, the decision targets the run being displayed, never a
+    // neighbour.
     let post = {
-        let cfg = cfg.clone();
+        let cfg = cfg.with_session(review.session_id.clone());
         move |raw: &'static str, feedback: Option<String>| {
             let cfg = cfg.clone();
             let mut decision = decision;
@@ -2394,22 +2488,31 @@ mod tests {
         }
     }
 
+    /// A fixed-authority config so URL rewrites are deterministic in assertions.
+    fn jcfg() -> ConnConfig {
+        ConnConfig { host: "127.0.0.1".into(), port: 7878, session_id: "s".into() }
+    }
+
     #[test]
     fn jump_matches_a_visual_output_and_carries_its_screenshot() {
         let items = vec![item("FB-01", Some("dashboard.png"), "review: dashboard")];
         let outputs = vec![output("dashboard.png", OutputArtifactType::Image)];
-        let target = jump_target(&items, "FB-01", &outputs).expect("resolves");
+        let target = jump_target(&jcfg(), &items, "FB-01", &outputs).expect("resolves");
         assert!(target.visual, "an image output opens the visual surface");
         assert_eq!(target.work_id, "dashboard.png");
         assert_eq!(target.path, "outputs/dashboard.png");
-        assert_eq!(target.screenshot_url.as_deref(), Some("/api/output/dashboard.png"));
+        // The host-relative fetch path is absolutized to the engine authority.
+        assert_eq!(
+            target.screenshot_url.as_deref(),
+            Some("http://127.0.0.1:7878/api/output/dashboard.png")
+        );
     }
 
     #[test]
     fn jump_matches_a_text_output_on_the_text_surface() {
         let items = vec![item("FB-02", Some("payment.rs"), "review: payment")];
         let outputs = vec![output("payment.rs", OutputArtifactType::Code)];
-        let target = jump_target(&items, "FB-02", &outputs).expect("resolves");
+        let target = jump_target(&jcfg(), &items, "FB-02", &outputs).expect("resolves");
         assert!(!target.visual, "a code output stays on the text surface");
         assert_eq!(target.work_id, "payment.rs");
     }
@@ -2418,7 +2521,7 @@ mod tests {
     fn jump_finds_the_output_when_the_locator_carries_a_line_suffix() {
         let items = vec![item("FB-03", Some("payment.rs:42-44"), "review")];
         let outputs = vec![output("payment.rs", OutputArtifactType::Code)];
-        let target = jump_target(&items, "FB-03", &outputs).expect("resolves via contains");
+        let target = jump_target(&jcfg(), &items, "FB-03", &outputs).expect("resolves via contains");
         assert_eq!(target.work_id, "payment.rs");
     }
 
@@ -2426,7 +2529,7 @@ mod tests {
     fn jump_falls_back_to_a_text_target_for_an_unmatched_locator() {
         // No declared output matches — a unit annotation anchors on the locator.
         let items = vec![item("FB-04", Some("auth-flow"), "review: auth-flow")];
-        let target = jump_target(&items, "FB-04", &[]).expect("resolves to text");
+        let target = jump_target(&jcfg(), &items, "FB-04", &[]).expect("resolves to text");
         assert!(!target.visual);
         assert_eq!(target.work_id, "auth-flow");
         assert_eq!(target.label, "auth-flow");
@@ -2435,14 +2538,14 @@ mod tests {
     #[test]
     fn jump_falls_back_to_the_title_when_no_source_ref() {
         let items = vec![item("FB-05", None, "loose note")];
-        let target = jump_target(&items, "FB-05", &[]).expect("resolves to title");
+        let target = jump_target(&jcfg(), &items, "FB-05", &[]).expect("resolves to title");
         assert_eq!(target.label, "loose note");
     }
 
     #[test]
     fn jump_returns_none_for_an_unknown_id() {
         let items = vec![item("FB-06", Some("x"), "t")];
-        assert!(jump_target(&items, "FB-99", &[]).is_none());
+        assert!(jump_target(&jcfg(), &items, "FB-99", &[]).is_none());
     }
 
     // --- visual mark → ImageShape routing ----------------------------------
@@ -2786,12 +2889,17 @@ mod tab_render_tests {
         dioxus_ssr::render(&dom)
     }
 
+    fn tcfg() -> ConnConfig {
+        ConnConfig { host: "127.0.0.1".into(), port: 7878, session_id: "s".into() }
+    }
+
     fn body(active: &'static str) -> Element {
         let at = use_signal(|| None::<AnnotateTarget>);
         let io = use_signal(|| false);
         let review = ReviewSessionPayload::default();
         let unit_outputs: BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>> = BTreeMap::new();
-        tab_body(active, &[], &[], &[], &unit_outputs, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
+        let cfg = tcfg();
+        tab_body(&cfg, active, &[], &[], &[], &unit_outputs, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
     }
 
     #[test]
@@ -2824,7 +2932,8 @@ mod tab_render_tests {
                 crate::map::unit_view(&serde_json::json!({"slug":"u1","title":"Burst limiter","status":"completed","unit_type":"code"})),
                 crate::map::unit_view(&serde_json::json!({"slug":"u2","title":"Tests","status":"in_progress"})),
             ];
-            tab_body("units", &units, &[], &[], &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
+            let cfg = tcfg();
+            tab_body(&cfg, "units", &units, &[], &[], &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         let mut dom = VirtualDom::new(UnitsPop); dom.rebuild_in_place(); let _ = dioxus_ssr::render(&dom);
         fn KnowPop() -> Element {
@@ -2833,7 +2942,8 @@ mod tab_render_tests {
             let review = ReviewSessionPayload::default();
             let uo: BTreeMap<String, Vec<darkrun_api::session::UnitOutputPreview>> = BTreeMap::new();
             let know = vec![KnowledgeFile { name: "notes.md".into(), content: "# notes\nbody".into() }];
-            tab_body("knowledge", &[], &[], &know, &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
+            let cfg = tcfg();
+            tab_body(&cfg, "knowledge", &[], &[], &know, &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         let mut dom2 = VirtualDom::new(KnowPop); dom2.rebuild_in_place(); let _ = dioxus_ssr::render(&dom2);
     }
@@ -2854,7 +2964,8 @@ mod tab_render_tests {
                 OutputArtifact { station: "build".into(), name: "page.html".into(), artifact_type: OutputArtifactType::Html, language: None, directory: None, content: Some("<h1>hi</h1>".into()), relative_path: Some("build/page.html".into()), run_relative_path: None },
                 OutputArtifact { station: "build".into(), name: "shot.png".into(), artifact_type: OutputArtifactType::Image, language: None, directory: None, content: None, relative_path: None, run_relative_path: Some("build/shot.png".into()) },
             ];
-            tab_body("outputs", &[], &outputs, &[], &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
+            let cfg = tcfg();
+            tab_body(&cfg, "outputs", &[], &outputs, &[], &uo, &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         let mut dom = VirtualDom::new(OutPop); dom.rebuild_in_place(); let _ = dioxus_ssr::render(&dom);
     }
@@ -3051,6 +3162,7 @@ mod panel_render_tests {
                 visual: true,
                 screenshot_url: Some("/api/output/home.png".into()),
             };
+            let feedback_reload = use_signal(|| 0u32);
             annotate_panel(
                 ConnConfig::from_env(),
                 Some("run-1".into()),
@@ -3058,6 +3170,7 @@ mod panel_render_tests {
                 target,
                 vec![],
                 annotate_target,
+                feedback_reload,
             )
         }
         let _ = render(App);
@@ -3078,16 +3191,16 @@ mod panel_render_tests {
                     points: vec![PinPoint::new(0.1, 0.1, ""), PinPoint::new(0.2, 0.2, "")],
                 },
             ];
-            annotate_stage(true, AnnotateTool::Pin, Some("/s.png".into()), marks, None, vec![], Callback::new(|_: String| {}), |_| {})
+            annotate_stage(true, false, AnnotateTool::Pin, Some("/s.png".into()), marks, None, vec![], Callback::new(|_: String| {}), |_| {})
         }
         fn VisualNoShot() -> Element {
-            annotate_stage(true, AnnotateTool::Pen, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
+            annotate_stage(true, false, AnnotateTool::Pen, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
         }
         fn Text() -> Element {
-            annotate_stage(false, AnnotateTool::Select, None, vec![], Some("Alpha beta.\n\nGamma delta.".into()), vec![TextMark { selected_text: "beta".into(), paragraph: 0, tool: Some(AnnotateTool::Select), stale: false }], Callback::new(|_: String| {}), |_| {})
+            annotate_stage(false, false, AnnotateTool::Select, None, vec![], Some("Alpha beta.\n\nGamma delta.".into()), vec![TextMark { selected_text: "beta".into(), paragraph: 0, tool: Some(AnnotateTool::Select), stale: false }], Callback::new(|_: String| {}), |_| {})
         }
         fn TextNoBody() -> Element {
-            annotate_stage(false, AnnotateTool::Select, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
+            annotate_stage(false, false, AnnotateTool::Select, None, vec![], None, vec![], Callback::new(|_: String| {}), |_| {})
         }
         let _ = render(Visual);
         assert!(render(VisualNoShot).contains("draw on the surface"));
@@ -3142,14 +3255,14 @@ mod panel_render_tests {
                 st("build", Some("manufacture"), true),
                 st("prove", None, false),
             ];
-            tab_body("overview", &[], &[], &[], &Default::default(), &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
+            tab_body(&ConnConfig::from_env(), "overview", &[], &[], &[], &Default::default(), &[], &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         fn Feedback() -> Element {
             let at = use_signal(|| None::<AnnotateTarget>);
             let io = use_signal(|| false);
             let review = ReviewSessionPayload::default();
             let entries = map::feedback_entries(&[fb_item("FB-1", Some("home.png"), "review: home")]);
-            tab_body("feedback", &[], &[], &[], &Default::default(), &entries, &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
+            tab_body(&ConnConfig::from_env(), "feedback", &[], &[], &[], &Default::default(), &entries, &review, at, io, EventHandler::new(|_: (String, FeedbackAction)| {}))
         }
         assert!(render(Overview).contains("Reflection"));
         assert!(render(Feedback).contains("open inbox panel"));
@@ -3175,7 +3288,7 @@ mod panel_render_tests {
                 out("notes.md", OutputArtifactType::Markdown),
             ];
             let entries = map::feedback_entries(&[fb_item("FB-1", Some("page.html"), "x")]);
-            output_tab(&outputs, &entries, at)
+            output_tab(&ConnConfig::from_env(), &outputs, &entries, at)
         }
         let u = render(Units);
         assert!(u.contains("review"), "the row review action renders");

@@ -5,20 +5,27 @@ name: macos-appstore
 # human hits "Submit" in App Store Connect. Auth is an App Store Connect API key;
 # signing is fastlane `match` (the macOS MAS cert types). Mirrors ios-release.yml.
 #
-# Manual-only (workflow_dispatch) until the secrets exist + `match macos` is
-# populated. Enable the `push: tags` trigger once these repo secrets are set
-# (the SAME set iOS uses — bootstrap-macos-signing.sh reuses the iOS match repo):
-#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8,
-#   MATCH_GIT_URL, MATCH_PASSWORD, MATCH_GIT_BASIC_AUTHORIZATION
+# Builds AUTOMATICALLY on every push to main that touches the app, uploading the
+# .pkg to App Store Connect (visible in TestFlight; a human still hits "Submit"
+# for the store). Same secrets iOS uses (all present; manual runs pass). Build
+# number = commit count, so each build is monotonically newer. Web/server-only
+# pushes don't rebuild. workflow_dispatch stays for on-demand rebuilds.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "fastlane/**"
+      - ".github/workflows/macos-appstore.yml"
   workflow_dispatch:
     inputs:
       version:
         description: "Marketing version (e.g. 0.7.0). Defaults to Cargo.toml."
         required: false
-  # push:
-  #   tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 concurrency:
   group: macos-appstore
@@ -32,7 +39,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so `git rev-list --count` is the real build number
 
@@ -40,7 +47,11 @@ jobs:
         id: v
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          # A TAG push (vX.Y.Z) uses the tag as the marketing version; a BRANCH
+          # push (main, the continuous build) and dispatch fall back to the
+          # Cargo.toml version. Keying on event_name="push" broke the branch case
+          # (ref_name was "main", which Apple rejects as CFBundleShortVersionString).
+          if [ "${{ github.ref_type }}" = "tag" ]; then
             ver="${GITHUB_REF_NAME#v}"
           elif [ -n "${{ inputs.version }}" ]; then
             ver="${{ inputs.version }}"
@@ -61,7 +72,7 @@ jobs:
         run: cargo install dioxus-cli --version "^0.7" --locked
 
       - name: Set up Ruby + fastlane (bundler)
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@d45b1a4e94b71acab930e56e79c6aa188764e7f9 # v1
         with:
           ruby-version: "3.3"
           bundler-cache: true
@@ -101,6 +112,12 @@ jobs:
         # accepts it (package-macos-pkg.sh sets the matching LSMinimumSystemVersion).
         env:
           MACOSX_DEPLOYMENT_TARGET: "12.0"
+          # Bake the Sentry DSN + release into the binary at compile time
+          # (darkrun-telemetry reads DARKRUN_SENTRY_DSN via option_env!). The DSN
+          # is a public ingest key, stored as a repo secret only to keep it out of
+          # logs; if the secret is unset, telemetry compiles out (no-op).
+          DARKRUN_SENTRY_DSN: ${{ secrets.DARKRUN_SENTRY_DSN }}
+          DARKRUN_RELEASE: ${{ steps.v.outputs.version }}
         run: dx bundle --package darkrun-desktop --platform macos --release
 
       - name: Sign + package the .pkg

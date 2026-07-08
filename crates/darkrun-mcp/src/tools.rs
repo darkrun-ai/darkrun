@@ -1444,12 +1444,20 @@ impl DarkrunServer {
             && !input.mode.trim().is_empty()
             && !input.size.trim().is_empty()
         {
+            // Reject a typo'd `--mode` rather than silently coercing it to `solo`
+            // (the wrong review posture). Size is validated inside `run_start`.
+            let Some(mode) = Mode::parse_strict(&input.mode) else {
+                return Ok(err_text(format!(
+                    "unknown run mode '{}': expected one of team, solo, or dark",
+                    input.mode
+                )));
+            };
             return match run_start(
                 &store,
                 &input.slug,
                 &input.factory,
                 input.title.clone(),
-                Mode::from_label(&input.mode),
+                mode,
                 &input.size,
             ) {
                 Ok(run) => ok_json(&run),

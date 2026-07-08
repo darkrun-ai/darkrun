@@ -7,14 +7,15 @@
 //!    under the nonce ([`firebase::deposit`]), where the waiting CLI claims it.
 //!
 //! 2. **Standalone login** (no nonce): visiting app.darkrun.ai's login directly
-//!    signs in for the web app itself and lands on the [`Dashboard`], the start
-//!    of the standalone web experience, not a "close the tab" dead end.
+//!    signs in for the web app itself and lands on the [`Workspace`], the start
+//!    of the standalone web experience, not a "close the tab" dead end. A
+//!    persisted session skips the prompt entirely and goes straight there.
 
 use darkrun_ui::prelude::*;
 use darkrun_ui::tokens;
 
-use crate::dashboard::Dashboard;
-use crate::firebase::{self, Account};
+use crate::firebase;
+use crate::workspace::Workspace;
 
 /// The step the page is on — drives what's shown.
 #[derive(Clone, PartialEq)]
@@ -54,7 +55,7 @@ pub fn LoginPage() -> Element {
             spawn(async move {
                 match firebase::consume_redirect().await {
                     Ok(Some(session)) => {
-                        match firebase::deposit(&firebase::web_base(), &nonce, &session.id_token).await {
+                        match firebase::deposit(&firebase::web_base(), &nonce, &session).await {
                             Ok(()) => step.set(Step::Done),
                             Err(e) => step.set(Step::Failed(format!("Couldn't hand the token to the CLI: {e}"))),
                         }
@@ -165,15 +166,20 @@ fn SignInButton(
 }
 
 /// The standalone web experience (no CLI nonce) — also the default at the bare
-/// app root. Offers BOTH GitHub and GitLab sign-in (no single-provider default);
-/// on success it renders the [`Dashboard`] in place. Failure shows why and
-/// re-offers both providers. The CLI-bridge path is untouched.
+/// app root. This is a PERSISTENT-login workspace: on load it first tries to
+/// restore the persisted Firebase session ([`firebase::restore_session`]); if a
+/// user is still signed in, it goes STRAIGHT to the [`Workspace`] with that
+/// durable ID token — no re-login, no dependence on the ephemeral provider access
+/// token. Only when there is no persisted session AND no pending redirect does it
+/// offer the GitHub / GitLab sign-in buttons. The CLI-bridge path is untouched.
 #[component]
 pub(crate) fn StandaloneLogin() -> Element {
-    let mut account = use_signal(|| None::<Account>);
-    // Start in "working": on mount we consume any pending redirect result (we may
-    // have just returned from a provider). No pending result flips us to Idle,
-    // which shows the sign-in buttons.
+    // The persisted / freshly-minted Firebase ID token. `Some` → the workspace
+    // takes over; `None` → we're still resolving auth or showing the buttons.
+    let mut session_token = use_signal(|| None::<String>);
+    // Start in "working": on mount we restore the persisted session and/or consume
+    // a pending redirect result. No session + no pending flips us to Idle, which
+    // shows the sign-in buttons.
     let mut step = use_signal(|| Step::Working);
     // The provider the user picked, if any. A button only SETS this; the redirect
     // is spawned by the effect below, in THIS component's scope. Spawning from the
@@ -183,8 +189,26 @@ pub(crate) fn StandaloneLogin() -> Element {
 
     use_effect(move || {
         spawn(async move {
+            // 1. "Remember me": a persisted Firebase session goes straight to the
+            //    workspace with its durable ID token (no provider re-auth). But if
+            //    a run link bounced us here with a `return_to`, land back there.
+            if let Some(token) = firebase::restore_session().await {
+                if land_return_to() {
+                    return; // navigating away to the return target
+                }
+                session_token.set(Some(token));
+                return;
+            }
+            // 2. Otherwise, consume a pending redirect (we may have just returned
+            //    from a provider). The minted ID token is the workspace bearer —
+            //    unless a `return_to` sends us back to the run we came from.
             match firebase::consume_redirect().await {
-                Ok(Some(session)) => account.set(Some(Account::new(session))),
+                Ok(Some(session)) => {
+                    if land_return_to() {
+                        return;
+                    }
+                    session_token.set(Some(session.id_token));
+                }
                 Ok(None) => {
                     if pending.peek().is_none() {
                         step.set(Step::Idle);
@@ -208,23 +232,10 @@ pub(crate) fn StandaloneLogin() -> Element {
         }
     });
 
-    // Signed in → hand off to the dashboard. `on_link` starts a full-page redirect
-    // to link the second provider to the SAME account; the linked identity comes
-    // back through the redirect on the next load.
-    if account().is_some() {
-        return rsx! {
-            Dashboard {
-                account: account().unwrap(),
-                on_link: move |provider: String| {
-                    step.set(Step::Working);
-                    spawn(async move {
-                        if let Err(e) = firebase::start_link_redirect(&provider).await {
-                            step.set(Step::Failed(e));
-                        }
-                    });
-                },
-            }
-        };
+    // Signed in (persisted or fresh) → the workspace takes over, driven by the
+    // durable Firebase ID token.
+    if let Some(token) = session_token() {
+        return rsx! { Workspace { id_token: token } };
     }
 
     rsx! {
@@ -237,7 +248,7 @@ pub(crate) fn StandaloneLogin() -> Element {
                         ProviderButtons { step, pending }
                     }
                 },
-                // `Idle` / the unreachable `Done` (the dashboard takes over on
+                // `Idle` / the unreachable `Done` (the workspace takes over on
                 // success) both show the sign-in prompt.
                 _ => rsx! {
                     div { style: "text-align:center;",
@@ -271,4 +282,46 @@ fn ProviderButtons(step: Signal<Step>, pending: Signal<Option<&'static str>>) ->
 fn start_sign_in(provider: &'static str, mut step: Signal<Step>, mut pending: Signal<Option<&'static str>>) {
     step.set(Step::Working);
     pending.set(Some(provider));
+}
+
+/// If the URL carries a safe internal `return_to`, navigate there and report
+/// `true` (the caller should stop — we're leaving this page). This is how a
+/// `/runs/:slug` link that bounced here to sign in lands the user back on the
+/// live run, not the bare workspace.
+fn land_return_to() -> bool {
+    let Some(dest) = firebase::query_param("return_to").and_then(|r| sanitize_return_to(&r)) else {
+        return false;
+    };
+    if let Some(win) = web_sys::window() {
+        let _ = win.location().set_href(&dest);
+        return true;
+    }
+    false
+}
+
+/// Accept only a safe SAME-ORIGIN path as a return target: it must start with a
+/// single `/` (not `//`, a protocol-relative URL to another origin) and carry no
+/// scheme. Guards against an open-redirect through `return_to`.
+fn sanitize_return_to(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    (t.starts_with('/') && !t.starts_with("//") && !t.contains("://")).then(|| t.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_return_to;
+
+    #[test]
+    fn return_to_accepts_internal_paths_and_rejects_offsite() {
+        assert_eq!(
+            sanitize_return_to("/runs/quiet-canyon").as_deref(),
+            Some("/runs/quiet-canyon")
+        );
+        // Protocol-relative and absolute URLs are open-redirect vectors → rejected.
+        assert_eq!(sanitize_return_to("//evil.example.com"), None);
+        assert_eq!(sanitize_return_to("https://evil.example.com"), None);
+        assert_eq!(sanitize_return_to("javascript:alert(1)"), None);
+        // A bare (non-rooted) path isn't a valid app route target here.
+        assert_eq!(sanitize_return_to("runs/x"), None);
+    }
 }
