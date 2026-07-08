@@ -2,6 +2,21 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.10.0](https://github.com/darkrun-ai/darkrun/compare/v0.9.0...v0.10.0) (2026-07-08)
+
+
+### Features
+
+* **desktop:** auto-detect + drive the installed app from a dev-checkout engine ([275cdaf](https://github.com/darkrun-ai/darkrun/commit/275cdaf963e2e260bebfb344b741dc47b84c724a))
+
+
+### Bug Fixes
+
+* **engine:** hold at operator gates + durably record desktop decisions ([05ffe57](https://github.com/darkrun-ai/darkrun/commit/05ffe576f202474c05660b8aff4646fb8a052791))
+* **ios:** make the App Store release lane idempotent (no build-number collision) ([b339b95](https://github.com/darkrun-ai/darkrun/commit/b339b959e2b3dcc0dee6461a92010b4a833226d3))
+* **ios:** make the App Store release lane idempotent (no build-number collision) ([#205](https://github.com/darkrun-ai/darkrun/issues/205)) ([5bf5240](https://github.com/darkrun-ai/darkrun/commit/5bf5240b62c23f6247794b4aa7a7f5a7fec169b4))
+* **local:** auto-detect installed desktop app + hold/record checkpoint gates ([#206](https://github.com/darkrun-ai/darkrun/issues/206)) ([161bcd4](https://github.com/darkrun-ai/darkrun/commit/161bcd4d9036a18cf7806ec03cad5c1c3abbccec))
+
 ## [0.9.0](https://github.com/darkrun-ai/darkrun/compare/v0.8.0...v0.9.0) (2026-07-07)
 
 
