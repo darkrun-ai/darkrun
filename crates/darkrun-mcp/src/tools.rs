@@ -142,6 +142,24 @@ impl DarkrunServer {
         }
     }
 
+    /// Whether the run executes AUTONOMOUSLY (dark mode) — no operator in the
+    /// loop. A run whose mode can't be read (no state yet) is treated as
+    /// interactive (NOT autonomous), so an unclassified run still gets the
+    /// operator-in-the-loop behavior. This is the signal `darkrun_advance` reads
+    /// to decide whether it may BLOCK at a gate: a dark/headless run must never
+    /// block — it returns the gate action immediately.
+    fn run_is_autonomous(&self, slug: &str) -> bool {
+        let store = self.store();
+        store
+            .read_state(slug)
+            .ok()
+            .flatten()
+            .map(|s| s.mode)
+            .or_else(|| store.read_run(slug).ok().map(|r| r.frontmatter.mode))
+            .map(|m| m.is_autonomous())
+            .unwrap_or(false)
+    }
+
     /// Resolve which run a slug-optional command (e.g. `darkrun_run_inspect`) targets.
     ///
     /// Priority, so a user standing in a run's worktree never has to name it:
@@ -271,6 +289,110 @@ impl DarkrunServer {
             }
         }
     }
+
+    /// Whether `darkrun_advance` should BLOCK on this action instead of returning
+    /// it: it is a live OPERATOR gate (the pre-execution `UserGate` or a non-auto
+    /// post-execution `Checkpoint`), the run is NOT autonomous, AND a human
+    /// surface is live (a present client or a push-acked device →
+    /// [`SurfaceMode::Await`]).
+    ///
+    /// A dark / autonomous / headless run is NEVER held — it returns `false`
+    /// here so the agent gets the gate action immediately (today's behavior).
+    /// That keeps a lights-out run from wedging on an operator who will never
+    /// answer, and preserves the standalone/relay surfacing path (web_url).
+    fn gate_should_hold(&self, action: &crate::position::RunAction, slug: &str) -> bool {
+        use crate::position::RunAction;
+        let is_operator_gate = match action {
+            RunAction::UserGate { .. } => true,
+            RunAction::Checkpoint { kind, .. } => {
+                !matches!(kind, darkrun_core::domain::CheckpointKind::Auto)
+            }
+            _ => false,
+        };
+        if !is_operator_gate || self.run_is_autonomous(slug) {
+            return false;
+        }
+        matches!(
+            crate::desktop::surface_mode(self.sessions.presence(), self.sessions.has_ack(slug)),
+            crate::desktop::SurfaceMode::Await
+        )
+    }
+
+    /// The blocking half of `darkrun_advance`: when `action` sits on a live
+    /// operator gate, HOLD (over the review session's broadcast channel) until
+    /// the operator decides, then re-tick PAST the gate and return the next
+    /// action. The decision lands on disk via the HTTP layer's installed
+    /// gate-decider hook, so the re-tick reads the cleared gate.
+    ///
+    /// Returns:
+    /// - `Some(result)` — the gate applied and was awaited: either the re-ticked
+    ///   next action (Resolved) or a `pending_gate` keepalive (TimedOut) the
+    ///   agent re-calls;
+    /// - `None` — no hold applies (not a live operator gate, autonomous run, or
+    ///   the session vanished mid-await): the caller returns the gate action as
+    ///   today. `timeout` is a parameter so the hold window is testable.
+    async fn advance_gate_hold(
+        &self,
+        store: &StateStore,
+        slug: &str,
+        action: &crate::position::RunAction,
+        timeout: std::time::Duration,
+    ) -> Option<std::result::Result<CallToolResult, ErrorData>> {
+        if !self.gate_should_hold(action, slug) {
+            return None;
+        }
+        match self.sessions.await_decision(slug, timeout).await {
+            // The operator decided — the land is on disk (hook), so re-tick past
+            // the gate and hand back the next action.
+            AwaitOutcome::Resolved(_) => Some(match run_tick(store, slug) {
+                Ok(next) => {
+                    let adapted = self.adapt_tick(next);
+                    // SELF-HEAL against a STALE resolution. If the re-tick STILL
+                    // lands on an operator gate we'd hold on, the on-disk gate
+                    // never cleared — the resolution was in-memory only (e.g. the
+                    // SPA wake `POST /api/advance/:id` flipped the session
+                    // `Decided` without landing the decision durably). Returning
+                    // that raw gate action now would let the agent re-call advance
+                    // and `await_decision` return `Resolved` INSTANTLY again off
+                    // the same stale flip — an unbounded zero-delay spin. Instead:
+                    // consume the stale resolution (reset the session to Pending
+                    // so the NEXT await genuinely blocks), and degrade to the same
+                    // bounded `pending_gate` keepalive the TimedOut arm returns so
+                    // the agent re-calls at the normal cadence, not in a hot loop.
+                    // A genuine on-disk decision advances the run (the re-ticked
+                    // action is no longer a hold-gate) and returns as today.
+                    if self.gate_should_hold(&adapted.action, slug) {
+                        self.sessions.mark_pending(slug);
+                        ok_json(&pending_gate_keepalive(slug))
+                    } else {
+                        ok_json(&adapted)
+                    }
+                }
+                Err(e) => Ok(err_text(e)),
+            }),
+            // The window elapsed with no decision — a bounded keepalive so the
+            // MCP client doesn't time the call out; the agent re-calls advance.
+            AwaitOutcome::TimedOut => Some(ok_json(&pending_gate_keepalive(slug))),
+            // The session was never registered or was removed mid-await — fall
+            // through so the caller still returns the live gate action.
+            AwaitOutcome::Unknown | AwaitOutcome::Gone => None,
+        }
+    }
+}
+
+/// The bounded `pending_gate` keepalive returned both when the hold window
+/// elapses with no decision AND when a `Resolved` outcome turns out to be STALE
+/// (its re-tick still sits on the same operator gate). A stable-shaped record
+/// the agent re-calls `darkrun_advance` on at the NORMAL cadence — never a
+/// zero-delay hot loop.
+fn pending_gate_keepalive(slug: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "pending_gate",
+        "slug": slug,
+        "web_url": run_web_url(slug),
+        "note": "Waiting on the operator to decide the gate in the desktop / \
+                 web app. Re-run darkrun_advance to keep waiting.",
+    })
 }
 
 fn ok_json<T: Serialize>(value: &T) -> std::result::Result<CallToolResult, ErrorData> {
@@ -1565,7 +1687,7 @@ impl DarkrunServer {
         name = "darkrun_advance",
         description = "Advance the run one tick; returns the next structured action (drift -> feedback -> run)."
     )]
-    pub fn darkrun_advance(
+    pub async fn darkrun_advance(
         &self,
         Parameters(input): Parameters<RunRef>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
@@ -1609,7 +1731,26 @@ impl DarkrunServer {
                 // the first tick of this engine process surfaces it (live
                 // mirror from here on), and later ticks leave it alone.
                 self.surface_desktop_once(&input.slug);
-                ok_json(&self.adapt_tick(tick))
+                // adapt_tick surfaces the run and raises the desktop for a gate,
+                // so the decision surface exists (and the review session is
+                // registered under the slug) BEFORE we hold on it below.
+                let adapted = self.adapt_tick(tick);
+                // HOLD at a live operator gate: block until the operator decides,
+                // then re-tick past it. A dark / autonomous / headless run is not
+                // held — `advance_gate_hold` returns None and we fall through to
+                // return the gate action immediately (today's behavior).
+                if let Some(result) = self
+                    .advance_gate_hold(
+                        &store,
+                        &input.slug,
+                        &adapted.action,
+                        std::time::Duration::from_millis(DEFAULT_AWAIT_TIMEOUT_MS),
+                    )
+                    .await
+                {
+                    return result;
+                }
+                ok_json(&adapted)
             }
             Err(e) => Ok(err_text(e)),
         }
@@ -1617,11 +1758,11 @@ impl DarkrunServer {
 
     /// Deprecated alias of `darkrun_advance` — kept for one release.
     #[tool(name = "darkrun_tick", description = "Deprecated alias of darkrun_advance.")]
-    pub fn darkrun_tick_alias(
+    pub async fn darkrun_tick_alias(
         &self,
         params: Parameters<RunRef>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        self.darkrun_advance(params)
+        self.darkrun_advance(params).await
     }
 
     /// Show a run's frontmatter, derived state, and current position.
@@ -3545,8 +3686,8 @@ mod tests {
         assert!(dir.path().join(".darkrun/r/run.md").exists());
     }
 
-    #[test]
-    fn run_next_tool_advances() {
+    #[tokio::test]
+    async fn run_next_tool_advances() {
         let dir = tempdir().unwrap();
         let server = DarkrunServer::new(dir.path());
         server
@@ -3559,11 +3700,212 @@ mod tests {
             .unwrap();
         let res = server
             .darkrun_advance(Parameters(RunRef { slug: "r".into() }))
+            .await
             .unwrap();
         assert_eq!(res.is_error, Some(false));
         let v = res.structured_content.unwrap();
         assert_eq!(v["action"]["action"], "spec");
         assert_eq!(v["action"]["station"], "frame");
+    }
+
+    /// Drive a fresh SOLO run to its pre-execution operator gate: seal the spec,
+    /// tick through Review into the UserGate phase, then decompose a pending
+    /// unit — so the NEXT `run_tick` (the one `darkrun_advance` performs) yields
+    /// a `UserGate` action. Mirrors the position-level phase walk.
+    fn drive_to_user_gate(store: &StateStore, slug: &str) {
+        run_start(store, slug, "software", None, Mode::Solo, "full").expect("start");
+        run_tick(store, slug).expect("spec tick"); // Spec (solo holds)
+        crate::position::elaborate_seal(store, slug, "frame").expect("seal");
+        run_tick(store, slug).expect("post-seal → Review phase");
+        run_tick(store, slug).expect("review → UserGate phase");
+        let unit = darkrun_core::domain::Unit {
+            slug: "u1".into(),
+            frontmatter: darkrun_core::domain::UnitFrontmatter {
+                status: Status::Pending,
+                station: Some("frame".into()),
+                ..Default::default()
+            },
+            title: "u1".into(),
+            body: String::new(),
+        };
+        store.write_unit(slug, &unit).expect("write unit");
+    }
+
+    #[tokio::test]
+    async fn gate_should_hold_needs_a_live_surface_and_an_interactive_run() {
+        let dir = tempdir().unwrap();
+        let sessions = SessionRegistry::new();
+        let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
+        run_start(&server.store(), "s", "software", None, Mode::Solo, "full").expect("solo");
+        let gate = crate::position::RunAction::UserGate {
+            run: "s".into(),
+            station: "frame".into(),
+        };
+        // No client attached → SurfaceMode::Launch → do NOT hold (surface the
+        // gate elsewhere instead of blocking on an operator who isn't watching).
+        assert!(!server.gate_should_hold(&gate, "s"));
+        // A live desktop → hold at the gate.
+        let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
+        assert!(server.gate_should_hold(&gate, "s"));
+        // A non-gate action never holds, even with a live surface.
+        let spec = crate::position::RunAction::Spec {
+            run: "s".into(),
+            station: "frame".into(),
+            kills: String::new(),
+        };
+        assert!(!server.gate_should_hold(&spec, "s"));
+    }
+
+    #[tokio::test]
+    async fn advance_holds_at_a_live_gate_then_reticks_past_it_on_decision() {
+        use darkrun_api::{ReviewSessionPayload, SessionPayload, SessionStatus};
+        let dir = tempdir().unwrap();
+        let sessions = SessionRegistry::new();
+        // A live desktop → presence Live, so the gate HOLDS (Await mode).
+        let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
+        let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
+        drive_to_user_gate(&server.store(), "r");
+
+        // The operator decides shortly after advance begins holding: land the
+        // decision on disk (what the HTTP gate-decider hook does) AND flip the
+        // in-memory review session so the await unblocks.
+        let task_store = server.store();
+        let task_sessions = sessions.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            checkpoint_decide(&task_store, "r", true, None).expect("land the gate on disk");
+            task_sessions.upsert(SessionPayload::Review(ReviewSessionPayload {
+                session_id: "r".into(),
+                status: SessionStatus::Approved,
+                ..Default::default()
+            }));
+        });
+
+        let res = server
+            .darkrun_advance(Parameters(RunRef { slug: "r".into() }))
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(false));
+        let v = res.structured_content.unwrap();
+        // Held, then re-ticked PAST the gate: the returned action is the release
+        // (Manufacture), not the user_gate that was being held.
+        assert_eq!(v["action"]["action"], "manufacture");
+    }
+
+    #[tokio::test]
+    async fn advance_gate_hold_returns_pending_gate_on_timeout() {
+        let dir = tempdir().unwrap();
+        let sessions = SessionRegistry::new();
+        let _slot = sessions.try_acquire_ws_slot(8).expect("slot"); // presence Live
+        let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
+        drive_to_user_gate(&server.store(), "r");
+
+        let store = server.store();
+        let tick = run_tick(&store, "r").expect("gate tick");
+        assert!(matches!(
+            tick.action,
+            crate::position::RunAction::UserGate { .. }
+        ));
+        // Register the run's review session (what adapt_tick does) so the await
+        // has a target; nobody decides, so the bounded hold times out.
+        crate::sessions::create_show(&sessions, &store, "r").expect("show");
+        let held = server
+            .advance_gate_hold(&store, "r", &tick.action, std::time::Duration::from_millis(30))
+            .await
+            .expect("the gate applies → Some")
+            .unwrap();
+        let v = held.structured_content.unwrap();
+        assert_eq!(v["status"], "pending_gate");
+        assert_eq!(v["slug"], "r");
+        assert_eq!(v["web_url"], "https://app.darkrun.ai/runs/r");
+    }
+
+    /// A `Resolved` outcome whose re-tick STILL yields the same operator gate is
+    /// a STALE resolution (the SPA wake flipped the in-memory session `Decided`
+    /// without landing the decision on disk, so the disk gate is uncleared). The
+    /// hold must NOT hand back the raw gate for an immediate re-call — that would
+    /// spin, because the next `await_decision` would return `Resolved` instantly
+    /// off the same stale flip. Instead it degrades to the bounded `pending_gate`
+    /// keepalive AND resets the session to `Pending` so a subsequent await blocks.
+    #[tokio::test]
+    async fn advance_self_heals_a_stale_resolution_instead_of_spinning() {
+        use darkrun_api::{ReviewSessionPayload, SessionPayload, SessionStatus};
+        let dir = tempdir().unwrap();
+        let sessions = SessionRegistry::new();
+        // A live desktop → presence Live, so the gate WOULD hold (Await mode).
+        let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
+        let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
+        drive_to_user_gate(&server.store(), "r");
+
+        let store = server.store();
+        // The gate the run is parked on. `run_tick` re-emits it on every tick
+        // because the on-disk gate is NEVER cleared (nobody calls checkpoint_decide).
+        let tick = run_tick(&store, "r").expect("gate tick");
+        assert!(matches!(
+            tick.action,
+            crate::position::RunAction::UserGate { .. }
+        ));
+
+        // Register the run's review session (what adapt_tick does), then
+        // STALE-RESOLVE it exactly the way the SPA wake endpoint
+        // (POST /api/advance/:id) does: flip the in-memory review session to
+        // `Decided` WITHOUT landing the decision durably. `await_decision` now
+        // reads it as resolved immediately, but the disk gate is uncleared.
+        crate::sessions::create_show(&sessions, &store, "r").expect("show");
+        sessions.upsert(SessionPayload::Review(ReviewSessionPayload {
+            session_id: "r".into(),
+            status: SessionStatus::Decided,
+            ..Default::default()
+        }));
+
+        let held = server
+            .advance_gate_hold(&store, "r", &tick.action, std::time::Duration::from_millis(30))
+            .await
+            .expect("the gate applies → Some")
+            .unwrap();
+        let v = held.structured_content.unwrap();
+        // NOT the raw user_gate for immediate re-call — the bounded keepalive.
+        assert_eq!(v["status"], "pending_gate");
+        assert_eq!(v["slug"], "r");
+        assert!(v.get("action").is_none(), "must not hand back the raw gate action");
+
+        // The stale in-memory resolution was CONSUMED: the session is back to
+        // Pending, so a subsequent await genuinely BLOCKS (times out) instead of
+        // returning Resolved instantly again — no zero-delay spin.
+        let sess = sessions.get("r").expect("session still registered");
+        assert_eq!(sess.status(), Some(SessionStatus::Pending));
+        assert!(matches!(
+            sessions
+                .await_decision("r", std::time::Duration::from_millis(20))
+                .await,
+            AwaitOutcome::TimedOut
+        ));
+    }
+
+    #[tokio::test]
+    async fn advance_never_holds_a_dark_autonomous_run() {
+        let dir = tempdir().unwrap();
+        let sessions = SessionRegistry::new();
+        // A live surface is present — the ONLY thing keeping this from holding is
+        // that the run is autonomous.
+        let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
+        let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
+        run_start(&server.store(), "r", "software", None, Mode::Dark, "full").expect("dark run");
+
+        // Even at a (fabricated) operator gate with a live surface, a dark run is
+        // never held: it must keep today's behavior (return the gate action).
+        let gate = crate::position::RunAction::UserGate {
+            run: "r".into(),
+            station: "frame".into(),
+        };
+        assert!(!server.gate_should_hold(&gate, "r"), "autonomous run must not hold");
+        let held = server
+            .advance_gate_hold(&server.store(), "r", &gate, std::time::Duration::from_millis(30))
+            .await;
+        assert!(
+            held.is_none(),
+            "no hold for a dark run → the caller returns the gate action immediately"
+        );
     }
 
     #[tokio::test]
@@ -4047,8 +4389,8 @@ mod handler_smoke {
             .to_string()
     }
 
-    #[test]
-    fn every_handler_executes_both_paths() {
+    #[tokio::test]
+    async fn every_handler_executes_both_paths() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
 
@@ -4073,7 +4415,7 @@ mod handler_smoke {
         // ── error arms on an absent run ────────────────────────────────────
         let rr = |slug: &str| RunRef { slug: slug.into() };
         assert_eq!(
-            s.darkrun_advance(Parameters(rr("ghost"))).unwrap().is_error,
+            s.darkrun_advance(Parameters(rr("ghost"))).await.unwrap().is_error,
             Some(true)
         );
         s.darkrun_run_inspect(Parameters(RunShowRef { slug: Some("ghost".into()) })).unwrap();
@@ -4087,7 +4429,7 @@ mod handler_smoke {
             mode: "solo".into(),
             size: "full".into(),        }))
         .unwrap();
-        s.darkrun_advance(Parameters(rr("r"))).unwrap();
+        s.darkrun_advance(Parameters(rr("r"))).await.unwrap();
         s.darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
         s.darkrun_run_surface(Parameters(RunSurfaceInput {
             slug: "r".into(),
@@ -4355,15 +4697,15 @@ mod handler_smoke {
     /// The error arms: every slug-scoped handler called against a ghost run
     /// returns an error result (the `Err(e) => Ok(err_text(e))` tail) — covers the
     /// failure half of each wrapper that `every_handler_executes` hit on success.
-    #[test]
-    fn slug_scoped_handlers_error_on_a_ghost_run() {
+    #[tokio::test]
+    async fn slug_scoped_handlers_error_on_a_ghost_run() {
         let dir = tempdir().unwrap();
         let s = DarkrunServer::new(dir.path());
         let g = || "ghost".to_string();
 
         // Reads against a missing run hit the `Err(e) => err_text` tail.
         let is_err = |r: CallToolResult| r.is_error == Some(true);
-        assert!(is_err(s.darkrun_advance(Parameters(RunRef { slug: g() })).unwrap()));
+        assert!(is_err(s.darkrun_advance(Parameters(RunRef { slug: g() })).await.unwrap()));
         assert!(is_err(s.darkrun_unit_get(Parameters(UnitRef { slug: g(), unit: "u".into() })).unwrap()));
         assert!(is_err(s.darkrun_feedback_resolve(Parameters(FeedbackResolveInput { slug: g(), feedback_id: "fb-1".into(), status: "addressed".into(), reply: None })).unwrap()));
         assert!(is_err(s.darkrun_proof_get(Parameters(ProofGetInput { slug: g(), station: None })).unwrap()));

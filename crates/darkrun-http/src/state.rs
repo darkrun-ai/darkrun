@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use darkrun_api::{Proof, SessionPayload};
+use darkrun_api::{Proof, SessionPayload, SessionStatus};
 use darkrun_core::StateStore;
 use tokio::sync::broadcast;
 
@@ -212,6 +212,29 @@ impl SessionRegistry {
     pub fn get(&self, id: &str) -> Option<SessionPayload> {
         let guard = self.inner.lock().expect("session registry poisoned");
         guard.get(id).map(|e| e.payload.clone())
+    }
+
+    /// Reset a decision-bearing session's status back to `Pending`, so a
+    /// subsequent [`await_decision`](Self::await_decision) genuinely BLOCKS
+    /// instead of returning `Resolved` off a stale flip. The self-heal the
+    /// advance gate-hold uses: when a `Resolved` outcome's re-tick STILL lands
+    /// on the same operator gate (the on-disk gate never cleared — e.g. the SPA
+    /// wake `POST /api/advance/:id` flipped the session `Decided` without
+    /// landing the decision durably), the in-memory resolution is stale and
+    /// must be consumed so the next hold waits for a REAL decision rather than
+    /// spinning. Returns whether a decision-bearing session with that id existed
+    /// (and was reset); a no-op `false` on an unknown id or a display-only
+    /// variant with no status. Broadcasts the reset frame like any upsert.
+    pub fn mark_pending(&self, id: &str) -> bool {
+        let Some(mut payload) = self.get(id) else {
+            return false;
+        };
+        if payload.status().is_none() {
+            return false;
+        }
+        payload.set_status(SessionStatus::Pending);
+        self.upsert_under(id, payload);
+        true
     }
 
     /// Mint the next session id for the given kind `prefix` (`q`/`d`/`p`),
@@ -445,6 +468,17 @@ pub type SessionMaterializer = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 /// interactive session, to re-push the run's surface.
 pub type SurfaceResolver = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Durable gate-decision hook the engine installs: given a run slug, whether
+/// the operator APPROVED, and any feedback, land the decision in the on-disk
+/// StateStore the engine reads. Returns whether the land succeeded.
+///
+/// This is the bridge that keeps the durable gate write in sync with the
+/// in-memory review session. `darkrun-http` cannot depend on `darkrun-mcp`
+/// (that would be circular), so the engine (darkrun-mcp) installs a closure
+/// wrapping its `checkpoint_decide` — the same posture as [`SurfaceResolver`]
+/// and [`SessionMaterializer`]. The signature is `(run, approved, feedback)`.
+pub type GateDecider = Arc<dyn Fn(&str, bool, Option<String>) -> bool + Send + Sync>;
+
 /// The shared application state threaded through every handler.
 #[derive(Clone)]
 pub struct AppState {
@@ -467,6 +501,12 @@ pub struct AppState {
     /// prompt is dismissed and the NEXT open one — or the review — takes its
     /// place on the desktop, without waiting for the agent's next tick.
     pub resolve_surface: Option<SurfaceResolver>,
+    /// Optional durable gate-decision hook the engine installs: lands an
+    /// operator's Approve / Request-changes into the on-disk StateStore (via
+    /// the engine's `checkpoint_decide`), so `POST /review/:id/decide` writes
+    /// the gate durably and not just to the in-memory session. Absent → no-op
+    /// (the HTTP server keeps flipping the in-memory session only).
+    pub gate_decider: Option<GateDecider>,
 }
 
 impl AppState {
@@ -479,6 +519,7 @@ impl AppState {
             limits,
             materialize_session: None,
             resolve_surface: None,
+            gate_decider: None,
         }
     }
 
@@ -500,6 +541,16 @@ impl AppState {
         self
     }
 
+    /// Install the durable gate-decision hook (see `gate_decider`). The engine
+    /// wraps its `checkpoint_decide` here so a review decision lands on disk.
+    pub fn with_gate_decider(
+        mut self,
+        f: impl Fn(&str, bool, Option<String>) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.gate_decider = Some(Arc::new(f));
+        self
+    }
+
     /// Ensure `id` exists in the session registry, building it on demand via
     /// the installed materializer when absent. Returns whether it now exists.
     pub fn ensure_session(&self, id: &str) -> bool {
@@ -517,6 +568,18 @@ impl AppState {
     pub fn resolve_surface(&self, run: Option<&str>) {
         if let (Some(run), Some(hook)) = (run, &self.resolve_surface) {
             hook(run);
+        }
+    }
+
+    /// Land an operator's gate decision durably via the installed gate-decider
+    /// hook (see `gate_decider`). Returns whether the land succeeded; `false`
+    /// when no hook is installed (the standalone HTTP server case) or the land
+    /// failed — the caller treats this as best-effort, never blocking the
+    /// in-memory session flip on it.
+    pub fn decide_gate(&self, run: &str, approved: bool, feedback: Option<String>) -> bool {
+        match &self.gate_decider {
+            Some(hook) => hook(run, approved, feedback),
+            None => false,
         }
     }
 }
@@ -645,5 +708,33 @@ mod tests {
         drop(reg.try_acquire_ws_slot(8).expect("slot")); // connect then lose
         let _slot = reg.try_acquire_ws_slot(8).expect("slot"); // reattach
         assert_eq!(reg.presence(), Presence::Live);
+    }
+
+    #[test]
+    fn decide_gate_invokes_the_installed_hook_with_its_args() {
+        // The hook captures exactly what it was called with; decide_gate returns
+        // whatever the hook returns.
+        type Captured = Arc<Mutex<Option<(String, bool, Option<String>)>>>;
+        let captured: Captured = Arc::new(Mutex::new(None));
+        let sink = captured.clone();
+        let state = AppState::new(StateStore::new("."), Limits::default()).with_gate_decider(
+            move |run, approved, fb| {
+                *sink.lock().unwrap() = Some((run.to_string(), approved, fb));
+                true
+            },
+        );
+        assert!(state.decide_gate("run-x", true, Some("looks good".into())));
+        assert_eq!(
+            captured.lock().unwrap().clone(),
+            Some(("run-x".to_string(), true, Some("looks good".to_string())))
+        );
+    }
+
+    #[test]
+    fn decide_gate_is_a_noop_false_when_no_hook_is_installed() {
+        // The standalone HTTP server (no engine) installs no hook — decide_gate
+        // must not panic and reports the no-op with `false`.
+        let state = AppState::new(StateStore::new("."), Limits::default());
+        assert!(!state.decide_gate("run-x", true, None));
     }
 }

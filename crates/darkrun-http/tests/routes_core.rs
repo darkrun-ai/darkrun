@@ -688,6 +688,87 @@ async fn decide_approve_feedback_persisted_on_session() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// POST /review/:id/decide — durable gate-decider hook (the on-disk land bridge)
+// ════════════════════════════════════════════════════════════════════════════
+
+type GateCalls = std::sync::Arc<std::sync::Mutex<Vec<(String, bool, Option<String>)>>>;
+
+/// Install a capturing gate-decider on `state`; return the shared call log.
+fn capture_gate(state: AppState) -> (AppState, GateCalls) {
+    let calls: GateCalls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = calls.clone();
+    let state = state.with_gate_decider(move |run, approved, fb| {
+        sink.lock().unwrap().push((run.to_string(), approved, fb));
+        true
+    });
+    (state, calls)
+}
+
+#[tokio::test]
+async fn decide_approve_lands_the_gate_via_the_hook() {
+    // review("gd-ap") carries run_slug = Some("my-run"), so the durable land
+    // fires with approved=true and the feedback threaded through.
+    let (state, calls) = capture_gate(test_state());
+    state.sessions.upsert(review("gd-ap"));
+    let resp = send(
+        build_router(state),
+        post_json(
+            "/review/gd-ap/decide",
+            &json!({ "decision": "approved", "feedback": "ship it" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let got = calls.lock().unwrap().clone();
+    assert_eq!(
+        got,
+        vec![("my-run".to_string(), true, Some("ship it".to_string()))],
+        "the gate-decider hook fired once with (run, approved, feedback)"
+    );
+}
+
+#[tokio::test]
+async fn decide_changes_lands_the_gate_via_the_hook_as_not_approved() {
+    let (state, calls) = capture_gate(test_state());
+    state.sessions.upsert(review("gd-ch"));
+    let _ = send(
+        build_router(state),
+        post_json(
+            "/review/gd-ch/decide",
+            &json!({ "decision": "changes_requested", "feedback": "fix the spec" }),
+        ),
+    )
+    .await;
+    let got = calls.lock().unwrap().clone();
+    assert_eq!(
+        got,
+        vec![("my-run".to_string(), false, Some("fix the spec".to_string()))],
+        "a request-changes decision lands as approved=false with its feedback"
+    );
+}
+
+#[tokio::test]
+async fn decide_does_not_call_the_hook_for_an_adhoc_review_with_no_run() {
+    // A review with run_slug=None has no on-disk run to land into.
+    let (state, calls) = capture_gate(test_state());
+    state.sessions.upsert(SessionPayload::Review(ReviewSessionPayload {
+        session_id: "gd-adhoc".into(),
+        status: SessionStatus::Pending,
+        run_slug: None,
+        ..Default::default()
+    }));
+    let _ = send(
+        build_router(state),
+        post_json("/review/gd-adhoc/decide", &json!({ "decision": "approved" })),
+    )
+    .await;
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "no run slug → the durable gate-decider is never invoked"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // POST /review/:id/decide — request changes
 // ════════════════════════════════════════════════════════════════════════════
 

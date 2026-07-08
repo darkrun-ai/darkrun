@@ -145,6 +145,19 @@ pub async fn serve_stdio_on(
             let _ = crate::sessions::create_show_with_focus(&sessions, &res_store, run, false);
         })
     };
+    // Durable gate land: `POST /review/:slug/decide` flips the in-memory review
+    // session, but the ENGINE reads the on-disk StateStore. Wrap
+    // `checkpoint_decide` so a desktop/web Approve or Request-changes lands the
+    // decision on disk too — `checkpoint_decide` resolves BOTH the pre-execution
+    // UserGate and the post-execution Checkpoint, so one hook covers both desktop
+    // buttons. Without this the gate never clears on disk and the agent must
+    // re-issue advance to move past it.
+    let state = {
+        let ds = state.store.clone();
+        state.with_gate_decider(move |run, approved, fb| {
+            crate::position::checkpoint_decide(&ds, run, approved, fb).is_ok()
+        })
+    };
     // Durability: every interactive session (question / direction / picker) the
     // registry upserts — on raise AND on answer — is written to the run's
     // `interactive/` dir, so an open question and its eventual answer survive an
