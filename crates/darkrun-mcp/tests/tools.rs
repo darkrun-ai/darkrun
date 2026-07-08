@@ -108,8 +108,15 @@ fn started(slug: &str) -> (TempDir, DarkrunServer) {
 }
 
 fn next(server: &DarkrunServer, slug: &str) -> CallToolResult {
-    server
-        .darkrun_advance(Parameters(RunRef { slug: slug.into() }))
+    // `darkrun_advance` is async (it can HOLD at a live operator gate until the
+    // operator decides). These tests drive runs with no live surface, so the
+    // hold never engages and the future resolves synchronously — block it to
+    // completion on a throwaway current-thread runtime, keeping every caller sync.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(server.darkrun_advance(Parameters(RunRef { slug: slug.into() })))
         .unwrap()
 }
 
