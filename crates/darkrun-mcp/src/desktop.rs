@@ -4,12 +4,16 @@
 //!
 //! Resolution mirrors how the `bin/darkrun` shim resolves the CLI:
 //! - **Dev checkout** (the engine is running from a cargo workspace's
-//!   `target/<profile>/`): always use the local `target/<profile>/darkrun-desktop`,
-//!   **building it for the host arch on demand** if it isn't built yet. So a dev
-//!   build of the engine always drives a matching local desktop build.
+//!   `target/<profile>/`): on macOS, if the shipped "Darkrun AI" app is installed
+//!   it is **auto-detected and driven** (so a dev-checkout engine can smoke-test
+//!   the released app). Otherwise, or with `DARKRUN_DESKTOP=local`, the local
+//!   `target/<profile>/darkrun-desktop` is used, **built on demand** for the host
+//!   arch if it isn't built yet.
 //! - **Installed plugin**: the per-arch sub-package ships `darkrun-desktop` next
 //!   to `darkrun`, so it's a sibling of the running engine binary.
-//! - `DARKRUN_DESKTOP` overrides everything.
+//! - `DARKRUN_DESKTOP=<path>` overrides everything; `DARKRUN_DESKTOP=installed`
+//!   (macOS) opens the shipped Mac App Store / TestFlight app by bundle id via
+//!   LaunchServices, so a dev-checkout engine can drive the released app.
 //!
 //! ## macOS: launch via LaunchServices, not a bare `exec`
 //!
@@ -426,27 +430,109 @@ fn launch_direct(bin: PathBuf, port: u16, repo_root: &Path, session: Option<&str
     }
 }
 
+/// The single darkrun app bundle id (Mac App Store / TestFlight build), shared
+/// across platforms — see `desktop/Dioxus.toml`. Used to open the INSTALLED,
+/// signed app by identity rather than by path.
+#[cfg(target_os = "macos")]
+const INSTALLED_BUNDLE_ID: &str = "ai.darkrun.app";
+
+/// Open the **installed** app (Mac App Store / TestFlight) by bundle id via
+/// LaunchServices, pointed at the engine `port`.
+///
+/// Unlike [`launch`], this never rebuilds, wraps, or copies a binary — it opens
+/// the already-installed, signed `.app` as-is (`open -b`), which is the only way
+/// to drive the sandboxed store build (re-wrapping its signed binary would fail).
+/// The store app carries `network.client`, so it can reach `ws://127.0.0.1:port`.
+/// Requested via `DARKRUN_DESKTOP=installed`, so a dev-checkout engine (which
+/// otherwise always rebuilds + launches the local `target/` binary) can drive the
+/// SHIPPED app instead.
+#[cfg(target_os = "macos")]
+fn launch_installed(port: u16, repo_root: &Path, session: Option<&str>) -> Launch {
+    let log = log_path(repo_root);
+    let _ = open_log(repo_root); // ensure .darkrun/ exists for open's redirect
+    let mut cmd = Command::new("open");
+    cmd.arg("-n")
+        .arg("-b")
+        .arg(INSTALLED_BUNDLE_ID)
+        .arg("--env")
+        .arg(format!("DARKRUN_PORT={port}"));
+    if let Some(s) = session {
+        cmd.arg("--env").arg(format!("DARKRUN_SESSION_ID={s}"));
+    }
+    // `open -b` exits non-zero when the bundle id isn't installed, so a failure
+    // here is a real "not installed" signal — surface it as NotFound.
+    let ok = cmd
+        .arg("--stdout")
+        .arg(&log)
+        .arg("--stderr")
+        .arg(&log)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        Launch::Launched(PathBuf::from(INSTALLED_BUNDLE_ID))
+    } else {
+        Launch::NotFound
+    }
+}
+
+/// Whether the shipped "Darkrun AI" app is installed. The Mac App Store /
+/// TestFlight install it to `/Applications` (or `~/Applications`), so a cheap
+/// path probe suffices — no Spotlight dependency, no subprocess.
+#[cfg(target_os = "macos")]
+fn installed_app_present() -> bool {
+    const APP: &str = "Darkrun AI.app";
+    if Path::new("/Applications").join(APP).is_dir() {
+        return true;
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return Path::new(&home).join("Applications").join(APP).is_dir();
+    }
+    false
+}
+
 /// Bring up the desktop app pointed at the engine `port`.
 ///
-/// `DARKRUN_DESKTOP` wins. In a **dev checkout** the local
-/// `target/<profile>/darkrun-desktop` is always used — built on demand for the
-/// host arch (in the background, so this doesn't block) when it isn't compiled
-/// yet. Otherwise the installed sibling binary is launched.
+/// Resolution order:
+/// - `DARKRUN_DESKTOP=installed` (macOS): force the shipped store / TestFlight app.
+/// - `DARKRUN_DESKTOP=<path>`: launch that binary.
+/// - **Dev checkout, macOS**: if the shipped "Darkrun AI" app is installed it is
+///   AUTO-DETECTED and driven (so a dev-checkout engine smoke-tests the released
+///   app without rebuilding the local desktop). `DARKRUN_DESKTOP=local` forces the
+///   local `target/<profile>/darkrun-desktop` build instead, for desktop-UI work.
+/// - **Dev checkout otherwise**: the local build, compiled on demand.
+/// - Otherwise: the installed sibling binary.
 pub fn spawn(repo_root: &Path, port: u16, session: Option<&str>) -> Launch {
-    // Explicit override.
-    if let Ok(p) = std::env::var("DARKRUN_DESKTOP") {
-        let p = PathBuf::from(p);
+    let want = std::env::var("DARKRUN_DESKTOP").ok();
+    // `DARKRUN_DESKTOP=installed`: force the SHIPPED, signed store app by bundle
+    // id. Checked before the path form so the sentinel isn't read as a file path.
+    #[cfg(target_os = "macos")]
+    if want.as_deref() == Some("installed") {
+        return launch_installed(port, repo_root, session);
+    }
+    // Explicit binary path (ignoring the `installed` / `local` sentinels).
+    if let Some(path) = want.as_deref().filter(|w| *w != "installed" && *w != "local") {
+        let p = PathBuf::from(path);
         if p.is_file() {
             return launch(p, port, repo_root, session);
         }
     }
-    // Dev: always the local version, and ALWAYS rebuild it first so the launched
-    // app reflects the latest source — `cargo build` is incremental, so it's a
-    // near-instant no-op when nothing changed, and correctly recompiles when the
-    // UI did. (Previously a once-built binary was launched as-is, so edits to the
-    // desktop/UI crates never showed up until the binary was manually deleted.)
-    // If the builder can't even be spawned, fall back to launching whatever exists.
     if let Some((ws, profile)) = dev_workspace() {
+        // Dev checkout: prefer the AUTO-DETECTED installed app so this engine can
+        // drive the SHIPPED build without rebuilding the local desktop each time.
+        // `DARKRUN_DESKTOP=local` opts back into the local build for desktop-UI
+        // development (where you want to see your own changes).
+        #[cfg(target_os = "macos")]
+        if want.as_deref() != Some("local") && installed_app_present() {
+            return launch_installed(port, repo_root, session);
+        }
+        // Otherwise build the local desktop on demand and launch it (ALWAYS
+        // rebuild first so the app reflects the latest source; `cargo build` is a
+        // near-instant no-op when nothing changed). Fall back to launching
+        // whatever exists if the builder can't even be spawned.
         let bin = ws.join("target").join(&profile).join(bin_name());
         if spawn_build_then_launch(&ws, &profile, &bin, port, repo_root, session) {
             return Launch::Building;
