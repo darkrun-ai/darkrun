@@ -22,3 +22,24 @@
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 52s
 warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
 note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+   Compiling rayon v1.12.0
+   Compiling exr v1.74.0
+   Compiling darkrun-api v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-api)
+   Compiling darkrun-vcs v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-vcs)
+   Compiling darkrun-prompts v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-prompts)
+   Compiling darkrun-harness v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-harness)
+   Compiling darkrun-telemetry v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-telemetry)
+   Compiling av-scenechange v0.14.1
+   Compiling maybe-rayon v0.1.1
+    Blocking waiting for file lock on build directory
+   Compiling darkrun-git v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-git)
+   Compiling darkrun-core v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-core)
+   Compiling darkrun-tunnel v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-tunnel)
+   Compiling rav1e v0.8.1
+   Compiling darkrun-content v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-content)
+   Compiling ravif v0.13.0
+    Blocking waiting for file lock on build directory
+   Compiling image v0.25.10
+   Compiling dioxus-desktop v0.7.9
+   Compiling darkrun-http v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-http)
+   Compiling darkrun-mcp v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-mcp)
