@@ -32,16 +32,16 @@ quality_gates:
 - name: citations-resolve
   command: sh -c 'n=$(grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/frame/frame.md | sort -u | wc -l); test "$n" -ge 8 && grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/frame/frame.md | sort -u | xargs -I{} test -e {}'
 gate_results:
-- name: citations-resolve
-  status: pass
-  at: 2026-07-11T05:09:59.770137+00:00
-  attempts: 1
-  detail: 12 distinct extension-bearing repo paths cited; count >= 8 and every path resolves in the unit worktree (command exited 0)
 - name: artifact-nonempty
   status: pass
   at: 2026-07-11T05:30:17.773670+00:00
   attempts: 2
   detail: 'Re-verified against the distilled artifact (commit ea46b46): test -s exited 0'
+- name: citations-resolve
+  status: pass
+  at: 2026-07-11T05:30:31.977864+00:00
+  attempts: 2
+  detail: 'Re-verified against the distilled artifact (commit ea46b46): 14 distinct extension-bearing repo paths, all resolve, command exited 0'
 ---
 
 # Unit: author-frame
