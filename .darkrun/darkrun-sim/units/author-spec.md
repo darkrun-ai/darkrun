@@ -36,11 +36,6 @@ quality_gates:
 - name: acceptance-criteria-floor
   command: sh -c 'test $(grep -cE "^### AC-[0-9]+" .darkrun/darkrun-sim/specify/spec.md) -ge 12'
 gate_results:
-- name: artifact-nonempty
-  status: pass
-  at: 2026-07-11T18:08:56.649995+00:00
-  attempts: 1
-  detail: test -s .darkrun/darkrun-sim/specify/spec.md exited 0 in the unit worktree (commit 278c09a)
 - name: citations-resolve
   status: pass
   at: 2026-07-11T18:09:08.326388+00:00
@@ -51,6 +46,11 @@ gate_results:
   at: 2026-07-11T18:09:22.116140+00:00
   attempts: 1
   detail: 16 AC-numbered criteria counted (>= 12 floor); command exited 0 in the unit worktree (commit 278c09a)
+- name: artifact-nonempty
+  status: pass
+  at: 2026-07-11T18:29:50.373113+00:00
+  attempts: 2
+  detail: 'Re-verified against the tightened artifact (commit 217840a): test -s exited 0'
 ---
 
 # Unit: author-spec
