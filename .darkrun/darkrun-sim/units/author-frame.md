@@ -3,7 +3,7 @@ name: Author frame.md — the locked frame for darkrun-sim
 unit_type: doc
 status: in_progress
 depends_on: []
-worker: challenger
+worker: distiller
 model: opus
 station: frame
 outputs:
@@ -16,6 +16,11 @@ iterations:
   completed_at: 2026-07-11T05:10:13.062545+00:00
   result: advance
   note: 'Authored .darkrun/darkrun-sim/frame/frame.md in the unit worktree (commit 497d606 on darkrun/darkrun-sim/units/frame/author-frame). All 8 required sections present in order; 12 distinct extension-bearing repo paths cited, every one verified to resolve; zero predecessor-brand hits; no hedging/placeholder tokens (grep for TBD/should/probably/might/etc./seems/looks like returned nothing). Both declared quality gates (artifact-nonempty, citations-resolve) ran for real and recorded pass. The frame fixes red strictly to engine RunAction::Escalate (crates/darkrun-mcp/src/deadlock.rs) plus unfollowable-prompt failures; locks the four operator decisions with re-entry triggers; names the darkrun-mcp in-process seam (StateStore -> run_start -> run_tick_with_hosting, prompt-only, never .action) as the sole coupling surface; and sequences three phases (world+transcript spine, web/site replay player, site/CI consumption) with no time estimates. Challenger: attack citation accuracy against actual file contents (framer skimmed load-bearing files but grounding depth varies), the completeness of Out of scope against the unit spec''s minimum list, and whether every locked decision carries its re-entry trigger where the spec names one.'
+- worker: challenger
+  started_at: 2026-07-11T05:23:42.386673+00:00
+  completed_at: 2026-07-11T05:23:42.386673+00:00
+  result: advance
+  note: 'Challenge complete; all structural criteria hold (8 sections in order, 13 resolving citations, zero predecessor-brand hits, no hedge tokens, all 4 locked decisions intact with triggers on 1 and 2, out-of-scope covers the full minimum list, build order clean of time language). Four findings for resolve, worst first. BLOCKING-1: red condition (b)''s worked example ("agent wrote to a path the prompt never named") is undetectable under the frame''s own locked no-git seam — enforce_unit_scope in crates/darkrun-mcp/src/units.rs returns Ok(()) when Git::open fails, which it always does on a bare TempDir, and no other engine mechanism rejects an off-prompt action; either strike the example and rescope non-Escalate red to what is actually detectable, or qualify the no-git claim. BLOCKING-2: Locked Decision 2 describes the scripted provider as "today''s privileged e2e move sequences formalized behind the trait" — the exact privileged-knowledge pattern the gap section condemns; the frame must state how the scripted provider consumes .prompt (or explicitly argue why a canned move sequence still exercises prompt followability) or Phase 1 green is a vanity metric by the frame''s own standard. MUST-FIX-3: the # Frame section is 2 paragraphs with the red-run definition bundled into commentary; spec wants two-paragraph overview plus a clean one-sentence red-run definition. MUST-FIX-4: the deadlock exempt-action list reads as exhaustive but names 5 of 8 variants (missing PendingSeal, Sealed, FeedbackQuestion per is_exempt in crates/darkrun-mcp/src/deadlock.rs); add e.g. or complete it. Nits: darkrun-e2e consumes darkrun-mcp via dev-dependencies (parity claim slightly overstated); "from day one" is time-adjacent idiom; framer note said 12 citations, actual is 13. Distiller: fix in place in the unit worktree, keep all hard grep criteria passing, commit.'
 reviews:
   feasibility:
     at: 2026-07-03T01:24:16.145824+00:00
