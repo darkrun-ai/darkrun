@@ -1,7 +1,7 @@
 ---
 name: Author spec.md — testable acceptance criteria, contracts, and edge cases for darkrun-sim
 unit_type: doc
-status: in_progress
+status: completed
 depends_on: []
 worker: tightener
 model: opus
@@ -12,6 +12,7 @@ outputs:
 - specify/spec.md
 branch: darkrun/darkrun-sim/units/specify/author-spec
 started_at: 2026-07-11T18:09:38.163783+00:00
+completed_at: 2026-07-11T18:30:41.576268+00:00
 iterations:
 - worker: spec_writer
   started_at: 2026-07-11T18:09:38.163783+00:00
