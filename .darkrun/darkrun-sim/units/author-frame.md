@@ -19,6 +19,12 @@ quality_gates:
   command: test -s .darkrun/darkrun-sim/frame/frame.md
 - name: citations-resolve
   command: sh -c 'n=$(grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/frame/frame.md | sort -u | wc -l); test "$n" -ge 8 && grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/frame/frame.md | sort -u | xargs -I{} test -e {}'
+gate_results:
+- name: artifact-nonempty
+  status: pass
+  at: 2026-07-11T05:09:49.804723+00:00
+  attempts: 1
+  detail: test -s .darkrun/darkrun-sim/frame/frame.md exited 0 in the unit worktree
 ---
 
 # Unit: author-frame
