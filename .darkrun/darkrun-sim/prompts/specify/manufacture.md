@@ -1,29 +1,57 @@
----
-name: Author spec.md — testable acceptance criteria, contracts, and edge cases for darkrun-sim
-unit_type: doc
-status: pending
-depends_on: []
-worker: ''
-model: opus
-station: specify
-inputs:
-- frame.md
-outputs:
-- specify/spec.md
-branch: darkrun/darkrun-sim/units/specify/author-spec
-reviews:
-  completeness:
-    at: 2026-07-11T17:21:33.548961+00:00
-  testability:
-    at: 2026-07-11T17:21:43.629013+00:00
-quality_gates:
-- name: artifact-nonempty
-  command: test -s .darkrun/darkrun-sim/specify/spec.md
-- name: citations-resolve
-  command: sh -c 'n=$(grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/specify/spec.md | sort -u | wc -l); test "$n" -ge 10 && grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/specify/spec.md | sort -u | xargs -I{} test -e {}'
-- name: acceptance-criteria-floor
-  command: sh -c 'test $(grep -cE "^### AC-[0-9]+" .darkrun/darkrun-sim/specify/spec.md) -ge 12'
----
+
+> **Run** `darkrun-sim` · **Station** `specify` · **Phase** `manufacture`
+
+> Eliminates: _ambiguity_
+
+
+# Manufacture — `specify`
+
+This is the build floor. You run the **Pass loop** — _Plan → Make → Challenge → Resolve_ — over the wave-ready Units. The current beat is **spec_writer**, on model **sonnet**.
+
+
+**Contract**
+
+- Do exactly the work this action describes — no more, no less. Don't skip ahead to a later phase.
+- Treat the locked artifact (`spec.md`) as the source of truth. Read it before you act; never silently rewrite a locked decision.
+- Every claim you make must be backed by something you actually ran, read, or wrote. No assumed results.
+- Be specific and committed. **No placeholders** — a `TBD`, `similar to …`, `add error handling`, `etc.`, or `…` is a hole, not a decision; name the actual, checkable condition. **No hedging** — when you report work done, use a verb of completed action (`added`, `implemented`, `fixed`), never `should`, `seems`, `probably`, `might`, or `looks like`. Hedging is the tell of unfinished work.
+- When the action is finished, record your output where the station expects it, then call `darkrun_tick` again for the next instruction. The manager — not you — decides what comes next.
+
+
+
+**Explorers** (2): `contract`, `edge_case`
+
+
+**Workers** (3): `spec_writer` → `adversary` → `tightener`
+
+
+**Reviewers** (2): `testability`, `completeness`
+
+
+## This wave
+
+
+Dispatch the **spec_writer** beat in parallel across these wave-ready Units:
+
+- `author-spec`
+
+
+
+
+## Each Unit's spec — the contract the beat works against
+
+The subagent you dispatch for a Unit gets **no context beyond what you hand it**. Pass the Unit's spec below into its dispatch verbatim — the completion criteria with their verify commands, the declared paths, and the scope boundary are the contract the beat is judged against.
+
+### `author-spec` — Author spec.md — testable acceptance criteria, contracts, and edge cases for darkrun-sim
+
+- **inputs:** `frame.md`
+
+
+- **outputs:** `specify/spec.md`
+
+
+- **quality gates:** artifact-nonempty — `test -s .darkrun/darkrun-sim/specify/spec.md` · citations-resolve — `sh -c 'n=$(grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/specify/spec.md | sort -u | wc -l); test "$n" -ge 10 && grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/specify/spec.md | sort -u | xargs -I{} test -e {}'` · acceptance-criteria-floor — `sh -c 'test $(grep -cE "^### AC-[0-9]+" .darkrun/darkrun-sim/specify/spec.md) -ge 12'`
+
 
 # Unit: author-spec
 
@@ -72,3 +100,76 @@ Plus the frame's four locked decisions (dark-mode spine first; scripted provider
 ## Out of scope for this unit
 
 No crate scaffolding, no site code, no CI changes, no edits to any other `.darkrun/` file, no re-opening of the frame's or today's operator decisions.
+
+
+
+
+## Each Unit has its own worktree — work in it
+
+Every wave Unit is isolated on its own branch + worktree, forked off the station branch. Run that Unit's beat **inside its worktree** so its diff never tangles with another Unit's in-flight work; the manager lands each Unit back onto the station branch when it locks. Do **not** commit a Unit's work to the station branch yourself.
+
+- `author-spec` → `/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/.claude/worktrees/wiggly-gathering-spark/.darkrun/worktrees/darkrun-sim/units/specify/author-spec` (branch `darkrun/darkrun-sim/units/specify/author-spec`)
+
+
+
+
+
+## The Pass loop — make → challenge → resolve
+
+The Pass loop is adversarial on purpose: a single confident pass is exactly where LLM output is most often confidently wrong, so a second pass red-teams the first before anything locks.
+
+- **make** — the worker produces the Unit's output against its completion criteria. Build the real thing, not a sketch.
+- **challenge** — a second pass attacks what make produced: edge cases, missing handling, lazy assumptions. Assume the first pass was optimistic.
+- **resolve** — reconcile make and challenge into a Unit that satisfies its completion criteria with the challenges answered.
+
+
+
+
+**Quality-gate verifier nonce.** This dispatch carries a one-time verifier token: **`2796f4eaea4e90bd84afe4b66881e47e69054c607d573f4730c6611de09041a1`**. When you record a quality gate with `darkrun_quality_gate_record`, pass it as `nonce`. The engine refuses a gate result without the matching token — so a gate is only ever recorded as part of a real verification dispatch, never self-certified. Run the gate's command for real, then record the actual outcome with this nonce.
+
+
+Run **only the `spec_writer` beat** this tick. When the beat finishes, **record it** with `darkrun_unit_iterate` — pass the `worker`, the `result` (`advance` or `reject`), and a `note`: on advance, what you did and what the next worker needs to know; on reject, why you bounced it (a reject without a reason is refused). That note becomes the next beat's handoff above. Then call `darkrun_tick`; the manager advances the loop or releases the next wave. A Unit is locked only after Resolve and its completion criteria pass.
+
+A Unit gets a **bounded pass budget** — the manager escalates a Unit that can't converge within it to the operator rather than grinding forever. Don't paper over a stuck Unit to dodge the escalation; a Unit that needs more passes than the budget allows is a signal the spec, the scope, or the approach is wrong, and that's the operator's call to make.
+
+
+
+## Done when
+
+The `spec_writer` beat is complete for every Unit in this wave and its output is recorded. Then call `darkrun_tick`.
+
+---
+
+# Provider contracts in effect
+
+The project configures external-system providers whose behavior contracts apply to this phase. Follow them alongside the instructions above.
+
+# Git Provider — Behavior Contract
+
+darkrun is always git-backed when a `.git/` directory is present. This contract is **always active** in git environments — no settings activation needed.
+
+## What you, the agent, must do
+
+- Never run `git checkout`, `git merge`, `git branch -d`, or create branches manually during run operations. The engine owns branch topology, merge semantics, worktree creation, and station-branch enforcement.
+- Commit substantive work (unit body edits, artifact writes, source changes) before calling `darkrun_tick` — the pre-tick clean-tree gate blocks the tick on loose agent work and hands the file list back. The engine commits its own `.darkrun/` state on every tick; it does NOT author your commits.
+- **Never pair a VCS issue-closing keyword with a feedback id.** GitHub and GitLab parse `Closes`/`Fixes`/`Resolves`/`Implements` followed by an issue-shaped token as an external-issue closing reference — `Fixes fb-07` in a commit message or PR description renders a phantom closing link for a finding that is not a ticket. Use neutral phrasing — `addresses fb-07`, `per fb-07` — never a closing verb.
+- Treat `git push` failures as non-fatal — the engine retries on the next tick. Don't block on a transient remote outage.
+- If a station's gate is `external`, the engine watches for the PR merge signal. Don't flip frontmatter to fake the signal — the human's merge IS the decision.
+
+## Branch architecture (read-only fact you operate against)
+
+- **Run branch** `darkrun/<slug>/main` is the durable record. The engine commits state changes here and pushes on every tick (commit early, push often). The run's **delivery draft PR** opens against the project's default branch at run start and the engine flips it ready-for-review at seal.
+- **Station branches** `darkrun/<slug>/<station>` accumulate station-scope work, synced downstream and landed by the engine.
+- **Unit worktree branches** `darkrun/<slug>/units/<station>/<unit>` isolate each unit's diff — local-only, landed back onto the station branch when the unit locks.
+
+## external_refs handling
+
+The delivery PR's URL is stamped on `run.md` as `external_refs.pr_url` with its draft/ready status in `external_refs.other.pr_status`. You don't write these fields manually — the engine does — but you can read them to surface PR state to the operator. In DISCRETE mode the engine also opens a per-station draft PR at the station's external gate (recorded on `Station.pr_ref`); merging it is the approval.
+
+## Proof asset uploads
+
+Runtime-verification proof (screenshots, transcripts) is regenerated every run — attach it durably with `darkrun_proof_attach`, which records it on the run's proof ledger and posts it to the station's change request when one exists. Keep uploads idempotent — replace a re-run's proof rather than stacking duplicates.
+
+## Non-git environments
+
+When `.git/` is absent the engine falls back to filesystem persistence: no commits, no pushes, no worktrees, and `external` gates degrade to `ask` (there's no structural merge signal to enforce them). All run operations still work; this contract simply doesn't apply.

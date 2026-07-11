@@ -28,3 +28,4 @@
 {"action":"user_gate","at":"2026-07-11T17:22:37.369682+00:00","station":"specify","track":"run"}
 {"action":"noop","at":"2026-07-11T17:49:43.308931+00:00","station":null,"track":"run"}
 {"action":"units_invalid","at":"2026-07-11T17:50:33.665011+00:00","station":"specify","track":"run"}
+{"action":"manufacture","at":"2026-07-11T17:51:06.652360+00:00","station":"specify","track":"run"}
