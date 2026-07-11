@@ -20,12 +20,13 @@
     "specify": {
       "station": "specify",
       "status": "in_progress",
-      "phase": "user_gate",
+      "phase": "manufacture",
       "elaborated": true,
       "checkpoint": {
         "kind": "ask"
       },
       "branch": "darkrun/darkrun-sim/specify",
+      "verifier_nonce": "2796f4eaea4e90bd84afe4b66881e47e69054c607d573f4730c6611de09041a1",
       "started_at": "2026-07-11T15:37:29.759256+00:00"
     }
   },
