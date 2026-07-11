@@ -18,3 +18,4 @@
 {"action":"audit","at":"2026-07-11T05:39:42.011320+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
 {"action":"audit","at":"2026-07-11T05:41:51.824065+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
 {"action":"fix_feedback","at":"2026-07-11T05:44:08.397854+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
+{"action":"fix_feedback","at":"2026-07-11T05:46:08.797544+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}

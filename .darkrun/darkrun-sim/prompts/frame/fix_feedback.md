@@ -4,7 +4,7 @@
 > Eliminates: _wrong-thing_
 
 
-# Fix Feedback — `fb-02`
+# Fix Feedback — `fb-03`
 
 Open feedback preempts forward run progress. Something a reviewer or operator flagged is unresolved, and it routes to a **fix-worker** before the line moves on.
 
@@ -24,17 +24,17 @@ Dispatch one of **this station's** fix-workers — `builder`, `reconciler`, `val
 
 ## This fix has its own worktree — work in it
 
-The repair is isolated on its own branch + worktree, forked off the station branch: **`/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/.claude/worktrees/wiggly-gathering-spark/.darkrun/worktrees/darkrun-sim/fixes/frame/fb-02`**. Make the fix **inside that worktree** so its diff never tangles with in-flight unit work; the manager lands it back onto the station branch when you resolve the feedback. Don't commit the fix to the station branch yourself.
+The repair is isolated on its own branch + worktree, forked off the station branch: **`/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/.claude/worktrees/wiggly-gathering-spark/.darkrun/worktrees/darkrun-sim/fixes/frame/fb-03`**. Make the fix **inside that worktree** so its diff never tangles with in-flight unit work; the manager lands it back onto the station branch when you resolve the feedback. Don't commit the fix to the station branch yourself.
 
 
 ## What to do
 
-1. **Read the feedback item** `fb-02` in full (station `frame`). Understand the actual complaint, not your guess at it.
+1. **Read the feedback item** `fb-03` in full (station `frame`). Understand the actual complaint, not your guess at it.
 2. **Reproduce or locate** the problem in the real artifact. Don't fix what you can't first see.
 3. **Make the smallest correct change** that resolves it. Don't rewrite unrelated work to scratch an itch.
 4. **Re-verify** against the feedback's criteria — the fix isn't done until the original concern is demonstrably gone.
-5. **Close the loop**: record what you changed and why on `fb-02`, and resolve it.
+5. **Close the loop**: record what you changed and why on `fb-03`, and resolve it.
 
 ## Done when
 
-`fb-02` is resolved with evidence, the artifact is corrected, and nothing else regressed. Then call `darkrun_tick` — if more feedback is open, the manager routes the next item; otherwise the run resumes.
+`fb-03` is resolved with evidence, the artifact is corrected, and nothing else regressed. Then call `darkrun_tick` — if more feedback is open, the manager routes the next item; otherwise the run resumes.
