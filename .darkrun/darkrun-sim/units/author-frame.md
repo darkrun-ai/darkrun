@@ -8,6 +8,7 @@ model: opus
 station: frame
 outputs:
 - frame/frame.md
+branch: darkrun/darkrun-sim/units/frame/author-frame
 reviews:
   feasibility:
     at: 2026-07-03T01:24:16.145824+00:00

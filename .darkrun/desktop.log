@@ -67,3 +67,9 @@ warning: the following packages contain code that will be rejected by a future v
 note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
 The application cannot be opened for an unexpected reason, error=Error Domain=RBSRequestErrorDomain Code=5 "Launch failed." UserInfo={NSLocalizedFailureReason=Launch failed., NSUnderlyingError=0x79103c810 {Error Domain=NSPOSIXErrorDomain Code=153 "Unknown error: 153" UserInfo={NSLocalizedDescription=Launchd job spawn failed}}}
 The application cannot be opened for an unexpected reason, error=Error Domain=RBSRequestErrorDomain Code=5 "Launch failed." UserInfo={NSLocalizedFailureReason=Launch failed., NSUnderlyingError=0x95f03c5d0 {Error Domain=NSPOSIXErrorDomain Code=153 "Unknown error: 153" UserInfo={NSLocalizedDescription=Launchd job spawn failed}}}
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.34s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

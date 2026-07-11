@@ -7,12 +7,13 @@
     "frame": {
       "station": "frame",
       "status": "in_progress",
-      "phase": "user_gate",
+      "phase": "manufacture",
       "elaborated": true,
       "checkpoint": {
         "kind": "ask"
       },
       "branch": "darkrun/darkrun-sim/frame",
+      "verifier_nonce": "5b652c354ef96d24f5eb9eb70f98d11d99351f355fe517ab99b73c2a799487f5",
       "started_at": "2026-07-02T23:40:58.266557+00:00"
     }
   },
