@@ -29,6 +29,11 @@ gate_results:
   at: 2026-07-11T18:08:56.649995+00:00
   attempts: 1
   detail: test -s .darkrun/darkrun-sim/specify/spec.md exited 0 in the unit worktree (commit 278c09a)
+- name: citations-resolve
+  status: pass
+  at: 2026-07-11T18:09:08.326388+00:00
+  attempts: 1
+  detail: 28 distinct extension-bearing repo paths cited; count >= 10 and every path resolves in the unit worktree (command exited 0, commit 278c09a)
 ---
 
 # Unit: author-spec
