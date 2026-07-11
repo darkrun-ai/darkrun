@@ -36,11 +36,6 @@ quality_gates:
 - name: acceptance-criteria-floor
   command: sh -c 'test $(grep -cE "^### AC-[0-9]+" .darkrun/darkrun-sim/specify/spec.md) -ge 12'
 gate_results:
-- name: citations-resolve
-  status: pass
-  at: 2026-07-11T18:09:08.326388+00:00
-  attempts: 1
-  detail: 28 distinct extension-bearing repo paths cited; count >= 10 and every path resolves in the unit worktree (command exited 0, commit 278c09a)
 - name: acceptance-criteria-floor
   status: pass
   at: 2026-07-11T18:09:22.116140+00:00
@@ -51,6 +46,11 @@ gate_results:
   at: 2026-07-11T18:29:50.373113+00:00
   attempts: 2
   detail: 'Re-verified against the tightened artifact (commit 217840a): test -s exited 0'
+- name: citations-resolve
+  status: pass
+  at: 2026-07-11T18:30:00.394177+00:00
+  attempts: 2
+  detail: 'Re-verified against the tightened artifact (commit 217840a): 29 distinct extension-bearing paths, all resolve, command exited 0'
 ---
 
 # Unit: author-spec
