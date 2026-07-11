@@ -21,15 +21,17 @@ The engine commits its own `.darkrun/` bookkeeping on every tick — but it neve
 
 ## Uncommitted paths
 
-- `Cargo.lock`
-- `crates/darkrun-api/src/session.rs`
-- `crates/darkrun-http/src/handlers.rs`
-- `crates/darkrun-http/src/state.rs`
-- `crates/darkrun-http/tests/routes_core.rs`
-- `crates/darkrun-mcp/src/desktop.rs`
-- `crates/darkrun-mcp/src/server.rs`
-- `crates/darkrun-mcp/src/tools.rs`
-- `crates/darkrun-mcp/tests/tools.rs`
+- `.release-please-manifest.json`
+- `CHANGELOG.md`
+- `Cargo.toml`
+- `crates/darkrun-api/openapi.json`
+- `npm/darwin-arm64/package.json`
+- `npm/darwin-x64/package.json`
+- `npm/linux-arm64/package.json`
+- `npm/linux-x64/package.json`
+- `npm/win32-x64/package.json`
+- `plugin/.claude-plugin/plugin.json`
+- `plugin/package.json`
 
 
 ## What to do
