@@ -1,9 +1,9 @@
 ---
 name: Author spec.md — testable acceptance criteria, contracts, and edge cases for darkrun-sim
 unit_type: doc
-status: pending
+status: in_progress
 depends_on: []
-worker: ''
+worker: adversary
 model: opus
 station: specify
 inputs:
@@ -11,6 +11,13 @@ inputs:
 outputs:
 - specify/spec.md
 branch: darkrun/darkrun-sim/units/specify/author-spec
+started_at: 2026-07-11T18:09:38.163783+00:00
+iterations:
+- worker: spec_writer
+  started_at: 2026-07-11T18:09:38.163783+00:00
+  completed_at: 2026-07-11T18:09:38.163783+00:00
+  result: advance
+  note: 'Authored .darkrun/darkrun-sim/specify/spec.md (332 lines, commit 278c09a on darkrun/darkrun-sim/units/specify/author-spec). All six completion criteria verified passing: artifact non-empty; exact six-heading order (diff check exit 0); 16 ACs (floor 12); 28 distinct resolving citations (floor 10); zero predecessor-brand hits; zero hedge/time tokens. All three quality gates ran for real and recorded pass. Structure: 16 phase-tagged ACs, six contracts (Provider trait, NoopHosting, darkrun-core SimFixture schema, crate module map, fixture path/embedding, replay Route), nine edge cases each with a REQUIRED outcome. Adversary: the spec_writer flagged four judgment calls to attack — (1) the Provider trait signature (next_move(&mut self, prompt: Option<&str>) -> ProviderMove, 5-variant move enum) is its own design; world resolves station/unit targets via direct StateStore reads to keep the provider prompt-blind — check that doesn''t smuggle .action-equivalent knowledge into the driving path; (2) Contract 4''s module map pins the outcome (followability.rs unmodified and green) but leaves the harness.rs/scenarios.rs internal split loose enough that Build could leak .action-driven decisions into shared code; (3) NoopHosting.merge_state() returning MergeState::Unknown is a choice, not textually dictated — verify it cannot wedge a dark-mode run at a discrete-gate path; (4) STALE_AGE_SECS reset is scoped OUT of Phase 1 coverage as a documented non-goal — attack whether "documented non-goal" satisfies the unit''s "no shape may be left undefined" bar. Also verify every quoted signature/constant against the actual source in the worktree.'
 reviews:
   completeness:
     at: 2026-07-11T17:21:33.548961+00:00
