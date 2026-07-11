@@ -42,7 +42,7 @@ Phase: 1.
 
 The `Provider` trait's decision method takes `prompt: Option<&str>` — mirroring `TickResult.prompt`'s type exactly, and structurally excluding `TickResult.action` from the interface (the method has no parameter through which the caller could pass it). The scripted implementation receives this parameter and never inspects it: no `if`, `match`, `.contains(`, or other conditional keyed on its content anywhere in the function body.
 
-Check: `grep -n 'fn next_move' -A 5 <provider module>` (the new `provider` module under `crates/darkrun-sim/src/`) shows the parameter named `_prompt` (compiler-enforced unused) or, if named `prompt`, `grep -c 'prompt' <provider module>` (excluding the signature line and doc comments) reports 0 occurrences inside the scripted implementation's function bodies.
+Check (both parts required, regardless of what the parameter is named — an underscore prefix only silences the unused-variable lint, it does not prevent reads): (a) a named behavioral test `scripted_provider_ignores_prompt_content` in `crates/darkrun-sim/` drives the same script twice, once with the real rendered prompts and once with every prompt replaced by a fixed dummy string, and asserts the two emitted `ProviderMove` sequences are identical; (b) `grep -cE '(_?prompt)\s*[.)]|(_?prompt)\s*(==|!=)|contains|starts_with|ends_with' <the scripted impl's next_move body>` reports 0 uses of the prompt parameter beyond the signature line (doc comments excluded).
 
 Phase: 1.
 
@@ -232,7 +232,7 @@ pub struct FixtureEvent {
 }
 ```
 
-Normalization rules, applied before serialization (per the frame's "determinism by normalization at projection" decision):
+Normalization rules, applied before serialization (per this station's "determinism by normalization at projection" operator decision, recorded 2026-07-11 alongside the crate-partition and fixture-schema-placement decisions — a station-level decision, not one of the frame's four):
 
 1. Every RFC3339 timestamp value (`action-log.jsonl`'s `at`, `events.jsonl`'s `at`, `UnitFrontmatter.started_at`/`completed_at`, and `UnitIteration.started_at`/`completed_at` — all defined in `crates/darkrun-core/src/domain.rs` — wherever any of these surface inside a captured prompt body via a rendered `UnitSpecCard` or `Handoff`) is replaced with the fixed placeholder string `"<normalized>"`.
 2. The minted `verifier_nonce` value (`mint_verifier_nonce`, `crates/darkrun-mcp/src/position.rs`, seeded from `Utc::now()`) is replaced, wherever its literal hash string appears inside a captured prompt body (per its `{{ verifier_nonce }}` interpolation in `plugin/prompts/phases/manufacture.md`), with the fixed placeholder token `<nonce>`.
