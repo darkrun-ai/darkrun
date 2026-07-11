@@ -1,14 +1,21 @@
 ---
 name: Author frame.md — the locked frame for darkrun-sim
 unit_type: doc
-status: pending
+status: in_progress
 depends_on: []
-worker: ''
+worker: challenger
 model: opus
 station: frame
 outputs:
 - frame/frame.md
 branch: darkrun/darkrun-sim/units/frame/author-frame
+started_at: 2026-07-11T05:10:13.062545+00:00
+iterations:
+- worker: framer
+  started_at: 2026-07-11T05:10:13.062545+00:00
+  completed_at: 2026-07-11T05:10:13.062545+00:00
+  result: advance
+  note: 'Authored .darkrun/darkrun-sim/frame/frame.md in the unit worktree (commit 497d606 on darkrun/darkrun-sim/units/frame/author-frame). All 8 required sections present in order; 12 distinct extension-bearing repo paths cited, every one verified to resolve; zero predecessor-brand hits; no hedging/placeholder tokens (grep for TBD/should/probably/might/etc./seems/looks like returned nothing). Both declared quality gates (artifact-nonempty, citations-resolve) ran for real and recorded pass. The frame fixes red strictly to engine RunAction::Escalate (crates/darkrun-mcp/src/deadlock.rs) plus unfollowable-prompt failures; locks the four operator decisions with re-entry triggers; names the darkrun-mcp in-process seam (StateStore -> run_start -> run_tick_with_hosting, prompt-only, never .action) as the sole coupling surface; and sequences three phases (world+transcript spine, web/site replay player, site/CI consumption) with no time estimates. Challenger: attack citation accuracy against actual file contents (framer skimmed load-bearing files but grounding depth varies), the completeness of Out of scope against the unit spec''s minimum list, and whether every locked decision carries its re-entry trigger where the spec names one.'
 reviews:
   feasibility:
     at: 2026-07-03T01:24:16.145824+00:00
