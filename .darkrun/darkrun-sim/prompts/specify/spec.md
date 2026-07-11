@@ -48,11 +48,17 @@ Dispatch **all** explorers (`contract`, `edge_case`) **at once, in parallel** �
 
 - **deadlock-escalate-is-stranded-verdict** — `crates/darkrun-mcp/src/deadlock.rs` is the engine's cross-tick wheel-spin guard (the predecessor's HALT_THRESHOLD ported forward — this bug class is a scar, not a hypothetical). After 4 same-signature no-progress ticks, or a two-signature A↔B churn over ≥8 ticks, `run_tick` swaps the wedged action for `RunAction::Escalate { reason }`. External-await actions are exempt; per-run history lives in `.darkrun/<slug>/deadlock.json` and resets after STALE_AGE_SECS=3600, so a bounded sim run must complete inside the hour window. For any stranded-agent/protocol-fidelity test, `Escalate` is the machine-readable red verdict — key pass/fail off it instead of inventing new stall detection. Note its limit: it catches the ENGINE refusing to advance; only a zero-knowledge agent in the seat extends it to catch prompts that never taught the agent what to stamp.
 
+- **existing-darkrun-sim-crate-is-a-prompt-linter** — crates/darkrun-sim already exists on run-main but is a DIFFERENT tool than the protocol-fidelity simulator the darkrun-sim frame locks: it is a prompt-wording linter. SimAgent::read (src/agent.rs:153) is a pure text classifier over darkrun_* tool tokens; harness.rs drives a privileged walk that calls plain run_tick (src/harness.rs:21,69 — the network-reaching path the frame forbids), pattern-matches TickResult.action to decide moves (src/harness.rs:150-196 — the exact privileged-knowledge shape the frame condemns), and runs solo mode not dark (src/scenarios.rs:53). tests/followability.rs is a static corpus scan (every reachable prompt names only registered tools, via tool_registry.rs's include_str! parse of #[tool(name=...)] attributes — the rmcp tool-list accessor is crate-private). Its Cargo.toml already takes darkrun-core + darkrun-mcp as real [dependencies]. Any frame-compliant simulator work must NOT silently extend harness.rs in place; the .action-reading and run_tick violations would be perpetuated. The linter half (agent.rs, tool_registry.rs, followability tests) is independently valuable and CI-green today.
+
+- **fixture-determinism-traps** — Recording a darkrun engine transcript for byte-diff CI regeneration hits these confirmed nondeterminism/alignment traps: (1) verifier_nonce — mint_verifier_nonce (crates/darkrun-mcp/src/position.rs:3039-3043) hashes slug+station+Utc::now() on every Manufacture entry and the Manufacture template prints it literally (plugin/prompts/phases/manufacture.md:72-74), so rendered Manufacture prompts differ byte-for-byte on every regeneration — any fixture-diff gate must freeze the clock or normalize the nonce out before diffing. (2) events.jsonl is NOT 1:1 with action-log.jsonl — darkrun.run.created (position.rs:3245) and darkrun.station.dropped (position.rs:959) plus emits in runs.rs:251 and units.rs:485,493 have no action-log counterpart; a transcript projector needs an explicit merge rule, not cardinality assumptions. (3) journal lines carry no schema_version stamp (append_action_log, position.rs:2612-2624) — fixtures recorded at engine version N have no drift signal for a replayer built at N+1. (4) deadlock history resets after STALE_AGE_SECS=3600 (deadlock.rs:44,161-165) — a wall-clock-slow run silently zeroes its no-progress counter (false-green risk for stall tests). (5) Absolute worktree paths do NOT leak into prompts on a bare tempdir world — worktree context is gated behind git_backed_station (position.rs:2922-2937), false when Git::open fails.
+
 - **sim-prompt-surface-contract** — The engine's followability surface for a zero-knowledge (sim) agent is `TickResult { run, position, action, prompt }` from darkrun-mcp's position module. `.prompt` is the rendered markdown the agent reads; `.action` is the structured variant the privileged e2e driver reads (`crates/darkrun-e2e/tests/common/mod.rs::run_to_seal` never touches `.prompt` — exactly why e2e green proves cursor termination, not followability). A protocol-fidelity consumer must act on `.prompt` only. darkrun-mcp is a lib crate (binary lives in darkrun-cli), so drive ticks in-process: `StateStore::new(dir)` → `run_start(...)` → loop `run_tick_with_hosting(store, slug, &NoopHosting)` — plain `run_tick` resolves ApiHosting and can touch network in discrete mode. For a Claude-Code-modeled agent the raw rendered prompt is byte-identical to production (`darkrun_harness::adapt_instructions` is the identity for the Claude Code cap set); other cap sets append harness notes. Every tick also persists the rendered prompt under `.darkrun/<slug>/prompts/<scope>/<tag>.md` (`StateStore::write_prompt`/`read_prompts`), alongside `action-log.jsonl` and `events.jsonl` — a ready-made transcript/replay substrate.
 
 - **site-replay-substrate** — web/site is a client-side Dioxus wasm SPA (dioxus-router; darkrun-site-gen emits SEO artifacts only — it is NOT a pre-rendered SSG). Record/replay-without-a-live-engine is its established architecture: `/preview` renders real darkrun-api session payload fixtures with an explicit no-live-feed banner; `/browse` fetches a repo's committed `.darkrun/` tree over CORS HTTP and re-derives state client-side via darkrun-core (which compiles to wasm); the statusline demo embeds an offline ANSI→HTML snapshot. There is no shared normalized statusline state type — the CLI renders ANSI inline from StateStore (`crates/darkrun-cli/src/statusline.rs`), so a web statusline is a new projection best built from shared darkrun-ui components (the station strip / phase pipeline / unit DAG that `/browse` draws), not the CLI renderer. A replay player belongs in web/site as a new Route variant modeled on `/preview`; web/app (app.darkrun.ai) is the separate live-relay wasm app and is NOT where replay belongs.
 
 - **subagent-dispatch-is-prose** — The prompt corpus (`plugin/prompts/`, embedded by darkrun-prompts with a project `.darkrun/prompts/` → plugin-root → embedded override cascade) contains NO machine-parseable subagent dispatch markup — no `<subagent>`/`<dispatch>`/relay blocks anywhere. Manufacture prompts instruct in prose: dispatch the worker beat in parallel across wave-ready Units and pass each Unit's spec verbatim into the dispatch; the agent spawns subagents itself. Pool/scheduling behavior is prompt prose, not structured blocks — so any sim or tooling must NOT build a dispatch-block parser; followability of the prose IS the surface under test. Action→template mapping is `darkrun_prompts::template_key_for_action` (23 keys); a bare tempdir with no overrides resolves deterministically to the embedded corpus.
+
+- **wasm-boundary-for-fixture-types** — web/site (crate darkrun-site) depends on darkrun-ui, darkrun-api, darkrun-content, darkrun-core — never darkrun-mcp (unconditional nix/tokio/ureq/rmcp deps make it and anything depending on it, including crates/darkrun-sim, non-wasm). TickResult/RunAction/Position are Serialize-ONLY (no Deserialize, position.rs:69,243,252), so a replay fixture cannot round-trip engine types into the site. Any recorded-transcript payload the site replays needs a hand-rolled wasm-safe serde schema living in a wasm-clean crate (darkrun-core is the established home: its only native dep nix is cfg(unix)-gated for domain types). Site fixture-embedding precedents: include_str! (web/site/src/content.rs, 18+ call sites) and rust_embed (crates/darkrun-content/src/loader.rs:18-30); no JSON/transcript asset precedent exists yet. CI gap: no workflow builds web/site for wasm32 (ci.yml's wasm-app job scopes -p darkrun-app only); a site-consuming feature has no CI gate until deploy-web.yml runs.
 
 
 
@@ -79,25 +85,20 @@ Write every Unit with `darkrun_unit_create`, with the full anatomy:
 - **`model`** — match the tier to the risk: `opus` for architectural, cascading-failure, or deepest-reasoning work, `sonnet` (default) for known patterns plus judgment, `haiku` only for purely mechanical edits.
 
 
-There are no Units yet. You are creating them.
+### Units already on record
+
+- `author-spec`
+
+Reconcile these against what the explorers found — extend, split, or tighten them; don't blindly accept them.
 
 
 
 
-
-## Collaborate with the operator — required before this spec locks
-
-This run is in a **collaborative mode**, and the station will not advance to Review until you have actually involved the operator in shaping the spec. Do not author the whole spec solo and surface it only at the gate — bring the operator in *now*, while the frame is still soft:
-
-- Surface the open framing questions and the consequential choices to the operator with `darkrun_question` (a decision) or `darkrun_direction` (a direction to steer), and fold their answers into the spec.
-- When the spec genuinely reflects that collaboration, call **`darkrun_elaborate_seal`** for this station — that clears the hold and the next tick advances to Review.
-
-If you advance without involving the operator, the station stays in Spec; a stalled, non-collaborative Spec escalates to the operator rather than slipping past them. (`dark` mode pre-elaborates once up front and doesn't gate here.)
 
 
 ## Done when
 
-The spec names the risk, lists Units with testable completion criteria and dependencies, marks what's out of scope, the operator has been involved and `darkrun_elaborate_seal` is called, and it's written to the station's spec artifact. Then call `darkrun_tick`.
+The spec names the risk, lists Units with testable completion criteria and dependencies, marks what's out of scope, and it's written to the station's spec artifact. Then call `darkrun_tick`.
 
 ---
 
