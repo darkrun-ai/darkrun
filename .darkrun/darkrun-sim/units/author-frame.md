@@ -25,6 +25,11 @@ gate_results:
   at: 2026-07-11T05:09:49.804723+00:00
   attempts: 1
   detail: test -s .darkrun/darkrun-sim/frame/frame.md exited 0 in the unit worktree
+- name: citations-resolve
+  status: pass
+  at: 2026-07-11T05:09:59.770137+00:00
+  attempts: 1
+  detail: 12 distinct extension-bearing repo paths cited; count >= 8 and every path resolves in the unit worktree (command exited 0)
 ---
 
 # Unit: author-frame
