@@ -8,3 +8,4 @@
 {"action":"manufacture","at":"2026-07-11T05:01:22.593752+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
 {"at":"2026-07-11T05:01:55.554690+00:00","event":"darkrun.save_wip.blocked","files":9,"run":"darkrun-sim"}
 {"at":"2026-07-11T05:03:21.791619+00:00","event":"darkrun.save_wip.blocked","files":11,"run":"darkrun-sim"}
+{"action":"manufacture","at":"2026-07-11T05:05:11.286164+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
