@@ -21,17 +21,7 @@ The engine commits its own `.darkrun/` bookkeeping on every tick — but it neve
 
 ## Uncommitted paths
 
-- `.release-please-manifest.json`
-- `CHANGELOG.md`
-- `Cargo.toml`
-- `crates/darkrun-api/openapi.json`
-- `npm/darwin-arm64/package.json`
-- `npm/darwin-x64/package.json`
-- `npm/linux-arm64/package.json`
-- `npm/linux-x64/package.json`
-- `npm/win32-x64/package.json`
-- `plugin/.claude-plugin/plugin.json`
-- `plugin/package.json`
+- `Cargo.lock`
 
 
 ## What to do
