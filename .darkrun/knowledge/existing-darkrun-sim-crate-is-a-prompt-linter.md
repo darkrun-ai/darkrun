@@ -1,0 +1,6 @@
+---
+topic: existing-darkrun-sim-crate-is-a-prompt-linter
+created_at: 2026-07-11T15:45:54.489957+00:00
+updated_at: 2026-07-11T15:45:54.489957+00:00
+---
+crates/darkrun-sim already exists on run-main but is a DIFFERENT tool than the protocol-fidelity simulator the darkrun-sim frame locks: it is a prompt-wording linter. SimAgent::read (src/agent.rs:153) is a pure text classifier over darkrun_* tool tokens; harness.rs drives a privileged walk that calls plain run_tick (src/harness.rs:21,69 — the network-reaching path the frame forbids), pattern-matches TickResult.action to decide moves (src/harness.rs:150-196 — the exact privileged-knowledge shape the frame condemns), and runs solo mode not dark (src/scenarios.rs:53). tests/followability.rs is a static corpus scan (every reachable prompt names only registered tools, via tool_registry.rs's include_str! parse of #[tool(name=...)] attributes — the rmcp tool-list accessor is crate-private). Its Cargo.toml already takes darkrun-core + darkrun-mcp as real [dependencies]. Any frame-compliant simulator work must NOT silently extend harness.rs in place; the .action-reading and run_tick violations would be perpetuated. The linter half (agent.rs, tool_registry.rs, followability tests) is independently valuable and CI-green today.
