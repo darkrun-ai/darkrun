@@ -971,6 +971,24 @@ impl SessionPayload {
     pub fn resolved(&self) -> bool {
         matches!(self.status(), Some(s) if s != SessionStatus::Pending)
     }
+
+    /// Force this session's runtime `status`, for the decision-bearing variants
+    /// (review/question/direction/picker). A no-op on the display-only variants
+    /// (view/visual_review/proof), which carry no status. Used to CONSUME a
+    /// stale in-memory resolution (reset it to `Pending`) so a subsequent
+    /// `await_decision` genuinely blocks instead of returning `Resolved` off a
+    /// flip that never landed durably.
+    pub fn set_status(&mut self, status: SessionStatus) {
+        match self {
+            SessionPayload::Review(p) => p.status = status,
+            SessionPayload::Question(p) => p.status = status,
+            SessionPayload::Direction(p) => p.status = status,
+            SessionPayload::Picker(p) => p.status = status,
+            SessionPayload::View(_)
+            | SessionPayload::VisualReview(_)
+            | SessionPayload::Proof(_) => {}
+        }
+    }
 }
 
 /// The run + open-state of an [`SessionPayload::interactive`] session.

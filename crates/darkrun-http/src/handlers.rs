@@ -183,6 +183,10 @@ pub async fn review_decide(
         }
         .to_string(),
     );
+    // Capture the durable-land inputs before `review` is moved into the upsert:
+    // the run the gate belongs to and the feedback body to route on a block.
+    let run_slug = review.run_slug.clone();
+    let gate_feedback = req.feedback.clone();
     review.feedback = req.feedback;
     review.annotations = req.annotations;
     review.status = match decision {
@@ -190,6 +194,18 @@ pub async fn review_decide(
         ReviewDecision::ChangesRequested => SessionStatus::ChangesRequested,
     };
     state.sessions.upsert(SessionPayload::Review(review));
+
+    // Durable land: the in-memory session flip above is what the desktop sees,
+    // but the ENGINE reads the on-disk StateStore. When this review names a real
+    // run, mirror the decision into it via the installed gate-decider hook so
+    // `run_tick` walks past the gate (approve → complete/release; block → route
+    // the feedback as rework). Best-effort: a land failure still returns 200 with
+    // the session flipped — the operator's action is not lost. The engine's own
+    // `checkpoint_decide` re-enforces the severity gate, so this cannot approve
+    // over open must/should annotations (already refused above regardless).
+    if let Some(run) = run_slug.as_deref() {
+        let _ = state.decide_gate(run, decision == ReviewDecision::Approved, gate_feedback);
+    }
 
     (
         StatusCode::OK,
