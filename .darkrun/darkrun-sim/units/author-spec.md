@@ -2,13 +2,10 @@
 name: Author spec.md — testable acceptance criteria, contracts, and edge cases for darkrun-sim
 unit_type: doc
 status: pending
-depends_on:
-- author-frame
+depends_on: []
 worker: ''
 model: opus
 station: specify
-inputs:
-- frame/frame.md
 outputs:
 - specify/spec.md
 reviews:
