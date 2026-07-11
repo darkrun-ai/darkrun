@@ -21,7 +21,10 @@ The engine commits its own `.darkrun/` bookkeeping on every tick — but it neve
 
 ## Uncommitted paths
 
-- `Cargo.lock`
+- `infra/modules/auth/main.tf`
+- `infra/modules/auth/outputs.tf`
+- `infra/modules/auth/variables.tf`
+- `infra/modules/auth/versions.tf`
 
 
 ## What to do
