@@ -6,6 +6,8 @@ depends_on: []
 worker: ''
 model: opus
 station: specify
+inputs:
+- frame.md
 outputs:
 - specify/spec.md
 reviews:
