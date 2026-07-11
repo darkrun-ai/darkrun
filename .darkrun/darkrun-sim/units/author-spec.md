@@ -23,6 +23,12 @@ quality_gates:
   command: sh -c 'n=$(grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/specify/spec.md | sort -u | wc -l); test "$n" -ge 10 && grep -oE "(crates|web|plugin|desktop)/[A-Za-z0-9_./-]+[.](rs|md|toml|mjs|json)" .darkrun/darkrun-sim/specify/spec.md | sort -u | xargs -I{} test -e {}'
 - name: acceptance-criteria-floor
   command: sh -c 'test $(grep -cE "^### AC-[0-9]+" .darkrun/darkrun-sim/specify/spec.md) -ge 12'
+gate_results:
+- name: artifact-nonempty
+  status: pass
+  at: 2026-07-11T18:08:56.649995+00:00
+  attempts: 1
+  detail: test -s .darkrun/darkrun-sim/specify/spec.md exited 0 in the unit worktree (commit 278c09a)
 ---
 
 # Unit: author-spec
