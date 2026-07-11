@@ -37,6 +37,8 @@ reviews:
 approvals:
   completeness:
     at: 2026-07-11T18:45:20.038392+00:00
+  testability:
+    at: 2026-07-11T18:46:25.605584+00:00
 quality_gates:
 - name: artifact-nonempty
   command: test -s .darkrun/darkrun-sim/specify/spec.md
