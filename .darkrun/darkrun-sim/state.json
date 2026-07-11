@@ -21,6 +21,7 @@
       "station": "specify",
       "status": "in_progress",
       "phase": "spec",
+      "elaborated": true,
       "checkpoint": {
         "kind": "ask"
       },
