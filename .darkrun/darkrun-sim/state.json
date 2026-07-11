@@ -10,7 +10,8 @@
       "phase": "spec",
       "checkpoint": {
         "kind": "ask"
-      }
+      },
+      "branch": "darkrun/darkrun-sim/frame"
     }
   },
   "created_with_version": "0.5.0",
