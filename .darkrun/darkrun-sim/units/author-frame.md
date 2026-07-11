@@ -1,7 +1,7 @@
 ---
 name: Author frame.md — the locked frame for darkrun-sim
 unit_type: doc
-status: in_progress
+status: completed
 depends_on: []
 worker: distiller
 model: opus
@@ -10,6 +10,7 @@ outputs:
 - frame/frame.md
 branch: darkrun/darkrun-sim/units/frame/author-frame
 started_at: 2026-07-11T05:10:13.062545+00:00
+completed_at: 2026-07-11T05:30:57.777761+00:00
 iterations:
 - worker: framer
   started_at: 2026-07-11T05:10:13.062545+00:00
