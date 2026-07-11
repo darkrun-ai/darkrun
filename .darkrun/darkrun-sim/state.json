@@ -1,20 +1,31 @@
 {
   "factory": "software",
-  "active_station": "frame",
+  "active_station": "specify",
   "mode": "solo",
   "base_branch": "main",
   "stations": {
     "frame": {
       "station": "frame",
-      "status": "in_progress",
+      "status": "completed",
       "phase": "reflect",
       "elaborated": true,
       "checkpoint": {
-        "kind": "ask"
+        "kind": "ask",
+        "outcome": "advanced"
       },
       "branch": "darkrun/darkrun-sim/frame",
-      "verifier_nonce": "5b652c354ef96d24f5eb9eb70f98d11d99351f355fe517ab99b73c2a799487f5",
-      "started_at": "2026-07-02T23:40:58.266557+00:00"
+      "started_at": "2026-07-02T23:40:58.266557+00:00",
+      "completed_at": "2026-07-11T15:37:26.590369+00:00"
+    },
+    "specify": {
+      "station": "specify",
+      "status": "in_progress",
+      "phase": "spec",
+      "checkpoint": {
+        "kind": "ask"
+      },
+      "branch": "darkrun/darkrun-sim/specify",
+      "started_at": "2026-07-11T15:37:29.759256+00:00"
     }
   },
   "created_with_version": "0.5.0",
