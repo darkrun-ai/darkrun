@@ -35,7 +35,7 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       ref: ${{ steps.v.outputs.ref }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: v
         shell: bash
         run: |
@@ -90,7 +90,7 @@ jobs:
             bin: darkrun.exe
             desktop_bin: darkrun-desktop.exe
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.ref }}
 
@@ -181,7 +181,7 @@ jobs:
       # `draft: true` keeps it a draft — the publish-release job un-drafts it once
       # everything is green.
       - name: Attach tarballs to the draft release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           tag_name: ${{ needs.version.outputs.ref }}
           files: dist/*.tar.gz
@@ -195,7 +195,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.ref }}
       - uses: actions/setup-node@v6
@@ -257,12 +257,23 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ needs.version.outputs.ref }}
         run: |
+          set -euo pipefail
           # Resolve the draft release by tag (drafts aren't addressable by tag via
-          # `gh release view`, so list + match), then flip draft=false.
+          # `gh release view`, so list + match).
           rel_id=$(gh api "repos/$REPO/releases" --paginate \
             --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
           if [ -z "$rel_id" ]; then
             echo "::error::no release found for tag $TAG"; exit 1
+          fi
+          # ASSET GUARD: never un-draft an empty release. Even though this job
+          # `needs: github-release`, action-gh-release succeeds with zero files if
+          # the tarball artifacts didn't materialize — which would publish a
+          # binary-less release. Confirm the draft actually carries assets before
+          # flipping draft=false; otherwise fail and leave it a retryable draft.
+          asset_count=$(gh api "repos/$REPO/releases/$rel_id" --jq '.assets | length')
+          echo "release $TAG (id $rel_id) has $asset_count asset(s)"
+          if [ "${asset_count:-0}" -lt 1 ]; then
+            echo "::error::release $TAG has no binary assets — staying a draft"; exit 1
           fi
           gh api -X PATCH "repos/$REPO/releases/$rel_id" -F draft=false
           echo "published release $TAG (id $rel_id)"

@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use darkrun_vcs::{
-    Credential, CredentialStore, HttpRequest, HttpResponse, HttpTransport, Provider,
+    Credential, CredentialStore, HttpRequest, HttpResponse, HttpTransport, Provider, Refresher,
 };
 
 /// The default website base when `DARKRUN_WEB_BASE` is unset.
@@ -59,36 +59,90 @@ pub fn broker_url(web_base: &str, nonce: &str) -> String {
     )
 }
 
-/// Generate a URL-safe random nonce. Uses process + time entropy mixed through
-/// a small splitmix64 so we avoid pulling in an RNG crate for one value.
+/// Build the website refresh-broker URL: `<web>/auth/<provider>/refresh`.
+pub fn refresh_url(web_base: &str, provider: Provider) -> String {
+    format!(
+        "{base}/auth/{provider}/refresh",
+        base = web_base.trim_end_matches('/'),
+        provider = provider.key(),
+    )
+}
+
+/// A [`Refresher`] that re-mints a near-expiry token through the WEBSITE broker
+/// instead of a locally-held OAuth client secret.
+///
+/// This is the hosted default. The GitLab client secret lives only on the
+/// website, so the CLI can't run the refresh grant itself; it POSTs its stored
+/// refresh token to `<web>/auth/<provider>/refresh`, and the website performs the
+/// secret-bearing grant and returns the rotated [`Credential`], which
+/// [`refresh_before_use`](darkrun_vcs::refresh_before_use) then persists. The
+/// self-hosted/desktop path that DOES hold the secret uses
+/// [`OauthClient`](darkrun_vcs::OauthClient) directly instead.
+pub struct BrokerRefresher {
+    web_base: String,
+}
+
+impl BrokerRefresher {
+    /// A refresher that brokers through `web_base` (e.g. `https://darkrun.ai`).
+    pub fn new(web_base: impl Into<String>) -> Self {
+        Self {
+            web_base: web_base.into(),
+        }
+    }
+}
+
+impl Refresher for BrokerRefresher {
+    fn refresh(
+        &self,
+        transport: &dyn HttpTransport,
+        credential: &Credential,
+    ) -> darkrun_vcs::Result<Credential> {
+        // A refresh needs a refresh token — mirror the direct grant's precondition.
+        let refresh_token = credential
+            .refresh_token
+            .as_deref()
+            .ok_or(darkrun_vcs::VcsError::MissingField("refresh_token"))?;
+
+        let url = refresh_url(&self.web_base, credential.provider);
+        let body = serde_json::json!({ "refresh_token": refresh_token });
+        let request = HttpRequest::post(url)
+            .header("Accept", "application/json")
+            .json_body(&body)?;
+        let response = transport.execute(request)?;
+        if !response.is_success() {
+            return Err(darkrun_vcs::VcsError::Api {
+                provider: credential.provider.display_name(),
+                status: response.status,
+                message: response.text().unwrap_or_default(),
+            });
+        }
+        // The website returns the rotated credential in `Credential` wire shape.
+        let fresh: Credential = response.json()?;
+        Ok(fresh)
+    }
+}
+
+/// Generate a URL-safe random nonce. The nonce doubles as the OAuth `state`
+/// value guarding the browser round-trip, so it must be unguessable — it is
+/// drawn from the operating-system CSPRNG (`getrandom`), never a seeded PRNG.
 pub fn generate_nonce() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // A monotonic per-call counter guarantees successive calls differ even when
-    // the system clock hasn't advanced a nanosecond between them.
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seed = {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let bump = COUNTER.fetch_add(1, Ordering::Relaxed);
-        nanos
-            ^ (std::process::id() as u64).rotate_left(17)
-            ^ bump.rotate_left(40)
-            ^ 0x9E37_79B9_7F4A_7C15
-    };
-    let mut state = seed;
-    let mut out = String::with_capacity(32);
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-    for _ in 0..32 {
-        // splitmix64 step.
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        out.push(ALPHABET[(z % ALPHABET.len() as u64) as usize] as char);
+    // 252 = 36 * 7, the largest multiple of the alphabet length ≤ 256. Rejecting
+    // bytes at or above it keeps the mapping onto the 36-char alphabet unbiased.
+    const REJECT_AT: u8 = (256 / ALPHABET.len() * ALPHABET.len()) as u8;
+    let mut out = String::with_capacity(32);
+    let mut buf = [0u8; 64];
+    let mut i = buf.len();
+    while out.len() < 32 {
+        if i >= buf.len() {
+            getrandom::fill(&mut buf).expect("OS CSPRNG unavailable");
+            i = 0;
+        }
+        let byte = buf[i];
+        i += 1;
+        if byte < REJECT_AT {
+            out.push(ALPHABET[(byte % ALPHABET.len() as u8) as usize] as char);
+        }
     }
     out
 }
@@ -369,25 +423,117 @@ pub fn poll_relay_until_ready(
     }
 }
 
+/// The relay dial credential — re-exported so the CLI stores/refreshes the same
+/// shape the engine dials with. See [`darkrun_mcp::relay_token`].
+pub use darkrun_mcp::relay_token::RelayToken;
+
 /// Where the relay token is stored — `~/.darkrun/relay-token`, the path the
-/// engine reads (`darkrun_mcp::server` resolve_relay_token).
+/// engine reads (`darkrun_mcp::relay_token::resolve_dial_id_token`).
 pub fn relay_token_path() -> Option<std::path::PathBuf> {
-    Some(darkrun_mcp::registry::default_root()?.join("relay-token"))
+    darkrun_mcp::relay_token::default_relay_token_path()
 }
 
-/// Persist the relay token to `~/.darkrun/relay-token` (`0600` on unix).
+/// Persist the claimed relay-token payload to `~/.darkrun/relay-token`
+/// (`0600` on unix).
+///
+/// The broker hands the deposited blob back verbatim: the web app now deposits a
+/// JSON [`RelayToken`] (carrying the refresh material), while a LEGACY deposit is
+/// a bare ID-token string. Either is parsed via [`RelayToken::parse`] and
+/// rewritten as the canonical JSON form, so the engine's refresh-aware resolve
+/// reads one consistent shape.
 pub fn store_relay_token(token: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let path = relay_token_path().ok_or("could not resolve the ~/.darkrun directory")?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, token)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    let parsed = RelayToken::parse(token).ok_or("the relay broker returned an empty token")?;
+    parsed.store(&path)?;
     Ok(path)
+}
+
+/// Whether the token at `path` is within the refresh skew of expiry AND can be
+/// refreshed. The path-taking core so it's testable over a temp file.
+fn relay_token_needs_refresh_at(path: &std::path::Path) -> bool {
+    let Some(token) = RelayToken::load(path) else {
+        return false;
+    };
+    token.needs_refresh(
+        darkrun_mcp::relay_token::now_unix(),
+        darkrun_mcp::relay_token::REFRESH_SKEW_SECS,
+    ) && token.can_refresh()
+}
+
+/// Whether the stored relay token is within the refresh skew of expiry AND can
+/// be refreshed (has refresh material). A legacy bare token reports `false` — it
+/// can't refresh, so it forces a re-login only once it actually expires.
+pub fn relay_token_needs_refresh() -> bool {
+    relay_token_path().is_some_and(|p| relay_token_needs_refresh_at(&p))
+}
+
+/// Refresh the token at `path` in place over `transport`. The path/transport
+/// core so it's driven offline with a `MockTransport` over a temp file.
+///
+/// The refresh error is the CLASSIFIED [`darkrun_mcp::relay_token::RefreshError`]
+/// (boxed), so the boot pre-flight can downcast it to tell a HARD credential
+/// rejection (re-login) from a transient blip when it logs.
+fn refresh_relay_token_at(
+    transport: &dyn HttpTransport,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut token =
+        RelayToken::load(path).ok_or("no relay token stored — run `darkrun login` first")?;
+    darkrun_mcp::relay_token::refresh_over_transport_classified(
+        transport,
+        &mut token,
+        darkrun_mcp::relay_token::now_unix(),
+    )?;
+    token.store(path)?;
+    Ok(())
+}
+
+/// Refresh the stored relay token in place via Google's public securetoken
+/// endpoint, rewriting `~/.darkrun/relay-token` with a fresh `id_token` (+ new
+/// expiry and any rotated refresh token). Mirrors darkrun-vcs's OAuth
+/// `refresh_access_token` grant, driven through the CLI's blocking
+/// [`ReqwestTransport`]. Returns the token path.
+pub fn refresh_relay_token() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let path = relay_token_path().ok_or("could not resolve the ~/.darkrun directory")?;
+    let transport = ReqwestTransport::new()?;
+    refresh_relay_token_at(&transport, &path)?;
+    Ok(path)
+}
+
+/// Best-effort pre-flight (called at `darkrun mcp` boot): if the stored relay
+/// token is near expiry and refreshable, re-mint it now so the engine starts
+/// from a fresh credential. Never fatal — the engine's per-dial refresh is the
+/// backstop, so a failure here is only logged.
+pub fn refresh_relay_token_if_needed() {
+    if !relay_token_needs_refresh() {
+        return;
+    }
+    match refresh_relay_token() {
+        Ok(path) => eprintln!(
+            "darkrun: refreshed the relay credential ({})",
+            path.display()
+        ),
+        Err(e) => {
+            // A HARD failure (securetoken 400 / revoked refresh token) won't
+            // self-heal per-dial — only a re-login does — so say so plainly. A
+            // transient blip keeps the softer "retry per-dial" line.
+            let hard = e
+                .downcast_ref::<darkrun_mcp::relay_token::RefreshError>()
+                .is_some_and(|r| r.hard);
+            if hard {
+                eprintln!(
+                    "darkrun: the relay credential was rejected ({e}); re-run \
+                     /darkrun:darkrun-login to restore remote access — the engine will dial with \
+                     the current token meanwhile"
+                );
+            } else {
+                eprintln!(
+                    "darkrun: could not refresh the relay credential ({e}); the engine will retry \
+                     per-dial"
+                );
+            }
+        }
+    }
 }
 
 /// `darkrun login [provider]` — enable REMOTE access. Generates a nonce, opens
@@ -495,6 +641,102 @@ mod tests {
             broker_url("https://darkrun.ai", "nonce-1"),
             "https://darkrun.ai/auth/broker/nonce-1"
         );
+    }
+
+    #[test]
+    fn refresh_url_is_provider_scoped() {
+        assert_eq!(
+            refresh_url("https://darkrun.ai", Provider::GitLab),
+            "https://darkrun.ai/auth/gitlab/refresh"
+        );
+        // Trailing slash is trimmed so the path joins cleanly.
+        assert_eq!(
+            refresh_url("https://darkrun.ai/", Provider::GitHub),
+            "https://darkrun.ai/auth/github/refresh"
+        );
+    }
+
+    #[test]
+    fn broker_refresher_posts_refresh_token_and_returns_rotated_credential() {
+        // The website returns the rotated credential in `Credential` wire shape;
+        // the refresher deserializes it and hands it back for persistence.
+        let mock = MockTransport::new();
+        let rotated = Credential {
+            provider: Provider::GitLab,
+            access_token: "new-access".into(),
+            refresh_token: Some("new-refresh".into()),
+            expires_in: Some(7200),
+            token_type: Some("bearer".into()),
+        };
+        mock.expect(
+            Method::Post,
+            "https://darkrun.ai/auth/gitlab/refresh",
+            HttpResponse::new(200, serde_json::to_vec(&rotated).unwrap()),
+        );
+
+        let stale = Credential {
+            provider: Provider::GitLab,
+            access_token: "old-access".into(),
+            refresh_token: Some("old-refresh".into()),
+            expires_in: Some(7200),
+            token_type: Some("bearer".into()),
+        };
+        let broker = BrokerRefresher::new("https://darkrun.ai");
+        let fresh = broker.refresh(&mock, &stale).expect("refresh succeeds");
+
+        assert_eq!(fresh.access_token, "new-access");
+        assert_eq!(fresh.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(fresh.expires_in, Some(7200));
+
+        // Exactly one POST to the website carrying the OLD refresh token — the
+        // client secret is never sent (it lives on the website).
+        let req = mock.single_request();
+        assert_eq!(req.method, Method::Post);
+        assert_eq!(req.url, "https://darkrun.ai/auth/gitlab/refresh");
+        let body: serde_json::Value =
+            serde_json::from_slice(req.body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["refresh_token"], "old-refresh");
+        assert!(body.get("client_secret").is_none());
+    }
+
+    #[test]
+    fn broker_refresher_errors_without_a_refresh_token() {
+        // Nothing to exchange → the same MissingField the direct grant reports,
+        // and no request is made.
+        let mock = MockTransport::new();
+        let cred = Credential::new(Provider::GitLab, "access-only");
+        let broker = BrokerRefresher::new("https://darkrun.ai");
+        let err = broker.refresh(&mock, &cred).unwrap_err();
+        assert!(matches!(
+            err,
+            darkrun_vcs::VcsError::MissingField("refresh_token")
+        ));
+        assert!(mock.requests().is_empty());
+    }
+
+    #[test]
+    fn broker_refresher_surfaces_a_website_failure() {
+        // A non-2xx from the website (e.g. the grant was rejected upstream)
+        // surfaces as an Api error rather than a bogus credential.
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Post,
+            "https://darkrun.ai/auth/gitlab/refresh",
+            HttpResponse::new(502, br#"{"error":"refresh failed"}"#.to_vec()),
+        );
+        let cred = Credential {
+            provider: Provider::GitLab,
+            access_token: "old".into(),
+            refresh_token: Some("r".into()),
+            expires_in: Some(7200),
+            token_type: None,
+        };
+        let broker = BrokerRefresher::new("https://darkrun.ai");
+        let err = broker.refresh(&mock, &cred).unwrap_err();
+        match err {
+            darkrun_vcs::VcsError::Api { status, .. } => assert_eq!(status, 502),
+            other => panic!("expected Api error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -770,6 +1012,100 @@ mod tests {
             store.get(Provider::GitHub).unwrap().unwrap().access_token,
             "logged-in"
         );
+    }
+
+    #[test]
+    fn relay_token_serde_round_trips() {
+        let token = RelayToken {
+            id_token: "id-1".into(),
+            refresh_token: Some("rt-1".into()),
+            api_key: Some("AIzaKEY".into()),
+            expires_at: Some(1_800_000_000),
+            issued_at: Some(1_799_996_400),
+        };
+        let json = serde_json::to_string(&token).unwrap();
+        assert_eq!(RelayToken::parse(&json), Some(token));
+    }
+
+    #[test]
+    fn legacy_bare_string_parses_and_cannot_refresh() {
+        // A real Firebase ID token is `header.payload.signature`, never JSON.
+        let tok = RelayToken::parse("eyJhbGci.eyJzdWIi.sig").unwrap();
+        assert_eq!(tok.id_token, "eyJhbGci.eyJzdWIi.sig");
+        assert_eq!(tok.refresh_token, None);
+        assert!(!tok.can_refresh());
+    }
+
+    #[test]
+    fn store_relay_token_writes_json_and_needs_refresh_reads_the_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay-token");
+        let now = darkrun_mcp::relay_token::now_unix();
+        let skew = darkrun_mcp::relay_token::REFRESH_SKEW_SECS;
+
+        // A refreshable token comfortably before expiry → no refresh.
+        RelayToken {
+            id_token: "id".into(),
+            refresh_token: Some("rt".into()),
+            api_key: Some("k".into()),
+            expires_at: Some(now + skew + 60),
+            issued_at: Some(now),
+        }
+        .store(&path)
+        .unwrap();
+        assert!(!relay_token_needs_refresh_at(&path));
+
+        // Inside the skew window → refresh.
+        RelayToken {
+            id_token: "id".into(),
+            refresh_token: Some("rt".into()),
+            api_key: Some("k".into()),
+            expires_at: Some(now + skew - 1),
+            issued_at: Some(now),
+        }
+        .store(&path)
+        .unwrap();
+        assert!(relay_token_needs_refresh_at(&path));
+
+        // A legacy bare token, stored as JSON, can't refresh → never true.
+        // (Written to a temp path — `store_relay_token` targets the real home.)
+        let legacy_path = dir.path().join("legacy");
+        RelayToken::parse("bare-legacy-token")
+            .unwrap()
+            .store(&legacy_path)
+            .unwrap();
+        assert!(!relay_token_needs_refresh_at(&legacy_path));
+    }
+
+    #[test]
+    fn refresh_relay_token_at_rewrites_the_file_over_a_mock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay-token");
+        RelayToken {
+            id_token: "stale".into(),
+            refresh_token: Some("rt-old".into()),
+            api_key: Some("k".into()),
+            expires_at: Some(0),
+            issued_at: Some(0),
+        }
+        .store(&path)
+        .unwrap();
+
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Post,
+            "https://securetoken.googleapis.com/v1/token?key=k",
+            HttpResponse::new(
+                200,
+                br#"{"id_token":"fresh","refresh_token":"rt-new","expires_in":"3600"}"#.to_vec(),
+            ),
+        );
+        refresh_relay_token_at(&mock, &path).unwrap();
+
+        let reloaded = RelayToken::load(&path).unwrap();
+        assert_eq!(reloaded.id_token, "fresh");
+        assert_eq!(reloaded.refresh_token.as_deref(), Some("rt-new"));
+        assert!(reloaded.expires_at.unwrap() > darkrun_mcp::relay_token::now_unix());
     }
 
     #[test]

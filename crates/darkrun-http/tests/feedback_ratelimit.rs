@@ -2069,12 +2069,15 @@ async fn feedback_writes_surface_persistence_faults() {
     .await;
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-    // update / reply: seed a settled doc and make the doc FILE read-only — the
-    // read succeeds but truncating it for the rewrite fails.
+    // update / reply: seed a settled doc and make the collection DIR read-only —
+    // the read succeeds but the atomic rewrite (write temp file + rename into
+    // the dir) cannot create its temp sibling, so the mutation fails. (A
+    // read-only doc FILE no longer induces the fault: an atomic write renames a
+    // fresh temp over the target, and rename only needs write on the directory.)
     let (state2, _dir2) = test_state_with_dir();
     seed_doc(&state2, "ro", "fb-1", "frame", "closed", "T");
-    let doc_path = state2.store.feedback_dir("ro").join("fb-1.md");
-    std::fs::set_permissions(&doc_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let fbdir2 = state2.store.feedback_dir("ro");
+    std::fs::set_permissions(&fbdir2, std::fs::Permissions::from_mode(0o555)).unwrap();
 
     let upd = send(
         state2.clone(),
@@ -2089,7 +2092,7 @@ async fn feedback_writes_surface_persistence_faults() {
     )
     .await;
     assert_eq!(rep.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    std::fs::set_permissions(&doc_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&fbdir2, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     // delete: a read-only collection DIR lets the read succeed but blocks the
     // unlink (removing an entry needs write on the directory).

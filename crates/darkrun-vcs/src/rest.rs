@@ -510,9 +510,50 @@ pub fn gitlab_create_note(
     Ok(())
 }
 
+/// Items requested per page of a paginated list (both providers cap at 100).
+const PAGE_SIZE: u32 = 100;
+
+/// Safety bound on the pages walked, so a misbehaving remote can't loop forever.
+const MAX_PAGES: u32 = 100;
+
+/// GET every page of a paginated list endpoint, concatenating the JSON arrays.
+///
+/// [`HttpResponse`] carries no headers, so pagination is driven by explicit
+/// `?per_page=&page=` query params — which both GitHub and GitLab honor —
+/// rather than following `Link` rel=next. Pages are walked until one comes back
+/// short (fewer than a full page, which includes empty), the standard
+/// termination signal, capped at [`MAX_PAGES`]. Without this a verdict past the
+/// first page (GitHub's default 30, GitLab's 20) is silently dropped.
+fn get_all_pages(
+    transport: &dyn HttpTransport,
+    provider: Provider,
+    cred: &Credential,
+    base_url: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let sep = if base_url.contains('?') { '&' } else { '?' };
+    let mut out = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let url = format!("{base_url}{sep}per_page={PAGE_SIZE}&page={page}");
+        let resp = transport.execute(authorize(HttpRequest::get(url), provider, cred))?;
+        if !resp.is_success() {
+            return Err(api_error(provider, &resp));
+        }
+        let serde_json::Value::Array(items) = resp.json::<serde_json::Value>()? else {
+            break;
+        };
+        let was_full = items.len() as u32 == PAGE_SIZE;
+        out.extend(items);
+        // A short (or empty) page is the last one; a full page may have more.
+        if !was_full {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 /// GitHub: the human review notes on a PR — issue comments (`c<id>`) plus review
 /// verdicts (`r<id>`), with `CHANGES_REQUESTED` flagged as a change request.
-/// Two GETs: `/issues/{n}/comments` and `/pulls/{n}/reviews`.
+/// Two paginated endpoints: `/issues/{n}/comments` and `/pulls/{n}/reviews`.
 pub fn github_review_notes(
     transport: &dyn HttpTransport,
     cred: &Credential,
@@ -522,71 +563,61 @@ pub fn github_review_notes(
     let base = Provider::GitHub.api_base();
     let mut out = Vec::new();
 
-    // Issue comments.
+    // Issue comments (all pages).
     let curl = format!(
         "{base}/repos/{owner}/{repo}/issues/{number}/comments",
         owner = coords.owner,
         repo = coords.repo,
     );
-    let resp = transport.execute(authorize(HttpRequest::get(curl), Provider::GitHub, cred))?;
-    if !resp.is_success() {
-        return Err(api_error(Provider::GitHub, &resp));
-    }
-    if let serde_json::Value::Array(items) = resp.json::<serde_json::Value>()? {
-        for c in items {
-            let Some(id) = c.get("id").and_then(|x| x.as_u64()) else {
-                continue;
-            };
-            let body = c.get("body").and_then(|x| x.as_str()).unwrap_or_default();
-            if body.is_empty() {
-                continue;
-            }
-            out.push(RemoteNote {
-                id: format!("c{id}"),
-                author: gh_login(&c),
-                body: body.to_string(),
-                change_request: false,
-            });
+    for c in get_all_pages(transport, Provider::GitHub, cred, &curl)? {
+        let Some(id) = c.get("id").and_then(|x| x.as_u64()) else {
+            continue;
+        };
+        let body = c.get("body").and_then(|x| x.as_str()).unwrap_or_default();
+        if body.is_empty() {
+            continue;
         }
+        out.push(RemoteNote {
+            id: format!("c{id}"),
+            author: gh_login(&c),
+            body: body.to_string(),
+            change_request: false,
+        });
     }
 
-    // Review verdicts.
+    // Review verdicts (all pages).
     let rurl = format!(
         "{base}/repos/{owner}/{repo}/pulls/{number}/reviews",
         owner = coords.owner,
         repo = coords.repo,
     );
-    let resp = transport.execute(authorize(HttpRequest::get(rurl), Provider::GitHub, cred))?;
-    if !resp.is_success() {
-        return Err(api_error(Provider::GitHub, &resp));
-    }
-    if let serde_json::Value::Array(items) = resp.json::<serde_json::Value>()? {
-        for r in items {
-            let Some(id) = r.get("id").and_then(|x| x.as_u64()) else {
-                continue;
-            };
-            let state = r.get("state").and_then(|x| x.as_str()).unwrap_or_default();
-            let change_request = state == "CHANGES_REQUESTED";
-            let body = r.get("body").and_then(|x| x.as_str()).unwrap_or_default();
-            // A bodyless non-change-request review (plain APPROVED) carries no
-            // actionable feedback — skip it.
-            if body.is_empty() && !change_request {
-                continue;
-            }
-            out.push(RemoteNote {
-                id: format!("r{id}"),
-                author: gh_login(&r),
-                body: body.to_string(),
-                change_request,
-            });
+    for r in get_all_pages(transport, Provider::GitHub, cred, &rurl)? {
+        let Some(id) = r.get("id").and_then(|x| x.as_u64()) else {
+            continue;
+        };
+        let state = r.get("state").and_then(|x| x.as_str()).unwrap_or_default();
+        let change_request = state == "CHANGES_REQUESTED";
+        let body = r.get("body").and_then(|x| x.as_str()).unwrap_or_default();
+        // A bodyless non-change-request review (plain APPROVED) carries no
+        // actionable feedback — skip it.
+        if body.is_empty() && !change_request {
+            continue;
         }
+        out.push(RemoteNote {
+            id: format!("r{id}"),
+            author: gh_login(&r),
+            body: body.to_string(),
+            change_request,
+        });
     }
     Ok(out)
 }
 
-/// GitLab: the human notes on an MR (`GET /merge_requests/{iid}/notes`),
-/// skipping system notes. GitLab notes carry no change-request verdict, so all
-/// are plain comments.
+/// GitLab: the human notes on an MR (`GET /merge_requests/{iid}/notes`, all
+/// pages). Ordinary notes are plain comments; the one system note we keep is a
+/// reviewer's "Request changes" verdict, mapped to a change request so it routes
+/// as a Blocker like GitHub's `CHANGES_REQUESTED`. Other system notes (approvals,
+/// label/assignee churn, …) carry no actionable feedback and are skipped.
 pub fn gitlab_notes(
     transport: &dyn HttpTransport,
     cred: &Credential,
@@ -598,38 +629,53 @@ pub fn gitlab_notes(
         base = Provider::GitLab.api_base(),
         id = project_id,
     );
-    let resp = transport.execute(authorize(HttpRequest::get(url), Provider::GitLab, cred))?;
-    if !resp.is_success() {
-        return Err(api_error(Provider::GitLab, &resp));
-    }
     let mut out = Vec::new();
-    if let serde_json::Value::Array(items) = resp.json::<serde_json::Value>()? {
-        for n in items {
-            if n.get("system").and_then(|x| x.as_bool()).unwrap_or(false) {
-                continue; // skip auto-generated system notes
-            }
-            let Some(id) = n.get("id").and_then(|x| x.as_u64()) else {
-                continue;
-            };
-            let body = n.get("body").and_then(|x| x.as_str()).unwrap_or_default();
-            if body.is_empty() {
-                continue;
-            }
-            let author = n
-                .get("author")
-                .and_then(|a| a.get("username"))
-                .and_then(|x| x.as_str())
-                .unwrap_or_default()
-                .to_string();
-            out.push(RemoteNote {
-                id: id.to_string(),
-                author,
-                body: body.to_string(),
-                change_request: false,
-            });
+    for n in get_all_pages(transport, Provider::GitLab, cred, &url)? {
+        let Some(id) = n.get("id").and_then(|x| x.as_u64()) else {
+            continue;
+        };
+        let body = n.get("body").and_then(|x| x.as_str()).unwrap_or_default();
+        if body.is_empty() {
+            continue;
         }
+        let author = n
+            .get("author")
+            .and_then(|a| a.get("username"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let system = n.get("system").and_then(|x| x.as_bool()).unwrap_or(false);
+        if system {
+            // Keep only the changes-requested verdict; drop other system notes.
+            if is_gitlab_changes_requested(body) {
+                out.push(RemoteNote {
+                    id: id.to_string(),
+                    author,
+                    body: body.to_string(),
+                    change_request: true,
+                });
+            }
+            continue;
+        }
+        out.push(RemoteNote {
+            id: id.to_string(),
+            author,
+            body: body.to_string(),
+            change_request: false,
+        });
     }
     Ok(out)
+}
+
+/// Whether a GitLab MR system note records a reviewer requesting changes.
+///
+/// GitLab (16.6+) emits a system note whose body reads like "requested changes"
+/// when a reviewer sets their review state to changes-requested — the closest
+/// analogue to GitHub's `CHANGES_REQUESTED`. Matched case-insensitively; the
+/// phrase is specific enough not to collide with benign system notes
+/// ("requested review from …", "approved this merge request", …).
+fn is_gitlab_changes_requested(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("requested changes")
 }
 
 /// The GitHub `user.login` of a comment/review object.

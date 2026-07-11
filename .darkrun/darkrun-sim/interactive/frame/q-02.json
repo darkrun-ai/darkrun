@@ -1,0 +1,32 @@
+{
+  "session_type": "question",
+  "session_id": "q-02",
+  "status": "answered",
+  "run_slug": "darkrun-sim",
+  "title": "Recording provider for the dumb agent",
+  "prompt": "Which token source should the deliberately-dumb recording agent use when capturing real fixture runs (phase 3)?",
+  "context": "The provider stays pluggable either way, and the scripted (deterministic, no-LLM) provider is always phase 1's spine + CI's fast path. This choice is only about the *real-model* recorder that captures the committed fixtures the website replays. Recording is an occasional dev-machine act (fixture regeneration), not per-CI-run, so cost scales with re-records, not commits. June's decision said \"a real local-or-cheap-API dumb model\" without pinning which.",
+  "options": [
+    {
+      "id": "api-haiku",
+      "label": "Cheap API model — claude-haiku (Recommended)",
+      "description": "Real tool-calling reliability with a genuinely weak-enough model; zero local setup; pennies per recorded run since recording is occasional. Highest-fidelity signal per unit of harness work."
+    },
+    {
+      "id": "local-small-model",
+      "label": "Local small model (no API dependency)",
+      "description": "Free and offline, but flakier tool-calling means more harness babysitting, and the harness work to stabilize it lands before the protocol signal does."
+    },
+    {
+      "id": "scripted-only-defer",
+      "label": "Defer the real model — scripted provider only for now",
+      "description": "Ship spine + player on scripted fixtures alone; pick the real-model provider only when the replay surface has proven out. Lowest scope now, but protocol fidelity stays untested against a real model."
+    }
+  ],
+  "multi_select": false,
+  "answer": {
+    "selected": [
+      "scripted-only-defer"
+    ]
+  }
+}

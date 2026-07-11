@@ -140,6 +140,40 @@ pub async fn review_decide(
     let decision = ReviewDecision::canonicalize(&req.decision);
     let feedback = req.feedback.clone().unwrap_or_default();
 
+    // Severity gate: an Approve over open must/should annotations is rejected
+    // server-side, mirroring the engine's `checkpoint_decide`. A remote/curl
+    // caller cannot bypass the invariant the desktop enforces by disabling its
+    // Approve button. Only enforced when the session names a real run on disk;
+    // ad-hoc reviews carry no station annotations to steer.
+    if decision == ReviewDecision::Approved {
+        if let Some(slug) = review.run_slug.as_deref() {
+            if let Ok(annotations) = state.store.list_annotations(slug) {
+                let station = review.station.clone();
+                let scoped: Vec<_> = annotations
+                    .into_iter()
+                    .filter(|a| {
+                        station
+                            .as_deref()
+                            .is_none_or(|s| a.work_item.station == s)
+                    })
+                    .collect();
+                let open = darkrun_core::count_open_by_severity(&scoped);
+                if open.blocks_clean_approve() {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "error": "checkpoint has open blocking annotations",
+                            "session_id": id,
+                            "blockers": open.must + open.should,
+                            "bar": open.bar_label(),
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
     // Reflect the decision back onto the session payload and re-register it so
     // subscribers see the resolved state.
     review.decision = Some(
@@ -149,6 +183,10 @@ pub async fn review_decide(
         }
         .to_string(),
     );
+    // Capture the durable-land inputs before `review` is moved into the upsert:
+    // the run the gate belongs to and the feedback body to route on a block.
+    let run_slug = review.run_slug.clone();
+    let gate_feedback = req.feedback.clone();
     review.feedback = req.feedback;
     review.annotations = req.annotations;
     review.status = match decision {
@@ -156,6 +194,18 @@ pub async fn review_decide(
         ReviewDecision::ChangesRequested => SessionStatus::ChangesRequested,
     };
     state.sessions.upsert(SessionPayload::Review(review));
+
+    // Durable land: the in-memory session flip above is what the desktop sees,
+    // but the ENGINE reads the on-disk StateStore. When this review names a real
+    // run, mirror the decision into it via the installed gate-decider hook so
+    // `run_tick` walks past the gate (approve → complete/release; block → route
+    // the feedback as rework). Best-effort: a land failure still returns 200 with
+    // the session flipped — the operator's action is not lost. The engine's own
+    // `checkpoint_decide` re-enforces the severity gate, so this cannot approve
+    // over open must/should annotations (already refused above regardless).
+    if let Some(run) = run_slug.as_deref() {
+        let _ = state.decide_gate(run, decision == ReviewDecision::Approved, gate_feedback);
+    }
 
     (
         StatusCode::OK,

@@ -1,0 +1,75 @@
+   Compiling tokio-rustls v0.26.4
+   Compiling darkrun-api v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-api)
+   Compiling darkrun-prompts v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-prompts)
+   Compiling darkrun-vcs v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-vcs)
+   Compiling darkrun-harness v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-harness)
+   Compiling darkrun-ui v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-ui)
+   Compiling hyper-rustls v0.27.9
+   Compiling darkrun-core v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-core)
+   Compiling reqwest v0.13.4
+   Compiling reqwest v0.12.28
+   Compiling darkrun-content v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-content)
+   Compiling darkrun-tunnel v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-tunnel)
+   Compiling gix-transport v0.57.1
+   Compiling sentry v0.48.2
+   Compiling gix-protocol v0.62.0
+   Compiling darkrun-telemetry v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-telemetry)
+   Compiling gix v0.84.0
+   Compiling darkrun-git v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-git)
+   Compiling darkrun-http v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-http)
+   Compiling darkrun-mcp v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-mcp)
+   Compiling darkrun-desktop v0.7.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 52s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+   Compiling rayon v1.12.0
+   Compiling exr v1.74.0
+   Compiling darkrun-api v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-api)
+   Compiling darkrun-vcs v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-vcs)
+   Compiling darkrun-prompts v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-prompts)
+   Compiling darkrun-harness v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-harness)
+   Compiling darkrun-telemetry v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-telemetry)
+   Compiling av-scenechange v0.14.1
+   Compiling maybe-rayon v0.1.1
+    Blocking waiting for file lock on build directory
+   Compiling darkrun-git v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-git)
+   Compiling darkrun-core v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-core)
+   Compiling darkrun-tunnel v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-tunnel)
+   Compiling rav1e v0.8.1
+   Compiling darkrun-content v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-content)
+   Compiling ravif v0.13.0
+    Blocking waiting for file lock on build directory
+   Compiling image v0.25.10
+   Compiling dioxus-desktop v0.7.9
+   Compiling darkrun-http v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-http)
+   Compiling darkrun-mcp v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-mcp)
+    Blocking waiting for file lock on build directory
+    Blocking waiting for file lock on build directory
+   Compiling dioxus v0.7.9
+   Compiling darkrun-ui v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/crates/darkrun-ui)
+   Compiling darkrun-desktop v0.9.0 (/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 58s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 45s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+The application cannot be opened for an unexpected reason, error=Error Domain=RBSRequestErrorDomain Code=5 "Launch failed." UserInfo={NSLocalizedFailureReason=Launch failed., NSUnderlyingError=0x74703c570 {Error Domain=NSPOSIXErrorDomain Code=153 "Unknown error: 153" UserInfo={NSLocalizedDescription=Launchd job spawn failed}}}
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 21s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+The application cannot be opened because its executable is missing.
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 45s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 31s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+The application cannot be opened for an unexpected reason, error=Error Domain=RBSRequestErrorDomain Code=5 "Launch failed." UserInfo={NSLocalizedFailureReason=Launch failed., NSUnderlyingError=0x79103c810 {Error Domain=NSPOSIXErrorDomain Code=153 "Unknown error: 153" UserInfo={NSLocalizedDescription=Launchd job spawn failed}}}
+The application cannot be opened for an unexpected reason, error=Error Domain=RBSRequestErrorDomain Code=5 "Launch failed." UserInfo={NSLocalizedFailureReason=Launch failed., NSUnderlyingError=0x95f03c5d0 {Error Domain=NSPOSIXErrorDomain Code=153 "Unknown error: 153" UserInfo={NSLocalizedDescription=Launchd job spawn failed}}}
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.34s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

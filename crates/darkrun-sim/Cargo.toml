@@ -1,0 +1,22 @@
+[package]
+name = "darkrun-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "darkrun protocol-fidelity simulator — a dumb, no-knowledge agent that must follow the engine's rendered prompts"
+publish = false
+
+# The crate's value is the harness + agent under `src/` plus the followability
+# suite under `tests/`. The library drives real engine ticks (via darkrun-mcp)
+# and re-parses the rendered prompt text, so a prompt-wording regression is a
+# failing test rather than a silent unfollowable instruction.
+[dependencies]
+darkrun-core = { workspace = true }
+darkrun-mcp = { path = "../darkrun-mcp" }
+darkrun-prompts = { workspace = true }
+serde_json = { workspace = true }
+tempfile = "3"
+
+[dev-dependencies]

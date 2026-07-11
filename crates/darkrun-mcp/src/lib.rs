@@ -7,10 +7,13 @@
 //!
 //! ## Manager
 //!
-//! The manager is a **pure read** of on-disk `.darkrun/` state that
-//! returns ONE structured next-action instruction. It never runs LLM agents —
-//! it tells the caller what to do; the caller does it, then re-ticks. See
-//! [`position::derive_position`] and [`position::run_tick`].
+//! The manager derives ONE structured next-action instruction from on-disk
+//! `.darkrun/` state. It never runs LLM agents — it tells the caller what to do;
+//! the caller does it, then re-ticks. See [`position::derive_position`] and
+//! [`position::run_tick`]. Derivation is a pure read, so in `solo`/`dark` a tick
+//! is effectively read-only; in `team` mode a tick also performs hosting side
+//! effects inline (pushes the station branch, opens/polls the PR/MR, files
+//! remote review notes as feedback) — see the [`position`] module docs.
 //!
 //! Three-track priority (Track C -> B -> A): **drift -> feedback ->
 //! run**. Inside the run track, each Station walks the phase machine
@@ -72,6 +75,7 @@ pub mod position;
 pub mod proof;
 pub mod reflection;
 pub mod registry;
+pub mod relay_token;
 pub mod reset;
 pub mod runs;
 pub mod scaffold;

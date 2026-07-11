@@ -5,17 +5,20 @@ name: ios-release
 # release.yml). The binary + metadata are uploaded but NOT submitted for review;
 # a human hits "Submit" in App Store Connect. Auth + signing as in ios-testflight.
 #
-# Manual-only (workflow_dispatch) until the secrets exist + `match` is populated.
-# Enable the `push: tags` trigger once the ASC_* + MATCH_* secrets are set.
+# Fires AUTOMATICALLY on a version tag — release-please pushes `vX.Y.Z` when its
+# release PR merges, so a GA App Store build is cut with no manual step (uploaded,
+# not auto-submitted; a human hits "Submit"). GA is tag-driven on purpose:
+# continuous beta builds are ios-testflight's job. workflow_dispatch stays for
+# on-demand rebuilds.
 
 on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       version:
         description: "Marketing version (e.g. 0.7.0). Defaults to the tag."
         required: false
-  # push:
-  #   tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 concurrency:
   group: ios-release
@@ -29,7 +32,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so `git rev-list --count` is the real build number
 
@@ -60,7 +63,7 @@ jobs:
         run: cargo install dioxus-cli --version "^0.7" --locked
 
       - name: Set up Ruby + fastlane (bundler)
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@d45b1a4e94b71acab930e56e79c6aa188764e7f9 # v1
         with:
           ruby-version: "3.3"
           bundler-cache: true
@@ -96,6 +99,12 @@ jobs:
         run: dx build --package darkrun-desktop --platform ios --release --target aarch64-apple-ios
         env:
           IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+          # Bake the Sentry DSN + release into the binary at compile time
+          # (darkrun-telemetry reads DARKRUN_SENTRY_DSN via option_env!). The DSN
+          # is a public ingest key, stored as a repo secret only to keep it out of
+          # logs; if the secret is unset, telemetry compiles out (no-op).
+          DARKRUN_SENTRY_DSN: ${{ secrets.DARKRUN_SENTRY_DSN }}
+          DARKRUN_RELEASE: ${{ steps.v.outputs.version }}
 
       - name: Sign + package the .ipa
         run: ./fastlane/package-ios-ipa.sh

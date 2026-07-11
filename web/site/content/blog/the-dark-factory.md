@@ -52,7 +52,7 @@ Frame ─▶ Specify ─▶ Shape ─▶ Build ─▶ Prove ─▶ Harden
 
 A staffed line has a human at every station signing off before the product moves. That's `solo` and `team` mode — you or your team look at each boundary before the run crosses it.
 
-`dark` mode is the lights-out line. You frame the work once, up front, in full. Then the run goes station to station with nobody standing on the floor. It only stops for the two things an unstaffed line genuinely can't handle on its own: a gate that's waiting on something external, and real ambiguity it can't resolve from the frame. Otherwise the lights stay off and the product moves.
+`dark` mode is the lights-out line. You frame the work once, up front, in full. Then the run goes station to station with nobody standing on the floor. It only stops for the one thing an unstaffed line genuinely can't handle on its own: a gate that's waiting on something external. When it hits an ambiguity it can't resolve from the frame, it doesn't stop to ask, because there's nobody on the floor to answer; it decides, records the assumption, and keeps moving, and you can override that call later through feedback. Otherwise the lights stay off and the product moves.
 
 That only works because the stations are real. A lights-out factory is only safe if each station actually retires its risk before passing the product on. The whole design — order by cost of late discovery, lock one artifact per station, never reopen — is what makes it safe to turn the lights off.
 

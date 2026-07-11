@@ -101,6 +101,21 @@ impl ConnConfig {
         }
     }
 
+    /// Rewrite a host-relative artifact fetch path (e.g. `/api/output/x.png`)
+    /// into an absolute URL on the engine's loopback authority.
+    ///
+    /// The desktop webview is served over a custom protocol, so a bare relative
+    /// URL would resolve against that origin — not the engine — and never load.
+    /// Absolute `http(s)` URLs pass through unchanged; a leading slash is
+    /// normalized so both `/api/…` and `api/…` become `http://host:port/api/…`.
+    pub fn artifact_url(&self, path: &str) -> String {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            path.to_string()
+        } else {
+            format!("http://{}/{}", self.authority(), path.trim_start_matches('/'))
+        }
+    }
+
     /// The WebSocket URL for the session feed.
     pub fn ws_url(&self) -> String {
         format!(
@@ -595,14 +610,18 @@ const DEEPLINK_HOST: &str = "app.darkrun.ai";
 /// environments without Universal-Link support (see `[deep_links] schemes`).
 const DEEPLINK_SCHEME: &str = "darkrun";
 
-/// Parse a darkrun deep link into the review/session id it points at.
+/// Parse a darkrun deep link into the run/review/session id it points at.
 ///
 /// Pure over the URL string, so it is exhaustively unit-tested. Recognizes the
 /// shapes the OS hands us when a darkrun link is opened (see `Dioxus.toml`
 /// `[deep_links]`):
 ///
-///   - Universal Link — `https://app.darkrun.ai/review/<id>` (only this host,
-///     only the `/review/` path). Any other host or path is not ours.
+///   - Universal Link — `https://app.darkrun.ai/review/<id>` (a review) and
+///     `https://app.darkrun.ai/runs/<slug>` (a live run — the clean link the
+///     engine mints, see `darkrun_mcp` `run_web_url`). Only this host, only these
+///     two paths; any other host or path is not ours. Both map to the same live
+///     session id (the relay session id == the run slug), so the app opens the
+///     run's live view either way.
 ///   - Custom scheme — `darkrun://review/<id>` and `darkrun://session/<id>`
 ///     (the `//` makes `review`/`session` the URL *authority*, so we read both
 ///     the authority and the first path segment to be tolerant of either form,
@@ -613,14 +632,17 @@ const DEEPLINK_SCHEME: &str = "darkrun";
 pub fn parse_review_deeplink(url: &str) -> Option<String> {
     let parsed = ::url::Url::parse(url.trim()).ok()?;
     match parsed.scheme() {
-        // Universal Link: https://app.darkrun.ai/review/<id>
+        // Universal Link: https://app.darkrun.ai/{review|runs}/<id>
         "https" | "http" => {
             if parsed.host_str()? != DEEPLINK_HOST {
                 return None;
             }
             let mut segs = parsed.path_segments()?;
-            if segs.next()? != "review" {
-                return None;
+            // `/review/<id>` (a review) or `/runs/<slug>` (a live run) — both name
+            // the same live session id the app opens.
+            match segs.next()? {
+                "review" | "runs" => {}
+                _ => return None,
             }
             non_empty_decoded(segs.next()?)
         }
@@ -802,12 +824,35 @@ mod tests {
     }
 
     #[test]
+    fn universal_link_runs_path_yields_slug() {
+        // The clean run link the engine mints opens the run's live view — the slug
+        // is the live session id.
+        assert_eq!(
+            parse_review_deeplink("https://app.darkrun.ai/runs/quiet-tumbling-canyon"),
+            Some("quiet-tumbling-canyon".to_string())
+        );
+        // Trailing slash, query, and fragment don't change the slug.
+        assert_eq!(
+            parse_review_deeplink("https://app.darkrun.ai/runs/quiet-canyon/"),
+            Some("quiet-canyon".to_string())
+        );
+        assert_eq!(
+            parse_review_deeplink("https://app.darkrun.ai/runs/quiet-canyon?x=1#f"),
+            Some("quiet-canyon".to_string())
+        );
+        // A missing slug on the runs path is still rejected.
+        assert_eq!(parse_review_deeplink("https://app.darkrun.ai/runs/"), None);
+        assert_eq!(parse_review_deeplink("https://app.darkrun.ai/runs"), None);
+    }
+
+    #[test]
     fn wrong_path_or_kind_is_rejected() {
-        // Right host, not the review path.
-        assert_eq!(parse_review_deeplink("https://app.darkrun.ai/runs/abc"), None);
+        // Right host, an unrecognized path (only /review and /runs are ours).
+        assert_eq!(parse_review_deeplink("https://app.darkrun.ai/settings/abc"), None);
         assert_eq!(parse_review_deeplink("https://app.darkrun.ai/"), None);
-        // Custom scheme, unrecognized kind.
+        // Custom scheme, unrecognized kind (the scheme only carries review/session).
         assert_eq!(parse_review_deeplink("darkrun://run/abc"), None);
+        assert_eq!(parse_review_deeplink("darkrun://runs/abc"), None);
     }
 
     #[test]
@@ -1192,5 +1237,26 @@ mod asset_url_tests {
         // Right shape but a different run slug — not this run's asset.
         let elsewhere = "file:///x/.darkrun/other-run/assets/a.png";
         assert_eq!(c.asset_url("r", elsewhere), elsewhere);
+    }
+
+    #[test]
+    fn artifact_url_absolutizes_host_relative_paths() {
+        let c = cfg();
+        // A host-relative fetch path gets the engine authority prefixed.
+        assert_eq!(
+            c.artifact_url("/api/output/home.png"),
+            "http://127.0.0.1:59298/api/output/home.png"
+        );
+        // A leading slash is optional — both normalize to the same URL.
+        assert_eq!(
+            c.artifact_url("api/output/home.png"),
+            "http://127.0.0.1:59298/api/output/home.png"
+        );
+        // Already-absolute http(s) urls pass through unchanged.
+        assert_eq!(c.artifact_url("https://cdn/x.png"), "https://cdn/x.png");
+        assert_eq!(
+            c.artifact_url("http://127.0.0.1:59298/api/output/x.png"),
+            "http://127.0.0.1:59298/api/output/x.png"
+        );
     }
 }

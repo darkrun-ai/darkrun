@@ -35,7 +35,9 @@ walking the line:
 :::steps
 - **darkrun-new** scaffolds the run and opens the first station.
 - The **manager** advances each station through its phases, doing the work.
-- You **review in the desktop app** — approve, request changes, or annotate.
+- You **review in the desktop app** (or the website on CLI-only builds like
+  linux-arm64): approve, request changes, or annotate. See
+  [Review and feedback](/docs/review) for the per-platform surfaces.
 - At each **checkpoint** the run either advances on its own or stops and asks you.
 :::
 
@@ -67,8 +69,12 @@ The same engine runs headless if you'd rather drive it directly:
 
 ```sh
 npm i -g darkrun          # the native binary, no JS app
-darkrun run "add rate limiting to the public API"
+darkrun run start "add rate limiting to the public API"
+darkrun run next          # tick the manager; print the next action
 ```
 
-`run` opens a top-level Run and starts the manager loop. Most people use the
-agent path above; the CLI is there for scripts and CI.
+`run start` seeds a new Run at the factory's first station. From there you drive
+it a tick at a time: each `darkrun run next` advances the manager one step and
+prints the next concrete action to take. Keep ticking until a Checkpoint asks you
+to decide (`darkrun run decide`, or `--reject` to route rework back as drift). Most
+people use the agent path above; the CLI is there for scripts and CI.

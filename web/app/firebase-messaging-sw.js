@@ -28,12 +28,47 @@ firebase.initializeApp({
 const messaging = firebase.messaging();
 
 // Render a background push as an OS notification. The relay sends FCM messages
-// with a `notification` block (title/body from the host's gate event).
+// with a `notification` block (title/body from the host's gate event) and, for a
+// gate on a specific run, a click target (`webpush.fcm_options.link`, mirrored
+// into `webpush.data.link`) pointing at `app.darkrun.ai/runs/<slug>`. Stash the
+// link in the notification `data` so the `notificationclick` handler can open the
+// live run.
 messaging.onBackgroundMessage((payload) => {
   const n = payload.notification || {};
+  const link =
+    (payload.fcmOptions && payload.fcmOptions.link) ||
+    (payload.data && payload.data.link) ||
+    "/";
   self.registration.showNotification(n.title || "darkrun", {
     body: n.body || "",
     icon: "/assets/favicon.png",
     tag: "darkrun-gate",
+    data: { link },
   });
+});
+
+// Open (or focus) the run's live view when the operator taps the notification.
+// Overriding onBackgroundMessage bypasses FCM's default click handling, so wire
+// it explicitly: focus an existing darkrun tab if one is open (navigating it to
+// the run), else open the run link in a new window.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const link = (event.notification.data && event.notification.data.link) || "/";
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clientList) => {
+        for (const client of clientList) {
+          if ("focus" in client) {
+            if ("navigate" in client) {
+              client.navigate(link);
+            }
+            return client.focus();
+          }
+        }
+        if (self.clients.openWindow) {
+          return self.clients.openWindow(link);
+        }
+      }),
+  );
 });

@@ -169,10 +169,12 @@ pub fn sweep(store: &StateStore, run: &str) -> Result<()> {
             }
         }
 
-        if witnesses_changed {
-            store.write_unit(run, &updated)?;
-        }
-
+        // File the drift feedback BEFORE restamping the witness. If the process
+        // crashes between the two writes, the witness still holds the OLD hash,
+        // so the next sweep re-detects the drift and re-files — where the dedup
+        // (`drift_feedback_is_open`) collapses it to a no-op. Restamping first
+        // would instead mark the premise "steady" on the next sweep, silently
+        // dropping the re-orientation signal forever.
         for (path, kind) in drifts {
             // Keep annotations valid across the change (text re-anchors;
             // image/pdf regions re-crop from the new bytes).
@@ -182,7 +184,7 @@ pub fn sweep(store: &StateStore, run: &str) -> Result<()> {
                 }
             }
             // Dedup against an already-open drift feedback for this premise, then
-            // cascade-cap. Restamp has already run either way.
+            // cascade-cap.
             let marker = drift_marker(kind, &path);
             if drift_feedback_is_open(store, run, &marker)? {
                 continue;
@@ -201,6 +203,12 @@ pub fn sweep(store: &StateStore, run: &str) -> Result<()> {
                 vec![],
             )?;
             open_drift += 1;
+        }
+
+        // Now that the feedback owns the unresolved re-orientation, restamp the
+        // witnesses to the current bytes so the same change fires exactly once.
+        if witnesses_changed {
+            store.write_unit(run, &updated)?;
         }
     }
     Ok(())

@@ -39,6 +39,18 @@ const USER_AGENT: &str = "darkrun-web";
 /// The committed-state directory every darkrun run lives under.
 const STATE_DIR: &str = ".darkrun";
 
+/// Entries per page when walking GitLab's `.darkrun` tree
+/// (`GET /projects/{}/repository/tree`). Mirrors the `per_page=100` baked into
+/// the GitLab branch of [`tree_url`]; a page shorter than this is the last one.
+const TREE_PER_PAGE: usize = 100;
+
+/// The most `.darkrun` tree pages we walk for one GitLab repo before stopping.
+/// At [`TREE_PER_PAGE`] entries per page this covers 20,000 tree entries (a repo
+/// with many runs, each with many artifact blobs); the cap is a safety bound so
+/// a misbehaving remote can never spin us forever. If hit, it is logged; entries
+/// past it are unseen. GitHub is exempt — it returns the whole tree in one call.
+const TREE_MAX_PAGES: u32 = 200;
+
 /// Query for `GET /api/repos/sessions` — which provider the bearer token
 /// belongs to and which repository to read the `.darkrun/` tree from.
 #[derive(Debug, Deserialize)]
@@ -140,36 +152,118 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
 
 /// Read `repo`'s committed `.darkrun/` tree from `provider` using `cred`,
 /// normalized into runs. A missing `.darkrun/` (a `404`) is not an error.
+///
+/// The two providers have different tree pagination models, so each has its own
+/// fetch: GitHub returns the whole recursive tree in one call (and flags
+/// truncation), while GitLab's subtree endpoint is page-based and is walked to
+/// the end.
 fn fetch_sessions(
     transport: &dyn darkrun_vcs::HttpTransport,
     provider: Provider,
     cred: &Credential,
     repo: &str,
 ) -> darkrun_vcs::Result<Vec<DiscoveredSession>> {
-    let url = tree_url(provider, repo);
-    let request = authorize(HttpRequest::get(url), provider, cred);
+    match provider {
+        Provider::GitHub => fetch_sessions_github(transport, cred, repo),
+        Provider::GitLab => fetch_sessions_gitlab(transport, cred, repo),
+    }
+}
+
+/// GitHub tree discovery: one recursive call returns the whole tree. GitHub caps
+/// it (100k entries / 7MB) and sets `"truncated": true` when it does — that is
+/// NOT page-based, so we can't walk it, but a silent truncation would drop runs,
+/// so we surface it via a `tracing::warn` before normalizing whatever we got.
+fn fetch_sessions_github(
+    transport: &dyn darkrun_vcs::HttpTransport,
+    cred: &Credential,
+    repo: &str,
+) -> darkrun_vcs::Result<Vec<DiscoveredSession>> {
+    let url = tree_url(Provider::GitHub, repo);
+    let request = authorize(HttpRequest::get(url), Provider::GitHub, cred);
     let response = transport.execute(request)?;
 
-    // A repo with no `.darkrun/` (GitLab `404`) or no committed tree at all
-    // (GitHub `404` / `409` on an empty repo) is a legitimate empty result, not
-    // a failure — skip + continue.
+    // No committed tree at all (`404`/`409` on an empty repo) is a legitimate
+    // empty result, not a failure.
     if matches!(response.status, 404 | 409) {
         return Ok(Vec::new());
     }
     if !response.is_success() {
         return Err(darkrun_vcs::VcsError::Api {
-            provider: provider.display_name(),
+            provider: Provider::GitHub.display_name(),
             status: response.status,
             message: response.text().unwrap_or_default(),
         });
     }
 
     let value: serde_json::Value = response.json()?;
-    Ok(parse_sessions(provider, repo, &value))
+    if tree_truncated(&value) {
+        tracing::warn!(
+            repo = %repo,
+            "GitHub git tree was truncated (>100k entries / 7MB); some `.darkrun/` runs may be missing from discovery",
+        );
+    }
+    Ok(parse_sessions(Provider::GitHub, repo, &value))
 }
 
-/// The git-tree endpoint URL for `repo` on `provider`.
-fn tree_url(provider: Provider, repo: &str) -> String {
+/// GitLab tree discovery: the `.darkrun` subtree endpoint is page-based
+/// (`?page=N` + `per_page`), so walk every page until a short page ends the list
+/// (bounded by [`TREE_MAX_PAGES`]). Every page's raw entries are accumulated and
+/// handed to [`parse_sessions`] once, so cross-page run-id de-duplication is
+/// preserved exactly as the single-page path did it.
+fn fetch_sessions_gitlab(
+    transport: &dyn darkrun_vcs::HttpTransport,
+    cred: &Credential,
+    repo: &str,
+) -> darkrun_vcs::Result<Vec<DiscoveredSession>> {
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    for page in 1..=TREE_MAX_PAGES {
+        let url = format!("{}&page={}", tree_url(Provider::GitLab, repo), page);
+        let request = authorize(HttpRequest::get(url), Provider::GitLab, cred);
+        let response = transport.execute(request)?;
+
+        // A repo with no `.darkrun/` yields a `404` — a clean empty result.
+        if matches!(response.status, 404 | 409) {
+            break;
+        }
+        if !response.is_success() {
+            return Err(darkrun_vcs::VcsError::Api {
+                provider: Provider::GitLab.display_name(),
+                status: response.status,
+                message: response.text().unwrap_or_default(),
+            });
+        }
+
+        let value: serde_json::Value = response.json()?;
+        let Some(page_entries) = value.as_array() else {
+            break;
+        };
+        let page_len = page_entries.len();
+        entries.extend(page_entries.iter().cloned());
+        // A short page (fewer than a full page) is the last page.
+        if page_len < TREE_PER_PAGE {
+            break;
+        }
+        if page == TREE_MAX_PAGES {
+            tracing::warn!(
+                repo = %repo,
+                pages = TREE_MAX_PAGES,
+                "GitLab `.darkrun` tree hit the pagination cap; entries past it are unseen",
+            );
+        }
+    }
+    // Normalize + de-duplicate across all pages in one pass over the combined
+    // array (the GitLab shape [`parse_sessions`] expects is a bare array).
+    Ok(parse_sessions(
+        Provider::GitLab,
+        repo,
+        &serde_json::Value::Array(entries),
+    ))
+}
+
+/// The git-tree endpoint URL for `repo` on `provider`. Shared with the
+/// GitHub-App workspace path (`github_app.rs`), which reads the same
+/// `.darkrun/` tree through an installation token.
+pub(crate) fn tree_url(provider: Provider, repo: &str) -> String {
     match provider {
         // The whole tree at the default branch (`HEAD`), recursively, in one
         // call; we filter the entries down to `.darkrun/` ourselves.
@@ -186,6 +280,17 @@ fn tree_url(provider: Provider, repo: &str) -> String {
             STATE_DIR,
         ),
     }
+}
+
+/// Whether a GitHub git-tree response was truncated. GitHub sets
+/// `"truncated": true` when the recursive tree exceeds its cap (100k entries /
+/// 7MB); a truncated tree may be missing `.darkrun/` entries. Shared with the
+/// GitHub-App workspace path (`github_app.rs`), which reads the same tree.
+pub(crate) fn tree_truncated(value: &serde_json::Value) -> bool {
+    value
+        .get("truncated")
+        .and_then(|t| t.as_bool())
+        .unwrap_or(false)
 }
 
 /// Percent-encode a repository path for use in a URL path segment (GitLab wants
@@ -217,8 +322,9 @@ fn authorize(request: HttpRequest, provider: Provider, cred: &Credential) -> Htt
     }
 }
 
-/// Normalize a provider's tree JSON into the runs under `.darkrun/`.
-fn parse_sessions(
+/// Normalize a provider's tree JSON into the runs under `.darkrun/`. Shared with
+/// the GitHub-App workspace path (`github_app.rs`).
+pub(crate) fn parse_sessions(
     provider: Provider,
     repo: &str,
     value: &serde_json::Value,
@@ -282,6 +388,7 @@ fn json_error(status: StatusCode, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use darkrun_vcs::{HttpResponse, Method, MockTransport};
 
     #[test]
     fn github_tree_yields_distinct_runs() {
@@ -354,5 +461,122 @@ mod tests {
             tree_url(Provider::GitLab, "jwaldrip/darkrun"),
             "https://gitlab.com/api/v4/projects/jwaldrip%2Fdarkrun/repository/tree?path=.darkrun&recursive=true&per_page=100"
         );
+    }
+
+    // ---- multi-page fetch (offline via the mock transport) ------------------
+
+    /// The GitLab `.darkrun` tree URL for a page — `tree_url` plus `&page=N`,
+    /// exactly as [`fetch_sessions_gitlab`] builds it, so the mock keys line up.
+    fn gitlab_tree_page_url(repo: &str, page: u32) -> String {
+        format!("{}&page={}", tree_url(Provider::GitLab, repo), page)
+    }
+
+    /// A GitLab tree page body: a bare array of `{ path, type: "blob" }` entries.
+    fn gitlab_tree_body(paths: &[String]) -> Vec<u8> {
+        let arr: Vec<serde_json::Value> = paths
+            .iter()
+            .map(|p| serde_json::json!({ "path": p, "type": "blob" }))
+            .collect();
+        serde_json::to_vec(&serde_json::Value::Array(arr)).unwrap()
+    }
+
+    #[test]
+    fn gitlab_tree_is_walked_across_pages_and_deduped() {
+        let repo = "jwaldrip/darkrun";
+        let cred = Credential::new(Provider::GitLab, "glpat");
+        let mock = MockTransport::new();
+
+        // A full first page: TREE_PER_PAGE blobs, one per run run-000..run-099.
+        let page1: Vec<String> = (0..TREE_PER_PAGE)
+            .map(|i| format!(".darkrun/run-{i:03}/state.json"))
+            .collect();
+        // A short second page: a dup of run-099 (cross-page de-dup) + two NEW runs.
+        let page2 = vec![
+            ".darkrun/run-099/run.md".to_string(),
+            ".darkrun/run-100/state.json".to_string(),
+            ".darkrun/run-101/run.md".to_string(),
+        ];
+        mock.expect(
+            Method::Get,
+            gitlab_tree_page_url(repo, 1),
+            HttpResponse::new(200, gitlab_tree_body(&page1)),
+        );
+        mock.expect(
+            Method::Get,
+            gitlab_tree_page_url(repo, 2),
+            HttpResponse::new(200, gitlab_tree_body(&page2)),
+        );
+
+        let runs = fetch_sessions(&mock, Provider::GitLab, &cred, repo).unwrap();
+        // 100 from page 1 + 2 NEW from page 2 (run-099 de-duplicated) = 102.
+        assert_eq!(runs.len(), TREE_PER_PAGE + 2);
+        assert!(runs.iter().any(|r| r.run_id == "run-100"), "page-2 run seen");
+        assert!(runs.iter().any(|r| r.run_id == "run-101"), "page-2 run seen");
+        // run-099 appears exactly once despite being on both pages.
+        assert_eq!(runs.iter().filter(|r| r.run_id == "run-099").count(), 1);
+        // Exactly two pages fetched (the short second page stops the walk).
+        assert_eq!(mock.requests().len(), 2);
+    }
+
+    #[test]
+    fn gitlab_tree_single_short_page_makes_one_request() {
+        let repo = "jwaldrip/darkrun";
+        let cred = Credential::new(Provider::GitLab, "glpat");
+        let mock = MockTransport::new();
+        let page1 = vec![
+            ".darkrun/run-1/run.md".to_string(),
+            ".darkrun/run-2/state.json".to_string(),
+        ];
+        mock.expect(
+            Method::Get,
+            gitlab_tree_page_url(repo, 1),
+            HttpResponse::new(200, gitlab_tree_body(&page1)),
+        );
+        let runs = fetch_sessions(&mock, Provider::GitLab, &cred, repo).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].run_id, "run-1");
+        // A short first page ends the walk immediately — exactly one request.
+        assert_eq!(mock.requests().len(), 1);
+    }
+
+    #[test]
+    fn gitlab_tree_missing_darkrun_is_empty_not_an_error() {
+        let repo = "acme/empty";
+        let cred = Credential::new(Provider::GitLab, "glpat");
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Get,
+            gitlab_tree_page_url(repo, 1),
+            HttpResponse::new(404, br#"{"message":"404 Tree Not Found"}"#.to_vec()),
+        );
+        let runs = fetch_sessions(&mock, Provider::GitLab, &cred, repo).unwrap();
+        assert!(runs.is_empty());
+        assert_eq!(mock.requests().len(), 1);
+    }
+
+    #[test]
+    fn github_tree_truncation_is_surfaced_and_still_parses() {
+        // A truncated tree must not silently drop runs: the entries present are
+        // still parsed, and `tree_truncated` flags the cap (the log warns).
+        let truncated = serde_json::json!({
+            "truncated": true,
+            "tree": [ { "path": ".darkrun/run-abc/run.md", "type": "blob" } ]
+        });
+        assert!(tree_truncated(&truncated));
+        let repo = "jwaldrip/darkrun";
+        let cred = Credential::new(Provider::GitHub, "gho");
+        let mock = MockTransport::new();
+        mock.expect(
+            Method::Get,
+            tree_url(Provider::GitHub, repo),
+            HttpResponse::new(200, serde_json::to_vec(&truncated).unwrap()),
+        );
+        let runs = fetch_sessions(&mock, Provider::GitHub, &cred, repo).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "run-abc");
+        // GitHub is a single call — no pagination.
+        assert_eq!(mock.requests().len(), 1);
+        // A tree with no `truncated` key reads false.
+        assert!(!tree_truncated(&serde_json::json!({ "tree": [] })));
     }
 }

@@ -29,14 +29,17 @@
 //! concurrent visual sessions without clobbering each other.
 
 
+use std::collections::BTreeMap;
+
 use darkrun_api::common::GateType;
 use darkrun_api::session::{
-    ApproveAction, ApproveActionKind, DirectionArchetype, DirectionSessionPayload, PickerKind,
-    PickerOption, PickerSessionPayload, QuestionOption, QuestionSessionPayload, ReviewSessionPayload,
-    RunCurrentState, RunPhase, SessionPayload, StationStateInfo,
+    ApproveAction, ApproveActionKind, DirectionArchetype, DirectionSessionPayload, KnowledgeFile,
+    OutputArtifact, OutputArtifactType, PickerKind, PickerOption, PickerSessionPayload,
+    QuestionOption, QuestionSessionPayload, ReviewSessionPayload, RunCurrentState, RunPhase,
+    SessionPayload, StationStateInfo, UnitOutputPreview, UnitOutputType,
 };
 use darkrun_api::SessionStatus;
-use darkrun_core::domain::{CheckpointKind, StationPhase};
+use darkrun_core::domain::{CheckpointKind, StationPhase, Unit};
 use darkrun_core::StateStore;
 use serde::Serialize;
 
@@ -208,6 +211,12 @@ pub fn create_show_with_focus(
         }
     }
 
+    // The deliverable views the desktop's Outputs / Knowledge / Overview
+    // (Reflection) tabs render. Built from on-disk run state — without these the
+    // production payload left them at Default and three tabs rendered empty
+    // against a live engine.
+    let deliverables = build_deliverables(store, slug, &units);
+
     let build = |session_id: &str| {
         SessionPayload::Review(ReviewSessionPayload {
             session_id: session_id.to_string(),
@@ -223,6 +232,11 @@ pub fn create_show_with_focus(
             station: gate_station.clone(),
             approve_action: approve_action.clone(),
             await_active,
+            reflection: deliverables.reflection.clone(),
+            knowledge_files: deliverables.knowledge_files.clone(),
+            output_artifacts: deliverables.output_artifacts.clone(),
+            unit_outputs: deliverables.unit_outputs.clone(),
+            output_declared_by: deliverables.output_declared_by.clone(),
             ..Default::default()
         })
     };
@@ -240,6 +254,157 @@ pub fn create_show_with_focus(
     hydrate_interactive(registry, store, slug);
 
     Ok(slug.to_string())
+}
+
+/// The on-disk deliverable views the desktop review tabs render.
+#[derive(Default)]
+struct Deliverables {
+    /// The run-scope synthesized reflection (Overview tab).
+    reflection: Option<String>,
+    /// Project knowledge documents (Knowledge tab).
+    knowledge_files: Vec<KnowledgeFile>,
+    /// Flattened declared-output deliverables (Outputs tab).
+    output_artifacts: Vec<OutputArtifact>,
+    /// Per-unit output previews, keyed by the unit's DISPLAY TITLE (the key the
+    /// desktop's unit rows look up — its `UnitView.title`, not the slug).
+    unit_outputs: BTreeMap<String, Vec<UnitOutputPreview>>,
+    /// Inverse of `unit_outputs`: declared output path -> declaring unit slugs.
+    output_declared_by: BTreeMap<String, Vec<String>>,
+}
+
+/// Cap on inline artifact/preview text embedded into a review payload — large
+/// files surface by name + size + fetch URL instead of bloating the payload.
+const INLINE_PREVIEW_MAX: u64 = 64 * 1024;
+
+/// Build the deliverable views the desktop's Outputs / Knowledge / Overview
+/// (Reflection) tabs render, from on-disk run state: the synthesized run
+/// reflection, the project knowledge files, and each unit's declared-output
+/// previews (with the flattened output-artifact list and the path->units
+/// inverse). Output paths resolve against the repo root, mirroring the
+/// output-existence gate.
+fn build_deliverables(store: &StateStore, slug: &str, units: &[Unit]) -> Deliverables {
+    let repo_root = crate::position::cascade_repo_root(store);
+
+    // Reflection — synthesize a run-scope narrative from the recorded Reflect
+    // outputs, each headed by its station (empty station = run-level).
+    let reflection = {
+        let sections: Vec<String> = crate::reflection::list(store, slug)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| !r.body.trim().is_empty())
+            .map(|r| {
+                let head = if r.station.is_empty() { "run".to_string() } else { r.station };
+                format!("## {head}\n\n{}", r.body.trim())
+            })
+            .collect();
+        (!sections.is_empty()).then(|| sections.join("\n\n"))
+    };
+
+    // Knowledge — the project knowledge docs (constraints, prior art, traps).
+    let knowledge_files = store
+        .read_knowledge_raw()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(topic, content)| KnowledgeFile {
+            name: format!("{topic}.md"),
+            content,
+        })
+        .collect();
+
+    // Outputs — each unit's declared output paths become a preview + a flattened
+    // artifact + a path->units inverse entry.
+    let mut unit_outputs: BTreeMap<String, Vec<UnitOutputPreview>> = BTreeMap::new();
+    let mut output_artifacts: Vec<OutputArtifact> = Vec::new();
+    let mut output_declared_by: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for u in units {
+        let mut previews = Vec::new();
+        for path in &u.frontmatter.outputs {
+            let abs = repo_root.join(path);
+            let meta = std::fs::metadata(&abs).ok();
+            let exists = meta.as_ref().map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
+            let size_bytes = meta.as_ref().filter(|m| m.is_file()).map(|m| m.len());
+            let name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path)
+                .to_string();
+            let (unit_type, artifact_type, language) = classify_output(path);
+            let small = exists && size_bytes.map(|n| n <= INLINE_PREVIEW_MAX).unwrap_or(false);
+            let text_unit =
+                matches!(unit_type, UnitOutputType::Markdown | UnitOutputType::Html);
+            let text_artifact = matches!(
+                artifact_type,
+                OutputArtifactType::Markdown | OutputArtifactType::Html | OutputArtifactType::Code
+            );
+            let inline = if small && (text_unit || text_artifact) {
+                std::fs::read_to_string(&abs).ok()
+            } else {
+                None
+            };
+            previews.push(UnitOutputPreview {
+                path: path.clone(),
+                name: name.clone(),
+                output_type: unit_type,
+                url: format!("/api/runs/{slug}/asset/{path}"),
+                preview_body: if text_unit { inline.clone() } else { None },
+                size_bytes,
+                exists,
+            });
+            output_artifacts.push(OutputArtifact {
+                station: u.station().to_string(),
+                name,
+                artifact_type,
+                language,
+                directory: None,
+                content: if text_artifact { inline } else { None },
+                relative_path: None,
+                run_relative_path: Some(path.clone()),
+            });
+            output_declared_by
+                .entry(path.clone())
+                .or_default()
+                .push(u.slug.clone());
+        }
+        if !previews.is_empty() {
+            unit_outputs.insert(u.title.clone(), previews);
+        }
+    }
+
+    Deliverables {
+        reflection,
+        knowledge_files,
+        output_artifacts,
+        unit_outputs,
+        output_declared_by,
+    }
+}
+
+/// Classify a declared output path by extension into `(unit-preview kind,
+/// artifact kind, highlight language)`. The two render taxonomies differ
+/// (a unit preview has no `code`/`video` kind), so a `.rs` file is `File`
+/// as a preview but `Code` as an artifact.
+fn classify_output(path: &str) -> (UnitOutputType, OutputArtifactType, Option<String>) {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "md" | "markdown" => (UnitOutputType::Markdown, OutputArtifactType::Markdown, None),
+        "html" | "htm" => (UnitOutputType::Html, OutputArtifactType::Html, None),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" => {
+            (UnitOutputType::Image, OutputArtifactType::Image, None)
+        }
+        "mp4" | "mov" | "webm" | "m4v" => (UnitOutputType::File, OutputArtifactType::Video, None),
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "rb" | "java" | "kt" | "c" | "h"
+        | "cpp" | "cc" | "hpp" | "cs" | "swift" | "sh" | "sql" | "toml" | "yaml" | "yml"
+        | "json" => (
+            UnitOutputType::File,
+            OutputArtifactType::Code,
+            Some(ext.clone()),
+        ),
+        _ => (UnitOutputType::File, OutputArtifactType::File, None),
+    }
 }
 
 /// Load a run's persisted interactive sessions into the registry (only those
@@ -472,7 +637,7 @@ pub(crate) fn raise_setup_picker(registry: &SessionRegistry, slug: &str, title: 
             "Which review mode? (how much oversight the work needs)".to_string(),
             vec![
                 opt("solo", "solo", "Each station asks for local review before advancing. Default."),
-                opt("team", "team", "Each station opens a PR/MR the team reviews and merges. Needs gh/glab."),
+                opt("team", "team", "Each station opens a PR/MR the team reviews and merges. Needs `darkrun auth login`."),
                 opt("dark", "dark", "Pre-elaborate up front, then run without stopping for review."),
             ],
         ),

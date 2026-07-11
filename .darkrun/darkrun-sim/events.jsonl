@@ -1,0 +1,16 @@
+{"at":"2026-07-02T23:40:49.663149+00:00","event":"darkrun.run.created","factory":"software","mode":"solo","run":"darkrun-sim"}
+{"action":"spec","at":"2026-07-02T23:40:59.051021+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
+{"action":"spec","at":"2026-07-03T01:18:21.419801+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
+{"action":"review","at":"2026-07-03T01:18:55.029558+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
+{"action":"user_gate","at":"2026-07-03T01:26:02.239557+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
+{"action":"user_gate","at":"2026-07-08T04:41:25.252940+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
+{"action":"user_gate","at":"2026-07-08T04:44:24.975194+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
+{"action":"manufacture","at":"2026-07-11T05:01:22.593752+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
+{"at":"2026-07-11T05:01:55.554690+00:00","event":"darkrun.save_wip.blocked","files":9,"run":"darkrun-sim"}
+{"at":"2026-07-11T05:03:21.791619+00:00","event":"darkrun.save_wip.blocked","files":11,"run":"darkrun-sim"}
+{"action":"manufacture","at":"2026-07-11T05:05:11.286164+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}
+{"action":"noop","at":"2026-07-11T05:10:25.616558+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":null}
+{"action":"noop","at":"2026-07-11T05:10:37.299113+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":null}
+{"action":"noop","at":"2026-07-11T05:11:59.562773+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":null}
+{"at":"2026-07-11T05:30:57.812505+00:00","event":"darkrun.unit.completed","run":"darkrun-sim","station":"frame","unit":"author-frame"}
+{"action":"audit","at":"2026-07-11T05:31:10.211892+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"frame"}

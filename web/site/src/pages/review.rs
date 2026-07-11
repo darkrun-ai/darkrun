@@ -1,9 +1,11 @@
 //! `/review` — how review works.
 //!
 //! This is **not** the live review surface, and it deliberately does not connect
-//! to a running engine. Review happens in the **darkrun desktop app**: a local,
-//! dark-brand window that streams the live session over `ws://127.0.0.1:PORT`
-//! and never takes over your browser. Remote / web review is a later thing.
+//! to a running engine. Review is local by default: the **darkrun desktop app**
+//! opens a dark-brand window that streams the live session over `ws://127.0.0.1:PORT`
+//! and never takes over your browser. Remote review ships too: sign in with
+//! `darkrun login` and you can watch and drive the same run from app.darkrun.ai or
+//! your phone. It is opt-in, not the default.
 //!
 //! The page explains that split and shows a representative review layout (built
 //! from the real `darkrun-api` types) so the desktop app's surface is legible
@@ -115,8 +117,8 @@ pub fn Review() -> Element {
     }
 }
 
-/// The note that frames where review actually happens: the local desktop app
-/// now, remote / web review later. Dark-brand, terse.
+/// The note that frames where review actually happens: local by default in the
+/// desktop app, opt-in remote from the web or your phone. Dark-brand, terse.
 #[component]
 pub fn DesktopNote() -> Element {
     let wrap = format!(
@@ -140,7 +142,7 @@ pub fn DesktopNote() -> Element {
         div { style: "{wrap}",
             div { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px;",
                 Badge { tone: Tone::Accent, filled: true, "desktop app" }
-                Badge { tone: Tone::Neutral, "remote review: coming later" }
+                Badge { tone: Tone::Neutral, "remote review: opt-in" }
             }
             p { style: "{line}",
                 "Run "
@@ -151,11 +153,19 @@ pub fn DesktopNote() -> Element {
                     "darkrun serve"
                 }
                 " on your machine, then open the desktop app. It lists your runs and opens \
-                 any one into its live review \u{2014} all over loopback, nothing leaves your box."
+                 any one into its live review over loopback, staying entirely on your box."
             }
             p { style: "{sub}",
-                "Reviewing from the web (or another machine) is on the roadmap, not shipped. \
-                 For now the browser is for reading the docs; the app is for driving the work."
+                "Want to watch or drive a run from the web or your phone? Sign in with "
+                code {
+                    style: format!(
+                        "font-family:{};color:{};", tokens::FONT_MONO, theme::ACCENT,
+                    ),
+                    "darkrun login"
+                }
+                " and the same review reaches you at app.darkrun.ai. Remote review is shipped \
+                 and opt-in: local stays the default, and nothing leaves your machine until you \
+                 sign in."
             }
         }
     }

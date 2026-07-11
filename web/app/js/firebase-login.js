@@ -17,6 +17,7 @@ import {
   signInWithRedirect,
   getRedirectResult,
   linkWithRedirect,
+  onAuthStateChanged,
   GithubAuthProvider,
   OAuthProvider,
 } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
@@ -91,39 +92,62 @@ function friendlyAuthError(e, providerKey) {
 // signInWithRedirect's internal chain stalls before it navigates (verified
 // in-browser: no navigation, no error, no network). Deferred to a clean macrotask
 // (outside the wasm call stack) it navigates normally — matching a direct
-// page-context call, which works. Do not await it either (the page unloads).
-export async function startSignInRedirect(providerKey) {
+// page-context call, which works.
+//
+// Returns a Promise that stays PENDING on success (the page navigates away and
+// the whole wasm context is torn down, so the caller's await never resolves —
+// that's fine) and REJECTS on failure, so the caller can surface the error and
+// offer retry instead of hanging on "Signing in…" forever. Do NOT `await`
+// signInWithRedirect itself (on success the page unloads before it settles).
+export function startSignInRedirect(providerKey) {
   const provider = providerFor(providerKey);
   // Defer to a fresh macrotask so the navigation runs in clean page context,
   // decoupled from the wasm call that invoked us.
-  setTimeout(() => {
-    signInWithRedirect(auth, provider).catch((e) => {
-      console.error("darkrun: sign-in redirect failed to start:", e);
-    });
-  }, 0);
+  return new Promise((_resolve, reject) => {
+    setTimeout(() => {
+      signInWithRedirect(auth, provider).catch((e) => {
+        console.error("darkrun: sign-in redirect failed to start:", e);
+        reject(new Error(friendlyAuthError(e, providerKey)));
+      });
+    }, 0);
+  });
 }
 
 // Start a full-page redirect to LINK `providerKey` to the currently signed-in
 // account, so ONE darkrun account spans both GitHub and GitLab. Same return path
 // as startSignInRedirect; consumeRedirect() reports it with mode "link". Same
-// fire-and-forget rule: do NOT await linkWithRedirect (see startSignInRedirect).
-export async function startLinkRedirect(providerKey) {
-  const user = auth.currentUser;
-  if (!user) throw new Error("Sign in before linking another account.");
-  const provider = providerFor(providerKey);
-  setTimeout(() => {
-    linkWithRedirect(user, provider).catch((e) => {
-      console.error("darkrun: link redirect failed to start:", e);
-    });
-  }, 0);
+// contract: the returned Promise stays pending on success and REJECTS on failure
+// (or if there's no signed-in user to link to), so a failed link surfaces instead
+// of hanging.
+export function startLinkRedirect(providerKey) {
+  return new Promise((_resolve, reject) => {
+    const user = auth.currentUser;
+    if (!user) {
+      reject(new Error("Sign in before linking another account."));
+      return;
+    }
+    const provider = providerFor(providerKey);
+    setTimeout(() => {
+      linkWithRedirect(user, provider).catch((e) => {
+        console.error("darkrun: link redirect failed to start:", e);
+        reject(new Error(friendlyAuthError(e, providerKey)));
+      });
+    }, 0);
+  });
 }
 
 // On app load, consume a pending redirect result (present only right after we
 // return from a provider). Resolves to JSON:
-//   { mode: "signIn" | "link", idToken, accessToken, provider }
+//   { mode, idToken, accessToken, provider, refreshToken, apiKey, expiresAt, issuedAt }
 // or "" when there is no pending redirect. The dashboard needs the provider OAuth
 // access token (to list repos through darkrun-web's /api/repos proxy), which
 // Firebase vends only here, on the sign-in/link result's credential.
+//
+// refreshToken + apiKey + expiresAt/issuedAt are the relay-refresh material: the
+// CLI parks them with the ID token so the CLI/engine can re-mint the ID token
+// from Google's public securetoken endpoint before its ~1h lifetime lapses,
+// instead of dialing an expired token and 401ing forever (crit#6). The API key
+// is the PUBLIC Firebase Web API key from firebaseConfig — safe to ship.
 export async function consumeRedirect() {
   let result;
   try {
@@ -140,14 +164,61 @@ export async function consumeRedirect() {
   }
   if (!result) return "";
   const providerKey = providerKeyOf(result);
-  const idToken = await result.user.getIdToken();
+  // getIdTokenResult vends the ID token AND its expiry/issued-at claims in one
+  // call, so the refresh can be scheduled ahead of expiry.
+  const tokenResult = await result.user.getIdTokenResult();
+  const idToken = tokenResult.token;
+  const refreshToken = result.user.refreshToken || "";
+  const apiKey = firebaseConfig.apiKey;
+  const expiresAt = Math.floor(new Date(tokenResult.expirationTime).getTime() / 1000) || 0;
+  const issuedAt = Math.floor(new Date(tokenResult.issuedAtTime).getTime() / 1000) || 0;
   const credential =
     providerKey === "gitlab"
       ? OAuthProvider.credentialFromResult(result)
       : GithubAuthProvider.credentialFromResult(result);
   const accessToken = (credential && credential.accessToken) || "";
   const mode = result.operationType === "link" ? "link" : "signIn";
-  return JSON.stringify({ mode, idToken, accessToken, provider: providerKey });
+  return JSON.stringify({
+    mode,
+    idToken,
+    accessToken,
+    provider: providerKey,
+    refreshToken,
+    apiKey,
+    expiresAt,
+    issuedAt,
+  });
+}
+
+// Resolve the PERSISTED user's Firebase ID token, or "" when nobody is signed
+// in. This is what makes the web app a "remember me" workspace: Firebase Auth
+// persists the session in browser local storage, so on any later load the user
+// is still signed in without re-authorizing a provider. We await a one-shot
+// onAuthStateChanged (the SDK restores persisted auth asynchronously, so
+// auth.currentUser can be null for a beat right after load), then mint a fresh
+// ID token from the restored user. The Rust app calls this on startup and uses
+// the token as the bearer for the App-backed /api/workspace + /api/run calls.
+export async function currentUserIdToken() {
+  const user = await new Promise((resolve) => {
+    const unsub = onAuthStateChanged(
+      auth,
+      (u) => {
+        unsub();
+        resolve(u);
+      },
+      () => {
+        unsub();
+        resolve(null);
+      },
+    );
+  });
+  if (!user) return "";
+  try {
+    return await user.getIdToken();
+  } catch (e) {
+    console.error("darkrun: could not read the persisted ID token:", e);
+    return "";
+  }
 }
 
 // Determine "github" | "gitlab" from a redirect UserCredential.

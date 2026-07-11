@@ -266,6 +266,49 @@ pub(crate) fn io<T>(path: &Path, r: std::io::Result<T>) -> Result<T> {
     })
 }
 
+/// Atomically persist `content` to `path`: stream it into a sibling temp file,
+/// `fsync`, then `rename` it over the target.
+///
+/// A crash mid-write leaves either the previous file or the fully-written new
+/// one on disk — never a truncated mix. This is what stops a torn `state.json`
+/// (the non-derivable gate history) from wedging every subsequent advance the
+/// way a plain `fs::write` truncate-then-write can. The temp file is created in
+/// the SAME directory as the target so the `rename` stays on one filesystem
+/// (cross-device renames are not atomic and fail). The caller is responsible
+/// for creating the parent directory.
+pub(crate) fn write_atomic(path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
+    // A unique-enough temp sibling: the pid disambiguates across processes, the
+    // nanosecond clock across writers within one process. The rename below makes
+    // the swap atomic regardless of the name.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".{stem}.{}.{nonce}.tmp", std::process::id()));
+
+    let write = || -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(content.as_ref())?;
+        f.sync_all()?;
+        Ok(())
+    };
+    if let Err(source) = write() {
+        let _ = fs::remove_file(&tmp);
+        return Err(CoreError::Io { path: tmp, source });
+    }
+    if let Err(source) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(CoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
 /// Why a guarded artifact write was refused: the bytes on disk are not the ones
 /// the caller last read, so overwriting would silently clobber the newer
 /// content. Carries the CURRENT sha + content so the caller can re-read,
@@ -350,19 +393,34 @@ impl StateStore {
         if let Some(parent) = path.parent() {
             io(parent, fs::create_dir_all(parent))?;
         }
-        if path.exists() {
-            let current = io(path, fs::read_to_string(path))?;
-            let current_sha = crate::witness::hash_bytes(current.as_bytes());
-            if expected_sha != Some(current_sha.as_str()) {
-                return Err(CoreError::Conflict(Box::new(WriteConflict {
-                    path: path.to_path_buf(),
-                    current_sha,
-                    current_content: current,
-                })));
+        // Serialize the compare-and-swap across processes. Without a lock, two
+        // engine processes (the parallel-subagent concurrency the harness runs)
+        // can both read the same `expected_sha`, both pass the check, and both
+        // write — silently dropping one edit (a TOCTOU). The advisory `mkdir`
+        // lock makes read-compare-write atomic; a stable per-path lock name
+        // keeps unrelated artifacts from contending. This is also the only
+        // production acquirer of the otherwise-dead `LockManager`.
+        let repo_root = self.root.parent().unwrap_or(&self.root);
+        let locks = crate::locks::LockManager::new(repo_root);
+        let lock_name = format!(
+            "artifact-{}",
+            crate::witness::hash_bytes(path.to_string_lossy().as_bytes())
+        );
+        locks.with_lock(&lock_name, "write_guarded", || {
+            if path.exists() {
+                let current = io(path, fs::read_to_string(path))?;
+                let current_sha = crate::witness::hash_bytes(current.as_bytes());
+                if expected_sha != Some(current_sha.as_str()) {
+                    return Err(CoreError::Conflict(Box::new(WriteConflict {
+                        path: path.to_path_buf(),
+                        current_sha,
+                        current_content: current,
+                    })));
+                }
             }
-        }
-        io(path, fs::write(path, content))?;
-        Ok(crate::witness::hash_bytes(content.as_bytes()))
+            write_atomic(path, content)?;
+            Ok(crate::witness::hash_bytes(content.as_bytes()))
+        })?
     }
 
     /// Append one line to a run-scoped append-only journal (e.g.
@@ -484,7 +542,7 @@ impl StateStore {
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{}.json", payload.session_id()));
         let json = serde_json::to_vec_pretty(payload)?;
-        io(&path, fs::write(&path, json))?;
+        write_atomic(&path, &json)?;
         Ok(())
     }
 
@@ -603,7 +661,7 @@ impl StateStore {
     pub fn set_active_run(&self, slug: &str) -> Result<()> {
         io(&self.root, fs::create_dir_all(&self.root))?;
         let path = self.active_pointer();
-        io(&path, fs::write(&path, slug))
+        write_atomic(&path, slug)
     }
 
     /// Clear the active-run pointer. Idempotent.
@@ -679,7 +737,7 @@ impl StateStore {
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join("run.md");
         let content = frontmatter::serialize(&run.frontmatter, &run.body)?;
-        io(&path, fs::write(&path, content))
+        write_atomic(&path, content)
     }
 
     // ─── Unit documents ──────────────────────────────────────────────────
@@ -739,7 +797,7 @@ impl StateStore {
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{}.md", unit.slug));
         let content = frontmatter::serialize(&unit.frontmatter, &unit.body)?;
-        io(&path, fs::write(&path, content))
+        write_atomic(&path, content)
     }
 
     /// Guarded write of a unit document: overwriting an EXISTING unit requires
@@ -787,7 +845,7 @@ impl StateStore {
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join("state.json");
         let json = serde_json::to_string_pretty(state)?;
-        io(&path, fs::write(&path, json))
+        write_atomic(&path, json)
     }
 
     // ─── Feedback documents ──────────────────────────────────────────────
@@ -824,7 +882,7 @@ impl StateStore {
         let dir = self.feedback_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{id}.md"));
-        io(&path, fs::write(&path, content))
+        write_atomic(&path, content)
     }
 
     /// Guarded write of a feedback document — overwriting an existing item
@@ -871,7 +929,7 @@ impl StateStore {
         let dir = self.reflections_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{id}.md"));
-        io(&path, fs::write(&path, content))
+        write_atomic(&path, content)
     }
 
     /// The PROJECT-level knowledge directory — `.darkrun/knowledge/`, a sibling
@@ -937,7 +995,7 @@ impl StateStore {
         let dir = self.knowledge_dir();
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{topic}.md"));
-        io(&path, fs::write(&path, content))
+        write_atomic(&path, content)
     }
 
     /// Guarded write of a knowledge document: overwriting an EXISTING topic
@@ -991,7 +1049,7 @@ impl StateStore {
         let dir = self.briefs_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{id}.md"));
-        io(&path, fs::write(&path, content))
+        write_atomic(&path, content)
     }
 
     /// Guarded write of a brief/outcome — overwriting an existing brief requires
@@ -1030,7 +1088,7 @@ impl StateStore {
         let dir = self.prompts_dir(run).join(safe(scope));
         io(&dir, fs::create_dir_all(&dir))?;
         let path = dir.join(format!("{}.md", safe(label)));
-        io(&path, fs::write(&path, body))
+        write_atomic(&path, body)
     }
 
     /// Read every persisted prompt for a run, keyed by its `<scope>/<label>`

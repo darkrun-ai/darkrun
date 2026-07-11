@@ -21,7 +21,7 @@ you'll reach for most:
 - **darkrun-resume** — advance the run; returns the next concrete action.
 - **darkrun-checkpoint** — decide a station's gate: approve to advance, or request changes (routed back as drift).
 - **darkrun-inspect** — show the run's state: stations, units, criteria, checkpoint status.
-- **darkrun-dark** — run lights-out: pre-elaborate up front, then advance without stopping except on external/await gates and real ambiguity.
+- **darkrun-dark** — run lights-out: pre-elaborate up front, then advance without stopping except on external/await gates; ambiguity is decided and recorded, not asked.
 - **darkrun-zap** — zero-ceremony single-unit execution; nothing written under `.darkrun/`.
 :::
 
@@ -58,7 +58,7 @@ by what they touch:
 :::
 
 :::keypoints title="Gates, feedback, and evidence"
-- **darkrun_checkpoint_decide** / **darkrun_checkpoint_choose** — resolve a station's gate.
+- **darkrun_checkpoint_decide** — resolve a station's gate.
 - **darkrun_gate_review** — the pre-checkpoint multi-reviewer code-review pass.
 - **darkrun_feedback_create** / **_list** / **_move** / **_resolve** / **_reject** — the feedback track that routes rework as drift.
 - **darkrun_review_stamp** / **darkrun_run_review_stamp** — a reviewer's per-role sign-off.

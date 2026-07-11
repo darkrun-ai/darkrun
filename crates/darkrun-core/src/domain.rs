@@ -139,6 +139,13 @@ pub enum CheckpointKind {
     /// Hand off to an external review surface (e.g. a PR).
     External,
     /// Block on a `darkrun_await_gate` call until a decision arrives.
+    ///
+    /// NOTE: no station Checkpoint is ever *derived* as `Await` — [`Mode::gate`]
+    /// only ever yields `Auto`/`Ask`/`External`, so a run's mode never produces
+    /// an await checkpoint. This variant exists solely as the wire/UI
+    /// representation of the run-level await surface (the blocking
+    /// `darkrun_await_gate` waiter / [`SealKind::Await`]) that clients render;
+    /// it is not a fourth mode-selectable gate.
     Await,
 }
 
@@ -244,6 +251,20 @@ impl Mode {
             // solo / continuous / collaborative / quick / bugfix / refactor /
             // full / standard / unknown all resolve to the in-the-loop default.
             _ => Mode::Solo,
+        }
+    }
+
+    /// STRICT parse: `Some` only for a RECOGNIZED mode token (the current
+    /// `team`/`solo`/`dark` plus the legacy aliases [`from_label`] tolerates),
+    /// `None` for anything else. Unlike [`from_label`], this does NOT silently
+    /// coerce a typo to `solo` — the run-start path uses it to reject an invalid
+    /// `--mode` instead of quietly running the wrong review posture.
+    pub fn parse_strict(s: &str) -> Option<Mode> {
+        match s.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+            "team" | "discrete" | "discrete_hybrid" => Some(Mode::Team),
+            "solo" | "continuous" | "collaborative" => Some(Mode::Solo),
+            "dark" | "auto" | "autopilot" => Some(Mode::Dark),
+            _ => None,
         }
     }
 }
