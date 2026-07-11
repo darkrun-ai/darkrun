@@ -24,7 +24,9 @@ Phase: 1.
 
 Per the frame's Engine seams ("Read only `.prompt`"), the code path that decides what to do next reads only `TickResult.prompt`; `.action` is read solely in a separably-named grading/projection path, after the move already executed.
 
-Check: `grep -n '\.action' <world module> <provider module>` (the new `world` and `provider` modules under `crates/darkrun-sim/src/`, once they exist) shows every match either absent from the decision path, or confined to a function whose name signals post-hoc grading (e.g. containing `grade`, `project`, or `transcript`) — never inside the function that calls `Provider::next_move` or interprets its return value into a `run_tick_with_hosting` follow-up call.
+Structural rule (closes the file-name-scoped-grep gap): in the call graph rooted at the `world` module's tick loop — every function reachable from it, regardless of which file defines that function, including any helper `harness.rs` or any other `crates/darkrun-sim/src/*.rs` file exposes into that call graph — no function takes `RunAction`, `&RunAction`, or a value derived from matching one of `RunAction`'s variants (a station name pulled out of `RunAction::Spec { station, .. }`, or an action-tag string) as input to a DECISION: a branch (`if`/`match`/method dispatch) that selects which `ProviderMove` is returned or which `run_tick_with_hosting` follow-up call is made. The only permitted `.action` consumers anywhere in that call graph are functions on the post-hoc grading/projection path (the `transcript` module, and the world module's own grading step that runs after a `ProviderMove` has already been chosen and executed).
+
+Check: (1) `grep -n '\.action' <world module> <provider module>` (the new `world` and `provider` modules under `crates/darkrun-sim/src/`, once they exist) shows every match either absent from the decision path, or confined to a function whose name signals post-hoc grading (e.g. containing `grade`, `project`, or `transcript`) — never inside the function that calls `Provider::next_move` or interprets its return value into a `run_tick_with_hosting` follow-up call; (2) a named review assertion, not grep-automatable: for every function called directly or transitively from the `world` module's tick-loop entry point, its signature takes no `RunAction`/`&RunAction`-derived parameter into a decision branch — this closes the gap a same-crate helper living outside the `world`/`provider` filename scope of check (1) would otherwise open (e.g. a function added to `harness.rs` that returns an `.action`-derived value for a caller in `world` to branch on).
 
 Phase: 1.
 
@@ -72,23 +74,25 @@ Phase: 1.
 
 A scripted scenario that deliberately never satisfies a `Spec` action's requirements (never decomposes a unit, never seals) trips the engine's own deadlock guard (`crates/darkrun-mcp/src/deadlock.rs`, `HALT_THRESHOLD = 4`) and the resulting `RunAction::Escalate` is captured as the fixture's `FixtureOutcome::Escalated` variant — the sim's entire red-verdict vocabulary, per the frame's Goal section.
 
-Check: `cargo test -p darkrun-sim escalate_scenario_is_detected_red` feeds the world a provider that always returns `ProviderMove::Stop` from tick one and asserts the resulting fixture's `outcome` is `FixtureOutcome::Escalated { .. }` within the first `HALT_THRESHOLD + 1` ticks.
+Check: `cargo test -p darkrun-sim escalate_scenario_is_detected_red` feeds the world a provider whose `next_move` always returns `ProviderMove::AdvanceStation` targeting the run's current active station and NEVER returns `ProviderMove::CompleteWave` (so the station's wave is seeded once — a unit decomposed, its elaboration hold cleared — but that unit is never marked completed, and the provider never returns `Stop`). The derived `RunAction` stabilizes on repeat calls once the station has a pending, never-completed unit; the test asserts `FixtureOutcome::Escalated { .. }` once the deadlock guard's own repeat counter exceeds `HALT_THRESHOLD` (`crates/darkrun-mcp/src/deadlock.rs`'s `check` function, the same same-signature-count mechanism its own `same_action_no_progress_halts_after_threshold` test exercises directly). This inducer never returns `Stop`, so AC-9 does not depend on, and cannot conflict with, the Stop-legitimacy rule stated in Contract 1 and in "An exhausted script" below.
 
 Phase: 1.
 
 ### AC-10: Every non-Escalate engine edge has a named, defined outcome
 
-The edges enumerated in `## Edge cases` below (a rejected move, an exhausted script, a dark-mode `FeedbackQuestion`, a `render_prompt` `None`, the `STALE_AGE_SECS` reset, a double `run_start`, post-`Sealed` ticks, an empty prompts directory for an unreached station, a fixture referencing content the site no longer embeds) each resolve to one of exactly two named outcomes: a `FixtureOutcome` variant (a legitimate, transcript-visible result) or a harness failure (an `.expect()`/panic that fails the regenerating test loudly). No edge is left to silently pass or silently swallow.
+The edges enumerated in `## Edge cases` below — a rejected move, an exhausted script, a dark-mode `FeedbackQuestion`, a `render_prompt` `None`, a double `run_start`, post-`Sealed` ticks, an empty prompts directory for an unreached station, a fixture referencing content the site no longer embeds — each resolve to one of exactly two named outcomes: a `FixtureOutcome` variant (a legitimate, transcript-visible result) or a harness failure (an `.expect()`/panic that fails the regenerating test loudly). No edge in this list of eight is left to silently pass or silently swallow.
 
-Check: for each edge case named in `## Edge cases`, a `cargo test -p darkrun-sim` test exists asserting the specific outcome named there (a `FixtureOutcome` variant match, or `#[should_panic]`/`Result::is_err()` for the harness-failure class).
+Named exception, not a silent gap: the deadlock guard's `STALE_AGE_SECS` reset (`## Edge cases`, "The deadlock guard's `STALE_AGE_SECS` reset") is deliberately outside this AC's eight-edge list. Its defined behavior is a documented, unexercised non-goal with a named re-entry trigger — Phase 1 ships no test for it, and that absence is itself the checkable fact (below), not an omission this AC leaves ungoverned.
+
+Check: for each of the eight edges named above, a `cargo test -p darkrun-sim` test exists asserting the specific outcome named there (a `FixtureOutcome` variant match, or `#[should_panic]`/`Result::is_err()` for the harness-failure class); `grep -rn 'STALE_AGE_SECS' crates/darkrun-sim/` returns no match, confirming Phase 1 ships no test targeting the named exception.
 
 Phase: 1.
 
 ### AC-11: The prompt-wording linter partition survives the rebuild unweakened
 
-`crates/darkrun-sim/tests/followability.rs` is not edited by this Run's build work, and its suite still passes after `harness.rs` is rebuilt onto the locked seams.
+`crates/darkrun-sim/tests/followability.rs` is not edited by this Run's build work, and its suite still passes after `harness.rs` is rebuilt onto the locked seams. Per Contract 4, the walk-until-`Sealed` loop `followability.rs` depends on (transitively, via `core_scenarios()`) is owned by `crates/darkrun-sim/src/scenarios.rs` after the rebuild, not by the narrowed `harness.rs` — `scenarios.rs` is where that loop lives.
 
-Check: `cargo test -p darkrun-sim --test followability` exits 0.
+Check: `cargo test -p darkrun-sim --test followability` exits 0; `grep -n 'fn capture_to_seal' crates/darkrun-sim/src/harness.rs` returns no match (confirming the loop left `harness.rs`) and `grep -n 'fn capture_to_seal' crates/darkrun-sim/src/scenarios.rs` returns one match (confirming Contract 4's ownership choice).
 
 Phase: 1.
 
@@ -102,7 +106,7 @@ Phase: 2.
 
 ### AC-13: The replay page composes the darkrun-ui prelude components, bans no-live-feed, bans network
 
-The new page module renders `StationStrip` (`crates/darkrun-ui/src/components/station_strip.rs`), `StationPipeline` (`crates/darkrun-ui/src/components/pipeline.rs`), and `UnitGraph` (`crates/darkrun-ui/src/graph/view.rs`) — all three re-exported by `darkrun_ui::prelude` (`crates/darkrun-ui/src/lib.rs`) — against data derived from the embedded fixture, displays an explicit no-live-feed banner (mirroring `web/site/src/pages/preview.rs`'s `ScaffoldNote` pattern and its "Preview only — no live feed is attached" wording), and performs zero network fetches.
+The new page module renders `StationStrip` (`crates/darkrun-ui/src/components/station_strip.rs`), `StationPipeline` (`crates/darkrun-ui/src/components/pipeline.rs`), and `UnitGraph` (`crates/darkrun-ui/src/graph/view.rs`) — all three re-exported by `darkrun_ui::prelude` (`crates/darkrun-ui/src/lib.rs`) — against data derived from the embedded fixture, displays an explicit no-live-feed banner, and performs zero network fetches. Wording precedent for the banner: `web/site/src/pages/preview.rs` lines 88-93, the `lead` prop of its `SectionHead` component — "...Preview only — no live feed is attached." — NOT `ScaffoldNote`, whose own text begins "Fixture: representative..." and describes fixture provenance, not live-feed status. The replay page's banner MAY separately reuse `ScaffoldNote`'s dashed-border visual container (`crate::pages::review::ScaffoldNote`, `web/site/src/pages/review.rs` line 199) for its box styling — that is an independent, optional choice about the container, not the source of the no-live-feed sentence.
 
 Check: `grep -n 'StationStrip\|StationPipeline\|UnitGraph' <replay page module>` (the new page module under `web/site/src/pages/`, once it exists) shows all three names used inside an `rsx!` block; `grep -in 'no live feed\|no-live-feed' <replay page module>` returns at least one match; `grep -nE 'gloo|remote::|\.fetch\(' <replay page module>` returns nothing (contrast with `web/site/src/pages/browse.rs`, which does use `crate::remote::fetch_run_list`/`fetch_run_detail` for its live-repo pattern — the replay page must not).
 
@@ -120,15 +124,15 @@ Phase: 2.
 
 Loading `/replay` in the built site displays the transcript of the one committed, Phase-1-produced fixture — no engine process, no MCP server, no `StateStore` reachable from the browser.
 
-Check: `cargo build -p darkrun-site --target wasm32-unknown-unknown` succeeds with the fixture `include_str!`-embedded (mirroring `web/site/src/content.rs`'s existing `include_str!` pattern for markdown), and a local static-server load of `/replay` (or the site generator's pre-rendered HTML for that path) shows non-empty station/unit content sourced from the embedded JSON, not a loading spinner or fetch error state.
+Check: `cargo build -p darkrun-site --target wasm32-unknown-unknown` succeeds with the fixture `include_str!`-embedded (mirroring `web/site/src/content.rs`'s existing `include_str!` pattern for markdown), and a local static-server load of `/replay` (or the site generator's pre-rendered HTML for that path) shows non-empty station/unit content sourced from the embedded JSON, not a loading spinner or fetch error state. This AC's build check is a one-shot bar for this Run's own Prove pass; ongoing CI enforcement of the same wasm build, on every future change, is defined separately in AC-16 — this AC does not itself gate CI.
 
 Phase: 3.
 
-### AC-16: CI regenerates the fixture and gates on divergence and on Escalate
+### AC-16: CI regenerates the fixture, gates on divergence and on Escalate, and gates darkrun-site's wasm build
 
-A CI job runs the darkrun-sim fixture-regeneration path and fails the build if the regenerated fixture differs from the committed copy, or if the regenerated run's `FixtureOutcome` is `Escalated` while the committed fixture's is `Sealed`. The gate has a real, exercised failure mode (not a check that can never turn red): AC-9's dedicated escalate-scenario test proves the same detection path the CI job depends on actually fires.
+A CI job runs the darkrun-sim fixture-regeneration path and fails the build if the regenerated fixture differs from the committed copy, or if the regenerated run's `FixtureOutcome` is `Escalated` while the committed fixture's is `Sealed`. The gate has a real, exercised failure mode (not a check that can never turn red): AC-9's dedicated escalate-scenario test proves the same detection path the CI job depends on actually fires. The SAME job extension additionally runs `cargo clippy -p darkrun-site --target wasm32-unknown-unknown -- -D warnings` (mirroring the existing `wasm-app` job's own `-p darkrun-app` step, `.github/workflows/ci.yml` line 149), so AC-15's wasm build is enforced on every CI run going forward, not verified once at Prove time and then left with no ongoing enforcement.
 
-Check: `.github/workflows/ci.yml` (today's wasm job, named `wasm-app`, scopes `-p darkrun-app` only per its `cargo clippy -p darkrun-app --target wasm32-unknown-unknown` step) gains either a new job or an extension whose steps include running the regeneration entry point and a `diff` (or byte-equality assertion) against the committed fixture path, non-zero exit on mismatch; `cargo test -p darkrun-sim escalate_scenario_is_detected_red` (AC-9) passing is the proof the gate's Escalate branch is reachable, not dead code.
+Check: `.github/workflows/ci.yml` (today's wasm job, named `wasm-app`, scopes `-p darkrun-app` only per its `cargo clippy -p darkrun-app --target wasm32-unknown-unknown` step) gains either a new job or an extension whose steps include: (1) running the regeneration entry point and a `diff` (or byte-equality assertion) against the committed fixture path, non-zero exit on mismatch; (2) `cargo clippy -p darkrun-site --target wasm32-unknown-unknown -- -D warnings`, non-zero exit on any wasm-target compile or lint failure. `cargo test -p darkrun-sim escalate_scenario_is_detected_red` (AC-9) passing is the proof the gate's Escalate branch is reachable, not dead code. `grep -n 'darkrun-site --target wasm32-unknown-unknown' .github/workflows/ci.yml` returns at least one match once this AC lands.
 
 Phase: 3.
 
@@ -156,13 +160,26 @@ pub enum ProviderMove {
     Approve,
     /// Stamp every named run-level reviewer.
     StampRunReviewers,
-    /// Nothing to do this call (a mid-wave `Noop`, or a terminal
-    /// `Sealed`/`Escalate` the world has already observed).
+    /// Legitimate ONLY when the `world` module has already observed a
+    /// terminal `RunAction` (`Sealed` or `Escalate`) on the MOST RECENT
+    /// tick — see Edge cases: "An exhausted script". There is no other
+    /// legitimate reason to return `Stop`; a scripted provider with
+    /// nothing left to do before a terminal action has a scenario bug,
+    /// not a `Stop` to return. Returning `Stop` before a terminal action
+    /// is observed is a harness failure: the `world` module panics,
+    /// naming the exhausted step count, rather than looping or treating
+    /// it as a silent no-op.
     Stop,
 }
 ```
 
-The `Provider` trait's own method signature never receives a station or unit identifier: the `world` module resolves WHICH station/unit a `ProviderMove` targets using the same direct `StateStore` reads the existing linter's `Harness::active_station` already uses (a `read_state` call, not a `TickResult.action` read) — a channel the frame's Engine seams do not forbid, since the constraint is specifically about `TickResult.action`, not about all engine-state reads. The scripted implementation of `Provider` may condition `next_move`'s return value ONLY on its own private, internal state (an owned step counter or fixed move sequence); it MUST NOT parse, match on, or otherwise branch on the `prompt` parameter's content. `TickResult.action` is read by the `world` module only inside its post-hoc grading/projection path, after a `ProviderMove` has already been chosen and executed.
+The `Provider` trait's own method signature never receives a station or unit identifier: the `world` module resolves WHICH station/unit a `ProviderMove` targets using its OWN direct, PER-TICK `StateStore` reads (`read_state`/`read_units`, `crates/darkrun-core/src/state.rs`) — not a `TickResult.action` read. This is stated plainly rather than over-cited: today's `Harness::active_station` (`crates/darkrun-sim/src/harness.rs`) is a single BOOTSTRAP call made once inside `Harness::start`, not a per-tick call, so it establishes only that a direct `StateStore` read is an existing, sanctioned pattern in this crate — not that a PER-TICK read is. The per-tick read is new to this Run's build and remains a channel the frame's Engine seams do not forbid, since the constraint is specifically about `TickResult.action`, not about all engine-state reads.
+
+Positive boundary rule: the `world` module's per-tick `StateStore` reads influence only WHERE a `ProviderMove` is aimed (which station or unit slug becomes the target of `AdvanceStation`, `CompleteWave`, or any other targeted variant) — never WHICH `ProviderMove` variant `Provider::next_move` returns. `next_move`'s return value is a function of the scripted provider's own private internal state alone (below); the target-resolution reads never feed back into that choice.
+
+Check (named test, not grep-automatable): `cargo test -p darkrun-sim state_reads_resolve_targets_only` runs the default scripted scenario twice against two independent temp directories — once untouched, once with every non-identifier `StateStore` field (a unit's body text, a run's title) corrupted after each tick while every station/unit SLUG is left untouched — and asserts the two runs' captured `ProviderMove` sequences are identical, proving the corrupted fields had zero effect on which moves were chosen.
+
+The scripted implementation of `Provider` may condition `next_move`'s return value ONLY on its own private, internal state (an owned step counter or fixed move sequence); it MUST NOT parse, match on, or otherwise branch on the `prompt` parameter's content. `TickResult.action` is read by the `world` module only inside its post-hoc grading/projection path, after a `ProviderMove` has already been chosen and executed — the same structural rule AC-3 states for the call graph rooted at the tick loop.
 
 ### Contract 2: `NoopHosting`
 
@@ -224,8 +241,8 @@ Normalization rules, applied before serialization (per the frame's "determinism 
 ### Contract 4: the crate module map after partition
 
 - Untouched (no behavioral change required by this Run): `crates/darkrun-sim/src/agent.rs`, `crates/darkrun-sim/src/tool_registry.rs`, `crates/darkrun-sim/tests/followability.rs`.
-- Rebuilt (a fresh implementation replacing the current file's contents, not an incremental patch, per the operator's "extending the current harness in place is forbidden"): `crates/darkrun-sim/src/harness.rs`. Its role narrows from "drive a Run AND decide what to do next by matching `.action`" to "own the tempdir/`StateStore` and execute one `run_tick_with_hosting` call per invocation," exposing `.action` only for the linter's own post-hoc prompt-capture bookkeeping.
-- Adjusted as needed to keep sourcing representative prompts from the rebuilt `harness.rs` without changing what it asserts: `crates/darkrun-sim/src/scenarios.rs` (today's solo-mode call at line 53 is a linter-only concern and stays out of this Run's dark-mode-first scope).
+- Rebuilt (a fresh implementation replacing the current file's contents, not an incremental patch, per the operator's "extending the current harness in place is forbidden"): `crates/darkrun-sim/src/harness.rs`. Its role narrows from "drive a Run AND decide what to do next by matching `.action`, including the walk-until-`Sealed` loop" to exactly these named primitives and nothing else: `Harness::start` (unchanged signature — `slug`, `factory`, `mode: &str` — owns the tempdir/`StateStore`), `Harness::tick` (its ONLY internal change: calls `run_tick_with_hosting` against `crate::world::NoopHosting`, Contract 2, instead of today's bare `run_tick`, exactly once per invocation — the exact fix for the violation AC-2 names), `Harness::seal`, `Harness::decide`, `Harness::render`, and three primitives promoted from private to `pub(crate)` so `scenarios.rs` can call them: `decompose_one`, `complete_units`, `seed_spec`. The free function `action_tag` stays `pub`. `harness.rs` no longer contains `capture_to_seal` or any walk-until-`Sealed` loop — that loop moves OUT, verbatim (same match arms, same `guard < 2000` convergence check), to `scenarios.rs` (next bullet). `harness.rs` still exposes `TickResult` (with its `.action` field) unchanged from `Harness::tick`, but that exposure exists solely for the relocated loop's own post-hoc prompt-capture bookkeeping in `scenarios.rs` — `harness.rs` itself makes no decision keyed on `.action`.
+- Adjusted, not untouched, and its adjustment has a stated ceiling: `crates/darkrun-sim/src/scenarios.rs`. `core_scenarios()` keeps returning the SAME `Scenario` data it returns today, so `crates/darkrun-sim/tests/followability.rs` (which calls it transitively and is not edited by this Run, AC-11) needs no change. Internally, `scenarios.rs` gains a new function, `capture_to_seal(harness: &Harness) -> BTreeMap<String, String>`, that is the walk-until-`Sealed` loop relocated verbatim from today's `harness.rs`, built on the `pub(crate)` primitives promoted above (`decompose_one`, `complete_units`, `seed_spec`) plus `Harness::tick`/`seal`/`decide`/`render`. Nothing else in `scenarios.rs` changes (today's solo-mode call at line 53 is a linter-only concern and stays out of this Run's dark-mode-first scope).
 - New: three modules named `world`, `provider`, and `transcript`, added as files under `crates/darkrun-sim/src/`, each declared with a `pub mod` line added to the existing `crates/darkrun-sim/src/lib.rs`.
 - New: the `sim_fixture` module under `crates/darkrun-core/src/` (Contract 3).
 
@@ -239,7 +256,7 @@ The scripted dark-mode scenario's regenerated, normalized fixture is committed a
 - URL pattern: `#[route("/replay")]` — a static path with no dynamic segment, since Phase 2/3 ships exactly one committed fixture (mirrors `/preview`'s static route, not `/browse/:..rest`'s dynamic one).
 - `all_paths()` entry: the literal `"/replay".to_string()` pushed into the `vec![...]` inside `Route::all_paths()` (`web/site/src/route.rs`), in the same static list that already contains `"/preview".to_string()`.
 - darkrun-ui components composed: `StationStrip` (`crates/darkrun-ui/src/components/station_strip.rs`), `StationPipeline` (`crates/darkrun-ui/src/components/pipeline.rs`), `UnitGraph` (`crates/darkrun-ui/src/graph/view.rs`) — imported via `darkrun_ui::prelude::*`, the same glob import `web/site/src/pages/preview.rs` uses.
-- No-live-feed banner: an explicit, visible banner stating no live engine backs the page, in the visual/textual style of `web/site/src/pages/preview.rs`'s "Preview only — no live feed is attached" copy (its `ScaffoldNote` component, imported from `crate::pages::review::ScaffoldNote`).
+- No-live-feed banner: an explicit, visible banner stating no live engine backs the page. Text precedent: `web/site/src/pages/preview.rs` lines 88-93, the `lead` prop of its `SectionHead` component — "...Preview only — no live feed is attached." (not `ScaffoldNote`'s text, which reads "Fixture: representative..." and describes fixture provenance, not live-feed status). Container precedent, a separate and optional choice: `ScaffoldNote` (`crate::pages::review::ScaffoldNote`, `web/site/src/pages/review.rs` line 199) may be reused for the banner's dashed-border visual box, independent of which component supplies the no-live-feed sentence.
 - No-fetch rule: the new page module contains no `gloo`, `remote::`, or `.fetch(` token — all data comes from the `include_str!`-embedded fixture (Contract 5), deserialized once at component-render time.
 
 ## Edge cases
@@ -322,6 +339,7 @@ REQUIRED: the committed fixture (Contract 5) is fully self-contained — every d
 - `crates/darkrun-ui/src/graph/view.rs`
 - `web/site/src/route.rs`
 - `web/site/src/pages/preview.rs`
+- `web/site/src/pages/review.rs`
 - `web/site/src/pages/browse.rs`
 - `web/site/src/content.rs`
 - `web/site/Cargo.toml`
