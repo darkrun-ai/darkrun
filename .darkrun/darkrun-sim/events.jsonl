@@ -27,3 +27,4 @@
 {"at":"2026-07-11T17:12:11.479933+00:00","event":"darkrun.save_wip.blocked","files":4,"run":"darkrun-sim"}
 {"action":"spec","at":"2026-07-11T17:12:40.697426+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"specify"}
 {"action":"review","at":"2026-07-11T17:12:56.848129+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"specify"}
+{"action":"user_gate","at":"2026-07-11T17:22:37.369743+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"specify"}
