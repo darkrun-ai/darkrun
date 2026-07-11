@@ -33,3 +33,4 @@
 {"action":"manufacture","at":"2026-07-11T17:51:06.652450+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"specify"}
 {"at":"2026-07-11T18:30:41.617034+00:00","event":"darkrun.unit.completed","run":"darkrun-sim","station":"specify","unit":"author-spec"}
 {"action":"audit","at":"2026-07-11T18:30:54.812919+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"specify"}
+{"action":"fix_feedback","at":"2026-07-11T18:40:47.438820+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"specify"}
