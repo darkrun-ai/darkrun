@@ -779,21 +779,37 @@ fn run_next_no_active_run_errors() {
 // ─── run decide ──────────────────────────────────────────────────────────────
 
 #[test]
-fn run_decide_approve_advances_into_spec_track() {
+fn decide_off_gate_is_refused() {
     let repo = temp_repo();
     start_run(repo.path(), "Add Login");
+    // A fresh run's frame station is mid-flight (Spec), not holding at any
+    // gate. `checkpoint_decide` must refuse a bare approve here rather than
+    // silently completing the station: an approve can only resolve a genuine
+    // pre-execution UserGate or an entered, undecided Checkpoint, and the CLI
+    // has no surface (no unit/manufacture) to drive a solo run to either.
     let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
-    assert!(r.ok(), "stderr: {}", r.stderr);
-    let v = json(&r.stdout);
-    // Approving the frame checkpoint advances to the next station.
-    assert_eq!(v["action"]["station"], "specify");
+    assert_eq!(r.code, 1, "stdout: {}", r.stdout);
+    assert!(
+        r.stderr.contains("no checkpoint is awaiting a decision"),
+        "stderr: {}",
+        r.stderr
+    );
 }
 
 #[test]
 fn run_decide_emits_action_json() {
     let repo = temp_repo();
     start_run(repo.path(), "Add Login");
-    let v = json(&Cli::new().repo(repo.path()).args(["run", "decide"]).run().stdout);
+    // Approve is refused off-gate, but reject is legal off-gate (it files
+    // feedback and holds) — use it to check the decide envelope's generic
+    // JSON shape without depending on the removed walk-via-approve behavior.
+    let v = json(
+        &Cli::new()
+            .repo(repo.path())
+            .args(["run", "decide", "--reject", "--notes", "recheck"])
+            .run()
+            .stdout,
+    );
     assert!(v["action"].is_object());
     assert_eq!(v["run"], "add-login");
 }
@@ -845,13 +861,15 @@ fn run_decide_no_active_run_errors() {
 }
 
 #[test]
-fn run_decide_approve_persists_advance() {
+fn run_decide_refused_approve_does_not_persist_an_advance() {
     let repo = temp_repo();
     start_run(repo.path(), "Add Login");
-    Cli::new().repo(repo.path()).args(["run", "decide"]).run();
-    // A follow-up show should reflect the advanced active station.
+    let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    assert_eq!(r.code, 1);
+    // A follow-up show must reflect that the refused approve did not silently
+    // advance the station.
     let v = json(&Cli::new().repo(repo.path()).args(["run", "show"]).run().stdout);
-    assert_eq!(v["state"]["active_station"], "specify");
+    assert_eq!(v["state"]["active_station"], "frame");
 }
 
 #[test]
@@ -1307,15 +1325,18 @@ fn statusline_json_without_dir_prints_nothing_or_uses_cwd() {
 }
 
 #[test]
-fn statusline_after_decide_shows_advanced_station() {
+fn statusline_unchanged_by_a_refused_decide() {
     let repo = temp_repo();
     start_run(repo.path(), "Add Login");
-    Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    // A bare approve off-gate is refused and must not silently advance the
+    // station, so the statusline still names the original station.
+    let decide = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    assert_eq!(decide.code, 1);
     let r = Cli::new()
         .arg("statusline")
         .stdin(workspace_json(repo.path()))
         .run();
-    assert!(r.stdout.contains("specify"), "expected advanced station:\n{}", r.stdout);
+    assert!(r.stdout.contains("frame"), "expected unchanged station:\n{}", r.stdout);
 }
 
 #[test]
@@ -1598,12 +1619,13 @@ fn lifecycle_start_show_next_decide_threads_through() {
     // next: spec at frame
     let next = json(&Cli::new().repo(repo.path()).args(["run", "next"]).run().stdout);
     assert_eq!(next["action"]["station"], "frame");
-    // decide: advance
-    let decide = json(&Cli::new().repo(repo.path()).args(["run", "decide"]).run().stdout);
-    assert_eq!(decide["action"]["station"], "specify");
-    // show again: advanced
+    // decide: a bare approve is refused, the run is not holding at a gate.
+    let decide = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    assert_eq!(decide.code, 1);
+    assert!(decide.stderr.contains("no checkpoint is awaiting a decision"));
+    // show again: unchanged, the refused decide did not advance anything.
     let show2 = json(&Cli::new().repo(repo.path()).args(["run", "show"]).run().stdout);
-    assert_eq!(show2["state"]["active_station"], "specify");
+    assert_eq!(show2["state"]["active_station"], "frame");
 }
 
 // ─── in-module unit tests for pure helpers ───────────────────────────────────
@@ -1712,101 +1734,114 @@ fn slugify_via_start_drops_non_ascii_letters() {
     );
 }
 
-// ─── deep lifecycle: driving a run through every station ─────────────────────
-
-/// Approve the active checkpoint `n` times in `repo`, returning the last output.
-fn decide_n(repo: &Path, n: usize) -> Run {
-    let mut last = Cli::new().repo(repo).args(["run", "decide"]).run();
-    for _ in 1..n {
-        last = Cli::new().repo(repo).args(["run", "decide"]).run();
-    }
-    last
-}
-
-/// The ordered station names of the software factory.
-const STATIONS: [&str; 6] = ["frame", "specify", "shape", "build", "prove", "harden"];
+// ─── deep lifecycle: the off-gate guard holds across repeated attempts ───────
+//
+// Driving a run station-by-station requires reaching a genuine gate (a
+// pre-execution UserGate or an entered, undecided Checkpoint) via
+// manufacture/units/elaborate-seal — none of which the CLI exposes (it only
+// wraps `run start | next | decide | pr`). So a solo run started here can
+// never legitimately walk past `frame`, and every bare approve — no matter
+// how many times it's retried — is refused rather than silently completing
+// the station. These tests assert that refusal holds, and holds
+// consistently, in place of the old (buggy) walk-through-every-station
+// coverage.
 
 #[test]
-fn decide_walks_through_every_station_in_order() {
+fn repeated_off_gate_decides_never_advance_the_station() {
     let repo = temp_repo();
     start_run(repo.path(), "Walk Stations");
-    // Each approve advances to the next station's spec; assert the sequence.
-    for next_station in &STATIONS[1..] {
-        let v = json(&Cli::new().repo(repo.path()).args(["run", "decide"]).run().stdout);
-        assert_eq!(v["action"]["station"], *next_station);
-        assert_eq!(v["action"]["action"], "spec");
+    // Calling decide repeatedly must not eventually "walk" through the
+    // pipeline — each bare approve is refused in turn.
+    for _ in 0..5 {
+        let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+        assert_eq!(r.code, 1, "stdout: {}", r.stdout);
+        assert!(r.stderr.contains("no checkpoint is awaiting a decision"));
     }
+    let v = json(&Cli::new().repo(repo.path()).args(["run", "show"]).run().stdout);
+    assert_eq!(v["state"]["active_station"], "frame");
 }
 
 #[test]
-fn decide_at_last_station_enters_run_review() {
+fn repeated_off_gate_approves_never_reach_run_review_or_complete() {
     let repo = temp_repo();
     start_run(repo.path(), "Seal It");
-    // 5 approves reach the last station; the 6th closes harden's checkpoint and
-    // the run holds in the whole-run review (the cross-station audit) — it no
-    // longer seals on the operator's decide alone, the run reviewers gate first.
-    decide_n(repo.path(), 5);
-    let v = json(&Cli::new().repo(repo.path()).args(["run", "decide"]).run().stdout);
-    assert_eq!(v["action"]["action"], "run_review");
+    // What used to be "5 approves reach the last station, the 6th enters
+    // run_review" is gone: none of these approves are legal off-gate, so the
+    // run never advances toward review or completion no matter how many are
+    // sent.
+    for _ in 0..6 {
+        let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+        assert_eq!(r.code, 1);
+        assert!(r.stderr.contains("no checkpoint is awaiting a decision"));
+    }
+    let v = json(&Cli::new().repo(repo.path()).args(["run", "show"]).run().stdout);
+    assert_eq!(v["complete"], false);
+    assert_eq!(v["state"]["active_station"], "frame");
 }
 
 #[test]
-fn decide_after_sealed_errors_no_active_station() {
+fn decide_off_gate_error_is_distinct_from_no_active_station_error() {
     let repo = temp_repo();
     start_run(repo.path(), "Seal It");
-    decide_n(repo.path(), 6); // through sealing
+    // "no active station" is reserved for a run that has actually completed
+    // every station; a fresh, mid-flight run gets the off-gate guard instead,
+    // and the two messages must not be conflated.
     let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
     assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("no active station"));
+    assert!(r.stderr.contains("no checkpoint is awaiting a decision"));
+    assert!(!r.stderr.contains("no active station"));
 }
 
 #[test]
-fn show_at_each_station_reports_that_station_active() {
+fn show_stays_at_frame_across_repeated_refused_decides() {
     let repo = temp_repo();
     start_run(repo.path(), "Track Active");
-    for (i, station) in STATIONS.iter().enumerate() {
+    for i in 0..3 {
         let v = json(&Cli::new().repo(repo.path()).args(["run", "show"]).run().stdout);
-        assert_eq!(
-            v["state"]["active_station"], *station,
-            "after {i} advances"
-        );
-        if i + 1 < STATIONS.len() {
-            Cli::new().repo(repo.path()).args(["run", "decide"]).run();
-        }
+        assert_eq!(v["state"]["active_station"], "frame", "after {i} refused decides");
+        let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+        assert_eq!(r.code, 1, "decide attempt {i} should be refused");
     }
 }
 
 #[test]
-fn earlier_stations_are_completed_after_advancing() {
+fn earlier_stations_are_not_marked_completed_by_a_refused_decide() {
     let repo = temp_repo();
     start_run(repo.path(), "Completed Trail");
-    decide_n(repo.path(), 3); // now at build
+    let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    assert_eq!(r.code, 1);
     let v = json(&Cli::new().repo(repo.path()).args(["run", "show"]).run().stdout);
-    // frame/specify/shape should be marked completed in state.
-    for done in ["frame", "specify", "shape"] {
-        assert_eq!(
-            v["state"]["stations"][done]["status"], "completed",
-            "{done} should be completed"
-        );
-    }
+    // The refused approve must not mark frame completed, nor manufacture
+    // specify/shape into existence — nothing advances off-gate.
+    assert_eq!(v["state"]["stations"]["frame"]["status"], "pending");
+    assert!(v["state"]["stations"].get("specify").is_none());
+    assert!(v["state"]["stations"].get("shape").is_none());
 }
 
 #[test]
-fn show_after_sealing_marks_harden_completed() {
+fn show_after_repeated_refused_decides_never_reaches_or_completes_harden() {
     let repo = temp_repo();
     start_run(repo.path(), "Seal Done");
-    decide_n(repo.path(), 6);
+    for _ in 0..6 {
+        Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    }
     let v = json(&Cli::new().repo(repo.path()).args(["run", "show"]).run().stdout);
-    assert_eq!(v["state"]["stations"]["harden"]["status"], "completed");
+    assert!(
+        v["state"]["stations"].get("harden").is_none(),
+        "harden must not exist without ever being entered"
+    );
+    assert_eq!(v["state"]["active_station"], "frame");
 }
 
 #[test]
-fn next_at_advanced_station_targets_that_station() {
+fn next_still_targets_frame_after_repeated_refused_decides() {
     let repo = temp_repo();
     start_run(repo.path(), "Next After Advance");
-    decide_n(repo.path(), 2); // now at shape
+    for _ in 0..2 {
+        Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    }
     let v = json(&Cli::new().repo(repo.path()).args(["run", "next"]).run().stdout);
-    assert_eq!(v["action"]["station"], "shape");
+    assert_eq!(v["action"]["station"], "frame");
 }
 
 // ─── reject / rework routing ─────────────────────────────────────────────────
@@ -1835,19 +1870,22 @@ fn reject_records_feedback_on_disk() {
 }
 
 #[test]
-fn reject_then_approve_eventually_advances() {
+fn reject_then_approve_is_still_refused_off_gate() {
     let repo = temp_repo();
     start_run(repo.path(), "Reject Then Pass");
-    // Reject holds at frame.
+    // Reject holds at frame and routes fix-feedback.
     Cli::new()
         .repo(repo.path())
         .args(["run", "decide", "--reject", "--notes", "redo"])
         .run();
     let held = json(&Cli::new().repo(repo.path()).args(["run", "show"]).run().stdout);
     assert_eq!(held["state"]["active_station"], "frame");
-    // A subsequent approve still moves forward.
-    let v = json(&Cli::new().repo(repo.path()).args(["run", "decide"]).run().stdout);
-    assert!(v["action"]["station"] == "frame" || v["action"]["station"] == "specify");
+    // A subsequent approve is still refused: rejecting routes feedback but
+    // does not open a Checkpoint hold, so the station is still mid-flight and
+    // the off-gate guard applies exactly as it did before the reject.
+    let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    assert_eq!(r.code, 1, "stdout: {}", r.stdout);
+    assert!(r.stderr.contains("no checkpoint is awaiting a decision"));
 }
 
 // ─── serde / output shape ────────────────────────────────────────────────────
@@ -1918,7 +1956,7 @@ fn state_json_round_trips_through_show() {
 // ─── statusline phase / pipeline progression ─────────────────────────────────
 
 #[test]
-fn statusline_pipeline_grows_done_pips_as_run_advances() {
+fn statusline_pip_count_is_unchanged_by_repeated_refused_decides() {
     let repo = temp_repo();
     start_run(repo.path(), "Pip Growth");
     let first = Cli::new()
@@ -1926,52 +1964,73 @@ fn statusline_pipeline_grows_done_pips_as_run_advances() {
         .stdin(workspace_json(repo.path()))
         .run();
     let done_first = first.stdout.matches('●').count();
-    decide_n(repo.path(), 3);
+    // What used to advance the pipeline (`decide_n`) is now a run of refused,
+    // off-gate approves: none of them are legal, so the completed-pip count
+    // must not move.
+    for _ in 0..3 {
+        let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+        assert_eq!(r.code, 1);
+    }
     let later = Cli::new()
         .arg("statusline")
         .stdin(workspace_json(repo.path()))
         .run();
     let done_later = later.stdout.matches('●').count();
-    assert!(
-        done_later > done_first,
-        "expected more completed pips after advancing ({done_first} → {done_later})"
+    assert_eq!(
+        done_later, done_first,
+        "pip count must not change on a refused decide ({done_first} → {done_later})"
     );
 }
 
 #[test]
-fn statusline_at_sealed_shows_all_pips_done() {
+fn statusline_refused_seal_leaves_pips_pending() {
     let repo = temp_repo();
     start_run(repo.path(), "All Done");
-    decide_n(repo.path(), 6); // seal
+    // Sealing (walking every station to completion) requires a genuine
+    // checkpoint at each station, unreachable from the CLI; a raw approve
+    // off-gate is refused, so the pipeline stays at its fresh state: one
+    // active pip and five pending, none completed.
+    for _ in 0..6 {
+        let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+        assert_eq!(r.code, 1);
+    }
     let r = Cli::new()
         .arg("statusline")
         .stdin(workspace_json(repo.path()))
         .run();
-    // Every station is done (or the final one shown active) — none pending.
     assert_eq!(
         r.stdout.matches('○').count(),
-        0,
-        "no pending pips at seal:\n{}",
+        5,
+        "five stations still pending:\n{}",
         r.stdout
     );
     assert_eq!(
-        r.stdout.matches('●').count() + r.stdout.matches('◉').count(),
-        6,
-        "all six pips accounted for:\n{}",
+        r.stdout.matches('◉').count(),
+        1,
+        "one active pip:\n{}",
+        r.stdout
+    );
+    assert_eq!(
+        r.stdout.matches('●').count(),
+        0,
+        "no completed pips without a real seal:\n{}",
         r.stdout
     );
 }
 
 #[test]
-fn statusline_shows_current_station_name_after_advance() {
+fn statusline_station_name_unchanged_by_repeated_refused_decides() {
     let repo = temp_repo();
     start_run(repo.path(), "Name Advance");
-    decide_n(repo.path(), 3); // build
+    for _ in 0..3 {
+        let r = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+        assert_eq!(r.code, 1);
+    }
     let r = Cli::new()
         .arg("statusline")
         .stdin(workspace_json(repo.path()))
         .run();
-    assert!(r.stdout.contains("build"));
+    assert!(r.stdout.contains("frame"));
 }
 
 #[test]
@@ -2110,12 +2169,18 @@ fn run_start_unknown_flag_exits_2() {
 fn run_decide_extra_positional_is_treated_as_slug() {
     let repo = temp_repo();
     start_run(repo.path(), "Pos Slug");
-    // Decide with the run's own slug as positional should succeed.
+    // A bare approve is refused off-gate regardless of slug resolution, so
+    // isolate the positional-arg parsing (not the guard) by pairing it with a
+    // reject, which is legal off-gate. If the positional were mistaken for
+    // something else (e.g. swallowed as a flag value), the run would not be
+    // found and this would fail with "run not found" instead.
     let r = Cli::new()
         .repo(repo.path())
-        .args(["run", "decide", "pos-slug"])
+        .args(["run", "decide", "pos-slug", "--reject", "--notes", "recheck"])
         .run();
     assert!(r.ok(), "stderr: {}", r.stderr);
+    let v = json(&r.stdout);
+    assert_eq!(v["run"], "pos-slug");
 }
 
 #[test]
@@ -2435,14 +2500,18 @@ fn auth_status_is_deterministic() {
 fn two_runs_advance_independently() {
     let repo = temp_repo();
     start_run(repo.path(), "Run Alpha");
-    // alpha is active; advance it twice.
-    Cli::new().repo(repo.path()).args(["run", "decide"]).run();
-    Cli::new().repo(repo.path()).args(["run", "decide"]).run();
-    // Start beta (now active, fresh at frame).
+    // alpha is active; reject its checkpoint (legal off-gate) and route
+    // feedback distinct to alpha.
+    Cli::new()
+        .repo(repo.path())
+        .args(["run", "decide", "--reject", "--notes", "alpha needs rework"])
+        .run();
+    // Start beta (now active, fresh at frame, untouched by alpha's rejection).
     start_run(repo.path(), "Run Beta");
     let beta = json(&Cli::new().repo(repo.path()).args(["run", "show"]).run().stdout);
     assert_eq!(beta["state"]["active_station"], "frame");
-    // Alpha retains its advanced position.
+    // Alpha still holds at frame with its own rejection recorded, independent
+    // of beta's fresh, untouched state.
     let alpha = json(
         &Cli::new()
             .repo(repo.path())
@@ -2450,16 +2519,27 @@ fn two_runs_advance_independently() {
             .run()
             .stdout,
     );
-    assert_eq!(alpha["state"]["active_station"], "shape");
+    assert_eq!(alpha["state"]["active_station"], "frame");
+    let feedback_dir = repo.path().join(".darkrun").join("run-alpha").join("feedback");
+    let any = std::fs::read_dir(&feedback_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            std::fs::read_to_string(e.path())
+                .map(|c| c.contains("alpha needs rework"))
+                .unwrap_or(false)
+        });
+    assert!(any, "alpha's rejection feedback should be recorded independently of beta");
 }
 
 #[test]
-fn decide_then_next_reports_advanced_station_spec() {
+fn decide_then_next_reports_unchanged_station_spec() {
     let repo = temp_repo();
     start_run(repo.path(), "Decide Next");
-    Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    let decide = Cli::new().repo(repo.path()).args(["run", "decide"]).run();
+    assert_eq!(decide.code, 1);
     let v = json(&Cli::new().repo(repo.path()).args(["run", "next"]).run().stdout);
-    assert_eq!(v["action"]["station"], "specify");
+    assert_eq!(v["action"]["station"], "frame");
 }
 
 #[test]
