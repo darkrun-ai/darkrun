@@ -24,8 +24,9 @@ use axum::{
     Json,
 };
 use darkrun_api::{
-    DirectionSelectRequest, DirectionSelectResponse, FeedbackCreateRequest, FeedbackCreateResponse,
-    FeedbackDeleteResponse, FeedbackItem, FeedbackListResponse, FeedbackReplyCreateRequest,
+    AuthorType, DirectionSelectRequest, DirectionSelectResponse, FeedbackCreateRequest,
+    FeedbackCreateResponse, FeedbackDeleteResponse, FeedbackItem, FeedbackListResponse,
+    FeedbackReply, FeedbackReplyCreateRequest,
     FeedbackReplyCreateResponse, FeedbackStatus, FeedbackUpdateRequest, FeedbackUpdateResponse,
     OutputReviewRequest, OutputReviewResponse, PickerSelectRequest, PickerSelectResponse,
     ProofAttachRequest, ProofAttachResponse, ProofGetResponse, PushAckRequest, PushAckResponse,
@@ -117,15 +118,45 @@ pub async fn session_heartbeat(State(state): State<AppState>, Path(id): Path<Str
     }
 }
 
+/// Decode a decide body from either accepted shape.
+///
+/// The canonical shape is [`ReviewDecisionRequest`] (`{"decision": "approved"}`),
+/// but agents following the breadcrumb prompts keep sending the boolean alias
+/// `{"approved": true}`, which used to 422. Both now land: the alias maps
+/// `true` → `approved` and `false` → `changes_requested`, keeping the optional
+/// `feedback` string. `None` when the body matches neither shape.
+fn decision_from_body(body: &serde_json::Value) -> Option<ReviewDecisionRequest> {
+    if let Ok(req) = serde_json::from_value::<ReviewDecisionRequest>(body.clone()) {
+        return Some(req);
+    }
+    let approved = body.get("approved")?.as_bool()?;
+    Some(ReviewDecisionRequest {
+        decision: if approved { "approved" } else { "changes_requested" }.to_string(),
+        feedback: body
+            .get("feedback")
+            .and_then(|f| f.as_str())
+            .map(str::to_string),
+        annotations: None,
+    })
+}
+
 /// `POST /review/:id/decide` — record a review decision against a registered
 /// review session. The raw `decision` string is canonicalized server-side:
 /// only `approved` (case-insensitive) yields [`ReviewDecision::Approved`]. The
-/// session's payload is updated in place and pushed to any WebSocket subscriber.
+/// body is accepted in either shape [`decision_from_body`] recognizes (`422`
+/// otherwise). The session's payload is updated in place and pushed to any
+/// WebSocket subscriber.
 pub async fn review_decide(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<ReviewDecisionRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
+    let Some(req) = decision_from_body(&body) else {
+        return unprocessable(
+            "body must carry a 'decision' string or an 'approved' boolean",
+            &id,
+        );
+    };
     let Some(payload) = state.sessions.get(&id) else {
         return not_found("session", &id);
     };
@@ -527,11 +558,36 @@ pub async fn get_proof(State(state): State<AppState>, Path(run): Path<String>) -
     }
 }
 
+/// Project one on-disk reply line (`author: text`) onto the wire
+/// [`FeedbackReply`]. The sidecar stores replies as flat strings with no
+/// per-reply timestamp, so `created_at` is honestly empty rather than invented.
+/// A line with no `author:` prefix is attributed to `user` (the flat format's
+/// only untagged writer).
+fn wire_reply(line: &str) -> FeedbackReply {
+    let (author, body) = match line.split_once(':') {
+        Some((a, b)) if !a.trim().is_empty() => (a.trim().to_string(), b.trim().to_string()),
+        _ => ("user".to_string(), line.trim().to_string()),
+    };
+    let author_type = if author.eq_ignore_ascii_case("user") {
+        AuthorType::Human
+    } else {
+        AuthorType::Agent
+    };
+    FeedbackReply {
+        author,
+        author_type,
+        body,
+        created_at: String::new(),
+    }
+}
+
 /// `GET /api/feedback/:run/:station` — list feedback items for a run's station.
 ///
 /// Reads the run's feedback sidecar files off `.darkrun/` and returns the
 /// parsed items filtered to the requested station. Items with no recorded
-/// station are treated as belonging to every station (legacy-tolerant).
+/// station are treated as belonging to every station (legacy-tolerant). Each
+/// item carries its reply thread so the desktop renders the conversation, not
+/// just the finding.
 pub async fn list_feedback(
     State(state): State<AppState>,
     Path((run, station)): Path<(String, String)>,
@@ -541,7 +597,13 @@ pub async fn list_feedback(
         .into_iter()
         .map(|(id, content)| FeedbackDoc::parse(&id, &content))
         .filter(|doc| doc.matches_station(&station))
-        .map(|doc| doc.to_item())
+        .map(|doc| {
+            let mut item = doc.to_item();
+            // `to_item` projects the frontmatter; the reply thread rides along
+            // here so the list payload is the full record.
+            item.replies = doc.replies.iter().map(|r| wire_reply(r)).collect();
+            item
+        })
         .collect();
     items.sort_by(|a, b| a.feedback_id.cmp(&b.feedback_id));
 
@@ -806,4 +868,49 @@ fn internal_error(msg: &str) -> Response {
         Json(json!({ "error": msg })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decision_from_body_accepts_the_canonical_shape() {
+        let req = decision_from_body(&json!({ "decision": "approved", "feedback": "nice" }))
+            .expect("canonical shape parses");
+        assert_eq!(req.decision, "approved");
+        assert_eq!(req.feedback.as_deref(), Some("nice"));
+    }
+
+    #[test]
+    fn decision_from_body_accepts_the_boolean_alias() {
+        let yes = decision_from_body(&json!({ "approved": true })).expect("alias parses");
+        assert_eq!(yes.decision, "approved");
+        assert!(yes.feedback.is_none());
+        let no = decision_from_body(&json!({ "approved": false, "feedback": "redo it" }))
+            .expect("alias parses");
+        assert_eq!(no.decision, "changes_requested");
+        assert_eq!(no.feedback.as_deref(), Some("redo it"));
+    }
+
+    #[test]
+    fn decision_from_body_rejects_unrecognized_shapes() {
+        assert!(decision_from_body(&json!({})).is_none());
+        // A non-boolean `approved` is not the alias.
+        assert!(decision_from_body(&json!({ "approved": "yes" })).is_none());
+        assert!(decision_from_body(&json!("approved")).is_none());
+    }
+
+    #[test]
+    fn wire_reply_splits_author_and_body() {
+        let r = wire_reply("agent: applied the fix");
+        assert_eq!(r.author, "agent");
+        assert_eq!(r.author_type, AuthorType::Agent);
+        assert_eq!(r.body, "applied the fix");
+        // The `user` author reads as human; an untagged line defaults to user.
+        assert_eq!(wire_reply("user: thanks").author_type, AuthorType::Human);
+        let bare = wire_reply("just text");
+        assert_eq!(bare.author, "user");
+        assert_eq!(bare.body, "just text");
+    }
 }

@@ -260,6 +260,29 @@ pub fn looks_like_markdown(src: &str) -> bool {
 /// any surface that renders `to_html` output (session views, the review
 /// annotate stage, the artifact browser) so headings, code, tables, and
 /// blockquotes look identical everywhere.
+
+/// Render a whole markdown DOCUMENT: a doc with frontmatter gets its pairs as a
+/// chip row ([`frontmatter_html`]) ahead of the rendered body instead of a raw
+/// `---` block; a doc without frontmatter renders exactly like [`to_html`].
+/// This is the entry the artifact-browsing surfaces (annotate stage, knowledge
+/// tab, reflection) share.
+///
+/// A fenced leading block with NO flat scalars (a YAML list, nested structure)
+/// cannot be summarized as chips; rather than silently dropping it, the WHOLE
+/// document renders as body so no content ever vanishes.
+pub fn to_html_doc(src: &str) -> String {
+    match split_frontmatter(src) {
+        (Some(block), body) => {
+            let header = frontmatter_html(block);
+            if header.is_empty() && !block.trim().is_empty() {
+                return to_html(src);
+            }
+            format!("{header}{}", to_html(body))
+        }
+        (None, body) => to_html(body),
+    }
+}
+
 pub const CSS: &str = "\
 .dr-md{font-family:var(--dr-font-sans);color:var(--dr-text);line-height:1.55;}\
 .dr-md h1{font-size:20px;font-weight:700;margin:2px 0 10px;line-height:1.25;}\
@@ -468,6 +491,52 @@ mod tests {
     fn empty_input_is_empty() {
         assert_eq!(to_html(""), "");
         assert_eq!(to_html("   \n  \n"), "");
+    }
+
+    #[test]
+    fn frontmatter_renders_as_chips_ahead_of_the_body() {
+        let doc = "---\nid: FB-01\nstatus: pending\nreplies:\n  - \"skip me\"\n---\n# Title\n\nbody";
+        let (fm, body) = split_frontmatter(doc);
+        let pairs = frontmatter_pairs(fm.expect("frontmatter block"));
+        // Flat scalars only; the list items under `replies:` are skipped.
+        assert!(pairs.contains(&("id".to_string(), "FB-01".to_string())), "{pairs:?}");
+        assert!(pairs.contains(&("status".to_string(), "pending".to_string())), "{pairs:?}");
+        assert!(body.trim_start().starts_with("# Title"));
+        let html = to_html_doc(doc);
+        assert!(html.starts_with("<div class=\"dr-md-meta\">"), "{html}");
+        assert!(html.contains("FB-01"), "{html}");
+        assert!(html.contains("<h1>Title</h1>"), "{html}");
+        // The fence lines never render as body text.
+        assert!(!html.contains("<p>---"), "{html}");
+    }
+
+    #[test]
+    fn fenced_block_with_no_flat_scalars_is_never_silently_dropped() {
+        // The leading fenced section holds only a YAML list: unsummarizable as
+        // chips, so the WHOLE doc renders as body rather than the section
+        // vanishing from the render.
+        let doc = "---\n- alpha\n- beta\n---\nbody text";
+        let html = to_html_doc(doc);
+        assert!(html.contains("alpha"), "fenced content must not vanish: {html}");
+        assert!(html.contains("body text"), "{html}");
+    }
+
+    #[test]
+    fn doc_without_frontmatter_renders_like_to_html() {
+        assert_eq!(to_html_doc("plain **bold**"), to_html("plain **bold**"));
+        // An unclosed fence is body, not frontmatter (nothing silently dropped).
+        let unclosed = "---\ntitle: x\nno closing fence";
+        assert_eq!(to_html_doc(unclosed), to_html(unclosed));
+        // A thematic-break-looking doc with no leading fence stays untouched.
+        assert!(to_html_doc("a\n\n---\n\nb").contains("a"));
+    }
+
+    #[test]
+    fn frontmatter_values_are_escaped_in_chips() {
+        let doc = "---\ntitle: \"<b>sneaky</b>\"\n---\nbody";
+        let html = to_html_doc(doc);
+        assert!(html.contains("&lt;b&gt;sneaky&lt;/b&gt;"), "{html}");
+        assert!(!html.contains("<b>sneaky</b>"), "{html}");
     }
 
     #[test]

@@ -68,7 +68,8 @@ pub use review_current::{
 };
 pub use routes::{HttpMethod, RouteSpec, ROUTES};
 pub use runs::{
-    RunDetailPayload, RunDetailStation, RunDetailUnit, RunListPayload, RunSummary, StationProgress,
+    RunArchiveRequest, RunArchiveResponse, RunDetailPayload, RunDetailStation, RunDetailUnit,
+    RunListPayload, RunSummary, StationProgress,
 };
 pub use session::{
     ApproveAction, ApproveActionKind, DirectionAnnotations, DirectionArchetype, DirectionPin,

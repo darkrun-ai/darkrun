@@ -4977,6 +4977,42 @@
         "title": "ReviewSessionPayload",
         "type": "object"
       },
+      "RunArchiveRequest": {
+        "description": "`POST /api/runs/:slug/archive` request body: the reversible archive\ntoggle. Mirrors the engine's `run_archive` tool (no confirmation step,\n`archived: false` restores). An empty body archives (the common case).",
+        "properties": {
+          "archived": {
+            "default": true,
+            "description": "The archived flag to set (`true` archives, `false` restores).",
+            "type": "boolean"
+          }
+        },
+        "title": "RunArchiveRequest",
+        "type": "object"
+      },
+      "RunArchiveResponse": {
+        "description": "`POST /api/runs/:slug/archive` response body.",
+        "properties": {
+          "archived": {
+            "description": "The archived flag after the write.",
+            "type": "boolean"
+          },
+          "ok": {
+            "description": "Always `true` on success.",
+            "type": "boolean"
+          },
+          "slug": {
+            "description": "The run the flag was set on.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "slug",
+          "archived"
+        ],
+        "title": "RunArchiveResponse",
+        "type": "object"
+      },
       "RunCurrentState": {
         "$defs": {
           "MilestoneStatus": {
@@ -5346,6 +5382,13 @@
                 "description": "The factory driving the run (e.g. `software`).",
                 "type": "string"
               },
+              "open_drift": {
+                "default": 0,
+                "description": "Open drift feedback on the run: `origin = drift` items still holding a\ngate. Drift is feedback (the sweep files a drift item when a locked\ninput premise moves), so this count is readable straight off the run's\nfeedback files. Defaults to `0` so an older producer still decodes.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
               "phase": {
                 "description": "The active phase within the active station, if known.",
                 "type": [
@@ -5515,6 +5558,13 @@
           "factory": {
             "description": "The factory driving the run (e.g. `software`).",
             "type": "string"
+          },
+          "open_drift": {
+            "default": 0,
+            "description": "Open drift feedback on the run: `origin = drift` items still holding a\ngate. Drift is feedback (the sweep files a drift item when a locked\ninput premise moves), so this count is readable straight off the run's\nfeedback files. Defaults to `0` so an older producer still decodes.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           },
           "phase": {
             "description": "The active phase within the active station, if known.",
@@ -8257,6 +8307,20 @@
           }
         },
         "summary": "Return a run's detail: stations, units on the active station, and phase.",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/runs/{slug}/archive": {
+      "post": {
+        "operationId": "archiveRun",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        },
+        "summary": "Set (or clear) a run's archived flag; archived runs drop out of the default list.",
         "tags": [
           "runs"
         ]

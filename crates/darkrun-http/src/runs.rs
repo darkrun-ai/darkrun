@@ -10,6 +10,8 @@
 //! - `GET /api/runs/:slug` — a single run's [`RunDetailPayload`]: identity,
 //!   live position, every station it walks, and the units sitting on the active
 //!   station. `404` when the run is unknown.
+//! - `POST /api/runs/:slug/archive` sets (or clears) a run's archived flag,
+//!   mirroring the engine's `run_archive` semantics.
 //!
 //! The display strings (`status`, `phase`) come from the domain enums' serde
 //! representation, so they stay in lockstep with the wire contract without a
@@ -22,13 +24,15 @@ use axum::{
     Json,
 };
 use darkrun_api::{
-    RunDetailPayload, RunDetailStation, RunDetailUnit, RunListPayload, RunSummary, StationProgress,
+    FeedbackOrigin, RunArchiveRequest, RunArchiveResponse, RunDetailPayload, RunDetailStation,
+    RunDetailUnit, RunListPayload, RunSummary, StationProgress,
 };
 use darkrun_core::domain::{Run, Station, StationPhase, Status, Unit};
 use darkrun_core::state::RunState;
 use serde_json::json;
 use std::path::Path as FsPath;
 
+use crate::feedback_doc::FeedbackDoc;
 use crate::state::AppState;
 
 /// The run's stable branch (`darkrun/<slug>/main`) — MUST mirror the engine's
@@ -147,6 +151,22 @@ fn active_phase(run: &Run, state: Option<&RunState>) -> Option<String> {
         .map(|s| phase_string(s.phase))
 }
 
+/// Count a run's OPEN drift feedback: `origin = drift` items still holding a
+/// gate. The drift sweep files these when a locked input premise moves, so the
+/// count is readable straight off the run's feedback sidecars (no engine
+/// dependency), and the number is exactly what the operator would find in the
+/// inbox.
+fn open_drift(state: &AppState, slug: &str) -> u32 {
+    state
+        .store
+        .read_feedback_raw(slug)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, content)| FeedbackDoc::parse(&id, &content))
+        .filter(|doc| doc.origin == FeedbackOrigin::Drift && doc.status.blocks_gate())
+        .count() as u32
+}
+
 /// Project a [`Run`] (+ its derived state, if present) into a [`RunSummary`].
 ///
 /// `authored_by_me` is the engine's "Mine" predicate for this run's branch; the
@@ -157,6 +177,7 @@ fn summarize(
     state: Option<&RunState>,
     authored_by_me: bool,
     author: Option<String>,
+    open_drift: u32,
 ) -> RunSummary {
     RunSummary {
         slug: run.slug.clone(),
@@ -169,6 +190,7 @@ fn summarize(
         started_at: run.frontmatter.started_at.clone(),
         authored_by_me,
         author,
+        open_drift,
     }
 }
 
@@ -226,10 +248,11 @@ pub async fn list_runs(State(state): State<AppState>) -> Response {
             if run.frontmatter.archived.unwrap_or(false) {
                 continue;
             }
-            let state = store.read_state(&slug).ok().flatten();
+            let run_state = store.read_state(&slug).ok().flatten();
             let mine = authorship.mine(&slug);
             let author = authorship.author(&slug);
-            summaries.push(summarize(&run, state.as_ref(), mine, author));
+            let drift = open_drift(&state, &slug);
+            summaries.push(summarize(&run, run_state.as_ref(), mine, author, drift));
         }
     }
 
@@ -301,6 +324,54 @@ pub async fn get_run(State(state): State<AppState>, Path(slug): Path<String>) ->
     };
 
     (StatusCode::OK, Json(payload)).into_response()
+}
+
+/// `POST /api/runs/:slug/archive`: set (or clear) a run's archived flag.
+///
+/// Mirrors the engine's `run_archive` tool semantics: reversible, no
+/// confirmation step, and an archived run drops out of the default
+/// `GET /api/runs` list (restore with `archived: false`). Archiving also
+/// clears the active-run pointer when it names this run, so an archived run
+/// stops surfacing as the default. `404` when the run is unknown.
+pub async fn set_run_archived(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Json(req): Json<RunArchiveRequest>,
+) -> Response {
+    let store = &state.store;
+    let Ok(mut run) = store.read_run(&slug) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "run not found", "id": slug })),
+        )
+            .into_response();
+    };
+
+    run.frontmatter.archived = Some(req.archived);
+    if store.write_run(&run).is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to persist the archived flag" })),
+        )
+            .into_response();
+    }
+    if req.archived {
+        if let Ok(Some(active)) = store.active_run() {
+            if active == slug {
+                let _ = store.clear_active_run();
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(RunArchiveResponse {
+            ok: true,
+            slug,
+            archived: req.archived,
+        }),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

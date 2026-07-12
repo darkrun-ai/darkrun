@@ -187,6 +187,8 @@ fn component_schemas() -> Map<String, Value> {
     collect_schema!(schemas, "RunSummary", crate::runs::RunSummary);
     collect_schema!(schemas, "RunListPayload", crate::runs::RunListPayload);
     collect_schema!(schemas, "RunDetailPayload", crate::runs::RunDetailPayload);
+    collect_schema!(schemas, "RunArchiveRequest", crate::runs::RunArchiveRequest);
+    collect_schema!(schemas, "RunArchiveResponse", crate::runs::RunArchiveResponse);
 
     // Validation envelope.
     collect_schema!(schemas, "ValidationError", crate::common::ValidationError);
