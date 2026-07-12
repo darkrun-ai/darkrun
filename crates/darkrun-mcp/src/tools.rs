@@ -904,6 +904,21 @@ pub struct AnnotationListInput {
     pub open_only: bool,
 }
 
+/// Input for `darkrun_annotation_resolve` — close ONE annotation by id so it
+/// stops blocking the checkpoint.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AnnotationResolveInput {
+    /// The run slug.
+    pub slug: String,
+    /// The annotation id (the `anno_…` handle from a submit / payload).
+    pub annotation_id: String,
+    /// The terminal status to set: `addressed` (a fix landed) or `dismissed` (no
+    /// code change). Defaults to `addressed`.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
 /// Input for `darkrun_reflection_record` — capture a Reflect-phase retrospective.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -2436,6 +2451,46 @@ impl DarkrunServer {
         }
     }
 
+    /// Close ONE annotation so it stops blocking the checkpoint.
+    ///
+    /// An OPEN `must`/`should` annotation blocks a clean Approve on every decide
+    /// path (`checkpoint_decide` here and `POST /review/:id/decide` on the desktop).
+    /// Without a way to transition an annotation OUT of `open`, a run could be
+    /// wedged: the operator marked a blocker, the agent addressed it, but nothing
+    /// could flip the annotation, so Approve stayed refused forever. This is that
+    /// missing verb: the fix loop (or the operator via the desktop's HTTP route)
+    /// resolves an addressed annotation, re-opening the path to Approve.
+    #[tool(
+        name = "darkrun_annotation_resolve",
+        description = "Close one annotation by id (status: addressed = a fix landed, or dismissed = no code change) so it no longer blocks the checkpoint's clean Approve."
+    )]
+    pub fn darkrun_annotation_resolve(
+        &self,
+        Parameters(input): Parameters<AnnotationResolveInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        use darkrun_api::annotation::AnnotationStatus;
+        // Only the two TERMINAL, human-meaningful outcomes are settable here:
+        // `addressed` (a fix landed) or `dismissed` (valid but no code change).
+        // `open`/`shifted` are lifecycle states the engine owns, not resolutions.
+        let status = match input.status.as_deref().unwrap_or("addressed").trim().to_ascii_lowercase().as_str() {
+            "addressed" | "resolve" | "resolved" => AnnotationStatus::Addressed,
+            "dismissed" | "dismiss" => AnnotationStatus::Dismissed,
+            other => {
+                return Ok(err_text(format!(
+                    "invalid annotation resolution '{other}': use 'addressed' or 'dismissed'"
+                )))
+            }
+        };
+        let store = self.store();
+        match store.update_annotation_status(&input.slug, &input.annotation_id, status) {
+            Ok(annotation) => {
+                let _ = crate::commit::commit_state(&store, "darkrun: annotation resolve");
+                ok_json(&annotation)
+            }
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
     // ── Reflections ──────────────────────────────────────────────────────
 
     /// Record a Reflect-phase retrospective so it survives the run.
@@ -2720,7 +2775,18 @@ impl DarkrunServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
         match crate::reset::reset(&store, &input.slug, input.station.as_deref(), input.confirm) {
-            Ok(plan) => ok_json(&plan),
+            Ok(plan) => {
+                // INT-3: a confirmed WHOLE-RUN reset deletes the run's on-disk state,
+                // but its in-memory sessions would linger — a subscribed desktop would
+                // sit on a pending gate for a run that no longer exists (an
+                // unresolvable zombie). Retire them so subscribers' streams close and a
+                // re-fetch 404s. Only on a confirmed run-scope reset: a station reset
+                // keeps the run (and its review session) alive.
+                if input.confirm && input.station.is_none() {
+                    self.sessions.retire_run(&input.slug);
+                }
+                ok_json(&plan)
+            }
             Err(e) => Ok(err_text(e)),
         }
     }
@@ -4464,6 +4530,118 @@ mod tests {
         assert_eq!(v["items"][0]["source"]["kind"], "text");
         assert_eq!(v["items"][0]["source"]["path"], "src/payment.rs");
         assert_eq!(v["items"][0]["source"]["start_line"], 42);
+    }
+
+    /// IP-1/INT-2 regression: an OPEN `must` annotation blocks a clean Approve, and
+    /// before this fix there was NO wired path to close it — the run could wedge.
+    /// `darkrun_annotation_resolve` is that path: resolving the annotation clears
+    /// the block.
+    #[test]
+    fn annotation_resolve_unblocks_the_checkpoint() {
+        let (_d, server) = started_server();
+        let station_query = || WorkItemInput {
+            kind: "station".into(),
+            id: String::new(),
+            station: "build".into(),
+        };
+        let blocks = |server: &DarkrunServer| -> bool {
+            server
+                .darkrun_annotation_list(Parameters(AnnotationListInput {
+                    slug: "r".into(),
+                    work_item: station_query(),
+                    open_only: false,
+                }))
+                .unwrap()
+                .structured_content
+                .unwrap()["blocks_clean_approve"]
+                .as_bool()
+                .unwrap()
+        };
+
+        // Submit an OPEN `must` station note — it blocks a clean Approve.
+        let submitted = server
+            .darkrun_annotation_submit(Parameters(AnnotationSubmitInput {
+                slug: "r".into(),
+                author: Some("human".into()),
+                work_item: station_query(),
+                artifact: None,
+                anchor: None,
+                expression: None,
+                comment: "overall: tighten the error handling".into(),
+                ask: serde_json::json!({ "kind": "change", "severity": "must" }),
+                suggestion: None,
+            }))
+            .unwrap();
+        let id = submitted.structured_content.unwrap()["annotation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(blocks(&server), "an open must annotation blocks Approve");
+
+        // Resolve it (a fix landed) — the previously-missing verb.
+        let resolved = server
+            .darkrun_annotation_resolve(Parameters(AnnotationResolveInput {
+                slug: "r".into(),
+                annotation_id: id.clone(),
+                status: Some("addressed".into()),
+            }))
+            .unwrap();
+        assert_eq!(resolved.is_error, Some(false));
+        assert_eq!(resolved.structured_content.unwrap()["status"], "addressed");
+
+        // With it resolved, nothing blocks a clean Approve any more.
+        assert!(!blocks(&server), "a resolved annotation no longer blocks Approve");
+
+        // An unknown id is a clean error, not a panic.
+        let missing = server
+            .darkrun_annotation_resolve(Parameters(AnnotationResolveInput {
+                slug: "r".into(),
+                annotation_id: "anno_nope".into(),
+                status: None,
+            }))
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
+
+        // An invalid resolution token is refused.
+        let bad = server
+            .darkrun_annotation_resolve(Parameters(AnnotationResolveInput {
+                slug: "r".into(),
+                annotation_id: id,
+                status: Some("banana".into()),
+            }))
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true));
+    }
+
+    /// INT-3 regression: a confirmed WHOLE-RUN reset must RETIRE that run's live
+    /// sessions from the registry (else a subscribed desktop sits on a zombie gate
+    /// for a deleted run) while leaving a sibling run's session intact.
+    #[test]
+    fn run_reset_retires_the_runs_sessions_but_not_a_siblings() {
+        use darkrun_api::SessionPayload;
+        let (_d, server) = started_server();
+        // A live review session for run "r" (the reset target) and a sibling "s".
+        let review = |slug: &str| -> SessionPayload {
+            serde_json::from_value(serde_json::json!({
+                "session_type": "review", "session_id": slug, "status": "pending", "run_slug": slug
+            }))
+            .unwrap()
+        };
+        server.sessions().upsert_under("r", review("r"));
+        server.sessions().upsert_under("s", review("s"));
+        assert!(server.sessions().get("r").is_some());
+
+        // Confirmed whole-run reset retires r's sessions.
+        let out = server
+            .darkrun_run_reset(Parameters(RunResetInput {
+                slug: "r".into(),
+                station: None,
+                confirm: true,
+            }))
+            .unwrap();
+        assert_eq!(out.is_error, Some(false));
+        assert!(server.sessions().get("r").is_none(), "the reset run's session is retired");
+        assert!(server.sessions().get("s").is_some(), "a sibling run's session survives");
     }
 
     #[test]

@@ -75,6 +75,23 @@ struct SessionPresence {
     last_lost_ms: u64,
 }
 
+/// The run a session payload belongs to, across every variant. `darkrun-api`
+/// exposes no single accessor (each payload carries its own `run_slug` field),
+/// so this projects them uniformly for the run-scoped [`SessionRegistry::retire_run`]
+/// sweep. The `View` variant's `run_slug` is a bare `String`; the rest are
+/// `Option<String>`.
+fn payload_run_slug(payload: &SessionPayload) -> Option<&str> {
+    match payload {
+        SessionPayload::Review(p) => p.run_slug.as_deref(),
+        SessionPayload::Question(p) => p.run_slug.as_deref(),
+        SessionPayload::Direction(p) => p.run_slug.as_deref(),
+        SessionPayload::Picker(p) => p.run_slug.as_deref(),
+        SessionPayload::View(p) => Some(p.run_slug.as_str()),
+        SessionPayload::VisualReview(p) => p.run_slug.as_deref(),
+        SessionPayload::Proof(p) => p.run_slug.as_deref(),
+    }
+}
+
 /// Current epoch milliseconds.
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -366,6 +383,37 @@ impl SessionRegistry {
     pub fn remove(&self, id: &str) -> Option<SessionPayload> {
         let mut guard = self.inner.lock().expect("session registry poisoned");
         guard.remove(id).map(|e| e.payload)
+    }
+
+    /// Retire every in-memory session belonging to a run — its review session
+    /// (keyed by the run slug), every interactive/derived session that names the
+    /// run (question / direction / picker / view / visual-review / proof), and the
+    /// `current` focus pointer when it points at this run.
+    ///
+    /// Called when a run is RESET or ARCHIVED: the on-disk run is gone, but its
+    /// sessions would otherwise linger in the registry and a subscribed desktop
+    /// would sit on a PENDING GATE for a run that no longer exists — an
+    /// unresolvable zombie the operator can neither approve nor dismiss. Removal
+    /// drops each session's broadcast channel, so a subscriber's stream closes
+    /// (and any in-flight `await_decision` returns `Gone`) — the signal for the
+    /// client to re-render "run was reset" rather than the stale gate, and for a
+    /// subsequent `GET /api/session/:id` to `404`. Returns how many were retired.
+    ///
+    /// Idempotent: a run with no live sessions retires zero.
+    pub fn retire_run(&self, slug: &str) -> usize {
+        // Collect the ids to drop while holding the lock, then remove them
+        // afterwards (remove() re-locks, so it can't run inside this guard).
+        let ids: Vec<String> = {
+            let guard = self.inner.lock().expect("session registry poisoned");
+            guard
+                .iter()
+                .filter(|(id, entry)| {
+                    id.as_str() == slug || payload_run_slug(&entry.payload) == Some(slug)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        ids.iter().filter(|id| self.remove(id).is_some()).count()
     }
 
     /// Subscribe to live-update frames for a session, creating the entry's
@@ -706,6 +754,52 @@ mod tests {
             "session_type": "question", "session_id": id, "status": status
         }))
         .expect("minimal question payload")
+    }
+
+    fn review(id: &str, run: &str) -> SessionPayload {
+        serde_json::from_value(serde_json::json!({
+            "session_type": "review", "session_id": id, "status": "pending", "run_slug": run
+        }))
+        .expect("minimal review payload")
+    }
+
+    fn question_on(id: &str, run: &str) -> SessionPayload {
+        serde_json::from_value(serde_json::json!({
+            "session_type": "question", "session_id": id, "status": "pending", "run_slug": run
+        }))
+        .expect("minimal question payload")
+    }
+
+    /// INT-3 regression: retiring a RESET run drops its review session, every
+    /// interactive session that names it, AND the `current` focus pointer aimed at
+    /// it — while leaving a sibling run's sessions completely intact. Without this,
+    /// a subscribed desktop sat on a pending gate for a run that no longer existed.
+    #[test]
+    fn retire_run_drops_only_the_named_runs_sessions() {
+        let reg = SessionRegistry::new();
+        // Run "one": its review session (keyed by slug), a question, and the shared
+        // `current` focus pointing at it.
+        reg.upsert_under("one", review("one", "one"));
+        reg.upsert(question_on("q-01", "one"));
+        reg.upsert_under("current", review("current", "one"));
+        // Run "two": a review + a question that must SURVIVE the retire.
+        reg.upsert_under("two", review("two", "two"));
+        reg.upsert(question_on("q-02", "two"));
+
+        let retired = reg.retire_run("one");
+        assert_eq!(retired, 3, "one + q-01 + current retire");
+
+        // The zombie session is gone (a subsequent GET would 404).
+        assert!(reg.get("one").is_none());
+        assert!(reg.get("q-01").is_none());
+        assert!(reg.get("current").is_none());
+        // The survivor run is untouched.
+        assert!(reg.get("two").is_some());
+        assert!(reg.get("q-02").is_some());
+
+        // Idempotent: a second retire (or a run with no sessions) removes nothing.
+        assert_eq!(reg.retire_run("one"), 0);
+        assert_eq!(reg.retire_run("nope"), 0);
     }
 
     #[tokio::test]
