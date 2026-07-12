@@ -7,6 +7,7 @@
 //!   - `HEAD   /api/session/:id/heartbeat`           — client-presence ping.
 //!   - `POST   /review/:id/decide`                   — record a review decision.
 //!   - `POST   /visual-review/:id/annotate`          — annotate an output -> feedback.
+//!   - `POST   /api/annotation/:run/:id/resolve`     — close an annotation (unblock).
 //!   - `POST   /api/proof/:run`                       — attach a run's proof.
 //!   - `GET    /api/proof/:run`                       — read a run's proof.
 //!   - `POST   /api/advance/:id`                     — SPA wake signal past a gate.
@@ -529,6 +530,52 @@ pub async fn visual_review_annotate(
         }),
     )
         .into_response()
+}
+
+/// `POST /api/annotation/:run/:id/resolve` — close ONE annotation so it stops
+/// blocking the checkpoint.
+///
+/// An OPEN `must`/`should` annotation blocks a clean Approve on both decide paths
+/// (`review_decide` here and the engine's `checkpoint_decide`). Without a route to
+/// transition an annotation out of `open`, a desktop reviewer who marked a blocker,
+/// then saw it addressed, had NO way to clear it — Approve stayed refused and the
+/// run wedged. This is the desktop's half of that missing verb (the MCP tool
+/// `darkrun_annotation_resolve` is the agent's half): the body's optional `status`
+/// selects `addressed` (a fix landed, the default) or `dismissed` (no code change).
+/// `400` on an unknown status or unsafe segment, `404` when the annotation is
+/// unknown.
+pub async fn resolve_annotation(
+    State(state): State<AppState>,
+    Path((run, id)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    use darkrun_api::annotation::AnnotationStatus;
+    // Path safety rides on the store's own containment: `annotation_path` funnels
+    // both `run` and `id` through the same `contained()` backstop every leaf uses,
+    // so a traversing segment can't escape `annotations/` (the same posture the
+    // other feedback/unit handlers here rely on).
+    // Only the two terminal, human-meaningful resolutions are settable: `addressed`
+    // (a fix landed) or `dismissed` (valid, no code change). Absent → `addressed`.
+    let raw = body
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("addressed")
+        .trim()
+        .to_ascii_lowercase();
+    let status = match raw.as_str() {
+        "addressed" | "resolve" | "resolved" => AnnotationStatus::Addressed,
+        "dismissed" | "dismiss" => AnnotationStatus::Dismissed,
+        other => {
+            return bad_request(&format!(
+                "invalid annotation resolution '{other}': use 'addressed' or 'dismissed'"
+            ))
+        }
+    };
+    match state.store.update_annotation_status(&run, &id, status) {
+        Ok(annotation) => (StatusCode::OK, Json(json!({ "ok": true, "annotation": annotation }))).into_response(),
+        // The only expected error is the not-found case; surface it as `404`.
+        Err(_) => not_found("annotation", &id),
+    }
 }
 
 /// `POST /api/proof/:run` — attach a run's objective-evidence [`Proof`].

@@ -119,6 +119,10 @@ pub fn build_router(app: AppState) -> Router {
             get(handlers::get_proof).post(handlers::attach_proof),
         )
         .route("/api/advance/{id}", post(handlers::advance))
+        .route(
+            "/api/annotation/{run}/{id}/resolve",
+            post(handlers::resolve_annotation),
+        )
         .route("/api/push/ack", post(handlers::push_ack))
         .route(
             "/api/unit/{run}/{unit}/reset",
