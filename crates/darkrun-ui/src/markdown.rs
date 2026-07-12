@@ -1,19 +1,33 @@
-//! A minimal, dependency-free markdown renderer for the short agent-authored
-//! prose the interactive session views carry — question/direction prompts,
-//! context preambles, and option descriptions.
+//! The shared markdown renderer for agent-authored prose, specs, and review
+//! artifacts — unit specs, run overviews, question/direction prompts, output
+//! documents.
 //!
-//! It covers exactly what those prompts use in practice: paragraphs (blank-line
-//! separated), unordered lists (`- ` / `* `), inline `**bold**`, and inline
-//! `` `code` ``. Everything else passes through as text. The output is a small
-//! HTML string rendered via `dangerous_inner_html`; all source text is
-//! HTML-escaped FIRST, then the inline markers are applied to the escaped text,
-//! so there is no injection surface even though the input is agent-authored.
+//! It renders full CommonMark + GFM (headings, paragraphs, ordered/nested lists,
+//! blockquotes, tables, links, images, inline code, fenced code, strikethrough)
+//! via `pulldown-cmark` — the same engine the marketing site uses, so the two
+//! surfaces stay in lockstep. The output is an HTML string dropped into a
+//! `.dr-md` container via `dangerous_inner_html`.
 //!
-//! This is deliberately not a full CommonMark engine (no headings, links,
-//! nested lists, tables) — those don't appear in mid-run prompts, and keeping it
-//! tiny avoids pulling a markdown crate into the wasm site build.
+//! ## Safety (the input is agent-authored)
+//!
+//! `pulldown-cmark` renders text content HTML-escaped, but by default it passes
+//! RAW HTML through verbatim (`<script>…`), which would be an injection surface
+//! for agent-authored input. [`to_html`] closes that: every raw HTML event
+//! (block and inline) is rewritten to escaped text, so markup in the source can
+//! never inject nodes. Link/image destinations are also scheme-checked, so a
+//! `javascript:` URL degrades to an inert `#`.
+//!
+//! ## Frontmatter
+//!
+//! A leading YAML `---` block is NOT part of the rendered body: [`to_html`]
+//! strips it, and [`split_frontmatter`] / [`frontmatter_html`] surface it as a
+//! clean metadata header (status/station/role/mode chips) above the prose,
+//! rather than leaking `---` + literal `key: value` lines into the document.
 
-/// HTML-escape `&`, `<`, `>`, `"` so source text can never inject markup.
+use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
+
+/// HTML-escape `&`, `<`, `>`, `"` so source text can never inject markup. Used
+/// for the frontmatter chips (the body is escaped by `pulldown-cmark` itself).
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -28,181 +42,268 @@ fn escape(s: &str) -> String {
     out
 }
 
-/// Apply inline markers to ALREADY-ESCAPED text: `**bold**` → `<strong>`,
-/// `` `code` `` → `<code>`. Unmatched markers are left as literal text. Runs in
-/// a single pass; `code` spans are taken verbatim (no bold inside code).
-///
-/// UTF-8 safe: the marker bytes (`*`, `` ` ``) are ASCII so `find` returns
-/// char-boundary offsets, and untouched text is advanced one whole `char` at a
-/// time — never byte-by-byte, which would shred multi-byte glyphs like `—`.
-fn inline(escaped: &str) -> String {
-    let mut out = String::with_capacity(escaped.len());
-    let mut rest = escaped;
-    while !rest.is_empty() {
-        // Inline code: `...`
-        if let Some(after) = rest.strip_prefix('`') {
-            if let Some(end) = after.find('`') {
-                out.push_str("<code class=\"dr-md-code\">");
-                out.push_str(&after[..end]);
-                out.push_str("</code>");
-                rest = &after[end + 1..];
-                continue;
+/// Whether a link/image destination uses a safe scheme. Relative URLs (no
+/// scheme) and the `http`/`https`/`mailto`/`tel` schemes are allowed; anything
+/// else (`javascript:`, `data:`, `vbscript:`, `file:`) is rejected.
+fn is_safe_url(url: &str) -> bool {
+    let u = url.trim();
+    // Find the scheme delimiter, but only if it precedes any path/query/fragment
+    // separator — otherwise a colon later in a relative path isn't a scheme.
+    let mut scheme_end = None;
+    for (i, c) in u.char_indices() {
+        match c {
+            ':' => {
+                scheme_end = Some(i);
+                break;
             }
-        }
-        // Bold: **...**
-        if let Some(after) = rest.strip_prefix("**") {
-            if let Some(end) = after.find("**") {
-                out.push_str("<strong>");
-                out.push_str(&after[..end]);
-                out.push_str("</strong>");
-                rest = &after[end + 2..];
-                continue;
-            }
-        }
-        // Pass one whole char through (advance by its full UTF-8 width).
-        let ch = rest.chars().next().unwrap();
-        out.push(ch);
-        rest = &rest[ch.len_utf8()..];
-    }
-    out
-}
-
-/// Whether a line is an unordered-list item (`- ` or `* `), returning its body.
-fn list_item(line: &str) -> Option<&str> {
-    let t = line.trim_start();
-    t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))
-}
-
-/// Whether a line is an ATX heading (`# ` … `###### `), returning its level
-/// (1..=6) and the trimmed heading text. Up to three leading spaces are allowed
-/// (CommonMark); more, or no space after the hashes, is not a heading.
-fn heading(line: &str) -> Option<(u8, &str)> {
-    let t = line.trim_start();
-    let hashes = t.len() - t.trim_start_matches('#').len();
-    if (1..=6).contains(&hashes) {
-        if let Some(text) = t[hashes..].strip_prefix(' ') {
-            return Some((hashes as u8, text.trim()));
+            '/' | '?' | '#' => break,
+            c if c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.' => {}
+            _ => break,
         }
     }
-    None
+    match scheme_end {
+        Some(i) => matches!(
+            u[..i].to_ascii_lowercase().as_str(),
+            "http" | "https" | "mailto" | "tel"
+        ),
+        None => true,
+    }
 }
 
-/// Whether a line opens/closes a fenced code block (``` optionally with a lang).
-fn is_fence(line: &str) -> bool {
-    line.trim_start().starts_with("```")
+/// Replace an unsafe destination with an inert `#`.
+fn sanitize_url(url: CowStr<'_>) -> CowStr<'_> {
+    if is_safe_url(&url) {
+        url
+    } else {
+        CowStr::Borrowed("#")
+    }
 }
 
-/// Render the supported markdown subset of `src` to an HTML string. Empty input
-/// yields an empty string. Blocks are paragraphs and `<ul>` lists; consecutive
-/// list lines group into one list, blank lines break paragraphs.
+/// Render markdown `src` to an HTML string for a `.dr-md` container. Full
+/// CommonMark + GFM (tables, strikethrough); frontmatter is stripped; raw HTML
+/// is escaped and unsafe link/image URLs are neutralized (agent-safe). Empty
+/// input yields an empty string.
 pub fn to_html(src: &str) -> String {
+    let (_, body) = split_frontmatter(src);
+    if body.trim().is_empty() {
+        return String::new();
+    }
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    let parser = Parser::new_ext(body, options).map(|event| match event {
+        // Agent-authored input: never pass raw HTML through — escaping it to
+        // text removes the injection surface while keeping it visible.
+        Event::Html(h) => Event::Text(h),
+        Event::InlineHtml(h) => Event::Text(h),
+        // Scheme-check link/image destinations so `javascript:` can't ride in.
+        Event::Start(Tag::Link { link_type, dest_url, title, id }) => Event::Start(Tag::Link {
+            link_type,
+            dest_url: sanitize_url(dest_url),
+            title,
+            id,
+        }),
+        Event::Start(Tag::Image { link_type, dest_url, title, id }) => Event::Start(Tag::Image {
+            link_type,
+            dest_url: sanitize_url(dest_url),
+            title,
+            id,
+        }),
+        other => other,
+    });
     let mut out = String::new();
-    let mut para: Vec<String> = Vec::new();
-    let mut list: Vec<String> = Vec::new();
-
-    let flush_para = |out: &mut String, para: &mut Vec<String>| {
-        if !para.is_empty() {
-            out.push_str("<p class=\"dr-md-p\">");
-            out.push_str(&inline(&para.join(" ")));
-            out.push_str("</p>");
-            para.clear();
-        }
-    };
-    let flush_list = |out: &mut String, list: &mut Vec<String>| {
-        if !list.is_empty() {
-            out.push_str("<ul class=\"dr-md-ul\">");
-            for item in list.iter() {
-                out.push_str("<li>");
-                out.push_str(&inline(item));
-                out.push_str("</li>");
-            }
-            out.push_str("</ul>");
-            list.clear();
-        }
-    };
-
-    // Fenced code blocks (```) are taken verbatim, so their state spans lines.
-    let mut in_code = false;
-    let mut code: Vec<String> = Vec::new();
-    let flush_code = |out: &mut String, code: &mut Vec<String>| {
-        out.push_str("<pre class=\"dr-md-pre\"><code>");
-        out.push_str(&escape(&code.join("\n")));
-        out.push_str("</code></pre>");
-        code.clear();
-    };
-
-    for raw in src.lines() {
-        // A fence line toggles code mode (and never appears in the output).
-        if is_fence(raw) {
-            if in_code {
-                flush_code(&mut out, &mut code);
-                in_code = false;
-            } else {
-                flush_list(&mut out, &mut list);
-                flush_para(&mut out, &mut para);
-                in_code = true;
-            }
-            continue;
-        }
-        if in_code {
-            // Verbatim — the source line as-is (indentation is significant).
-            code.push(raw.to_string());
-            continue;
-        }
-        let line = raw.trim_end();
-        if line.trim().is_empty() {
-            flush_list(&mut out, &mut list);
-            flush_para(&mut out, &mut para);
-        } else if let Some((level, text)) = heading(line) {
-            // A heading is its own block: close any open list/paragraph first.
-            flush_list(&mut out, &mut list);
-            flush_para(&mut out, &mut para);
-            out.push_str(&format!("<h{level} class=\"dr-md-h{level}\">"));
-            out.push_str(&inline(&escape(text)));
-            out.push_str(&format!("</h{level}>"));
-        } else if let Some(item) = list_item(line) {
-            // A list starts: close any open paragraph first.
-            flush_para(&mut out, &mut para);
-            list.push(escape(item.trim()));
-        } else {
-            // A normal line: close any open list first.
-            flush_list(&mut out, &mut list);
-            para.push(escape(line.trim()));
-        }
-    }
-    // Close anything still open — an unterminated fence flushes as a code block.
-    if in_code && !code.is_empty() {
-        flush_code(&mut out, &mut code);
-    }
-    flush_list(&mut out, &mut list);
-    flush_para(&mut out, &mut para);
+    html::push_html(&mut out, parser);
     out
 }
 
-/// Scoped CSS for markdown rendered by [`to_html`] — headings, paragraphs, lists,
-/// inline code, and fenced code blocks under a `.dr-md` container. Inject this
-/// once on any surface that renders `to_html` output (the session views ship
-/// their own copy of the base rules; this is the self-contained set, including
-/// headings + code fences, for other surfaces like the review artifact stage).
+/// Split a leading YAML frontmatter block off `src`, returning `(frontmatter,
+/// body)`. A frontmatter block is a first line of exactly `---` closed by a
+/// later line of exactly `---` or `...`. With no such block the whole input is
+/// the body and the frontmatter is `None`.
+pub fn split_frontmatter(src: &str) -> (Option<&str>, &str) {
+    let s = src.strip_prefix('\u{feff}').unwrap_or(src);
+    let first_end = s.find('\n').unwrap_or(s.len());
+    if s[..first_end].trim_end() != "---" {
+        return (None, src);
+    }
+    let after_open = &s[(first_end + 1).min(s.len())..];
+    let mut idx = 0usize;
+    for line in after_open.split_inclusive('\n') {
+        let trimmed = line.trim_matches(|c| c == '\n' || c == '\r' || c == ' ' || c == '\t');
+        if trimmed == "---" || trimmed == "..." {
+            let fm = after_open[..idx].trim_matches('\n');
+            let body = &after_open[(idx + line.len()).min(after_open.len())..];
+            return (Some(fm), body);
+        }
+        idx += line.len();
+    }
+    (None, src)
+}
+
+/// Parse a frontmatter block into ordered `key: value` pairs. A flat YAML
+/// subset: `key: value` lines (quotes trimmed), skipping blanks, comments, and
+/// non-`key: value` lines (nested structures aren't modelled).
+pub fn frontmatter_pairs(block: &str) -> Vec<(String, String)> {
+    block
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
+                return None;
+            }
+            let (k, v) = line.split_once(':')?;
+            let k = k.trim();
+            if k.is_empty() {
+                return None;
+            }
+            let v = v.trim().trim_matches('"').trim_matches('\'').trim();
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// A tone-class suffix for a `status:` value so a completed unit reads green, a
+/// blocked one red, and in-flight amber/cyan.
+fn status_tone_class(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "done" | "complete" | "completed" | "passed" | "approved" | "merged" | "ok" => {
+            " dr-md-chip-ok"
+        }
+        "blocked" | "failed" | "error" | "rejected" | "changes_requested" => " dr-md-chip-danger",
+        "active" | "in_progress" | "in-progress" | "running" | "review" | "pending" => {
+            " dr-md-chip-active"
+        }
+        _ => "",
+    }
+}
+
+/// Render a frontmatter block as a clean metadata header — a row of key/value
+/// chips (status toned by state) — for placement above the rendered body inside
+/// a `.dr-md` container. Empty (or key-less) input yields an empty string, so a
+/// caller can unconditionally prepend it.
+pub fn frontmatter_html(block: &str) -> String {
+    let pairs = frontmatter_pairs(block);
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("<div class=\"dr-md-meta\">");
+    for (k, v) in &pairs {
+        if v.is_empty() {
+            out.push_str(&format!(
+                "<span class=\"dr-md-chip\"><span class=\"dr-md-chip-k\">{}</span></span>",
+                escape(k),
+            ));
+            continue;
+        }
+        let tone = if k.eq_ignore_ascii_case("status") {
+            status_tone_class(v)
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "<span class=\"dr-md-chip{tone}\">\
+             <span class=\"dr-md-chip-k\">{}</span>\
+             <span class=\"dr-md-chip-v\">{}</span></span>",
+            escape(k),
+            escape(v),
+        ));
+    }
+    out.push_str("</div>");
+    out
+}
+
+/// A content heuristic: whether `src` reads as markdown (structural or inline
+/// signals) rather than plain source. Used to decide whether a text artifact
+/// with no telling extension should render formatted or raw. Conservative: it
+/// keys on real markdown syntax, so code/prose without markers stays raw.
+pub fn looks_like_markdown(src: &str) -> bool {
+    // A frontmatter block is a strong signal on its own.
+    if split_frontmatter(src).0.is_some() {
+        return true;
+    }
+    let body = split_frontmatter(src).1;
+    for raw in body.lines() {
+        let line = raw.trim_start();
+        // ATX heading (`# ` … `###### `).
+        let hashes = line.len() - line.trim_start_matches('#').len();
+        if (1..=6).contains(&hashes) && line[hashes..].starts_with(' ') {
+            return true;
+        }
+        // Unordered list.
+        if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
+            return true;
+        }
+        // Blockquote.
+        if line == ">" || line.starts_with("> ") {
+            return true;
+        }
+        // Fenced code.
+        if line.starts_with("```") || line.starts_with("~~~") {
+            return true;
+        }
+        // Table row.
+        if line.starts_with('|') && line.matches('|').count() >= 2 {
+            return true;
+        }
+        // Ordered list (`1. `).
+        let digits = line.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && line[digits..].starts_with(". ") {
+            return true;
+        }
+    }
+    // Inline signals: bold, strikethrough, a matched code span, or a link/image.
+    body.contains("**") || body.contains("~~") || body.matches('`').count() >= 2 || body.contains("](")
+}
+
+/// Scoped CSS for markdown rendered by [`to_html`], plus the frontmatter chip
+/// header. The single source of truth for `.dr-md` styling — inject it once on
+/// any surface that renders `to_html` output (session views, the review
+/// annotate stage, the artifact browser) so headings, code, tables, and
+/// blockquotes look identical everywhere.
 pub const CSS: &str = "\
 .dr-md{font-family:var(--dr-font-sans);color:var(--dr-text);line-height:1.55;}\
-.dr-md .dr-md-h1{font-size:20px;font-weight:700;margin:2px 0 10px;line-height:1.25;}\
-.dr-md .dr-md-h2{font-size:16px;font-weight:700;margin:18px 0 8px;line-height:1.3;}\
-.dr-md .dr-md-h3{font-size:14px;font-weight:700;margin:14px 0 6px;}\
-.dr-md .dr-md-h4,.dr-md .dr-md-h5,.dr-md .dr-md-h6{font-size:13px;font-weight:700;margin:12px 0 4px;color:var(--dr-text-muted);}\
-.dr-md .dr-md-h1:first-child,.dr-md .dr-md-h2:first-child{margin-top:0;}\
-.dr-md .dr-md-p{margin:0 0 10px;}\
-.dr-md .dr-md-p:last-child{margin-bottom:0;}\
-.dr-md .dr-md-ul{margin:8px 0;padding-left:20px;display:flex;flex-direction:column;gap:5px;}\
-.dr-md .dr-md-ul li{line-height:1.5;}\
-.dr-md .dr-md-code{font-family:var(--dr-font-mono);font-size:0.92em;\
+.dr-md h1{font-size:20px;font-weight:700;margin:2px 0 10px;line-height:1.25;}\
+.dr-md h2{font-size:16px;font-weight:700;margin:18px 0 8px;line-height:1.3;}\
+.dr-md h3{font-size:14px;font-weight:700;margin:14px 0 6px;}\
+.dr-md h4,.dr-md h5,.dr-md h6{font-size:13px;font-weight:700;margin:12px 0 4px;color:var(--dr-text-muted);}\
+.dr-md h1:first-child,.dr-md h2:first-child,.dr-md h3:first-child{margin-top:0;}\
+.dr-md p{margin:0 0 10px;}\
+.dr-md>:last-child{margin-bottom:0;}\
+.dr-md ul,.dr-md ol{margin:8px 0;padding-left:22px;display:flex;flex-direction:column;gap:5px;}\
+.dr-md li{line-height:1.5;}\
+.dr-md li>ul,.dr-md li>ol{margin:5px 0 0;}\
+.dr-md li::marker{color:var(--dr-text-faint);}\
+.dr-md a{color:var(--dr-accent);text-decoration:none;\
+border-bottom:1px solid color-mix(in srgb,var(--dr-accent) 40%,transparent);}\
+.dr-md a:hover{border-bottom-color:var(--dr-accent);}\
+.dr-md strong{font-weight:700;color:var(--dr-text);}\
+.dr-md em{font-style:italic;}\
+.dr-md del{opacity:0.6;}\
+.dr-md code{font-family:var(--dr-font-mono);font-size:0.92em;\
 background:var(--dr-surface-overlay);border:1px solid var(--dr-border);\
 border-radius:4px;padding:1px 5px;}\
-.dr-md .dr-md-pre{font-family:var(--dr-font-mono);font-size:12.5px;line-height:1.5;\
+.dr-md pre{font-family:var(--dr-font-mono);font-size:12.5px;line-height:1.5;\
 background:var(--dr-surface-overlay);border:1px solid var(--dr-border);\
 border-radius:8px;padding:12px 14px;overflow-x:auto;margin:10px 0;}\
-.dr-md .dr-md-pre code{font-family:inherit;background:none;border:none;padding:0;white-space:pre;}\
-.dr-md strong{font-weight:700;}\
+.dr-md pre code{font-family:inherit;font-size:inherit;background:none;border:none;padding:0;white-space:pre;}\
+.dr-md blockquote{margin:10px 0;padding:2px 14px;\
+border-left:3px solid var(--dr-border-strong);color:var(--dr-text-muted);}\
+.dr-md blockquote p{margin:6px 0;}\
+.dr-md img{max-width:100%;border-radius:6px;border:1px solid var(--dr-border);}\
+.dr-md hr{border:none;border-top:1px solid var(--dr-border);margin:14px 0;}\
+.dr-md table{border-collapse:collapse;margin:10px 0;font-size:12.5px;\
+max-width:100%;display:block;overflow-x:auto;}\
+.dr-md th,.dr-md td{border:1px solid var(--dr-border);padding:5px 10px;text-align:left;}\
+.dr-md thead th{background:var(--dr-surface-overlay);font-weight:700;}\
+.dr-md-meta{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px;}\
+.dr-md-chip{display:inline-flex;align-items:center;gap:6px;\
+font-family:var(--dr-font-mono);font-size:11px;border:1px solid var(--dr-border);\
+border-radius:6px;padding:2px 4px 2px 8px;background:var(--dr-surface-raised);}\
+.dr-md-chip-k{color:var(--dr-text-faint);text-transform:uppercase;letter-spacing:0.05em;}\
+.dr-md-chip-v{color:var(--dr-text);background:var(--dr-surface-overlay);border-radius:4px;padding:1px 7px;}\
+.dr-md-chip-ok .dr-md-chip-v{color:var(--dr-status-ok);}\
+.dr-md-chip-danger .dr-md-chip-v{color:var(--dr-status-danger);}\
+.dr-md-chip-active .dr-md-chip-v{color:var(--dr-status-info);}\
 ";
 
 #[cfg(test)]
@@ -215,63 +316,152 @@ mod tests {
     }
 
     #[test]
-    fn renders_bold_and_code() {
+    fn renders_paragraph_bold_and_inline_code() {
+        let html = to_html("call **run_tick** via `cargo test`");
+        assert!(html.contains("<p>call <strong>run_tick</strong> via <code>cargo test</code></p>"), "{html}");
+    }
+
+    #[test]
+    fn renders_gfm_table() {
+        let html = to_html("| A | B |\n|---|---|\n| 1 | 2 |");
+        assert!(html.contains("<table>"), "{html}");
+        assert!(html.contains("<th>A</th>"), "{html}");
+        assert!(html.contains("<td>1</td>"), "{html}");
+    }
+
+    #[test]
+    fn renders_links() {
+        let html = to_html("see [the docs](https://example.com/docs)");
+        assert!(html.contains("<a href=\"https://example.com/docs\">the docs</a>"), "{html}");
+    }
+
+    #[test]
+    fn renders_ordered_and_nested_lists() {
+        let html = to_html("1. first\n2. second\n   - nested a\n   - nested b");
+        assert!(html.contains("<ol>"), "ordered list: {html}");
+        assert!(html.contains("<li>first"), "{html}");
+        // The nested bullets live inside the second item's own <ul>.
+        assert!(html.contains("<ul>"), "nested unordered list: {html}");
+        assert!(html.contains("<li>nested a</li>"), "{html}");
+    }
+
+    #[test]
+    fn renders_blockquote() {
+        let html = to_html("> a quoted line\n> continued");
+        assert!(html.contains("<blockquote>"), "{html}");
+        assert!(html.contains("a quoted line"), "{html}");
+    }
+
+    #[test]
+    fn renders_strikethrough() {
+        let html = to_html("this is ~~gone~~ now");
+        assert!(html.contains("<del>gone</del>"), "{html}");
+    }
+
+    #[test]
+    fn renders_fenced_code_escaped() {
+        let html = to_html("```rust\nlet x = 1 < 2;\n```");
+        assert!(html.contains("<pre>"), "{html}");
+        assert!(html.contains("let x = 1 &lt; 2;"), "{html}");
+    }
+
+    #[test]
+    fn raw_block_html_is_escaped_not_injected() {
+        let html = to_html("<script>alert(1)</script>");
+        assert!(!html.contains("<script>"), "raw script must not pass through: {html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
+    }
+
+    #[test]
+    fn raw_inline_html_is_escaped_not_injected() {
+        let html = to_html("a normal <b>bold?</b> line");
+        assert!(!html.contains("<b>"), "inline raw html must not pass through: {html}");
+        assert!(html.contains("&lt;b&gt;"), "{html}");
+    }
+
+    #[test]
+    fn unsafe_link_scheme_is_neutralized() {
+        let html = to_html("[x](javascript:alert(document.cookie))");
+        assert!(!html.contains("javascript:"), "{html}");
+        assert!(html.contains("href=\"#\""), "{html}");
+    }
+
+    #[test]
+    fn safe_url_allows_relative_and_common_schemes() {
+        assert!(is_safe_url("https://example.com"));
+        assert!(is_safe_url("http://example.com"));
+        assert!(is_safe_url("mailto:a@b.co"));
+        assert!(is_safe_url("/relative/path"));
+        assert!(is_safe_url("#anchor"));
+        assert!(is_safe_url("./a:b")); // colon after a path separator isn't a scheme
+        assert!(!is_safe_url("javascript:alert(1)"));
+        assert!(!is_safe_url("data:text/html,<script>"));
+        assert!(!is_safe_url("vbscript:msgbox"));
+    }
+
+    #[test]
+    fn frontmatter_is_split_out_and_not_leaked_into_body() {
+        let src = "---\nstatus: done\nstation: build\nrole: worker\n---\n\n# Spec\n\nthe body";
+        let (fm, body) = split_frontmatter(src);
+        assert_eq!(fm, Some("status: done\nstation: build\nrole: worker"));
+        assert!(body.trim_start().starts_with("# Spec"), "{body}");
+        let html = to_html(src);
+        assert!(html.contains("<h1>Spec</h1>"), "{html}");
+        assert!(!html.contains("status: done"), "frontmatter leaked into body: {html}");
+        assert!(!html.contains("---"), "fence leaked into body: {html}");
+    }
+
+    #[test]
+    fn no_frontmatter_leaves_body_intact() {
+        let src = "# Just a heading\n\nno frontmatter here";
+        let (fm, body) = split_frontmatter(src);
+        assert_eq!(fm, None);
+        assert_eq!(body, src);
+    }
+
+    #[test]
+    fn frontmatter_pairs_parse_flat_yaml() {
+        let pairs = frontmatter_pairs("title: \"My Run\"\nmode: quick\n# a comment\nbad line");
         assert_eq!(
-            to_html("call **run_tick** via `cargo test`"),
-            "<p class=\"dr-md-p\">call <strong>run_tick</strong> via \
-             <code class=\"dr-md-code\">cargo test</code></p>"
+            pairs,
+            vec![
+                ("title".to_string(), "My Run".to_string()),
+                ("mode".to_string(), "quick".to_string()),
+            ]
         );
     }
 
     #[test]
-    fn renders_a_bulleted_list_distinct_from_paragraphs() {
-        let html = to_html("Pick one:\n\n- **A** fast\n- B slow\n\ndone");
-        assert!(html.contains("<p class=\"dr-md-p\">Pick one:</p>"), "{html}");
-        assert!(
-            html.contains("<ul class=\"dr-md-ul\"><li><strong>A</strong> fast</li><li>B slow</li></ul>"),
-            "{html}"
-        );
-        assert!(html.ends_with("<p class=\"dr-md-p\">done</p>"), "{html}");
+    fn frontmatter_html_renders_toned_chips() {
+        let html = frontmatter_html("status: done\nstation: build");
+        assert!(html.contains("dr-md-meta"), "{html}");
+        assert!(html.contains("dr-md-chip-ok"), "status=done should tone ok: {html}");
+        assert!(html.contains("station"), "{html}");
+        assert!(html.contains("build"), "{html}");
+        // A blocked status tones danger.
+        assert!(frontmatter_html("status: blocked").contains("dr-md-chip-danger"));
+        // No pairs → empty (a caller can prepend unconditionally).
+        assert_eq!(frontmatter_html(""), "");
     }
 
     #[test]
-    fn a_dash_run_on_splits_into_list_items() {
-        // The real-world failure: bullets on their own lines must each become an
-        // <li>, not one run-on paragraph with literal dashes.
-        let html = to_html("- one\n- two\n- three");
-        assert_eq!(html.matches("<li>").count(), 3, "{html}");
-        assert!(!html.contains("- one"), "no literal dashes survive: {html}");
+    fn looks_like_markdown_detects_structure() {
+        assert!(looks_like_markdown("# Heading"));
+        assert!(looks_like_markdown("- a bullet"));
+        assert!(looks_like_markdown("1. an item"));
+        assert!(looks_like_markdown("> a quote"));
+        assert!(looks_like_markdown("```\ncode\n```"));
+        assert!(looks_like_markdown("| a | b |\n|---|---|"));
+        assert!(looks_like_markdown("some **bold** prose"));
+        assert!(looks_like_markdown("a [link](https://x.co)"));
+        assert!(looks_like_markdown("---\nstatus: done\n---\nbody"));
     }
 
     #[test]
-    fn unmatched_markers_stay_literal_and_safe() {
-        let html = to_html("2 * 3 and a lone ` tick");
-        assert!(html.contains("2 * 3"), "{html}");
-        assert!(!html.contains("<strong>"), "{html}");
-        assert!(!html.contains("<code"), "{html}");
-    }
-
-    #[test]
-    fn renders_atx_headings() {
-        let html = to_html("# Unit: author-frame\n\n## Goal\n\nbody text");
-        assert!(html.contains("<h1 class=\"dr-md-h1\">Unit: author-frame</h1>"), "{html}");
-        assert!(html.contains("<h2 class=\"dr-md-h2\">Goal</h2>"), "{html}");
-        assert!(html.contains("<p class=\"dr-md-p\">body text</p>"), "{html}");
-        // A hash without a following space is NOT a heading.
-        assert!(to_html("#nospace").contains("<p class=\"dr-md-p\">#nospace</p>"));
-    }
-
-    #[test]
-    fn renders_fenced_code_verbatim_and_escaped() {
-        let html = to_html("before\n\n```rust\nlet x = 1 < 2;\n```\n\nafter");
-        assert!(
-            html.contains("<pre class=\"dr-md-pre\"><code>let x = 1 &lt; 2;</code></pre>"),
-            "{html}"
-        );
-        assert!(html.contains("<p class=\"dr-md-p\">before</p>"), "{html}");
-        assert!(html.contains("<p class=\"dr-md-p\">after</p>"), "{html}");
-        // The fence lines themselves never appear in the output.
-        assert!(!html.contains("```"), "{html}");
+    fn looks_like_markdown_ignores_plain_and_codey_text() {
+        assert!(!looks_like_markdown("just some plain prose with no markers at all"));
+        assert!(!looks_like_markdown("fn main() { let x = 1; println(x); }"));
+        assert!(!looks_like_markdown(""));
     }
 
     #[test]
@@ -282,11 +472,9 @@ mod tests {
 
     #[test]
     fn multibyte_glyphs_survive_intact() {
-        // Regression: an em-dash (3 UTF-8 bytes) next to bold/code must not be
-        // shredded into mojibake by a byte-wise passthrough.
+        // An em-dash / ellipsis (multi-byte) next to bold/code must not shred.
         let html = to_html("**A** — calls `run_tick` — fast … done");
-        assert!(html.contains("</strong> — calls"), "{html}");
-        assert!(html.contains("</code> — fast … done"), "{html}");
+        assert!(html.contains("<strong>A</strong> — calls <code>run_tick</code> — fast … done"), "{html}");
         assert!(!html.contains('\u{00e2}'), "no Latin-1 mojibake: {html}");
     }
 }
