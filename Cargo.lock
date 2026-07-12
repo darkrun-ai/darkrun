@@ -1672,8 +1672,6 @@ dependencies = [
  "darkrun-telemetry",
  "darkrun-vcs",
  "darkrun-verify",
- "getrandom 0.3.4",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
@@ -1901,10 +1899,13 @@ dependencies = [
 name = "darkrun-vcs"
 version = "0.10.0"
 dependencies = [
+ "getrandom 0.3.4",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

@@ -11,6 +11,15 @@ description = "darkrun OAuth + version-control providers (GitHub PRs, GitLab MRs
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Native HTTP edge: a blocking reqwest client backs `ReqwestTransport`, the real
+# `HttpTransport` the CLI and desktop app wire in. rustls (no native-tls, no
+# OpenSSL C) matches the workspace's no-C stance, the same transport stack
+# darkrun-git rides through gitoxide.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# OS CSPRNG for the OAuth/relay `state` nonce (getrandom, never a seeded PRNG).
+getrandom = "0.3"
+# Structured warning when the repo-list page walk hits its pagination cap.
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
