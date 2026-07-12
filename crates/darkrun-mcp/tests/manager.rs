@@ -302,12 +302,36 @@ fn checkpoint_reject_routes_rework_as_feedback() {
 fn checkpoint_approve_completes_and_advances() {
     let (_d, store) = store();
     run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+    // Approving completes the station and advances the cursor, but ONLY from a
+    // genuine gate hold. Walk frame to its held Checkpoint first (an approve from
+    // mid-flight is refused; see checkpoint_approve_off_gate_is_refused).
+    let cp = walk_to_checkpoint(&store, "r", "frame");
+    assert!(matches!(cp, RunAction::Checkpoint { .. }), "held at frame's gate: {cp:?}");
     let decided = checkpoint_decide(&store, "r", true, None).expect("approve");
     // frame completes; cursor advances to specify's Spec.
     assert!(matches!(&decided.action, RunAction::Spec { station, .. } if station == "specify"));
     let s = store.read_state("r").unwrap().unwrap();
     assert_eq!(s.stations["frame"].status, Status::Completed);
     assert_eq!(s.active_station, "specify");
+}
+
+/// CS-1/DF-5: an approve that arrives when the station is NOT holding at a gate
+/// (here: fresh off `run_start`, at the Spec phase) is a no-op error, not a
+/// silent station-completion. A blind approve must never skip Manufacture, Audit,
+/// and the gate itself. The legitimate held-gate approve is covered above.
+#[test]
+fn checkpoint_approve_off_gate_is_refused() {
+    let (_d, store) = store();
+    run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+    let err = checkpoint_decide(&store, "r", true, None).expect_err("off-gate approve refused");
+    assert!(
+        err.to_string().contains("no checkpoint is awaiting a decision"),
+        "actionable no-gate error: {err}"
+    );
+    // The station did NOT complete: it is untouched, still active on frame.
+    let s = store.read_state("r").unwrap().unwrap();
+    assert_ne!(s.stations["frame"].status, Status::Completed);
+    assert_eq!(s.active_station, "frame");
 }
 
 #[test]

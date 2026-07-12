@@ -855,6 +855,12 @@ fn sealed_tick_is_noop_for_state_advancement() {
                 checkpoint_decide(&store, "r", true, None).expect("clear gate");
                 continue;
             }
+            // Solo holds the Spec until the elaboration is sealed, so walk it
+            // legitimately to the gate (an off-gate approve is now refused).
+            if matches!(&t.action, RunAction::Spec { station: s, .. } if s == station) {
+                darkrun_mcp::position::elaborate_seal(&store, "r", station).expect("seal");
+                continue;
+            }
             if matches!(&t.action, RunAction::Checkpoint { station: s, .. } if s == station) {
                 break;
             }
@@ -1511,6 +1517,12 @@ fn sealed_position_serializes() {
             let t = run_tick(&store, "r").unwrap();
             if matches!(&t.action, RunAction::UserGate { station: s, .. } if s == station) {
                 checkpoint_decide(&store, "r", true, None).unwrap();
+                continue;
+            }
+            // Solo holds the Spec until the elaboration is sealed, so walk it
+            // legitimately to the gate (an off-gate approve is now refused).
+            if matches!(&t.action, RunAction::Spec { station: s, .. } if s == station) {
+                darkrun_mcp::position::elaborate_seal(&store, "r", station).unwrap();
                 continue;
             }
             if matches!(&t.action, RunAction::Checkpoint { station: s, .. } if s == station) {
