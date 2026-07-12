@@ -296,9 +296,42 @@ fn artifact_detail(a: &ArtifactEntry, on_review: Option<EventHandler<String>>) -
 fn kind_viewer(a: &ArtifactEntry) -> Element {
     match a.kind {
         ArtifactKind::Image | ArtifactKind::Screenshot => picture_viewer(a),
-        ArtifactKind::Markdown => text_viewer(a, "markdown"),
+        // Markdown is agent-authored prose/spec — render it as a formatted
+        // document (headings, lists, tables, code) rather than raw source.
+        ArtifactKind::Markdown => markdown_viewer(a),
         ArtifactKind::Json => text_viewer(a, "json"),
         ArtifactKind::File => file_viewer(a),
+    }
+}
+
+/// Render a markdown artifact as a formatted `.dr-md` document: a frontmatter
+/// metadata header (when present) above the CommonMark + GFM body. Falls back to
+/// a raw block when the artifact carries no inline body.
+fn markdown_viewer(a: &ArtifactEntry) -> Element {
+    let body = a.body.clone().filter(|b| !b.trim().is_empty());
+    let Some(body) = body else {
+        return text_viewer(a, "markdown");
+    };
+    let (frontmatter, _) = crate::markdown::split_frontmatter(&body);
+    let meta_html = frontmatter.map(crate::markdown::frontmatter_html).unwrap_or_default();
+    let body_html = crate::markdown::to_html(&body);
+    let frame = format!(
+        "max-height:520px;overflow:auto;padding:16px 18px;border-radius:8px;\
+         background:{base};border:1px solid {border};",
+        base = tokens::var::SURFACE_BASE,
+        border = tokens::var::BORDER,
+    );
+    rsx! {
+        style { "{crate::markdown::CSS}" }
+        div {
+            class: "dr-md dr-artifact-markdown",
+            "data-lang": "markdown",
+            style: "{frame}",
+            if !meta_html.is_empty() {
+                div { dangerous_inner_html: "{meta_html}" }
+            }
+            div { dangerous_inner_html: "{body_html}" }
+        }
     }
 }
 
