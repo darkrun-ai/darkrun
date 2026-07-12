@@ -61,6 +61,13 @@ pub async fn get_run_asset(
 ) -> Response {
     use std::path::{Component, PathBuf};
 
+    // The slug is a path component (`run_dir(slug)`); a traversal value here is
+    // an arbitrary-READ vector, so reject it before joining. The trailing asset
+    // path is separately lexically resolved below.
+    if let Some(resp) = reject_unsafe_segment("run slug", &slug) {
+        return resp;
+    }
+
     let assets_root = state.store.run_dir(&slug).join("assets");
     // Lexically resolve the requested sub-path; reject any escape.
     let mut safe = PathBuf::new();
@@ -289,6 +296,14 @@ pub async fn request_unit_reset(
     State(state): State<AppState>,
     Path((run, unit)): Path<(String, String)>,
 ) -> Response {
+    // Both segments are path components (`units_dir(run)/<unit>.md`); reject a
+    // traversal value before the store reads/writes the unit doc.
+    if let Some(resp) = reject_unsafe_segment("run", &run) {
+        return resp;
+    }
+    if let Some(resp) = reject_unsafe_segment("unit", &unit) {
+        return resp;
+    }
     let store = &state.store;
     let Ok(mut u) = store.read_unit(&run, &unit) else {
         return not_found("unit", &unit);
@@ -592,6 +607,12 @@ pub async fn list_feedback(
     State(state): State<AppState>,
     Path((run, station)): Path<(String, String)>,
 ) -> Response {
+    if let Some(resp) = reject_unsafe_segment("run", &run) {
+        return resp;
+    }
+    if let Some(resp) = reject_unsafe_segment("station", &station) {
+        return resp;
+    }
     let raw = state.store.read_feedback_raw(&run).unwrap_or_default();
     let mut items: Vec<FeedbackItem> = raw
         .into_iter()
@@ -630,6 +651,15 @@ pub async fn create_feedback(
     Path((run, station)): Path<(String, String)>,
     Json(req): Json<FeedbackCreateRequest>,
 ) -> Response {
+    // `run` becomes `feedback_dir(run)`, a path component, so reject a traversal
+    // slug (the arbitrary-WRITE vector) before persisting. `station` is stored
+    // in the doc; validate it too so no hostile segment reaches the layout.
+    if let Some(resp) = reject_unsafe_segment("run", &run) {
+        return resp;
+    }
+    if let Some(resp) = reject_unsafe_segment("station", &station) {
+        return resp;
+    }
     if req.title.trim().is_empty() || req.body.trim().is_empty() {
         return bad_request("title and body are required");
     }
@@ -672,9 +702,16 @@ pub async fn create_feedback(
 /// the item does not exist. Returns the list of fields actually changed.
 pub async fn update_feedback(
     State(state): State<AppState>,
-    Path((run, _station, id)): Path<(String, String, String)>,
+    Path((run, station, id)): Path<(String, String, String)>,
     Json(req): Json<FeedbackUpdateRequest>,
 ) -> Response {
+    // `run` + `id` become `feedback_dir(run)/<id>.md`; reject a traversal in
+    // either (and in the station segment) before touching the sidecar.
+    for (kind, value) in [("run", &run), ("station", &station), ("id", &id)] {
+        if let Some(resp) = reject_unsafe_segment(kind, value) {
+            return resp;
+        }
+    }
     if req.is_empty() {
         return bad_request("at least one of 'status' / 'closed_by' / 'resolution' must be provided");
     }
@@ -731,8 +768,13 @@ pub async fn update_feedback(
 /// item is unknown.
 pub async fn delete_feedback(
     State(state): State<AppState>,
-    Path((run, _station, id)): Path<(String, String, String)>,
+    Path((run, station, id)): Path<(String, String, String)>,
 ) -> Response {
+    for (kind, value) in [("run", &run), ("station", &station), ("id", &id)] {
+        if let Some(resp) = reject_unsafe_segment(kind, value) {
+            return resp;
+        }
+    }
     let Some(content) = state
         .store
         .read_feedback_raw(&run)
@@ -756,7 +798,10 @@ pub async fn delete_feedback(
             .into_response();
     }
 
-    let path = state.store.feedback_dir(&run).join(format!("{id}.md"));
+    // `feedback_path` contains both `run` and `id` to safe components, so the
+    // deletion target can never escape `feedback/` (belt-and-suspenders behind
+    // the route-layer guard above).
+    let path = state.store.feedback_path(&run, &id);
     if std::fs::remove_file(&path).is_err() {
         return internal_error("failed to delete feedback");
     }
@@ -778,9 +823,14 @@ pub async fn delete_feedback(
 /// set. `400` on an empty body, `404` when the parent is unknown.
 pub async fn create_feedback_reply(
     State(state): State<AppState>,
-    Path((run, _station, id)): Path<(String, String, String)>,
+    Path((run, station, id)): Path<(String, String, String)>,
     Json(req): Json<FeedbackReplyCreateRequest>,
 ) -> Response {
+    for (kind, value) in [("run", &run), ("station", &station), ("id", &id)] {
+        if let Some(resp) = reject_unsafe_segment(kind, value) {
+            return resp;
+        }
+    }
     if req.body.trim().is_empty() {
         return bad_request("reply body is required");
     }
@@ -840,6 +890,27 @@ fn not_found(kind: &str, id: &str) -> Response {
 /// Build a uniform `400` JSON envelope.
 fn bad_request(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+}
+
+/// Reject a path segment that is not a safe `.darkrun/` path component.
+///
+/// A run / station / unit / feedback-id segment becomes a LITERAL filesystem
+/// path component when a handler reads or writes state (see `get_run_asset`,
+/// `create_feedback`, and the unit routes), so a value like `../../etc` would
+/// let a request escape the state sandbox and the repo root. Every fs-touching
+/// route runs each such segment through this guard FIRST, so a traversal value
+/// `400`s before the store ever joins it, the edge half of the defense, paired
+/// with the store's own containment (`darkrun_core::state::validate` /
+/// `StateStore::run_dir`). Returns `Some(400)` to short-circuit, `None` to
+/// proceed.
+fn reject_unsafe_segment(kind: &str, value: &str) -> Option<Response> {
+    if darkrun_core::state::validate::is_valid_slug(value) {
+        None
+    } else {
+        Some(bad_request(&format!(
+            "invalid {kind}: must be a safe path component"
+        )))
+    }
 }
 
 /// Build a uniform `409` JSON envelope for a session-type mismatch.

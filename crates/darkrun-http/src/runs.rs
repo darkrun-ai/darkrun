@@ -35,6 +35,27 @@ use std::path::Path as FsPath;
 use crate::feedback_doc::FeedbackDoc;
 use crate::state::AppState;
 
+/// Reject a `:slug` path segment that is not a safe `.darkrun/` path component.
+///
+/// The slug becomes a literal filesystem component (`store.run_dir(slug)`), so a
+/// traversal value would let a request read/write outside the state sandbox.
+/// The browse routes reject it with `400` before the store joins it, mirroring
+/// the guard in `handlers` and the store's own containment. Returns `Some(400)`
+/// to short-circuit, `None` to proceed.
+fn reject_unsafe_slug(slug: &str) -> Option<Response> {
+    if darkrun_core::state::validate::is_valid_slug(slug) {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid run slug: must be a safe path component" })),
+            )
+                .into_response(),
+        )
+    }
+}
+
 /// The run's stable branch (`darkrun/<slug>/main`) — MUST mirror the engine's
 /// `lifecycle::run_main_branch` naming (station work lands on
 /// `darkrun/<slug>/<station>` and merges into this). Checking a branch that
@@ -267,6 +288,9 @@ pub async fn list_runs(State(state): State<AppState>) -> Response {
 /// every station it walks, and the units on the active station. `404` when no
 /// such run exists.
 pub async fn get_run(State(state): State<AppState>, Path(slug): Path<String>) -> Response {
+    if let Some(resp) = reject_unsafe_slug(&slug) {
+        return resp;
+    }
     let store = &state.store;
     let Ok(run) = store.read_run(&slug) else {
         return (
@@ -338,6 +362,9 @@ pub async fn set_run_archived(
     Path(slug): Path<String>,
     Json(req): Json<RunArchiveRequest>,
 ) -> Response {
+    if let Some(resp) = reject_unsafe_slug(&slug) {
+        return resp;
+    }
     let store = &state.store;
     let Ok(mut run) = store.read_run(&slug) else {
         return (
