@@ -97,7 +97,7 @@ where
 #[test]
 fn routes_table_is_non_empty() {
     assert!(!ROUTES.is_empty());
-    assert_eq!(ROUTES.len(), 20);
+    assert_eq!(ROUTES.len(), 21);
 }
 
 #[test]
@@ -2608,8 +2608,8 @@ fn openapi_core_schemas_present() {
 fn openapi_schema_count_is_stable() {
     let doc = openapi::document();
     let schemas = doc["components"]["schemas"].as_object().unwrap();
-    // 39 component schemas are emitted by component_schemas().
-    assert_eq!(schemas.len(), 39);
+    // 41 component schemas are emitted by component_schemas().
+    assert_eq!(schemas.len(), 41);
 }
 
 #[test]

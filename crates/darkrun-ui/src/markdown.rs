@@ -179,6 +179,62 @@ pub fn to_html(src: &str) -> String {
     out
 }
 
+/// Split a doc's leading YAML-ish frontmatter (`---` fenced, flat `key: value`
+/// scalars) from its body. Returns the parsed pairs and the body; a doc with no
+/// (or an unclosed) fence yields no pairs and the whole input as body. Lines
+/// inside the fence that aren't flat scalars (list items, blanks) are skipped:
+/// the chips are a summary, not a YAML parser.
+pub fn split_frontmatter(src: &str) -> (Vec<(String, String)>, &str) {
+    let Some(rest) = src.strip_prefix("---\n").or_else(|| src.strip_prefix("---\r\n")) else {
+        return (Vec::new(), src);
+    };
+    // Find the closing fence line; without one the whole input is body.
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end_matches(['\n', '\r']) == "---" {
+            let front = &rest[..offset];
+            let body = &rest[offset + line.len()..];
+            let pairs = front
+                .lines()
+                .filter_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    let k = k.trim();
+                    let v = v.trim().trim_matches('"').trim();
+                    // Indented keys are nested structure, not flat scalars.
+                    (!k.is_empty() && !v.is_empty() && !l.starts_with([' ', '\t']))
+                        .then(|| (k.to_string(), v.to_string()))
+                })
+                .collect();
+            return (pairs, body);
+        }
+        offset += line.len();
+    }
+    (Vec::new(), src)
+}
+
+/// Render a whole markdown DOCUMENT: a doc with frontmatter gets its pairs as a
+/// chip row (`.dr-md-fm`) ahead of the rendered body instead of a raw `---`
+/// block; a doc without frontmatter renders exactly like [`to_html`]. This is
+/// the entry the artifact-browsing surfaces (annotate stage, knowledge tab,
+/// reflection) share.
+pub fn to_html_doc(src: &str) -> String {
+    let (pairs, body) = split_frontmatter(src);
+    if pairs.is_empty() {
+        return to_html(body);
+    }
+    let mut out = String::from("<div class=\"dr-md-fm\">");
+    for (k, v) in &pairs {
+        out.push_str("<span class=\"dr-md-fm-chip\"><span class=\"dr-md-fm-k\">");
+        out.push_str(&escape(k));
+        out.push_str("</span>");
+        out.push_str(&escape(v));
+        out.push_str("</span>");
+    }
+    out.push_str("</div>");
+    out.push_str(&to_html(body));
+    out
+}
+
 /// Scoped CSS for markdown rendered by [`to_html`] — headings, paragraphs, lists,
 /// inline code, and fenced code blocks under a `.dr-md` container. Inject this
 /// once on any surface that renders `to_html` output (the session views ship
@@ -203,6 +259,12 @@ background:var(--dr-surface-overlay);border:1px solid var(--dr-border);\
 border-radius:8px;padding:12px 14px;overflow-x:auto;margin:10px 0;}\
 .dr-md .dr-md-pre code{font-family:inherit;background:none;border:none;padding:0;white-space:pre;}\
 .dr-md strong{font-weight:700;}\
+.dr-md .dr-md-fm{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px;}\
+.dr-md .dr-md-fm-chip{display:inline-flex;align-items:center;gap:5px;\
+font-family:var(--dr-font-mono);font-size:10.5px;line-height:1;color:var(--dr-text-muted);\
+background:var(--dr-surface-overlay);border:1px solid var(--dr-border);\
+border-radius:999px;padding:3px 8px;white-space:nowrap;}\
+.dr-md .dr-md-fm-k{color:var(--dr-text-faint);text-transform:uppercase;letter-spacing:0.05em;}\
 ";
 
 #[cfg(test)]
@@ -278,6 +340,45 @@ mod tests {
     fn empty_input_is_empty() {
         assert_eq!(to_html(""), "");
         assert_eq!(to_html("   \n  \n"), "");
+    }
+
+    #[test]
+    fn frontmatter_renders_as_chips_ahead_of_the_body() {
+        let doc = "---\nid: FB-01\nstatus: pending\nreplies:\n  - \"skip me\"\n---\n# Title\n\nbody";
+        let (pairs, body) = split_frontmatter(doc);
+        assert_eq!(
+            pairs,
+            vec![
+                ("id".to_string(), "FB-01".to_string()),
+                ("status".to_string(), "pending".to_string()),
+            ],
+            "flat scalars only; the empty replies key and its list items are skipped"
+        );
+        assert!(body.starts_with("# Title"));
+        let html = to_html_doc(doc);
+        assert!(html.starts_with("<div class=\"dr-md-fm\">"), "{html}");
+        assert!(html.contains("<span class=\"dr-md-fm-k\">id</span>FB-01"), "{html}");
+        assert!(html.contains("<h1 class=\"dr-md-h1\">Title</h1>"), "{html}");
+        // The fence lines never render as body text.
+        assert!(!html.contains("---"), "{html}");
+    }
+
+    #[test]
+    fn doc_without_frontmatter_renders_like_to_html() {
+        assert_eq!(to_html_doc("plain **bold**"), to_html("plain **bold**"));
+        // An unclosed fence is body, not frontmatter (nothing silently dropped).
+        let unclosed = "---\ntitle: x\nno closing fence";
+        assert_eq!(to_html_doc(unclosed), to_html(unclosed));
+        // A thematic-break-looking doc with no leading fence stays untouched.
+        assert!(to_html_doc("a\n\n---\n\nb").contains("a"));
+    }
+
+    #[test]
+    fn frontmatter_values_are_escaped_in_chips() {
+        let doc = "---\ntitle: \"<b>sneaky</b>\"\n---\nbody";
+        let html = to_html_doc(doc);
+        assert!(html.contains("&lt;b&gt;sneaky&lt;/b&gt;"), "{html}");
+        assert!(!html.contains("<b>sneaky</b>"), "{html}");
     }
 
     #[test]

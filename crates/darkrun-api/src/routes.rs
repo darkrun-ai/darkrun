@@ -62,6 +62,10 @@ pub mod paths {
     pub fn run_detail(slug: &str) -> String {
         format!("/api/runs/{slug}")
     }
+    /// `POST /api/runs/{slug}/archive`.
+    pub fn run_archive(slug: &str) -> String {
+        format!("/api/runs/{slug}/archive")
+    }
     /// `POST /question/{id}/answer`.
     pub fn question_answer(id: &str) -> String {
         format!("/question/{id}/answer")
@@ -150,6 +154,13 @@ pub const ROUTES: &[RouteSpec] = &[
         path_template: "/api/runs/{slug}",
         operation_id: "getRun",
         summary: "Return a run's detail: stations, units on the active station, and phase.",
+        tag: "runs",
+    },
+    RouteSpec {
+        method: HttpMethod::Post,
+        path_template: "/api/runs/{slug}/archive",
+        operation_id: "archiveRun",
+        summary: "Set (or clear) a run's archived flag; archived runs drop out of the default list.",
         tag: "runs",
     },
     RouteSpec {
@@ -271,6 +282,7 @@ mod path_tests {
         assert_eq!(paths::review_current(), "/api/review/current");
         assert_eq!(paths::runs(), "/api/runs");
         assert_eq!(paths::run_detail("r"), "/api/runs/r");
+        assert_eq!(paths::run_archive("r"), "/api/runs/r/archive");
         assert_eq!(paths::question_answer("s"), "/question/s/answer");
         assert_eq!(paths::direction_select("s"), "/direction/s/select");
         assert_eq!(paths::picker_select("s"), "/picker/s/select");

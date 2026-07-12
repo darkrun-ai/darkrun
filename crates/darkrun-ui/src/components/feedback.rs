@@ -86,6 +86,15 @@ impl Severity {
     }
 }
 
+/// One reply in a feedback item's thread, projected at the host boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyLine {
+    /// Who wrote the reply (e.g. `user`, a worker name).
+    pub author: String,
+    /// The reply text.
+    pub body: String,
+}
+
 /// One feedback row's view-model, projected from an annotation at the host
 /// boundary. Everything is plain data so the component derives `PartialEq`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,10 +113,12 @@ pub struct FeedbackEntry {
     pub author: String,
     /// When true the row renders dimmed (resolved/dismissed/addressed).
     pub resolved: bool,
+    /// The reply thread under the row, oldest first.
+    pub replies: Vec<ReplyLine>,
 }
 
 impl FeedbackEntry {
-    /// Construct an open (un-resolved) feedback entry.
+    /// Construct an open (un-resolved) feedback entry with no replies.
     pub fn new(
         id: impl Into<String>,
         severity: Severity,
@@ -124,6 +135,7 @@ impl FeedbackEntry {
             comment: comment.into(),
             author: author.into(),
             resolved: false,
+            replies: Vec::new(),
         }
     }
 }
@@ -150,11 +162,14 @@ pub enum FeedbackAction {
     Resolve,
     /// Dismiss it without action.
     Dismiss,
+    /// Open a reply composer on the item's thread.
+    Reply,
 }
 
 /// One feedback row: a severity dot, the locator + anchor, the comment, the
-/// author, and the small action chips. Fires `on_action` with the row's id and
-/// the chosen [`FeedbackAction`].
+/// author, and the small action chips, with the item's reply thread rendered
+/// under it, oldest first. Fires `on_action` with the row's id and the chosen
+/// [`FeedbackAction`].
 ///
 /// A plain function (not `#[component]`) because the wire-projected
 /// [`FeedbackEntry`] derives `PartialEq` but the `on_action` payload tuple does
@@ -171,6 +186,22 @@ pub fn feedback_row(
          border:1px solid {border};border-radius:7px;background:{surface};opacity:{opacity};",
         border = tokens::var::BORDER,
         surface = tokens::var::SURFACE_RAISED,
+    );
+    // The thread hangs under the row, indented past the severity dot so replies
+    // read as children of the finding.
+    let thread_style = format!(
+        "display:flex;flex-direction:column;gap:3px;margin:2px 0 0 19px;\
+         padding-left:10px;border-left:1px solid {border};",
+        border = tokens::var::BORDER,
+    );
+    let reply_who = format!(
+        "font-family:{mono};font-size:10.5px;color:{faint};margin-right:6px;",
+        mono = tokens::FONT_MONO,
+        faint = tokens::var::TEXT_FAINT,
+    );
+    let reply_body = format!(
+        "font-size:12px;color:{muted};",
+        muted = tokens::var::TEXT_MUTED,
     );
     let dot_style = format!(
         "width:9px;height:9px;border-radius:50%;flex:none;background:{};",
@@ -196,7 +227,8 @@ pub fn feedback_row(
     );
     let acts_style = "display:flex;gap:6px;";
 
-    // Resolved rows expose no live actions; open rows get jump/resolve/dismiss.
+    // Resolved rows expose no live actions; open rows get
+    // jump/resolve/dismiss/reply.
     let actions: Vec<(&str, FeedbackAction)> = if dim {
         Vec::new()
     } else {
@@ -204,51 +236,65 @@ pub fn feedback_row(
             ("jump", FeedbackAction::Jump),
             ("resolve", FeedbackAction::Resolve),
             ("dismiss", FeedbackAction::Dismiss),
+            ("reply", FeedbackAction::Reply),
         ]
     };
 
     rsx! {
-        div {
-            class: "dr-feedback-row",
-            "data-severity": entry.severity.slug(),
-            "data-resolved": "{dim}",
-            style: "{row_style}",
-            span { class: "dr-feedback-sev", style: "{dot_style}" }
-            span { class: "dr-feedback-loc", style: "{loc_style}",
-                "{entry.locator}"
-                if !entry.anchor.is_empty() {
-                    span { style: "{anc_style}", "{entry.anchor}" }
+        div { class: "dr-feedback-item", style: "display:flex;flex-direction:column;",
+            div {
+                class: "dr-feedback-row",
+                "data-severity": entry.severity.slug(),
+                "data-resolved": "{dim}",
+                style: "{row_style}",
+                span { class: "dr-feedback-sev", style: "{dot_style}" }
+                span { class: "dr-feedback-loc", style: "{loc_style}",
+                    "{entry.locator}"
+                    if !entry.anchor.is_empty() {
+                        span { style: "{anc_style}", "{entry.anchor}" }
+                    }
+                }
+                span { class: "dr-feedback-comment", style: "{comment_style}", "{entry.comment}" }
+                span { class: "dr-feedback-who", style: "{who_style}", "{entry.author}" }
+                span { class: "dr-feedback-acts", style: "{acts_style}",
+                    for (label, action) in actions.into_iter() {
+                        {
+                            let id = entry.id.clone();
+                            let handler = on_action;
+                            let chip = format!(
+                                "font-size:11px;color:{muted};border:1px solid {border};\
+                                 border-radius:5px;padding:2px 7px;cursor:pointer;background:transparent;",
+                                muted = tokens::var::TEXT_MUTED,
+                                border = tokens::var::BORDER_STRONG,
+                            );
+                            rsx! {
+                                span {
+                                    class: "dr-feedback-action",
+                                    "data-action": match action {
+                                        FeedbackAction::Jump => "jump",
+                                        FeedbackAction::Resolve => "resolve",
+                                        FeedbackAction::Dismiss => "dismiss",
+                                        FeedbackAction::Reply => "reply",
+                                    },
+                                    style: "{chip}",
+                                    onclick: move |_| {
+                                        if let Some(h) = &handler {
+                                            h.call((id.clone(), action));
+                                        }
+                                    },
+                                    "{label}"
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            span { class: "dr-feedback-comment", style: "{comment_style}", "{entry.comment}" }
-            span { class: "dr-feedback-who", style: "{who_style}", "{entry.author}" }
-            span { class: "dr-feedback-acts", style: "{acts_style}",
-                for (label, action) in actions.into_iter() {
-                    {
-                        let id = entry.id.clone();
-                        let handler = on_action;
-                        let chip = format!(
-                            "font-size:11px;color:{muted};border:1px solid {border};\
-                             border-radius:5px;padding:2px 7px;cursor:pointer;background:transparent;",
-                            muted = tokens::var::TEXT_MUTED,
-                            border = tokens::var::BORDER_STRONG,
-                        );
-                        rsx! {
-                            span {
-                                class: "dr-feedback-action",
-                                "data-action": match action {
-                                    FeedbackAction::Jump => "jump",
-                                    FeedbackAction::Resolve => "resolve",
-                                    FeedbackAction::Dismiss => "dismiss",
-                                },
-                                style: "{chip}",
-                                onclick: move |_| {
-                                    if let Some(h) = &handler {
-                                        h.call((id.clone(), action));
-                                    }
-                                },
-                                "{label}"
-                            }
+            if !entry.replies.is_empty() {
+                div { class: "dr-feedback-thread", style: "{thread_style}",
+                    for reply in entry.replies.iter() {
+                        div { class: "dr-feedback-reply",
+                            span { style: "{reply_who}", "{reply.author}" }
+                            span { style: "{reply_body}", "{reply.body}" }
                         }
                     }
                 }

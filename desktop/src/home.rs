@@ -307,6 +307,7 @@ pub fn HomeApp(
                         cfg: cfg.clone(),
                         selection,
                         projects: projects.clone(),
+                        runs_map: runs_map.clone(),
                         refresh,
                     }
                 }
@@ -986,12 +987,35 @@ fn MainPane(
     cfg: ConnConfig,
     selection: Signal<Selection>,
     projects: Vec<Project>,
+    runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
     refresh: Signal<u32>,
 ) -> Element {
     match selection.read().clone() {
         Selection::Run { port, slug, project } => {
             let mut run_cfg = cfg.with_session(slug.clone());
             run_cfg.port = port;
+            // The selected run's live summary out of the sidebar's per-project
+            // run lists; the drift chip reads its open_drift count.
+            let drift = runs_map
+                .values()
+                .find_map(|runs| runs.get(&slug))
+                .map(|(_, r)| r.open_drift)
+                .filter(|n| *n > 0);
+            // Archive is reversible and needs no confirm (the run_archive
+            // semantics); on success deselect, and the poller drops the
+            // archived run from the sidebar on its next tick.
+            let archive_cfg = run_cfg.clone();
+            let archive_slug = slug.clone();
+            let mut selection_done = selection;
+            let on_archive = move |_| {
+                let cfg = archive_cfg.clone();
+                let slug = archive_slug.clone();
+                spawn(async move {
+                    if wire::submit_run_archive(&cfg, &slug, true).await.is_ok() {
+                        selection_done.set(Selection::None);
+                    }
+                });
+            };
             // Key by run slug+port so selecting a different run REMOUNTS
             // ReviewApp — otherwise its one-shot session feed keeps streaming the
             // previous run while the checkpoint bar targets the new one (a
@@ -1001,7 +1025,12 @@ fn MainPane(
                 ReviewApp { key: "{slug}:{port}", cfg: run_cfg }
             };
             rsx! {
-                MainHeader { name: slug.clone(), crumb: project.clone() }
+                MainHeader {
+                    name: slug.clone(),
+                    crumb: project.clone(),
+                    drift,
+                    on_archive: Some(EventHandler::new(on_archive)),
+                }
                 {review}
             }
         }
@@ -1061,9 +1090,21 @@ fn SettingsPage() -> Element {
 }
 
 /// The main pane header: the selected run/project name + a breadcrumb (the
-/// owning project, or the project path for a no-engine view).
+/// owning project, or the project path for a no-engine view). A run header
+/// also carries the open-drift chip (when any drift feedback is open) and the
+/// archive affordance.
 #[component]
-fn MainHeader(name: String, crumb: String) -> Element {
+fn MainHeader(
+    name: String,
+    crumb: String,
+    /// Open drift count for the selected run: a warn chip when `Some`.
+    #[props(default)]
+    drift: Option<u32>,
+    /// The archive action for the selected run; `None` hides the control
+    /// (project / settings headers).
+    #[props(default)]
+    on_archive: Option<EventHandler<MouseEvent>>,
+) -> Element {
     let bar = format!(
         "padding:11px 16px;border-bottom:1px solid {border};display:flex;\
          align-items:center;gap:10px;",
@@ -1079,10 +1120,30 @@ fn MainHeader(name: String, crumb: String) -> Element {
         faint = tokens::var::TEXT_FAINT,
         mono = tokens::FONT_MONO,
     );
+    // The archive control matches the review rows' action-chip idiom.
+    let chip = format!(
+        "appearance:none;font-size:11px;color:{muted};border:1px solid {border};\
+         border-radius:5px;padding:3px 9px;cursor:pointer;background:transparent;",
+        muted = tokens::var::TEXT_MUTED,
+        border = tokens::var::BORDER_STRONG,
+    );
     rsx! {
         div { style: "{bar}",
             span { style: "{nm}", "{name}" }
             span { style: "{cr}", "{crumb}" }
+            if let Some(n) = drift {
+                Badge { tone: Tone::Warn, "drift {n}" }
+            }
+            span { style: "flex:1;" }
+            if let Some(archive) = on_archive {
+                button {
+                    class: "dr-run-archive",
+                    style: "{chip}",
+                    title: "Archive this run (reversible; it drops out of the run list)",
+                    onclick: move |evt| archive.call(evt),
+                    "archive"
+                }
+            }
         }
     }
 }
@@ -1853,6 +1914,7 @@ mod data_render_tests {
             started_at: Some("2026-06-05T00:00:00Z".into()),
             authored_by_me: true,
             author: Some("me".into()),
+            open_drift: 0,
         }
     }
 
@@ -1890,6 +1952,7 @@ mod data_render_tests {
 mod main_pane_render_tests {
     use super::*;
     use crate::wire::ConnConfig;
+    use darkrun_api::runs::StationProgress;
 
     fn render(app: fn() -> Element) -> String {
         let mut dom = VirtualDom::new(app);
@@ -1901,36 +1964,62 @@ mod main_pane_render_tests {
         Project { slug: "store-ab12cd34".into(), name: "store".into(), path: "/tmp/store".into(), port: Some(58616), harness: Some("claude-code".into()) }
     }
 
+    /// A runs map whose single run carries open drift, so the Run selection
+    /// exercises the header's drift-chip lookup.
+    fn drifted_runs_map() -> BTreeMap<String, BTreeMap<String, (u16, RunSummary)>> {
+        let run = RunSummary {
+            slug: "r".into(),
+            title: "Storefront run".into(),
+            factory: "software".into(),
+            active_station: "prove".into(),
+            phase: None,
+            status: "active".into(),
+            progress: StationProgress { completed: 2, total: 6 },
+            started_at: None,
+            authored_by_me: true,
+            author: None,
+            open_drift: 2,
+        };
+        let mut by_run = BTreeMap::new();
+        by_run.insert("r".to_string(), (58616u16, run));
+        let mut map = BTreeMap::new();
+        map.insert("store-ab12cd34".to_string(), by_run);
+        map
+    }
+
     #[test]
     fn main_pane_renders_every_selection_state() {
         // None — the projects / welcome surface.
         fn None_() -> Element {
             let sel = use_signal(|| Selection::None);
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], refresh } }
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh } }
         }
         let _ = render(None_);
         // NoEngine — the per-harness start command.
         fn NoEngine() -> Element {
             let sel = use_signal(|| Selection::NoEngine { name: "store".into(), path: "/tmp/store".into() });
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], refresh } }
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh } }
         }
         let _ = render(NoEngine);
         // Settings — the theme/settings page.
         fn Settings() -> Element {
             let sel = use_signal(|| Selection::Settings);
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![], refresh } }
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![], runs_map: BTreeMap::new(), refresh } }
         }
         let _ = render(Settings);
-        // Run — embeds the live Review for a selected run.
+        // Run: embeds the live Review for a selected run, with the header's
+        // drift chip + archive affordance.
         fn Run() -> Element {
             let sel = use_signal(|| Selection::Run { port: 58616, slug: "r".into(), project: "store".into() });
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], refresh } }
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: drifted_runs_map(), refresh } }
         }
-        let _ = render(Run);
+        let html = render(Run);
+        assert!(html.contains("drift 2"), "the drift chip renders: {html}");
+        assert!(html.contains("archive"), "the archive affordance renders: {html}");
     }
 }
 
@@ -2057,6 +2146,7 @@ mod helper_tests {
             started_at: Some("2026-06-05T00:00:00Z".into()),
             authored_by_me: mine,
             author: Some(author.into()),
+            open_drift: 0,
         }
     }
     fn proj(name: &str) -> Project {
