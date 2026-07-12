@@ -193,7 +193,9 @@ pub fn HomeApp(
 
                     // 2. Per-project run lists, merged across every engine
                     //    serving the project (main checkout + worktrees) and
-                    //    deduped by run slug.
+                    //    deduped by run slug. Held by reference below to resolve a
+                    //    run to the engine CURRENTLY serving it; the signal is
+                    //    committed at the end of the tick, after those reads.
                     let mut map =
                         BTreeMap::<String, BTreeMap<String, (u16, RunSummary)>>::new();
                     for e in &found {
@@ -206,48 +208,74 @@ pub fn HomeApp(
                             }
                         }
                     }
-                    if map != *runs_by_project.peek() {
-                        runs_by_project.set(map);
-                    }
 
                     // 2b. Deep link delivered at RUNTIME — the OS handed the
-                    //     already-running app a darkrun review link, which the
-                    //     tao event handler parsed into the mailbox (see
-                    //     `main.rs`). Drain it and open that review against the
-                    //     launch engine's port (the same authority the pinned
-                    //     launch + focus poller use). Cold-launch links land via
-                    //     `initial_session` instead, so this is the warm path.
+                    //     already-running app a darkrun review link, which the tao
+                    //     event handler parsed into the mailbox (see `main.rs`).
+                    //     Resolve the run to the engine that CURRENTLY serves it
+                    //     from discovery, NOT the launch port: the app may have
+                    //     been launched against a since-recycled ephemeral
+                    //     DARKRUN_PORT (macOS won't re-inject `--env` into a warm
+                    //     app), so following the live engine is what registers
+                    //     presence and lets the gate surface. Falls back to the
+                    //     launch port until discovery lists the run; the
+                    //     port-follow step below then corrects it. Cold-launch
+                    //     links land via `initial_session`, so this is the warm path.
                     if let Some(slug) = wire::take_pending_deeplink() {
+                        let port = port_for_run(&map, &slug).unwrap_or(base.port);
                         let project = found
                             .iter()
-                            .find(|e| e.port == base.port)
+                            .find(|e| e.port == port)
                             .map(engine_display_name)
                             .unwrap_or_default();
-                        selection.set(Selection::Run {
-                            port: base.port,
-                            slug,
-                            project,
-                        });
+                        selection.set(Selection::Run { port, slug, project });
                     }
 
-                    // 3. Current-focus on the launch engine's port.
-                    let mut probe = base.clone();
+                    // 3. Current-focus. `darkrun show` raises the run under the
+                    //    `current` session; navigate on a focus CHANGE, pointing at
+                    //    the engine that OWNS the run (per discovery) rather than
+                    //    only the launch engine — so a run raised on a different or
+                    //    restarted engine still opens live.
+                    let probe = base.clone();
                     let focus = wire::fetch_current_focus(&probe).await;
                     if *last_focus.peek() != focus {
                         last_focus.set(focus.clone());
                         if let Some(slug) = focus {
+                            let port = port_for_run(&map, &slug).unwrap_or(probe.port);
                             let project = found
                                 .iter()
-                                .find(|e| e.port == probe.port)
+                                .find(|e| e.port == port)
                                 .map(engine_display_name)
                                 .unwrap_or_default();
-                            probe.session_id = slug.clone();
-                            selection.set(Selection::Run {
-                                port: probe.port,
-                                slug,
-                                project,
-                            });
+                            selection.set(Selection::Run { port, slug, project });
                         }
+                    }
+
+                    // 4. Port-follow — an already-OPEN run whose engine RESTARTED
+                    //    on a fresh ephemeral port re-points to the live port, so
+                    //    the Review reconnects (MainPane keys ReviewApp by
+                    //    slug+port, so a changed port remounts it against the live
+                    //    engine) instead of hanging on the dead socket.
+                    let repoint = match &*selection.peek() {
+                        Selection::Run { port, slug, project } => {
+                            repoint_port(*port, port_for_run(&map, slug)).map(|p| {
+                                Selection::Run {
+                                    port: p,
+                                    slug: slug.clone(),
+                                    project: project.clone(),
+                                }
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(sel) = repoint {
+                        selection.set(sel);
+                    }
+
+                    // 5. Commit the run lists (moving `map`) once every read above
+                    //    is done.
+                    if map != *runs_by_project.peek() {
+                        runs_by_project.set(map);
                     }
 
                     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
@@ -319,6 +347,35 @@ pub fn HomeApp(
 /// which matches [`Project::name`].
 fn engine_display_name(e: &DiscoveredEngine) -> String {
     e.slug.clone()
+}
+
+/// The live engine port CURRENTLY serving `run_slug`, resolved from the
+/// per-project run lists discovery built this tick. Searches every project's run
+/// map for the slug and returns the port of the engine that listed it; `None`
+/// when no live engine serves that run (not discovered yet, or it stopped).
+///
+/// This is how an already-running app FOLLOWS the live engine: the app may have
+/// been launched against a since-recycled ephemeral port, so the launch port is
+/// unreliable — the engine that lists the run in `/api/runs` is the one to dial.
+fn port_for_run(
+    runs_map: &BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
+    run_slug: &str,
+) -> Option<u16> {
+    runs_map
+        .values()
+        .find_map(|runs| runs.get(run_slug).map(|(port, _)| *port))
+}
+
+/// Decide whether an OPEN run should re-point to a freshly-discovered engine
+/// port. Returns the new port only when discovery shows the run on a DIFFERENT
+/// live engine than the one currently connected (the engine restarted on a new
+/// ephemeral port); `None` to stay put — same port, or the run isn't in
+/// discovery yet (keep the current connection rather than dropping to nothing).
+fn repoint_port(current: u16, discovered: Option<u16>) -> Option<u16> {
+    match discovered {
+        Some(p) if p != current => Some(p),
+        _ => None,
+    }
 }
 
 /// Shell-local CSS: the responsive collapse to a hamburger drawer and the
@@ -2117,6 +2174,35 @@ mod helper_tests {
         }
         assert_eq!(run_dot_color("idle"), tokens::var::TEXT_FAINT);
         assert!(run_sel_bg().ends_with("1f"));
+    }
+
+    #[test]
+    fn port_for_run_selects_the_owning_engine() {
+        // Two projects, each served by its own engine port, each listing one run.
+        let mut a = BTreeMap::new();
+        a.insert("alpha".to_string(), (7001u16, run_with("active", true, "me")));
+        let mut b = BTreeMap::new();
+        b.insert("beta".to_string(), (7002u16, run_with("active", true, "me")));
+        // run_with() slugs both to "store-checkout"; override so the lookup key is
+        // the map key, mirroring how the poller keys by `r.slug`.
+        let map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>> =
+            BTreeMap::from([("proj-a".to_string(), a), ("proj-b".to_string(), b)]);
+        // Each run resolves to the port of the engine that lists it.
+        assert_eq!(port_for_run(&map, "alpha"), Some(7001));
+        assert_eq!(port_for_run(&map, "beta"), Some(7002));
+        // An unknown run resolves to nothing (not yet discovered / stopped).
+        assert_eq!(port_for_run(&map, "missing"), None);
+        assert_eq!(port_for_run(&BTreeMap::new(), "alpha"), None);
+    }
+
+    #[test]
+    fn repoint_port_follows_only_a_moved_engine() {
+        // Engine moved to a new ephemeral port → re-point to it.
+        assert_eq!(repoint_port(7001, Some(7005)), Some(7005));
+        // Same port → stay put (no needless remount).
+        assert_eq!(repoint_port(7001, Some(7001)), None);
+        // Run not in discovery yet → keep the current connection, don't drop it.
+        assert_eq!(repoint_port(7001, None), None);
     }
 
     #[test]
