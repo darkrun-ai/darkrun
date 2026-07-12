@@ -27,7 +27,7 @@ use serde::Deserialize;
 use crate::banner::InstallBanner;
 use crate::firebase;
 use crate::remote::{run_connection, CommandOutcome, RemoteState};
-use crate::{live_view, Header, Status};
+use crate::{live_view, Header, Offline, Status};
 
 /// The relay-attach descriptor `GET /api/runs/{slug}/relay` returns (mirrors the
 /// server's `darkrun_web::RelayDescriptor`).
@@ -124,6 +124,9 @@ pub fn RunView(slug: String) -> Element {
     );
 
     rsx! {
+        // The scoped `.dr-md` rules so the live surface's markdown prose renders
+        // formatted (the same set `App` injects for the review-link shell).
+        style { "{darkrun_ui::markdown::CSS}" }
         document::Title { "darkrun" }
         div { style: "{shell}",
             Header {}
@@ -138,6 +141,8 @@ pub fn RunView(slug: String) -> Element {
                     Phase::Connected => match state() {
                         RemoteState::Live(payload) => live_view(&payload, commands, cmd_outcome),
                         RemoteState::Reconnecting => rsx! { Status { text: "Reconnecting\u{2026}" } },
+                        // Terminal: the retry budget is spent, so offer an explicit retry.
+                        RemoteState::Offline => rsx! { Offline {} },
                         // Unconfigured (briefly, before the socket opens) or
                         // Connecting both read as connecting.
                         _ => rsx! { Status { text: "Connecting to your run\u{2026}" } },
