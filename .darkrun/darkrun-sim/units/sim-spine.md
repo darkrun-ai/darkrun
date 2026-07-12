@@ -15,6 +15,9 @@ outputs:
 - crates/darkrun-sim/src/provider.rs
 - crates/darkrun-sim/src/transcript.rs
 - crates/darkrun-sim/fixtures/dark-core.json
+reviews:
+  correctness:
+    at: 2026-07-12T06:11:51.306714+00:00
 quality_gates:
 - name: crate-tests
   command: cargo test -p darkrun-sim

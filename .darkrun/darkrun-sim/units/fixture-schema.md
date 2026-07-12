@@ -10,6 +10,9 @@ inputs:
 - spec.md
 outputs:
 - crates/darkrun-core/src/sim_fixture.rs
+reviews:
+  correctness:
+    at: 2026-07-12T06:11:51.306714+00:00
 quality_gates:
 - name: schema-tests
   command: cargo test -p darkrun-core sim_fixture
