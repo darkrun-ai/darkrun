@@ -15,6 +15,8 @@ outputs:
 reviews:
   correctness:
     at: 2026-07-12T06:11:51.306714+00:00
+  maintainability:
+    at: 2026-07-12T06:11:54.404623+00:00
 quality_gates:
 - name: workflow-parses
   command: python3 -c "import yaml;d=yaml.safe_load(open('.github/workflows/ci.yml'));assert 'sim-fidelity' in d['jobs']"

@@ -13,6 +13,8 @@ outputs:
 reviews:
   correctness:
     at: 2026-07-12T06:11:51.306714+00:00
+  maintainability:
+    at: 2026-07-12T06:11:54.404623+00:00
 quality_gates:
 - name: schema-tests
   command: cargo test -p darkrun-core sim_fixture
