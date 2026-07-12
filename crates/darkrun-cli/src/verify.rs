@@ -95,18 +95,34 @@ pub fn bench_command(
         requests,
         concurrency,
         timeout: Duration::from_secs(timeout_s),
+        ..Default::default()
     };
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let bench = runtime.block_on(load_http(&target, &opts))?;
+    // `load_http` errors (non-zero exit, no proof written) when the failure rate
+    // is too high, so a mostly-failing target can't certify as healthy here.
+    let report = runtime.block_on(load_http(&target, &opts))?;
+
+    // Always surface the success/failure accounting the BenchProof block omits,
+    // so the operator sees how many requests held up, not just the percentiles.
+    eprintln!(
+        "load: {} ok / {} failed of {} ({:.0}% failure)",
+        report.ok,
+        report.failed,
+        report.requests,
+        report.failure_rate() * 100.0,
+    );
 
     let json = match &surface {
         Some(_) => {
+            // Attachment shape: the surface-tagged Proof the Prove station stores.
             let surface = resolve_surface(surface.as_deref(), Surface::Api)?;
-            let proof: Proof = bench_proof_into(bench, surface);
+            let proof: Proof = bench_proof_into(report.proof.clone(), surface);
             serde_json::to_string_pretty(&proof)?
         }
-        None => serde_json::to_string_pretty(&bench)?,
+        // No surface: emit the full report (counts + proof) so the numbers and
+        // the accounting travel together.
+        None => serde_json::to_string_pretty(&report)?,
     };
 
     println!("{json}");
