@@ -1,9 +1,24 @@
 {
   "factory": "software",
-  "active_station": "shape",
+  "active_station": "build",
+  "plan": [
+    "frame",
+    "specify",
+    "build",
+    "prove",
+    "harden"
+  ],
   "mode": "solo",
   "base_branch": "main",
   "stations": {
+    "build": {
+      "station": "build",
+      "status": "pending",
+      "phase": "spec",
+      "checkpoint": {
+        "kind": "ask"
+      }
+    },
     "frame": {
       "station": "frame",
       "status": "completed",
@@ -16,16 +31,6 @@
       "branch": "darkrun/darkrun-sim/frame",
       "started_at": "2026-07-02T23:40:58.266557+00:00",
       "completed_at": "2026-07-11T15:37:26.590369+00:00"
-    },
-    "shape": {
-      "station": "shape",
-      "status": "in_progress",
-      "phase": "spec",
-      "checkpoint": {
-        "kind": "ask"
-      },
-      "branch": "darkrun/darkrun-sim/shape",
-      "started_at": "2026-07-12T02:20:46.565952+00:00"
     },
     "specify": {
       "station": "specify",
