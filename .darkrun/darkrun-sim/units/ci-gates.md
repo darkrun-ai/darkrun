@@ -18,7 +18,7 @@ quality_gates:
 - name: job-steps-present
   command: sh -c 'grep -q "committed_fixture_matches_regeneration" .github/workflows/ci.yml && grep -q "escalate_scenario_is_detected_red" .github/workflows/ci.yml && grep -q "clippy -p darkrun-site --target wasm32-unknown-unknown" .github/workflows/ci.yml'
 - name: local-dry-run
-  command: sh -c 'cargo test -p darkrun-sim committed_fixture_matches_regeneration && cargo test -p darkrun-sim escalate_scenario_is_detected_red'
+  command: sh -c 'a=$(cargo test -p darkrun-sim committed_fixture_matches_regeneration 2>&1) && echo "$a" | grep -qE "[1-9][0-9]* passed" && b=$(cargo test -p darkrun-sim escalate_scenario_is_detected_red 2>&1) && echo "$b" | grep -qE "[1-9][0-9]* passed"'
 ---
 
 # Unit: ci-gates
