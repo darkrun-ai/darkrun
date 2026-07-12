@@ -222,6 +222,7 @@ fn summary() -> RunSummary {
         started_at: Some("2026-05-30T00:00:00Z".into()),
         authored_by_me: true,
         author: Some("me@example.com".into()),
+        open_drift: 0,
     }
 }
 

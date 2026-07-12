@@ -44,8 +44,11 @@ pub async fn ws_session(
 #[cfg(not(tarpaulin_include))]
 async fn handle_socket(mut socket: WebSocket, state: AppState, id: String, max: usize) {
     // Enforce the concurrent-session cap. Hold the slot for the connection's
-    // lifetime via the RAII guard.
-    let _slot: WsSlot = match state.sessions.try_acquire_ws_slot(max) {
+    // lifetime via the RAII guard. Attributed to `id` so this subscriber also
+    // counts toward the session's OWN presence (`presence_for`): gate
+    // surfacing is per-run, and a viewer on run A must not read as a viewer
+    // on run B.
+    let _slot: WsSlot = match state.sessions.try_acquire_ws_slot_for(&id, max) {
         Some(slot) => slot,
         None => {
             let _ = socket

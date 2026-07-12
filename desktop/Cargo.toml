@@ -62,6 +62,15 @@ url = { workspace = true }
 # mode, so the layout viewport tracks the window width instead of WKWebView's
 # default ~980px desktop viewport (which ignores width=device-width and clips the
 # UI). Versions match wry's own objc2 graph so the WKWebView types unify.
+# Native file picker for the "Local repo" flow — the macOS Finder open panel (and
+# the GTK dialog on Linux, which the workspace already links for the webview).
+# Excluded on iOS, which has no folder picker; the Browse button is compiled out
+# there. default-features = false drops the xdg-portal backend (ashpd → wayland →
+# quick-xml, which carries open RustSec advisories with no upgrade path while
+# wayland-scanner pins quick-xml 0.39); the macOS backend is unconditional.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
 objc2-web-kit = { version = "0.3", features = [

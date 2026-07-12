@@ -62,6 +62,19 @@ struct PresenceTracker {
     last_lost_ms: AtomicU64,
 }
 
+/// Per-session presence state, mirroring [`PresenceTracker`] but scoped to one
+/// session id (the run slug, for run sessions). Existence in the map IS the
+/// "ever connected" bit: an entry is created on the first subscriber and never
+/// removed, so a session that lost its last subscriber can still report the
+/// grace window.
+#[derive(Default)]
+struct SessionPresence {
+    /// Live subscriber count for this session.
+    count: u64,
+    /// Epoch-ms when `count` last fell to zero. `0` = never lost.
+    last_lost_ms: u64,
+}
+
 /// Current epoch milliseconds.
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -131,6 +144,12 @@ pub struct SessionRegistry {
     inner: Arc<Mutex<HashMap<String, SessionEntry>>>,
     ws_session_count: Arc<AtomicU64>,
     presence: Arc<PresenceTracker>,
+    /// Per-session subscriber presence, keyed by the WS subscription's session
+    /// id (the run slug, for run sessions). The GLOBAL count above answers "is
+    /// anything connected"; this answers "is anyone watching THIS run", which
+    /// is what gate surfacing needs: a desktop viewing run A must not make a
+    /// gate on run B hold for a viewer that isn't there.
+    presence_by_session: Arc<Mutex<HashMap<String, SessionPresence>>>,
     /// Per-session set of device tokens that have ACKed a gate push for it. A
     /// device woken by a push POSTs `/api/push/ack` to confirm receipt, which
     /// lands here. The gate logic reads it as the "high-confidence live surface"
@@ -145,6 +164,13 @@ pub struct SessionRegistry {
     /// disk without the HTTP answer handlers needing to know how. Shared across
     /// clones (the engine installs it once, after construction).
     persist: Arc<Mutex<Option<PersistHook>>>,
+    /// Whether a DURABLE gate-decision path exists for this registry: flipped by
+    /// the engine when it installs the HTTP layer's gate-decider hook (see
+    /// `AppState::with_gate_decider`). The MCP advance only HOLDS at an operator
+    /// gate when this is set — a context where no decision can ever land (a bare
+    /// registry in tests, an engine-less embedding) keeps the immediate-return
+    /// contract instead of blocking on an answer that cannot arrive.
+    durable_decisions: Arc<AtomicBool>,
 }
 
 /// A durability callback: persist a session payload (e.g. to the run's
@@ -161,6 +187,19 @@ impl SessionRegistry {
     /// clone of this registry, so handlers that hold a clone persist too.
     pub fn on_persist(&self, hook: PersistHook) {
         *self.persist.lock().expect("session registry poisoned") = Some(hook);
+    }
+
+    /// Mark that a DURABLE gate-decision path exists (see `durable_decisions`).
+    /// The engine calls this when it installs the gate-decider hook; shared
+    /// across every clone of this registry.
+    pub fn enable_durable_decisions(&self) {
+        self.durable_decisions.store(true, Ordering::Release);
+    }
+
+    /// Whether a durable gate-decision path exists — the precondition for the
+    /// MCP advance to HOLD at an operator gate (see `durable_decisions`).
+    pub fn durable_decisions_enabled(&self) -> bool {
+        self.durable_decisions.load(Ordering::Acquire)
     }
 
     /// Run the persist hook for `payload`, if one is installed.
@@ -294,6 +333,35 @@ impl SessionRegistry {
         }
     }
 
+    /// Presence scoped to ONE session id (the run slug, for run sessions), with
+    /// the same grace-window semantics as the global [`presence`](Self::presence).
+    /// This is what gate surfacing consults: a desktop watching run A is
+    /// `NeverAttached` from run B's point of view, so B's gate still LAUNCHES.
+    pub fn presence_for(&self, session: &str) -> Presence {
+        self.presence_for_at(session, now_ms())
+    }
+
+    /// [`presence_for`](Self::presence_for) at an explicit `now` (epoch ms),
+    /// the clock seam so the per-session grace window is testable too.
+    fn presence_for_at(&self, session: &str, now: u64) -> Presence {
+        let guard = self
+            .presence_by_session
+            .lock()
+            .expect("session registry poisoned");
+        // No entry: no subscriber has ever attached to this session.
+        let Some(entry) = guard.get(session) else {
+            return Presence::NeverAttached;
+        };
+        if entry.count > 0 {
+            return Presence::Live;
+        }
+        if entry.last_lost_ms != 0 && now.saturating_sub(entry.last_lost_ms) < PRESENCE_GRACE_MS {
+            Presence::Lost
+        } else {
+            Presence::Closed
+        }
+    }
+
     /// Remove a session and drop its broadcast channel (closing subscribers).
     pub fn remove(&self, id: &str) -> Option<SessionPayload> {
         let mut guard = self.inner.lock().expect("session registry poisoned");
@@ -384,6 +452,21 @@ impl SessionRegistry {
     /// Try to reserve a WebSocket slot, honouring `max_ws_sessions`. Returns a
     /// guard that releases the slot on drop, or `None` if the cap is hit.
     pub fn try_acquire_ws_slot(&self, max: usize) -> Option<WsSlot> {
+        self.acquire_ws_slot(None, max)
+    }
+
+    /// Like [`try_acquire_ws_slot`](Self::try_acquire_ws_slot) but attributed
+    /// to a session id, so the subscriber also counts toward that session's
+    /// [`presence_for`](Self::presence_for) as well as the global count. The
+    /// WS upgrade path uses this (it knows which session it subscribes to).
+    pub fn try_acquire_ws_slot_for(&self, session: &str, max: usize) -> Option<WsSlot> {
+        self.acquire_ws_slot(Some(session), max)
+    }
+
+    /// The shared slot-acquire: bump the global count (cap-checked), and when
+    /// `session` is known, the per-session count too. The returned guard
+    /// releases both on drop.
+    fn acquire_ws_slot(&self, session: Option<&str>, max: usize) -> Option<WsSlot> {
         loop {
             let current = self.ws_session_count.load(Ordering::Acquire);
             if current as usize >= max {
@@ -397,9 +480,18 @@ impl SessionRegistry {
                 // The app is (re)attached — mark it ever-connected so a later
                 // drop is a *loss*, not "never opened" (F5).
                 self.presence.ever_connected.store(true, Ordering::Release);
+                if let Some(id) = session {
+                    let mut guard = self
+                        .presence_by_session
+                        .lock()
+                        .expect("session registry poisoned");
+                    guard.entry(id.to_string()).or_default().count += 1;
+                }
                 return Some(WsSlot {
                     counter: Arc::clone(&self.ws_session_count),
                     presence: Arc::clone(&self.presence),
+                    session: session.map(str::to_string),
+                    presence_by_session: Arc::clone(&self.presence_by_session),
                 });
             }
         }
@@ -410,10 +502,30 @@ impl SessionRegistry {
 pub struct WsSlot {
     counter: Arc<AtomicU64>,
     presence: Arc<PresenceTracker>,
+    /// The session this slot was attributed to (see `try_acquire_ws_slot_for`);
+    /// `None` for a slot acquired without session attribution.
+    session: Option<String>,
+    presence_by_session: Arc<Mutex<HashMap<String, SessionPresence>>>,
 }
 
 impl Drop for WsSlot {
     fn drop(&mut self) {
+        // Per-session release first: when this was the session's last
+        // subscriber, stamp its loss time so its grace window starts. Tolerate
+        // a poisoned lock (never panic in Drop); the entry is retained so the
+        // session keeps reporting Lost/Closed rather than NeverAttached.
+        if let Some(id) = self.session.take() {
+            let mut guard = match self.presence_by_session.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(entry) = guard.get_mut(&id) {
+                entry.count = entry.count.saturating_sub(1);
+                if entry.count == 0 {
+                    entry.last_lost_ms = now_ms();
+                }
+            }
+        }
         // `fetch_sub` returns the PRIOR value; if it was 1 the count just fell to
         // zero — stamp the loss time so the grace window starts (F5).
         if self.counter.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -708,6 +820,62 @@ mod tests {
         drop(reg.try_acquire_ws_slot(8).expect("slot")); // connect then lose
         let _slot = reg.try_acquire_ws_slot(8).expect("slot"); // reattach
         assert_eq!(reg.presence(), Presence::Live);
+    }
+
+    #[test]
+    fn presence_for_is_per_session_not_global() {
+        // The F12 scenario: a desktop watching run A must not make run B read
+        // as attended. Two sessions, a subscriber on A only.
+        let reg = SessionRegistry::new();
+        let _a = reg.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        assert_eq!(reg.presence_for("run-a"), Presence::Live);
+        assert!(reg.presence_for("run-a").is_present());
+        // Run B has never had a viewer: absent, so its gate LAUNCHES.
+        assert_eq!(reg.presence_for("run-b"), Presence::NeverAttached);
+        assert!(!reg.presence_for("run-b").is_present());
+        // The global count still sees the one connection (unchanged consumers).
+        assert_eq!(reg.presence(), Presence::Live);
+        assert_eq!(reg.live_connections(), 1);
+    }
+
+    #[test]
+    fn presence_for_mirrors_the_grace_window_per_session() {
+        let reg = SessionRegistry::new();
+        // Attach to A, then drop: A's loss is stamped and its grace window runs.
+        let slot = reg.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        drop(slot);
+        let lost_at = {
+            let guard = reg.presence_by_session.lock().unwrap();
+            guard.get("run-a").expect("entry retained").last_lost_ms
+        };
+        assert!(lost_at > 0, "drop stamps the per-session loss time");
+
+        // Within grace: LOST (still present); past it: CLOSED. Exactly the
+        // global tracker's semantics, scoped to the session.
+        assert_eq!(reg.presence_for_at("run-a", lost_at + 1), Presence::Lost);
+        assert!(reg.presence_for_at("run-a", lost_at + 1).is_present());
+        let past = lost_at + PRESENCE_GRACE_MS + 1;
+        assert_eq!(reg.presence_for_at("run-a", past), Presence::Closed);
+        // A session that never attached stays NeverAttached throughout.
+        assert_eq!(reg.presence_for_at("run-b", past), Presence::NeverAttached);
+    }
+
+    #[test]
+    fn session_slots_release_independently_and_share_clones() {
+        let reg = SessionRegistry::new();
+        let a1 = reg.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        let a2 = reg.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        // Clones observe the same per-session presence (Arc-shared map).
+        assert_eq!(reg.clone().presence_for("run-a"), Presence::Live);
+        // Dropping ONE of two subscribers keeps the session live.
+        drop(a1);
+        assert_eq!(reg.presence_for("run-a"), Presence::Live);
+        // Dropping the last flips it out of Live (into the grace window).
+        drop(a2);
+        assert_eq!(reg.presence_for("run-a"), Presence::Lost);
+        // An unattributed (global-only) slot never bleeds into a session.
+        let _g = reg.try_acquire_ws_slot(8).expect("slot");
+        assert_eq!(reg.presence_for("run-b"), Presence::NeverAttached);
     }
 
     #[test]

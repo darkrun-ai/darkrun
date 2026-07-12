@@ -307,6 +307,37 @@ fn review_body(
     let active_tab = use_signal(|| "units".to_string());
     let annotate_target = use_signal(|| None::<AnnotateTarget>);
     let inbox_open = use_signal(|| false);
+    // The feedback item a reply is being composed on (its `FB-NN` id), set by
+    // the row's reply chip; `None` keeps the composer closed.
+    let reply_target = use_signal(|| None::<String>);
+
+    // --- Proof at the gate (the run's objective evidence) --------------------
+    // Loaded when a gate opens so the checkpoint decision is made against the
+    // MEASURED numbers, not an assertion. Outer `None` = not yet answered;
+    // `Some(None)` = the engine has no proof attached (404).
+    let proof = use_signal(|| None::<Option<darkrun_api::ProofGetResponse>>);
+    // The active gate predicate: only render the checkpoint (and only fetch
+    // the proof) at an actual review/final gate blocking on a decision.
+    let gate_open = review.await_active.unwrap_or(false);
+    {
+        let cfg = cfg.clone();
+        let run = run_slug.clone();
+        use_effect(use_reactive!(|cfg, run, gate_open| {
+            let mut proof = proof;
+            spawn(async move {
+                let (true, Some(run)) = (gate_open, run) else {
+                    return;
+                };
+                match wire::fetch_proof(&cfg, &run).await {
+                    Ok(resp) => proof.set(Some(Some(resp))),
+                    Err(wire::WireError::Status(404)) => proof.set(Some(None)),
+                    // A transport failure leaves the slot unanswered rather
+                    // than claiming "no evidence" about a run we couldn't ask.
+                    Err(_) => {}
+                }
+            });
+        }));
+    }
 
     // The tab strip, with the Feedback tab carrying the open-annotation count
     // (danger-red when any blocker/high is open).
@@ -316,10 +347,6 @@ fn review_body(
     let mut tab_sig = active_tab;
     let mut inbox_sig = inbox_open;
     let inbox_is_open = *inbox_open.read();
-
-    // The active gate predicate: only render the checkpoint at an actual
-    // review/final gate that is currently blocking on a decision.
-    let gate_open = review.await_active.unwrap_or(false);
 
     rsx! {
         // ── The assembly line (TOP) ────────────────────────────────────────
@@ -337,7 +364,21 @@ fn review_body(
 
         // ── The feedback inbox (severity-grouped), toggled from the header ──
         if inbox_is_open {
-            {feedback_inbox_panel(cfg.clone(), run_slug.clone(), station.clone(), feedback, feedback_entries.clone(), &outputs, active_tab, annotate_target, inbox_open)}
+            {feedback_inbox_panel(cfg.clone(), run_slug.clone(), station.clone(), feedback, feedback_entries.clone(), &outputs, active_tab, annotate_target, inbox_open, reply_target)}
+        }
+
+        // ── The reply composer, opened from a feedback row's reply chip ─────
+        if let Some(fb_id) = reply_target.read().clone() {
+            ReplyComposer {
+                // Key by item so switching rows remounts (a fresh draft).
+                key: "{fb_id}",
+                cfg: cfg.clone(),
+                run: run_slug.clone(),
+                station: station.clone(),
+                fb_id,
+                feedback,
+                reply_target,
+            }
         }
 
         // ── The annotate surface, when an artifact is under review ──────────
@@ -389,6 +430,7 @@ fn review_body(
                         active_tab,
                         annotate_target,
                         inbox_open,
+                        reply_target,
                     ));
                     tab_body(&cfg, &active, &units, &outputs, &knowledge, &unit_outputs, &feedback_entries, &review, annotate_target, inbox_open, fb_action)
                 }
@@ -397,8 +439,51 @@ fn review_body(
 
         // ── The single, severity-driven checkpoint control set ──────────────
         if gate_open {
+            // Objective evidence first: the proof's numbers (or, at a prove
+            // gate, an explicit no-evidence state) sit right above the
+            // decision they inform.
+            {proof_at_gate(station.as_deref(), proof.read().clone())}
             {checkpoint_section(cfg, review, decision, open_blockers)}
         }
+    }
+}
+
+/// Whether a station is the objective-evidence station whose gate expects an
+/// attached proof. Matches the software factory's `prove` (and any custom
+/// station carrying `prove` in its name); other stations gate on review, not
+/// measurement, so an absent proof is not called out there.
+fn is_prove_station(station: Option<&str>) -> bool {
+    station.is_some_and(|s| s.to_ascii_lowercase().contains("prove"))
+}
+
+/// The objective-evidence block at an open gate.
+///
+/// A fetched proof renders its surface-routed NUMBERS through the existing
+/// [`ProofPanel`] (the same projection the proof session uses). A confirmed
+/// absence (`Some(None)`, the 404) at a prove gate renders an explicit,
+/// prominent no-evidence state: honesty, not silence. An unanswered fetch
+/// (outer `None`) or an absence at a non-prove gate renders nothing.
+fn proof_at_gate(
+    station: Option<&str>,
+    proof: Option<Option<darkrun_api::ProofGetResponse>>,
+) -> Element {
+    match proof {
+        Some(Some(resp)) => rsx! {
+            ProofPanel { proof: map::proof_view(&resp.proof) }
+        },
+        Some(None) if is_prove_station(station) => rsx! {
+            Card {
+                div { style: "display:flex;align-items:center;gap:10px;",
+                    Badge { tone: Tone::Danger, filled: true, "no evidence attached" }
+                    span {
+                        style: "font-size:12.5px;color:var(--dr-text-muted);",
+                        "This prove gate has no measured proof on the run. \
+                         Approving here signs off without objective evidence."
+                    }
+                }
+            }
+        },
+        _ => rsx! {},
     }
 }
 
@@ -759,7 +844,10 @@ fn row_actions(on_review: impl FnMut(MouseEvent) + 'static) -> Element {
     }
 }
 
-/// The Knowledge tab: the run's surfaced knowledge files.
+/// The Knowledge tab: the run's surfaced knowledge files, rendered as formatted
+/// documents through the same markdown path the annotate overlay uses
+/// (frontmatter chips included), so the operator reads a doc, not its source.
+/// A non-markdown name keeps the raw pre block.
 fn knowledge_tab(knowledge: &[darkrun_api::session::KnowledgeFile]) -> Element {
     if knowledge.is_empty() {
         return rsx! {
@@ -768,6 +856,7 @@ fn knowledge_tab(knowledge: &[darkrun_api::session::KnowledgeFile]) -> Element {
     }
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:12px;",
+            style { "{darkrun_ui::markdown::CSS}" }
             for kf in knowledge.iter() {
                 div {
                     div {
@@ -775,12 +864,22 @@ fn knowledge_tab(knowledge: &[darkrun_api::session::KnowledgeFile]) -> Element {
                                 color:var(--dr-text);margin-bottom:4px;",
                         "{kf.name}"
                     }
-                    pre {
-                        style: "margin:0;white-space:pre-wrap;font-family:var(--dr-font-mono);\
-                                font-size:11.5px;color:var(--dr-text-muted);\
-                                background:var(--dr-surface-base);border:1px solid var(--dr-border);\
-                                border-radius:6px;padding:10px;max-height:240px;overflow:auto;",
-                        "{kf.content}"
+                    if kf.name.ends_with(".md") || kf.name.ends_with(".markdown") {
+                        div {
+                            class: "dr-md",
+                            style: "font-size:12.5px;background:var(--dr-surface-base);\
+                                    border:1px solid var(--dr-border);border-radius:6px;\
+                                    padding:12px 14px;max-height:240px;overflow:auto;",
+                            dangerous_inner_html: darkrun_ui::markdown::to_html_doc(&kf.content),
+                        }
+                    } else {
+                        pre {
+                            style: "margin:0;white-space:pre-wrap;font-family:var(--dr-font-mono);\
+                                    font-size:11.5px;color:var(--dr-text-muted);\
+                                    background:var(--dr-surface-base);border:1px solid var(--dr-border);\
+                                    border-radius:6px;padding:10px;max-height:240px;overflow:auto;",
+                            "{kf.content}"
+                        }
                     }
                 }
             }
@@ -816,6 +915,8 @@ fn feedback_tab(
 }
 
 /// The Overview tab: the run-scope reflection + a per-station status digest.
+/// The reflection is agent-authored markdown, so it renders through the same
+/// formatted path as the annotate overlay rather than as raw source.
 fn overview_tab(review: &ReviewSessionPayload) -> Element {
     let reflection = review.reflection.clone();
     rsx! {
@@ -823,11 +924,12 @@ fn overview_tab(review: &ReviewSessionPayload) -> Element {
             if let Some(r) = reflection {
                 if !r.is_empty() {
                     div {
+                        style { "{darkrun_ui::markdown::CSS}" }
                         div { style: section_title(), "Reflection" }
-                        p {
-                            style: "margin:6px 0 0;font-size:12.5px;color:var(--dr-text-muted);\
-                                    white-space:pre-wrap;",
-                            "{r}"
+                        div {
+                            class: "dr-md",
+                            style: "margin-top:6px;font-size:12.5px;color:var(--dr-text-muted);",
+                            dangerous_inner_html: darkrun_ui::markdown::to_html_doc(&r),
                         }
                     }
                 }
@@ -869,10 +971,12 @@ fn feedback_action_handler(
     active_tab: Signal<String>,
     annotate_target: Signal<Option<AnnotateTarget>>,
     inbox_open: Signal<bool>,
+    reply_target: Signal<Option<String>>,
 ) -> impl FnMut((String, FeedbackAction)) + 'static {
     let mut active_tab = active_tab;
     let mut annotate_target = annotate_target;
     let mut inbox_open = inbox_open;
+    let mut reply_target = reply_target;
     move |(id, action): (String, FeedbackAction)| {
         let items = feedback.read().clone();
         // Jump is a surface action: focus the anchored artifact instead of
@@ -891,11 +995,16 @@ fn feedback_action_handler(
             }
             return;
         }
+        // Reply is a surface action too: open the composer on the item.
+        if action == FeedbackAction::Reply {
+            reply_target.set(Some(id));
+            return;
+        }
         // Resolve / dismiss mutate the record's status.
         let new_status = match action {
             FeedbackAction::Resolve => Some(FeedbackStatus::Addressed),
             FeedbackAction::Dismiss => Some(FeedbackStatus::NonActionable),
-            FeedbackAction::Jump => None,
+            FeedbackAction::Jump | FeedbackAction::Reply => None,
         };
         let (Some(status), Some(run), Some(station)) =
             (new_status, run.clone(), station.clone())
@@ -934,6 +1043,7 @@ fn feedback_inbox_panel(
     active_tab: Signal<String>,
     annotate_target: Signal<Option<AnnotateTarget>>,
     inbox_open: Signal<bool>,
+    reply_target: Signal<Option<String>>,
 ) -> Element {
     // Snapshot the outputs so the Jump resolver can match a feedback locator to
     // a declared output (and reuse its visual/path/url) without borrowing.
@@ -947,6 +1057,7 @@ fn feedback_inbox_panel(
         active_tab,
         annotate_target,
         inbox_open,
+        reply_target,
     );
     rsx! {
         Card {
@@ -958,6 +1069,111 @@ fn feedback_inbox_panel(
                 p { style: "color:var(--dr-text-muted);", "No feedback on this station yet." }
             } else {
                 {feedback_inbox(entries, Some(EventHandler::new(on_action)))}
+            }
+        }
+    }
+}
+
+/// The reply composer, opened on a feedback item from its row's reply chip.
+///
+/// POSTs the typed reply to the existing thread route
+/// (`/api/feedback/:run/:station/:id/replies`), then refetches the list so the
+/// new reply renders in the thread, and closes itself. Mirrors the checkpoint's
+/// station-note textarea idiom; the caller keys this by item id so switching
+/// rows starts a fresh draft.
+#[component]
+fn ReplyComposer(
+    cfg: ConnConfig,
+    run: Option<String>,
+    station: Option<String>,
+    fb_id: String,
+    feedback: Signal<Vec<FeedbackItem>>,
+    reply_target: Signal<Option<String>>,
+) -> Element {
+    let mut draft = use_signal(String::new);
+    let submit = use_signal(|| Submit::Idle);
+
+    let send = {
+        let cfg = cfg.clone();
+        let run = run.clone();
+        let station = station.clone();
+        let fb_id = fb_id.clone();
+        move |_| {
+            let body = draft.read().trim().to_string();
+            if body.is_empty() {
+                return;
+            }
+            let mut submit = submit;
+            let (Some(run), Some(station)) = (run.clone(), station.clone()) else {
+                submit.set(Submit::Failed("no run/station to reply into".into()));
+                return;
+            };
+            let cfg = cfg.clone();
+            let fb_id = fb_id.clone();
+            let mut feedback = feedback;
+            let mut reply_target = reply_target;
+            spawn(async move {
+                submit.set(Submit::Sending);
+                let req = darkrun_api::FeedbackReplyCreateRequest {
+                    body,
+                    author: None,
+                    close_as_answered: None,
+                };
+                match wire::submit_feedback_reply(&cfg, &run, &station, &fb_id, &req).await {
+                    Ok(()) => {
+                        // The thread grew server-side; refetch so it renders,
+                        // then close the composer.
+                        if let Ok(resp) = wire::fetch_feedback(&cfg, &run, &station).await {
+                            feedback.set(resp.items);
+                        }
+                        reply_target.set(None);
+                    }
+                    Err(e) => submit.set(Submit::Failed(e.to_string())),
+                }
+            });
+        }
+    };
+
+    let sending = matches!(*submit.read(), Submit::Sending);
+    let mut reply_close = reply_target;
+    let text_style = format!(
+        "width:100%;box-sizing:border-box;min-height:54px;padding:9px 12px;\
+         border-radius:6px;border:1px solid {border};background:{base};\
+         color:{text};font-family:{sans};font-size:13px;resize:vertical;",
+        border = tokens::var::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        text = tokens::var::TEXT,
+        sans = tokens::FONT_SANS,
+    );
+    rsx! {
+        Card {
+            div { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                Badge { tone: Tone::Info, "reply" }
+                span {
+                    style: "flex:1;font-family:var(--dr-font-mono);font-size:12px;\
+                            color:var(--dr-text-muted);",
+                    "{fb_id}"
+                }
+                Button {
+                    variant: ButtonVariant::Ghost,
+                    on_click: move |_| reply_close.set(None),
+                    "close"
+                }
+            }
+            textarea {
+                style: "{text_style}",
+                placeholder: "reply to this feedback\u{2026}",
+                oninput: move |evt| draft.set(evt.value()),
+            }
+            div { style: "display:flex;align-items:center;gap:10px;margin-top:8px;",
+                Button {
+                    variant: ButtonVariant::Primary,
+                    tone: Tone::Accent,
+                    disabled: sending,
+                    on_click: send,
+                    "Send reply"
+                }
+                SubmitStatus { state: submit.read().clone() }
             }
         }
     }
@@ -1586,7 +1802,15 @@ fn render_markdown_with_marks(body: &str, marks: &[TextMark]) -> Element {
     let meta_html = frontmatter
         .map(darkrun_ui::markdown::frontmatter_html)
         .unwrap_or_default();
-    let body_html = darkrun_ui::markdown::to_html(md_body);
+    // A fenced leading block with no flat scalars renders no chips. It must not
+    // vanish: `to_html` drops a leading `---` fence as metadata, so reconstruct
+    // the fence content ahead of the body (fence markers removed) and render that.
+    let body_html = match frontmatter {
+        Some(fm) if meta_html.is_empty() && !fm.trim().is_empty() => {
+            darkrun_ui::markdown::to_html(&format!("{fm}\n\n{md_body}"))
+        }
+        _ => darkrun_ui::markdown::to_html(md_body),
+    };
     rsx! {
         div {
             class: "dr-md dr-annotate-md",
@@ -3367,6 +3591,7 @@ mod panel_render_tests {
             let active_tab = use_signal(|| "units".to_string());
             let annotate_target = use_signal(|| None::<AnnotateTarget>);
             let inbox_open = use_signal(|| true);
+            let reply_target = use_signal(|| None::<String>);
             feedback_inbox_panel(
                 ConnConfig::from_env(),
                 Some("run-1".into()),
@@ -3377,6 +3602,7 @@ mod panel_render_tests {
                 active_tab,
                 annotate_target,
                 inbox_open,
+                reply_target,
             )
         }
         fn Full() -> Element {
@@ -3386,6 +3612,7 @@ mod panel_render_tests {
             let active_tab = use_signal(|| "units".to_string());
             let annotate_target = use_signal(|| None::<AnnotateTarget>);
             let inbox_open = use_signal(|| true);
+            let reply_target = use_signal(|| None::<String>);
             let outputs = vec![out("home.png", OutputArtifactType::Image)];
             feedback_inbox_panel(
                 ConnConfig::from_env(),
@@ -3397,10 +3624,103 @@ mod panel_render_tests {
                 active_tab,
                 annotate_target,
                 inbox_open,
+                reply_target,
             )
         }
         assert!(render(Empty).contains("No feedback on this station yet."));
-        assert!(render(Full).contains("Feedback inbox"));
+        let full = render(Full);
+        assert!(full.contains("Feedback inbox"));
+        // An open row exposes the reply chip alongside jump/resolve/dismiss.
+        assert!(full.contains("reply"), "the reply chip renders: {full}");
+    }
+
+    #[test]
+    fn feedback_row_renders_its_reply_thread() {
+        fn App() -> Element {
+            let mut item = fb_item("FB-2", Some("spec.md"), "review: spec");
+            item.replies = vec![darkrun_api::FeedbackReply {
+                author: "agent".into(),
+                author_type: AuthorType::Agent,
+                body: "tightened the section".into(),
+                created_at: String::new(),
+            }];
+            let entries = map::feedback_entries(&[item]);
+            feedback_inbox(entries, None)
+        }
+        let html = render(App);
+        assert!(html.contains("dr-feedback-thread"), "{html}");
+        assert!(html.contains("tightened the section"), "{html}");
+    }
+
+    #[test]
+    fn reply_composer_renders_with_a_target() {
+        fn App() -> Element {
+            let feedback = use_signal(Vec::<FeedbackItem>::new);
+            let reply_target = use_signal(|| Some("FB-3".to_string()));
+            rsx! {
+                ReplyComposer {
+                    cfg: ConnConfig::from_env(),
+                    run: Some("run-1".to_string()),
+                    station: Some("build".to_string()),
+                    fb_id: "FB-3".to_string(),
+                    feedback,
+                    reply_target,
+                }
+            }
+        }
+        let html = render(App);
+        assert!(html.contains("FB-3"), "{html}");
+        assert!(html.contains("Send reply"), "{html}");
+    }
+
+    // ── Proof at the gate ───────────────────────────────────────────────────
+
+    #[test]
+    fn proof_at_gate_renders_the_panel_when_evidence_exists() {
+        fn App() -> Element {
+            let resp = darkrun_api::ProofGetResponse {
+                run: "r".into(),
+                station: Some("prove".into()),
+                proof: darkrun_api::Proof::bench(
+                    darkrun_api::Surface::Library,
+                    darkrun_api::proof::BenchProof {
+                        p50: Some(1.2),
+                        p95: Some(3.4),
+                        ..Default::default()
+                    },
+                ),
+            };
+            proof_at_gate(Some("prove"), Some(Some(resp)))
+        }
+        let html = render(App);
+        assert!(html.contains("dr-proof-panel"), "the ProofPanel renders: {html}");
+        assert!(html.contains("p95"), "the numbers render: {html}");
+    }
+
+    #[test]
+    fn proof_at_gate_absence_is_loud_only_at_a_prove_gate() {
+        fn AbsentAtProve() -> Element {
+            proof_at_gate(Some("prove"), Some(None))
+        }
+        fn AbsentAtBuild() -> Element {
+            proof_at_gate(Some("build"), Some(None))
+        }
+        fn Unanswered() -> Element {
+            proof_at_gate(Some("prove"), None)
+        }
+        // A confirmed absence at the prove gate is an explicit, prominent state.
+        assert!(render(AbsentAtProve).contains("no evidence attached"));
+        // Other gates (and an unanswered fetch) render nothing: no false claim.
+        assert!(!render(AbsentAtBuild).contains("no evidence attached"));
+        assert!(!render(Unanswered).contains("no evidence attached"));
+    }
+
+    #[test]
+    fn is_prove_station_matches_prove_names_only() {
+        assert!(is_prove_station(Some("prove")));
+        assert!(is_prove_station(Some("05-prove")));
+        assert!(!is_prove_station(Some("build")));
+        assert!(!is_prove_station(None));
     }
 
     #[test]

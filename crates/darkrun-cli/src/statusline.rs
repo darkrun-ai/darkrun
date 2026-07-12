@@ -84,9 +84,10 @@ fn phase_chrome(phase: StationPhase) -> (&'static str, &'static str) {
 //   - Open feedback: one chip per item, the BOX tinted by severity (light red /
 //     orange / gold / near-white, lavender unclassified) with a NO_COLOR-legible
 //     mark (`!^~.?`).
-//   - Review/Audit awaits: AGENT chips — solid pastel status boxes per
+//   - Review/UserGate/Audit awaits: AGENT chips — solid pastel status boxes per
 //     reviewer role: pastel-green ✓ stamped, near-white ▸ being awaited,
-//     grey queued.
+//     grey queued. The UserGate hold keeps the review chips live: agents are
+//     still stamping while the operator gate is up.
 // Mutually exclusive, first match wins; none → single line.
 
 /// Filled / empty progress pips.
@@ -269,14 +270,21 @@ fn pool_line(
             }
             Some(chips.join(" "))
         }
-        Some(StationPhase::Review) | Some(StationPhase::Audit) => {
+        // UserGate rides with Review: the pre-execution operator hold IS the
+        // review stage's gate (phase_chrome renders both as `review`), and the
+        // reviewer agents are still stamping while the hold is up — so their
+        // status chips must stay on the pool line, not vanish at the gate.
+        Some(StationPhase::Review) | Some(StationPhase::UserGate) | Some(StationPhase::Audit) => {
             let reviewers: Vec<String> = station_def
                 .map(|s| s.reviewers.iter().map(|r| r.name().to_string()).collect())
                 .unwrap_or_default();
             if reviewers.is_empty() || units.is_empty() {
                 return None;
             }
-            let is_review = matches!(phase, Some(StationPhase::Review));
+            let is_review = matches!(
+                phase,
+                Some(StationPhase::Review) | Some(StationPhase::UserGate)
+            );
             // A role is DONE when every unit carries its stamp; the first
             // unstamped role is the one being awaited.
             let mut chips = Vec::new();
@@ -1175,6 +1183,42 @@ mod tests {
         let (_, second) = line.split_once('\n').expect("two lines");
         assert!(second.contains('\u{2713}'), "a stamped role shows ✓: {second}");
         assert!(second.contains('\u{25b8}'), "the awaited role shows ▸: {second}");
+    }
+
+    #[test]
+    fn user_gate_hold_keeps_review_agent_chips_on_the_pool_line() {
+        use darkrun_core::domain::{Stamp, Status, Unit, UnitFrontmatter};
+        use darkrun_core::StateStore;
+        // The reported bug: at the pre-execution UserGate (which renders as
+        // `Π review`) the reviewer agents are still stamping, but the pool line
+        // vanished because pool_line had no UserGate arm. The hold must show
+        // the same chips as Review.
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        seed_run_at_phase(&store, "build", StationPhase::UserGate);
+        let mut reviews = std::collections::BTreeMap::new();
+        reviews.insert(
+            "correctness".to_string(),
+            Some(Stamp { at: "2026-06-01T00:00:00Z".into() }),
+        );
+        store
+            .write_unit("r", &Unit {
+                slug: "u1".into(),
+                frontmatter: UnitFrontmatter {
+                    status: Status::InProgress,
+                    station: Some("build".into()),
+                    reviews,
+                    ..Default::default()
+                },
+                title: "u1".into(),
+                body: String::new(),
+            })
+            .unwrap();
+        let line = render(Some(dir.path().to_path_buf())).expect("renders");
+        let (first, second) = line.split_once('\n').expect("two lines at the gate");
+        assert!(first.contains("review"), "gate renders as review: {first}");
+        assert!(second.contains('\u{2713}'), "stamped role shows ✓: {second}");
+        assert!(second.contains('\u{25b8}'), "running role shows ▸: {second}");
     }
 
     /// Seed a run whose active station sits at `phase` (no units/feedback).

@@ -292,8 +292,8 @@ pub async fn relay_router_from_env() -> Option<Router> {
 }
 
 /// The public relay base URL the descriptor API hands clients, from
-/// `DARKRUN_RELAY_PUBLIC_URL` (default [`DEFAULT_RELAY_PUBLIC_URL`] —
-/// `wss://relay.darkrun.ai`, the same base the engine dials).
+/// `DARKRUN_RELAY_PUBLIC_URL` (default [`DEFAULT_RELAY_PUBLIC_URL`] — the apex
+/// host this service serves the relay on, the same base the engine dials).
 fn relay_public_url_from_env() -> String {
     std::env::var("DARKRUN_RELAY_PUBLIC_URL")
         .ok()

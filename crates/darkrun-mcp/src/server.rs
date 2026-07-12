@@ -158,6 +158,10 @@ pub async fn serve_stdio_on(
             crate::position::checkpoint_decide(&ds, run, approved, fb).is_ok()
         })
     };
+    // With the durable decider in place, tell the shared session registry so the
+    // MCP advance HOLDS at operator gates (a registry with no decision path
+    // keeps the immediate-return contract instead of waiting forever).
+    state.sessions.enable_durable_decisions();
     // Durability: every interactive session (question / direction / picker) the
     // registry upserts — on raise AND on answer — is written to the run's
     // `interactive/` dir, so an open question and its eventual answer survive an
@@ -395,7 +399,13 @@ fn resolve_relay_token(
 /// access to work, so `darkrun login` (which stores the dial token) is
 /// sufficient to make a run reachable — the URL no longer has to be exported by
 /// hand, which nothing did.
-pub const DEFAULT_RELAY_URL: &str = "wss://relay.darkrun.ai";
+///
+/// The relay is served by the web service on the APEX host (`darkrun.ai/relay/…`);
+/// `relay.darkrun.ai` has no DNS record today, so defaulting to it made every
+/// default-config engine fail its dial at DNS resolution. If a dedicated relay
+/// host is stood up later (Terraform has the mapping prepped), flipping this
+/// constant (or setting `DARKRUN_RELAY_URL`) is the whole migration.
+pub const DEFAULT_RELAY_URL: &str = "wss://darkrun.ai";
 
 /// The relay candidate to advertise + dial. The base URL defaults to the
 /// production relay ([`DEFAULT_RELAY_URL`]) and is overridable via
@@ -439,6 +449,12 @@ fn announce_engine(
                 "darkrun: discovery descriptor written to {}",
                 registry.descriptor_path().display()
             );
+            // Backfill the durable project record so this session's repo shows up
+            // in the desktop even if it was never added by hand. Best-effort and
+            // idempotent (an existing record, with its added_at, is kept).
+            if let Err(e) = crate::registry::ensure_project_registered(repo_root) {
+                eprintln!("darkrun: could not register project for discovery: {e}");
+            }
             Some(registry)
         }
         Err(e) => {

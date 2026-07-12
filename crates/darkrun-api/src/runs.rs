@@ -67,6 +67,12 @@ pub struct RunSummary {
     /// resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// Open drift feedback on the run: `origin = drift` items still holding a
+    /// gate. Drift is feedback (the sweep files a drift item when a locked
+    /// input premise moves), so this count is readable straight off the run's
+    /// feedback files. Defaults to `0` so an older producer still decodes.
+    #[serde(default)]
+    pub open_drift: u32,
 }
 
 /// `GET /api/runs` response body: every (non-archived) run on the project as a
@@ -86,6 +92,32 @@ impl RunListPayload {
         let count = runs.len();
         RunListPayload { runs, count }
     }
+}
+
+/// `POST /api/runs/:slug/archive` request body: the reversible archive
+/// toggle. Mirrors the engine's `run_archive` tool (no confirmation step,
+/// `archived: false` restores). An empty body archives (the common case).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RunArchiveRequest {
+    /// The archived flag to set (`true` archives, `false` restores).
+    #[serde(default = "default_archived")]
+    pub archived: bool,
+}
+
+/// The default for [`RunArchiveRequest::archived`] when the field is omitted.
+fn default_archived() -> bool {
+    true
+}
+
+/// `POST /api/runs/:slug/archive` response body.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RunArchiveResponse {
+    /// Always `true` on success.
+    pub ok: bool,
+    /// The run the flag was set on.
+    pub slug: String,
+    /// The archived flag after the write.
+    pub archived: bool,
 }
 
 /// A station row in a run's detail view.
@@ -169,6 +201,7 @@ mod tests {
             started_at: Some("2026-05-30T00:00:00Z".into()),
             authored_by_me: true,
             author: Some("me@example.com".into()),
+            open_drift: 0,
         }
     }
 
@@ -207,6 +240,22 @@ mod tests {
         let back: RunSummary = serde_json::from_value(v).unwrap();
         assert!(!back.authored_by_me);
         assert!(back.author.is_none());
+        // The drift count is additive: absent on an older producer → 0.
+        assert_eq!(back.open_drift, 0);
+    }
+
+    #[test]
+    fn archive_request_defaults_to_archiving() {
+        // An empty body archives; an explicit false restores.
+        let empty: RunArchiveRequest = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.archived);
+        let restore: RunArchiveRequest =
+            serde_json::from_value(json!({ "archived": false })).unwrap();
+        assert!(!restore.archived);
+        let resp = RunArchiveResponse { ok: true, slug: "r".into(), archived: true };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["slug"], "r");
+        assert_eq!(v["archived"], true);
     }
 
     #[test]
