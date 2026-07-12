@@ -89,7 +89,7 @@ pub fn Preview() -> Element {
                 "A static preview of the interactive session views the agent poses mid-run: a \
                  visual question, a design direction, the output artifact browser, and the \
                  objective-evidence proof panel, built from the real darkrun-api payload types. \
-                 Preview only — no live feed is attached."
+                 Preview only: no live feed is attached."
                     .to_string(),
             ),
         }
@@ -168,7 +168,7 @@ pub fn Preview() -> Element {
                         "font-family:{};font-size:18px;color:{};margin:0 0 12px;",
                         tokens::FONT_SANS, theme::TEXT,
                     ),
-                    "Proof — web vitals (visual surface)"
+                    "Proof: web vitals (visual surface)"
                 }
                 ProofPanel { proof: web_proof }
             }
@@ -180,7 +180,7 @@ pub fn Preview() -> Element {
                         "font-family:{};font-size:18px;color:{};margin:0 0 12px;",
                         tokens::FONT_SANS, theme::TEXT,
                     ),
-                    "Proof — benchmarks (bench surface)"
+                    "Proof: benchmarks (bench surface)"
                 }
                 ProofPanel { proof: bench_proof }
             }
@@ -190,6 +190,180 @@ pub fn Preview() -> Element {
 
 /// The canonical web-vital display order in the preview panel.
 const VITAL_ORDER: [&str; 5] = ["lcp", "fcp", "ttfb", "inp", "cls"];
+
+// ===========================================================================
+// Representative preview mockups
+// ===========================================================================
+//
+// The picture-per-option session views only demonstrate their point when the
+// options actually carry pictures. Rather than ship empty "no preview" boxes (or
+// pull a binary asset), each option/archetype carries a small self-contained
+// dark-brand SVG wireframe of the layout it names, inlined as a `data:` URI so
+// the fixture is deterministic and needs no external file. These stand in for
+// the real mockups the agent generates mid-run.
+
+/// Percent-encode an SVG document into a `data:image/svg+xml` URI safe to drop
+/// into an `<img src>`. Everything outside a conservative URL-safe allowlist is
+/// escaped, so hex colors (`#`), spaces, and angle brackets all survive.
+fn svg_data_uri(svg: &str) -> String {
+    const SAFE: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~:/=,()";
+    let mut out = String::from("data:image/svg+xml,");
+    for &b in svg.as_bytes() {
+        if SAFE.contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The dark-brand palette the wireframes paint with, kept literal because an
+/// `<img>` is isolated from the page's CSS custom properties.
+mod ink {
+    pub const BG: &str = "#0c1116";
+    pub const PANEL: &str = "#131a22";
+    pub const LINE: &str = "#24303b";
+    pub const BAR: &str = "#2b3947";
+    pub const ACCENT: &str = "#5fd7ff";
+    pub const OK: &str = "#5ad18b";
+    pub const TEXT: &str = "#e6edf3";
+}
+
+/// The 4:3 dark-brand wireframe for a question option, keyed by its id. Returns
+/// `None` for an unknown id so the caller falls back to a text card.
+fn option_mockup(id: &str) -> Option<String> {
+    let inner = match id {
+        // Status rail pinned left, output stream stacked right.
+        "split" => format!(
+            "<rect x='12' y='12' width='96' height='216' rx='8' fill='{p}' stroke='{l}'/>\
+             <rect x='24' y='28' width='60' height='8' rx='4' fill='{a}'/>\
+             <rect x='24' y='48' width='72' height='6' rx='3' fill='{b}'/>\
+             <rect x='24' y='62' width='52' height='6' rx='3' fill='{b}'/>\
+             <circle cx='30' cy='92' r='5' fill='{ok}'/><rect x='42' y='88' width='54' height='6' rx='3' fill='{b}'/>\
+             <circle cx='30' cy='112' r='5' fill='{a}'/><rect x='42' y='108' width='48' height='6' rx='3' fill='{b}'/>\
+             <rect x='120' y='12' width='188' height='102' rx='8' fill='{p}' stroke='{l}'/>\
+             <rect x='120' y='126' width='188' height='102' rx='8' fill='{p}' stroke='{l}'/>\
+             <rect x='134' y='28' width='120' height='8' rx='4' fill='{t}'/>\
+             <rect x='134' y='48' width='160' height='6' rx='3' fill='{b}'/>\
+             <rect x='134' y='64' width='150' height='6' rx='3' fill='{b}'/>\
+             <rect x='134' y='142' width='120' height='8' rx='4' fill='{t}'/>\
+             <rect x='134' y='162' width='160' height='6' rx='3' fill='{b}'/>\
+             <rect x='134' y='178' width='138' height='6' rx='3' fill='{b}'/>",
+            p = ink::PANEL, l = ink::LINE, a = ink::ACCENT, b = ink::BAR, ok = ink::OK, t = ink::TEXT,
+        ),
+        // Phases as a vertical timeline with inline previews.
+        "stacked" => {
+            let mut s = format!("<line x1='44' y1='24' x2='44' y2='216' stroke='{l}' stroke-width='2'/>", l = ink::LINE);
+            for (i, y) in [36, 96, 156].into_iter().enumerate() {
+                let dot = if i == 1 { ink::ACCENT } else if i == 0 { ink::OK } else { ink::BAR };
+                s.push_str(&format!(
+                    "<circle cx='44' cy='{c}' r='7' fill='{dot}'/>\
+                     <rect x='68' y='{y}' width='240' height='48' rx='8' fill='{p}' stroke='{l}'/>\
+                     <rect x='82' y='{ty}' width='120' height='8' rx='4' fill='{t}'/>\
+                     <rect x='82' y='{by}' width='196' height='6' rx='3' fill='{b}'/>",
+                    c = y + 12, dot = dot, y = y, ty = y + 12, by = y + 28,
+                    p = ink::PANEL, l = ink::LINE, t = ink::TEXT, b = ink::BAR,
+                ));
+            }
+            s
+        }
+        // Every station as a card in a responsive grid.
+        "grid" => {
+            let mut s = String::new();
+            for row in 0..2 {
+                for col in 0..3 {
+                    let x = 16 + col * 100;
+                    let y = 20 + row * 108;
+                    let head = if row == 0 && col == 0 { ink::ACCENT } else { ink::BAR };
+                    s.push_str(&format!(
+                        "<rect x='{x}' y='{y}' width='88' height='96' rx='8' fill='{p}' stroke='{l}'/>\
+                         <rect x='{hx}' y='{hy}' width='56' height='8' rx='4' fill='{head}'/>\
+                         <rect x='{hx}' y='{ry}' width='60' height='6' rx='3' fill='{b}'/>\
+                         <rect x='{hx}' y='{ry2}' width='44' height='6' rx='3' fill='{b}'/>",
+                        x = x, y = y, hx = x + 12, hy = y + 14, ry = y + 34, ry2 = y + 50,
+                        p = ink::PANEL, l = ink::LINE, head = head, b = ink::BAR,
+                    ));
+                }
+            }
+            s
+        }
+        _ => return None,
+    };
+    Some(svg_data_uri(&wrap_svg(&inner)))
+}
+
+/// The 4:3 dark-brand wireframe for a design archetype, keyed by its id. Always
+/// returns a URI (archetypes are image-first in the direction view).
+fn archetype_mockup(id: &str) -> String {
+    let inner = match id {
+        // Dense, telemetry-first: gauges, sparklines, mono readouts.
+        "instrument" => {
+            let mut s = format!("<rect x='12' y='12' width='296' height='216' rx='8' fill='{p}' stroke='{l}'/>", p = ink::PANEL, l = ink::LINE);
+            for (i, cx) in [64, 128, 192].into_iter().enumerate() {
+                let arc = if i == 1 { ink::ACCENT } else { ink::OK };
+                s.push_str(&format!(
+                    "<circle cx='{cx}' cy='64' r='26' fill='none' stroke='{b}' stroke-width='6'/>\
+                     <path d='M {ax} 64 A 26 26 0 0 1 {cx} 38' fill='none' stroke='{arc}' stroke-width='6'/>\
+                     <rect x='{lx}' y='100' width='36' height='6' rx='3' fill='{b}'/>",
+                    cx = cx, ax = cx - 26, arc = arc, lx = cx - 18, b = ink::BAR,
+                ));
+            }
+            s.push_str(&format!(
+                "<polyline points='232,60 244,48 256,66 268,40 280,58 292,44' fill='none' stroke='{a}' stroke-width='2'/>\
+                 <rect x='28' y='130' width='264' height='6' rx='3' fill='{b}'/>\
+                 <rect x='28' y='148' width='240' height='6' rx='3' fill='{b}'/>\
+                 <rect x='28' y='166' width='252' height='6' rx='3' fill='{b}'/>\
+                 <rect x='28' y='184' width='210' height='6' rx='3' fill='{b}'/>\
+                 <rect x='28' y='202' width='180' height='6' rx='3' fill='{b}'/>",
+                a = ink::ACCENT, b = ink::BAR,
+            ));
+            s
+        }
+        // Generous whitespace, one focal metric, quiet supporting detail.
+        "editorial" => format!(
+            "<rect x='40' y='40' width='90' height='8' rx='4' fill='{b}'/>\
+             <text x='40' y='138' font-family='monospace' font-size='84' font-weight='700' fill='{t}'>98</text>\
+             <text x='150' y='138' font-family='monospace' font-size='30' fill='{a}'>%</text>\
+             <rect x='40' y='166' width='150' height='7' rx='3' fill='{b}'/>\
+             <rect x='40' y='186' width='110' height='7' rx='3' fill='{b}'/>\
+             <rect x='232' y='40' width='48' height='48' rx='24' fill='none' stroke='{a}' stroke-width='4'/>",
+            b = ink::BAR, t = ink::TEXT, a = ink::ACCENT,
+        ),
+        // Pure mono, log-stream forward, minimal chrome.
+        "terminal" => {
+            let mut s = format!(
+                "<rect x='12' y='12' width='296' height='216' rx='8' fill='#080b0f' stroke='{l}'/>\
+                 <circle cx='30' cy='30' r='4' fill='{b}'/><circle cx='44' cy='30' r='4' fill='{b}'/><circle cx='58' cy='30' r='4' fill='{b}'/>",
+                l = ink::LINE, b = ink::BAR,
+            );
+            let widths = [180, 150, 210, 120, 200, 90, 160];
+            for (i, w) in widths.into_iter().enumerate() {
+                let y = 56 + i as i32 * 22;
+                let color = if i % 3 == 0 { ink::OK } else if i % 3 == 1 { ink::ACCENT } else { ink::BAR };
+                s.push_str(&format!(
+                    "<text x='28' y='{yt}' font-family='monospace' font-size='11' fill='{c}'>&gt;</text>\
+                     <rect x='44' y='{y}' width='{w}' height='6' rx='3' fill='{c}'/>",
+                    yt = y + 6, y = y, w = w, c = color,
+                ));
+            }
+            s
+        }
+        _ => String::new(),
+    };
+    svg_data_uri(&wrap_svg(&inner))
+}
+
+/// Wrap wireframe body markup in a 4:3 SVG root with the dark background.
+fn wrap_svg(inner: &str) -> String {
+    format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 320 240'>\
+         <rect width='320' height='240' fill='{bg}'/>{inner}</svg>",
+        bg = ink::BG,
+    )
+}
 
 /// Map a wire [`ViewArtifactKind`] onto the UI [`ArtifactKind`].
 fn view_artifact_kind(k: ViewArtifactKind) -> ArtifactKind {
@@ -302,21 +476,21 @@ pub fn sample_question() -> QuestionSessionPayload {
             QuestionOption {
                 id: "split".to_string(),
                 label: "Split status rail".to_string(),
-                image_url: None,
+                image_url: option_mockup("split"),
                 image_url_light: None,
                 description: Some("Run status pinned left, output stream right.".to_string()),
             },
             QuestionOption {
                 id: "stacked".to_string(),
                 label: "Stacked timeline".to_string(),
-                image_url: None,
+                image_url: option_mockup("stacked"),
                 image_url_light: None,
                 description: Some("Phases as a vertical timeline with inline previews.".to_string()),
             },
             QuestionOption {
                 id: "grid".to_string(),
                 label: "Station grid".to_string(),
-                image_url: None,
+                image_url: option_mockup("grid"),
                 image_url_light: None,
                 description: Some("Every station as a card in a responsive grid.".to_string()),
             },
@@ -345,7 +519,7 @@ pub fn sample_direction() -> DirectionSessionPayload {
             DirectionArchetype {
                 id: "instrument".to_string(),
                 label: "Instrument panel".to_string(),
-                image_url: String::new(),
+                image_url: archetype_mockup("instrument"),
                 image_url_light: None,
                 description: "Dense, telemetry-first: gauges, sparklines, monospace readouts."
                     .to_string(),
@@ -353,7 +527,7 @@ pub fn sample_direction() -> DirectionSessionPayload {
             DirectionArchetype {
                 id: "editorial".to_string(),
                 label: "Editorial calm".to_string(),
-                image_url: String::new(),
+                image_url: archetype_mockup("editorial"),
                 image_url_light: None,
                 description: "Generous whitespace, one focal metric, quiet supporting detail."
                     .to_string(),
@@ -361,7 +535,7 @@ pub fn sample_direction() -> DirectionSessionPayload {
             DirectionArchetype {
                 id: "terminal".to_string(),
                 label: "Terminal".to_string(),
-                image_url: String::new(),
+                image_url: archetype_mockup("terminal"),
                 image_url_light: None,
                 description: "Pure mono, log-stream forward, minimal chrome.".to_string(),
             },
@@ -472,4 +646,62 @@ pub fn sample_bench_proof() -> Proof {
             samples: Some(100_000),
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn svg_data_uri_escapes_hex_and_spaces() {
+        let uri = svg_data_uri("<rect fill='#0c1116' x='1 2'/>");
+        assert!(uri.starts_with("data:image/svg+xml,"));
+        // `#` and space must be percent-encoded so the URI survives an img src.
+        assert!(uri.contains("%23"), "hash must be escaped: {uri}");
+        assert!(uri.contains("%20"), "space must be escaped: {uri}");
+        assert!(!uri.contains('#'), "no raw hash may remain: {uri}");
+    }
+
+    #[test]
+    fn every_question_option_carries_a_mockup() {
+        // The picture-per-option view only demonstrates its point with pictures.
+        for o in sample_question().options {
+            let url = o.image_url.expect("option needs a mockup");
+            assert!(url.starts_with("data:image/svg+xml,"), "{}: {url}", o.id);
+        }
+    }
+
+    #[test]
+    fn every_archetype_carries_a_mockup() {
+        for a in sample_direction().archetypes {
+            assert!(
+                a.image_url.starts_with("data:image/svg+xml,"),
+                "{}: {}",
+                a.id,
+                a.image_url
+            );
+        }
+    }
+
+    #[test]
+    fn option_mockups_are_distinct_per_layout() {
+        let split = option_mockup("split").unwrap();
+        let stacked = option_mockup("stacked").unwrap();
+        let grid = option_mockup("grid").unwrap();
+        assert_ne!(split, stacked);
+        assert_ne!(stacked, grid);
+        assert_ne!(split, grid);
+        // An unknown id falls back to a text card (no picture).
+        assert!(option_mockup("nope").is_none());
+    }
+
+    #[test]
+    fn archetype_mockups_are_distinct_per_direction() {
+        let instrument = archetype_mockup("instrument");
+        let editorial = archetype_mockup("editorial");
+        let terminal = archetype_mockup("terminal");
+        assert_ne!(instrument, editorial);
+        assert_ne!(editorial, terminal);
+        assert_ne!(instrument, terminal);
+    }
 }
