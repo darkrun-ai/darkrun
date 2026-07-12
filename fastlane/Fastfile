@@ -65,15 +65,26 @@ platform :ios do
     tag = [ver && "v#{ver}", build && "build #{build}"].compact.join(" · ")
     changelog = ["Release candidate", tag.empty? ? nil : "(#{tag})",
                  sha.empty? ? nil : "· #{sha}", "off main."].compact.join(" ")
-    upload_to_testflight(
-      api_key: asc_api_key,
-      app_identifier: APP_ID,
-      app_platform: "ios", # pilot's option name; else it prompts + dies in CI
-      ipa: ENV.fetch("DARKRUN_IPA"),
-      skip_waiting_for_build_processing: true,
-      distribute_external: false,
-      changelog: changelog,
-    )
+    # A re-run on the same commit (a retried job, a re-dispatched workflow)
+    # re-uploads the SAME CFBundleVersion, and App Store Connect rejects the
+    # duplicate with a 409-style "already been used" error. That means this
+    # lane's goal (the build is in TestFlight) is already met, not a failure
+    # (the same tolerance the `release` lane carries). Only a DIFFERENT error
+    # is real and re-raised.
+    begin
+      upload_to_testflight(
+        api_key: asc_api_key,
+        app_identifier: APP_ID,
+        app_platform: "ios", # pilot's option name; else it prompts + dies in CI
+        ipa: ENV.fetch("DARKRUN_IPA"),
+        skip_waiting_for_build_processing: true,
+        distribute_external: false,
+        changelog: changelog,
+      )
+    rescue => e
+      raise unless e.message =~ /bundle version must be higher|already been used|DUPLICATE/i
+      UI.important("TestFlight build already in App Store Connect (this commit was uploaded before); nothing to re-upload.")
+    end
   end
 
   desc "App Store upload (no auto-submit). CI builds + signs the .ipa first."

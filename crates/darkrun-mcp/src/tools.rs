@@ -268,12 +268,14 @@ impl DarkrunServer {
             .unwrap_or_default();
         crate::notify::on_gate(run, &station);
         // Gate-surfacing decision (notify-and-await): only open a window when we
-        // have no confident live human surface. A connected client (or one within
-        // the presence grace window), or a device that ACKed the gate push, means
-        // hold via the await loop — the live mirror / push carries the raised
-        // session there, so a second window would be redundant.
+        // have no confident live human surface FOR THIS RUN. A client connected
+        // to the run's session (or one within its presence grace window), or a
+        // device that ACKed the gate push, means hold via the await loop (the
+        // live mirror / push carries the raised session there, so a second
+        // window would be redundant). Presence is per-run (F12): a desktop
+        // watching run A must not make run B's gate wait on a viewer it lacks.
         match crate::desktop::surface_mode(
-            self.sessions.presence(),
+            self.sessions.presence_for(run),
             self.sessions.has_ack(run),
         ) {
             crate::desktop::SurfaceMode::Await => {
@@ -611,9 +613,10 @@ pub struct UnitCreateInput {
     /// Run-relative output paths this unit produces.
     #[serde(default)]
     pub outputs: Vec<String>,
-    /// Executable quality gates ({name, command}) proving the completion
-    /// criteria. REQUIRED when outputs are declared — pass an explicit empty
-    /// list to defer deliberately. Circular gates (zero-match `! grep`, prose
+    /// Executable quality gates proving the completion criteria: {name,
+    /// command} objects, or bare command strings (the name is derived).
+    /// REQUIRED when outputs are declared; pass an explicit empty list to
+    /// defer deliberately. Circular gates (zero-match `! grep`, prose
     /// substrings against the unit's own output) are rejected.
     #[serde(default)]
     pub quality_gates: Option<Vec<QualityGateInput>>,
@@ -627,15 +630,63 @@ pub struct UnitCreateInput {
     pub unit_type: Option<String>,
 }
 
-/// One declared quality gate on the create/update input.
+/// One declared quality gate on the create/update input. Accepts BOTH shapes
+/// (untagged): the full `{name, command}` object, or a bare command string
+/// (`"cargo test"`), the shorthand agents reach for first. Rejecting the
+/// string with a -32602 forced a retry loop for a payload whose intent was
+/// unambiguous; instead it derives its gate name from the command.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
-pub struct QualityGateInput {
-    /// Short gate name (e.g. `tests`, `lint`, `types`).
-    pub name: String,
-    /// The literal command that runs the check (the project's real stack, not
-    /// a placeholder).
-    pub command: String,
+#[serde(untagged)]
+pub enum QualityGateInput {
+    /// The explicit form: a named gate plus its literal command.
+    Named {
+        /// Short gate name (e.g. `tests`, `lint`, `types`).
+        name: String,
+        /// The literal command that runs the check (the project's real stack,
+        /// not a placeholder).
+        command: String,
+    },
+    /// The shorthand form: just the literal command; the name is derived from
+    /// it (`"cargo test"` names `cargo-test`).
+    Command(String),
+}
+
+impl QualityGateInput {
+    /// Normalize either input shape into the domain gate: the explicit form
+    /// passes through; the string shorthand pairs the command with a name
+    /// derived from it.
+    fn to_domain(&self) -> darkrun_core::domain::QualityGate {
+        match self {
+            Self::Named { name, command } => darkrun_core::domain::QualityGate {
+                name: name.clone(),
+                command: command.clone(),
+            },
+            Self::Command(command) => darkrun_core::domain::QualityGate {
+                name: derived_gate_name(command),
+                command: command.clone(),
+            },
+        }
+    }
+}
+
+/// A short gate name derived from a bare command string: the leading program
+/// name (basename, so `./scripts/check.sh` names `check.sh`) plus its first
+/// non-flag subcommand, kebab-joined (`"cargo test -p x"` names `cargo-test`).
+/// Falls back to the whole string when it has no tokens.
+fn derived_gate_name(command: &str) -> String {
+    let mut tokens = command.split_whitespace();
+    let Some(program) = tokens.next() else {
+        return command.to_string();
+    };
+    let program = std::path::Path::new(program)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| program.to_string());
+    match tokens.next().filter(|t| !t.starts_with('-')) {
+        Some(sub) => format!("{program}-{sub}"),
+        None => program,
+    }
 }
 
 /// Input for `darkrun_unit_update` — corrective, field-scoped edits.
@@ -1840,12 +1891,14 @@ impl DarkrunServer {
         // Any surfacing counts toward the once-per-process tick launch.
         self.desktop_surfaced
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        // Gate-surfacing decision (notify-and-await): hold when a human surface is
-        // already live — a connected desktop (or one within the grace window) gets
-        // the raised session from the live mirror, and a push-acked device proved
-        // it received the gate notification. Only launch when neither holds.
+        // Gate-surfacing decision (notify-and-await): hold when a human surface
+        // is already live FOR THIS RUN. A desktop subscribed to the run's
+        // session (or one within its grace window) gets the raised session from
+        // the live mirror, and a push-acked device proved it received the gate
+        // notification. Only launch when neither holds. Presence is per-run
+        // (F12): a viewer on another run does not count.
         if let crate::desktop::SurfaceMode::Await =
-            crate::desktop::surface_mode(self.sessions.presence(), self.sessions.has_ack(slug))
+            crate::desktop::surface_mode(self.sessions.presence_for(slug), self.sessions.has_ack(slug))
         {
             eprintln!(
                 "darkrun: surface_desktop '{slug}': human surface live (present or push-acked) — holding, not relaunching"
@@ -2034,14 +2087,10 @@ impl DarkrunServer {
             depends_on: input.depends_on.clone(),
             inputs: input.inputs.clone(),
             outputs: input.outputs.clone(),
-            quality_gates: input.quality_gates.as_ref().map(|gs| {
-                gs.iter()
-                    .map(|g| darkrun_core::domain::QualityGate {
-                        name: g.name.clone(),
-                        command: g.command.clone(),
-                    })
-                    .collect()
-            }),
+            quality_gates: input
+                .quality_gates
+                .as_ref()
+                .map(|gs| gs.iter().map(QualityGateInput::to_domain).collect()),
             model: input.model.clone(),
             unit_type: input.unit_type.clone(),
         };
@@ -2075,14 +2124,10 @@ impl DarkrunServer {
             inputs: input.inputs.clone(),
             outputs: input.outputs.clone(),
             body: input.body.clone(),
-            quality_gates: input.quality_gates.as_ref().map(|gs| {
-                gs.iter()
-                    .map(|g| darkrun_core::domain::QualityGate {
-                        name: g.name.clone(),
-                        command: g.command.clone(),
-                    })
-                    .collect()
-            }),
+            quality_gates: input
+                .quality_gates
+                .as_ref()
+                .map(|gs| gs.iter().map(QualityGateInput::to_domain).collect()),
             model: input.model.clone(),
             expected_sha: input.expected_sha.clone(),
         };
@@ -3604,6 +3649,25 @@ mod tests {
     }
 
     #[test]
+    fn surface_desktop_holds_per_run_not_engine_wide() {
+        // F12: a desktop watching run A used to make EVERY run's gate read
+        // "connected" and choose Await, so run B's gate never launched a
+        // surface anyone could see. Presence is per-run now.
+        let dir = tempdir().unwrap();
+        let sessions = SessionRegistry::new();
+        let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
+        // A viewer subscribed to run A's session only.
+        let _slot = sessions.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        // Run A is attended → hold (Await), no relaunch.
+        assert_eq!(server.surface_desktop("run-a")["status"], "connected");
+        // Run B has no viewer → the LAUNCH path runs even while A is watched
+        // (no announced addr here, so it reports the port gap + web fallback).
+        let b = server.surface_desktop("run-b");
+        assert_eq!(b["status"], "no_engine_port");
+        assert_eq!(b["web_url"], "https://app.darkrun.ai/runs/run-b");
+    }
+
+    #[test]
     fn mutating_tools_refresh_reads_and_lifecycle_do_not() {
         // Data-mutating tools re-broadcast the live payload…
         for t in [
@@ -4080,6 +4144,65 @@ mod tests {
             .unwrap();
         let v = updated.structured_content.unwrap();
         assert_eq!(v["frontmatter"]["status"], "completed");
+    }
+
+    #[test]
+    fn quality_gate_input_accepts_object_and_string_shapes() {
+        // The wire shapes: a full {name, command} object AND a bare command
+        // string must BOTH deserialize (untagged); the string form used to
+        // bounce with -32602 and force a retry for an unambiguous payload.
+        let gates: Vec<QualityGateInput> = serde_json::from_value(serde_json::json!([
+            { "name": "lint", "command": "cargo clippy" },
+            "cargo test -p darkrun-core",
+        ]))
+        .expect("both shapes decode");
+        let domain: Vec<darkrun_core::domain::QualityGate> =
+            gates.iter().map(QualityGateInput::to_domain).collect();
+        assert_eq!(domain[0].name, "lint");
+        assert_eq!(domain[0].command, "cargo clippy");
+        // The shorthand derives its name from the command.
+        assert_eq!(domain[1].name, "cargo-test");
+        assert_eq!(domain[1].command, "cargo test -p darkrun-core");
+    }
+
+    #[test]
+    fn derived_gate_name_covers_paths_flags_and_bare_programs() {
+        assert_eq!(derived_gate_name("cargo test -p x"), "cargo-test");
+        // A pathy program names by basename; a flag is not a subcommand.
+        assert_eq!(derived_gate_name("./scripts/check.sh --fast"), "check.sh");
+        assert_eq!(derived_gate_name("eslint --max-warnings 0"), "eslint");
+        assert_eq!(derived_gate_name("make"), "make");
+        // Degenerate input falls back to the string itself.
+        assert_eq!(derived_gate_name(""), "");
+    }
+
+    #[test]
+    fn unit_create_accepts_string_quality_gates() {
+        let (_d, server) = started_server();
+        let created = server
+            .darkrun_unit_create(Parameters(UnitCreateInput {
+                slug: "r".into(),
+                unit: "u1".into(),
+                station: "frame".into(),
+                title: None,
+                depends_on: vec![],
+                quality_gates: Some(vec![
+                    QualityGateInput::Command("cargo test".into()),
+                    QualityGateInput::Named {
+                        name: "lint".into(),
+                        command: "cargo clippy".into(),
+                    },
+                ]),
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(created.is_error, Some(false));
+        let v = created.structured_content.unwrap();
+        let gates = &v["frontmatter"]["quality_gates"];
+        assert_eq!(gates[0]["name"], "cargo-test");
+        assert_eq!(gates[0]["command"], "cargo test");
+        assert_eq!(gates[1]["name"], "lint");
+        assert_eq!(gates[1]["command"], "cargo clippy");
     }
 
     #[test]
@@ -5096,10 +5219,12 @@ mod handler_smoke {
         let s = DarkrunServer::new(dir.path());
         let store = s.store();
         run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
-        // Hold a live WS slot → presence reads as Live, so run_show reports the
-        // desktop as already connected rather than trying to launch one.
-        let _slot = s.sessions().try_acquire_ws_slot(8).expect("ws slot");
-        assert!(s.sessions().presence().is_present());
+        // Hold a live WS slot ON THIS RUN's session → its presence reads as
+        // Live, so run_show reports the desktop as already connected rather
+        // than trying to launch one. (Presence is per-run, F12: a slot on some
+        // other session would not count for "r".)
+        let _slot = s.sessions().try_acquire_ws_slot_for("r", 8).expect("ws slot");
+        assert!(s.sessions().presence_for("r").is_present());
         let out = s.darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
         assert!(out.is_error != Some(true));
         let body = out.structured_content.expect("structured");

@@ -228,6 +228,28 @@ pub fn default_root() -> Option<PathBuf> {
     data_home().map(|base| base.join(".darkrun"))
 }
 
+/// The PRE-MIGRATION discovery root: `.darkrun` under the user's real home.
+///
+/// On macOS the active tree moved into the app-group container ([`default_root`]),
+/// stranding whatever history the engine had written under the real `~/.darkrun`
+/// before the move. Discovery unions a READ-ONLY scan of this tree (see
+/// [`list_known_projects`]) so those projects keep surfacing; nothing ever
+/// writes here. Off macOS this coincides with [`default_root`], and callers
+/// skip the union.
+pub fn legacy_root() -> Option<PathBuf> {
+    let home = {
+        #[cfg(target_os = "macos")]
+        {
+            real_user_home().or_else(dirs::home_dir).or_else(home_dir_env)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            dirs::home_dir().or_else(home_dir_env)
+        }
+    }?;
+    Some(home.join(".darkrun"))
+}
+
 /// Resolve the default root for CLONED projects (`~/darkrun`, or the app-group
 /// container's `darkrun` on macOS). Lives beside the discovery registry so the
 /// sandboxed Mac App Store app can read/write the repos the engine operates on.
@@ -677,9 +699,16 @@ fn newest_engine_descriptor_in(slug_path: &Path) -> Option<EngineDescriptor> {
 /// skipped, mirroring the prune in [`list_projects_in`].
 #[cfg(not(tarpaulin_include))] // resolves the real home dir; logic via list_known_projects_in
 pub fn list_known_projects() -> io::Result<Vec<ProjectRecord>> {
-    match default_root() {
-        Some(root) => list_known_projects_in(&root),
-        None => Ok(Vec::new()),
+    let Some(root) = default_root() else {
+        return Ok(Vec::new());
+    };
+    // On macOS the discovery root moved into the app-group container, which
+    // orphaned any pre-migration history under the real home's `~/.darkrun`.
+    // Union a READ-ONLY scan of that legacy tree so those projects keep
+    // surfacing; elsewhere the two roots coincide and the plain scan suffices.
+    match legacy_root().filter(|legacy| legacy != &root) {
+        Some(legacy) => list_known_projects_with_legacy_in(&root, &legacy),
+        None => list_known_projects_in(&root),
     }
 }
 
@@ -723,6 +752,73 @@ pub fn list_known_projects_in(root: &Path) -> io::Result<Vec<ProjectRecord>> {
         });
     }
     Ok(by_slug.into_values().collect())
+}
+
+/// Like [`list_known_projects_in`] but ALSO unions a READ-ONLY scan of a
+/// legacy (pre-migration) discovery tree. The active `root` wins a slug
+/// collision: a project present in both trees surfaces once, with the
+/// container tree's record; legacy entries only fill the gaps the root-move
+/// left behind. Used by tests with two temp roots.
+pub fn list_known_projects_with_legacy_in(
+    root: &Path,
+    legacy: &Path,
+) -> io::Result<Vec<ProjectRecord>> {
+    let mut projects = list_known_projects_in(root)?;
+    for record in list_legacy_projects_in(legacy) {
+        if !projects.iter().any(|p| p.slug == record.slug) {
+            projects.push(record);
+        }
+    }
+    Ok(projects)
+}
+
+/// READ-ONLY scan of a legacy (pre-migration) discovery tree.
+///
+/// Mirrors what [`list_known_projects_in`] surfaces per slug dir (a registered
+/// `project.json`, else the newest engine descriptor), with one hard rule: the
+/// legacy tree is HISTORY, not state this engine owns. Nothing is pruned,
+/// healed, or migrated; stale identities are re-keyed IN MEMORY (a worktree
+/// resolves to its main checkout) and a record whose canonical repo root no
+/// longer exists is simply skipped. Unreadable or malformed entries are
+/// skipped too (an absent tree scans empty, never errors).
+pub fn list_legacy_projects_in(root: &Path) -> Vec<ProjectRecord> {
+    let mut projects: Vec<ProjectRecord> = Vec::new();
+    let Ok(slug_dirs) = fs::read_dir(root) else {
+        return projects;
+    };
+    for slug_entry in slug_dirs.flatten() {
+        let slug_path = slug_entry.path();
+        if !slug_path.is_dir() {
+            continue;
+        }
+        // A registered record wins over a descriptor-synthesized one, matching
+        // the union order in list_known_projects_in.
+        let record = fs::read(slug_path.join(PROJECT_RECORD_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ProjectRecord>(&bytes).ok());
+        let (source_root, name, added_at) = match record {
+            Some(rec) => (rec.path, rec.name, rec.added_at),
+            None => match newest_engine_descriptor_in(&slug_path) {
+                Some(desc) => (desc.repo_root, None, Some(desc.started_at)),
+                None => continue,
+            },
+        };
+        let canonical = resolve_project_root(&source_root);
+        if !canonical.exists() {
+            continue;
+        }
+        let slug = slug_for(&canonical);
+        if projects.iter().any(|p| p.slug == slug) {
+            continue;
+        }
+        projects.push(ProjectRecord {
+            slug,
+            name: name.or_else(|| display_name_for(&canonical)),
+            path: canonical,
+            added_at,
+        });
+    }
+    projects
 }
 
 /// Ensure a durable [`ProjectRecord`] exists for `repo_root`, preserving any
@@ -1214,6 +1310,131 @@ mod tests {
         let known = list_known_projects_in(reg.path()).unwrap();
         assert_eq!(known.len(), 1, "one repo yields one project, not a duplicate");
         assert_eq!(known[0].name.as_deref(), Some("Reg"), "the registration wins");
+    }
+
+    #[test]
+    fn legacy_union_surfaces_orphaned_history_without_writing_to_it() {
+        // Two roots: the ACTIVE container tree and the pre-migration legacy tree.
+        let container = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+
+        // A project that lives ONLY in the legacy tree (registered before the
+        // root moved) whose repo still exists on disk.
+        let old_repo = tempfile::tempdir().unwrap();
+        register_project_in(legacy.path(), old_repo.path(), Some("Old".into())).unwrap();
+        // ...and a legacy session that left ONLY an engine descriptor behind.
+        let old_run_repo = tempfile::tempdir().unwrap();
+        let engine = EngineRegistry::with_root(legacy.path(), old_run_repo.path());
+        engine.announce(sample_addr(), "claude").unwrap();
+        engine.mark_stale().unwrap();
+        // ...and a legacy record whose repo is GONE: it must not surface (and
+        // must not be pruned either; the tree is read-only).
+        let ghost = ProjectRecord {
+            slug: "ghost-00000000".into(),
+            path: PathBuf::from("/nonexistent/ghost-repo"),
+            name: None,
+            added_at: None,
+        };
+        write_project_record_in(legacy.path(), &ghost.slug, &ghost).unwrap();
+
+        // A project registered in the container tree only.
+        let new_repo = tempfile::tempdir().unwrap();
+        register_project_in(container.path(), new_repo.path(), Some("New".into())).unwrap();
+
+        let snapshot = |root: &Path| {
+            let mut names: Vec<String> = walkdir_names(root);
+            names.sort();
+            names
+        };
+        let before = snapshot(legacy.path());
+
+        let known =
+            list_known_projects_with_legacy_in(container.path(), legacy.path()).unwrap();
+        let slugs: Vec<&str> = known.iter().map(|p| p.slug.as_str()).collect();
+        assert!(slugs.contains(&slug_for(old_repo.path()).as_str()), "{slugs:?}");
+        assert!(slugs.contains(&slug_for(old_run_repo.path()).as_str()), "{slugs:?}");
+        assert!(slugs.contains(&slug_for(new_repo.path()).as_str()), "{slugs:?}");
+        assert!(!slugs.contains(&"ghost-00000000"), "a vanished repo stays hidden");
+
+        // READ-ONLY: the legacy tree's entries are untouched. The ghost
+        // record survives; nothing was migrated, pruned, or healed on disk.
+        assert_eq!(before, snapshot(legacy.path()), "legacy tree must not change");
+        assert!(legacy
+            .path()
+            .join(&ghost.slug)
+            .join(PROJECT_RECORD_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn legacy_union_lets_the_container_tree_win_a_slug_collision() {
+        let container = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        // The SAME repo registered in both trees, with different display names.
+        let repo = tempfile::tempdir().unwrap();
+        register_project_in(legacy.path(), repo.path(), Some("Legacy".into())).unwrap();
+        register_project_in(container.path(), repo.path(), Some("Container".into())).unwrap();
+
+        let known =
+            list_known_projects_with_legacy_in(container.path(), legacy.path()).unwrap();
+        assert_eq!(known.len(), 1, "one repo surfaces once: {known:?}");
+        assert_eq!(
+            known[0].name.as_deref(),
+            Some("Container"),
+            "the container tree's record wins the collision"
+        );
+    }
+
+    /// Flat listing of every path under `root`, relative, for before/after
+    /// structure comparisons in the read-only legacy tests.
+    fn walkdir_names(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(rd) = fs::read_dir(root) else {
+            return out;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            if path.is_dir() {
+                for child in walkdir_names(&path) {
+                    out.push(format!("{name}/{child}"));
+                }
+            }
+            out.push(name);
+        }
+        out
+    }
+
+    #[test]
+    fn legacy_scan_is_empty_for_an_absent_tree_and_skips_junk() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Absent tree: empty, not an error.
+        assert!(list_legacy_projects_in(&tmp.path().join("never")).is_empty());
+        // Junk entries: a loose file, a slug dir with nothing usable, and a
+        // malformed record are all skipped.
+        fs::write(tmp.path().join("loose"), b"x").unwrap();
+        let empty = tmp.path().join("empty-00000000");
+        fs::create_dir_all(&empty).unwrap();
+        let bad = tmp.path().join("bad-00000000");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join(PROJECT_RECORD_FILE), b"not json").unwrap();
+        assert!(list_legacy_projects_in(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn legacy_root_is_the_real_home_dot_darkrun() {
+        // Whatever the platform, the legacy root names `.darkrun` directly under
+        // a home directory (never the app-group container).
+        let root = legacy_root().expect("home resolves");
+        assert!(root.ends_with(".darkrun"), "{root:?}");
+        assert!(
+            !root.to_string_lossy().contains("Group Containers"),
+            "the legacy root predates the container move: {root:?}"
+        );
     }
 
     #[test]

@@ -150,6 +150,13 @@ fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"))
 }
 
+/// The synthesized DEV-bundle id: the identity the generated `.app` wrapper
+/// carries (its `CFBundleIdentifier` in [`INFO_PLIST`] below must stay in
+/// sync). Distinct from [`INSTALLED_BUNDLE_ID`] (the signed store app), so the
+/// two never shadow each other in LaunchServices.
+#[cfg(target_os = "macos")]
+const DEV_BUNDLE_ID: &str = "ai.darkrun.desktop";
+
 /// The minimal `Info.plist` for the macOS launch wrapper. `CFBundleName` is what
 /// the Dock/menu-bar show ("darkrun"); the window title is set by the app itself.
 #[cfg(target_os = "macos")]
@@ -376,8 +383,22 @@ fn launch(bin: PathBuf, port: u16, repo_root: &Path, session: Option<&str>) -> L
         Err(_) => return launch_direct(bin, port, repo_root, session),
     };
     // Put a real copy of the binary inside the bundle (replacing any stale
-    // symlink) so the Dock shows our icon; a no-op when already current.
+    // symlink) so the Dock shows our icon; a no-op when already current. This
+    // also carries the ad-hoc re-seal (see sync_bundle_exe), which stays in
+    // place for the next cold start on both paths below.
     let _ = sync_bundle_exe(&bundle, &bin);
+    // WARM handoff, mirroring launch_installed: with a run to show and the dev
+    // bundle already running, hand it the review deep link (routed to the live
+    // instance as a GetURL apple event, tao `Event::Opened`) so it FOLLOWS the
+    // run. `open -n` here would instead spawn a second window still pinned to a
+    // stale env port; a warm app never re-reads `--env`. The COLD case keeps
+    // the `-n`-by-path launch below: the synthesized id can be registered to
+    // several checkouts, so only the path form is guaranteed to open THIS build.
+    if let Some(s) = session {
+        if app_running(DEV_BUNDLE_ID) && open_deeplink(DEV_BUNDLE_ID, s) {
+            return Launch::Launched(bin);
+        }
+    }
     let log = log_path(repo_root);
     let _ = open_log(repo_root); // ensure .darkrun/ exists for open's redirect
     // `open` blocks only until LaunchServices accepts the launch, so a non-zero
@@ -467,6 +488,40 @@ const INSTALLED_BUNDLE_ID: &str = "ai.darkrun.app";
 #[cfg(target_os = "macos")]
 fn review_deeplink(session: &str) -> String {
     format!("darkrun://review/{session}")
+}
+
+/// Whether a GUI app with `bundle_id` is currently RUNNING in the login
+/// session, per LaunchServices (`lsappinfo` prints nothing for an app that
+/// isn't up). Best-effort: a probe failure reads as "not running", degrading
+/// to the cold-launch path (a redundant window at worst, never a lost gate).
+#[cfg(target_os = "macos")]
+fn app_running(bundle_id: &str) -> bool {
+    Command::new("lsappinfo")
+        .args(["info", "-app", bundle_id])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
+        .unwrap_or(false)
+}
+
+/// Hand a run's review deep link to an ALREADY-RUNNING app by bundle id:
+/// `open -b <id> darkrun://review/<slug>` routes the URL to the live instance
+/// (GetURL apple event, tao `Event::Opened`) so it navigates to the run
+/// without a second window spawning. Returns whether `open` accepted it; a
+/// refusal falls back to the caller's cold-launch path.
+#[cfg(target_os = "macos")]
+fn open_deeplink(bundle_id: &str, session: &str) -> bool {
+    Command::new("open")
+        .arg("-b")
+        .arg(bundle_id)
+        .arg(review_deeplink(session))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Open the **installed** app (Mac App Store / TestFlight) by bundle id via
@@ -673,6 +728,16 @@ mod tests {
             "darkrun://review/quiet-tumbling-canyon"
         );
         assert_eq!(review_deeplink("r"), "darkrun://review/r");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn app_running_is_false_for_a_bundle_id_that_is_not_up() {
+        // The warm-handoff guard: an id nothing has ever registered can't be
+        // running, so the probe must say "not running" (and the caller then
+        // keeps the cold `open -n` path). Also covers the headless-CI case,
+        // where lsappinfo itself errors: that too must read as not running.
+        assert!(!app_running("ai.darkrun.test-never-installed"));
     }
 
     #[cfg(target_os = "macos")]
