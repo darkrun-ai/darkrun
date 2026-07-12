@@ -395,7 +395,13 @@ fn resolve_relay_token(
 /// access to work, so `darkrun login` (which stores the dial token) is
 /// sufficient to make a run reachable — the URL no longer has to be exported by
 /// hand, which nothing did.
-pub const DEFAULT_RELAY_URL: &str = "wss://relay.darkrun.ai";
+///
+/// The relay is served by the web service on the APEX host (`darkrun.ai/relay/…`);
+/// `relay.darkrun.ai` has no DNS record today, so defaulting to it made every
+/// default-config engine fail its dial at DNS resolution. If a dedicated relay
+/// host is stood up later (Terraform has the mapping prepped), flipping this
+/// constant (or setting `DARKRUN_RELAY_URL`) is the whole migration.
+pub const DEFAULT_RELAY_URL: &str = "wss://darkrun.ai";
 
 /// The relay candidate to advertise + dial. The base URL defaults to the
 /// production relay ([`DEFAULT_RELAY_URL`]) and is overridable via
