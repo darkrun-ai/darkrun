@@ -11,8 +11,9 @@
 //! loop station can no longer lock with zero review. Dark/Auto mode bypasses (a
 //! dark run never stops for review by design), as does a no-diff / non-git run
 //! (nothing to review). This joins the engine's other enforced checkpoint
-//! guarantees — the open-`must`/`should` severity gate and the Prove
-//! missing-proof hold, both in [`crate::position`].
+//! guarantees — the open-`must`/`should` severity gate, the Prove
+//! missing-proof hold, and the Prove evidence gate on the human approve, all
+//! in [`crate::position`].
 
 use std::path::Path;
 

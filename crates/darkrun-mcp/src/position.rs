@@ -1708,8 +1708,9 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
             // evidence, so a dark/Auto run can no longer clear Prove with an
             // empty or mismatched proof. Attaching a proof carrying real numbers
             // (or a terminal snapshot) clears it on the next tick. Gated on Auto
-            // only — solo/team surface the missing proof to the human reviewer at
-            // their gate, so they are not force-held here.
+            // only — solo/team park at their gate instead, where
+            // `checkpoint_decide`'s evidence gate enforces the same guarantee on
+            // the human approve (with an explicit override).
             if station.as_str() == darkrun_core::domain::Position::Prove.dir()
                 && matches!(kind, CheckpointKind::Auto)
                 && run.surface().is_some()
@@ -3674,6 +3675,12 @@ fn require_gate_review(
 /// `approved == true` advances the station (mirrors an `auto`/approved gate);
 /// `approved == false` holds the station and stamps the gate as `Blocked` so
 /// the rework routes back as feedback on the next tick.
+///
+/// Two engine guarantees are enforced on the approve path regardless of which
+/// surface issued the decision: open `must`/`should` annotations block a clean
+/// approve, and the Prove station's checkpoint refuses to lock without
+/// measurement-bearing evidence (or the explicit
+/// [`crate::proof::NO_EVIDENCE_OVERRIDE`] token in the feedback).
 pub fn checkpoint_decide(
     store: &StateStore,
     slug: &str,
@@ -3740,6 +3747,55 @@ pub fn checkpoint_decide(
         // before it can lock. Dark/Auto bypasses; a no-diff / no-git station has
         // nothing to review and locks freely.
         require_gate_review(store, slug, &station, effective_checkpoint_kind(&state))?;
+    }
+
+    // ── Evidence gate: a human Prove approve carries numbers, not assertions ──
+    // The cursor's Auto hold (in `derive_position`) already refuses to
+    // auto-lock the Prove station without objective proof, but that branch
+    // never sees a solo/team gate: those park and wait for THIS decide call.
+    // Enforce the same guarantee here, so an operator approve cannot silently
+    // pass Prove with a missing, mismatched, or empty proof, whichever surface
+    // issued it (MCP tool, desktop, curl, remote relay). Mirrors the Auto
+    // hold's scope: only the Prove station, and only once the run is classified
+    // to a surface (an unclassified run has no measurement route to demand).
+    // Request-changes is never blocked, and the operator keeps an EXPLICIT
+    // escape hatch: an approve whose feedback carries the literal
+    // `override: no-evidence` token records the decision with the override
+    // noted in the feedback trail.
+    if approved
+        && station == darkrun_core::domain::Position::Prove.dir()
+        && run.surface().is_some()
+    {
+        if let Some(gap) = crate::proof::station_proof_evidence_gap(store, slug, &station) {
+            let overridden = feedback
+                .as_deref()
+                .is_some_and(|f| f.contains(crate::proof::NO_EVIDENCE_OVERRIDE));
+            if !overridden {
+                return Err(McpError::InvalidInput(format!(
+                    "cannot approve the '{station}' station without measured evidence: {}. \
+                     Prove carries numbers, not assertions: measure the surface (darkrun \
+                     verify / darkrun bench) and attach the result with darkrun_proof_attach, \
+                     or approve again with feedback containing \"{}\" to record an explicit \
+                     no-evidence override.",
+                    gap.describe(),
+                    crate::proof::NO_EVIDENCE_OVERRIDE,
+                )));
+            }
+            // Make the override durable: note it in the feedback trail with a
+            // terminal status (so the manager's walk never routes it as
+            // rework), preserving the operator's own words alongside the gap
+            // that was waved through.
+            let id = nonclobber_feedback_id(store, slug, "fb-prove-override")?;
+            let body = feedback.clone().unwrap_or_default();
+            let doc = format!(
+                "---\nstatus: addressed\nstation: {station}\norigin: operator\ncreated_at: {now}\n---\n\
+                 Operator approved the '{station}' checkpoint without measured evidence \
+                 ({}) via the explicit `{}` token.\n\n{body}\n",
+                gap.describe(),
+                crate::proof::NO_EVIDENCE_OVERRIDE,
+            );
+            store.write_feedback_raw(slug, &id, &doc)?;
+        }
     }
 
     let mut landed_station: Option<String> = None;
@@ -5237,6 +5293,202 @@ mod tests {
         assert!(doc.contains("station: frame"));
         assert!(doc.contains("station note"));
         assert!(doc.contains("spec.md"));
+    }
+
+    /// Park a run at `station`'s post-execution Checkpoint with every earlier
+    /// factory station completed, so `checkpoint_decide` resolves THIS
+    /// station's gate (mirrors where a solo/team run waits for the operator).
+    fn park_at_checkpoint(store: &StateStore, slug: &str, station: &str) {
+        let factory = crate::factory::resolve_factory("software").unwrap();
+        let mut state = store.read_state(slug).unwrap().unwrap();
+        for name in factory.station_names() {
+            if name == station {
+                break;
+            }
+            let st = ensure_station(&mut state, &factory, &name).unwrap();
+            st.status = Status::Completed;
+        }
+        let st = ensure_station(&mut state, &factory, station).unwrap();
+        st.status = Status::InProgress;
+        st.phase = StationPhase::Checkpoint;
+        st.checkpoint = Some(Checkpoint {
+            kind: CheckpointKind::Ask,
+            entered_at: Some(Utc::now().to_rfc3339()),
+            outcome: None,
+        });
+        state.active_station = station.to_string();
+        store.write_state(slug, &state).unwrap();
+    }
+
+    /// F13: a human approve of the Prove checkpoint on a classified run must
+    /// not silently pass without measured evidence. The refusal is actionable:
+    /// it names the gap, the attach tool, the measurement command, and the
+    /// explicit override token.
+    #[test]
+    fn human_prove_approve_without_evidence_is_refused() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        crate::proof::set_surface(&store, "r", "api").expect("classify");
+        park_at_checkpoint(&store, "r", "prove");
+
+        let err = checkpoint_decide(&store, "r", true, None).expect_err("refused");
+        let msg = err.to_string();
+        assert!(msg.contains("no proof is attached"), "names the gap: {msg}");
+        assert!(msg.contains("darkrun_proof_attach"), "points at the attach tool: {msg}");
+        assert!(msg.contains("darkrun verify"), "points at the measurement command: {msg}");
+        assert!(msg.contains("override: no-evidence"), "documents the escape hatch: {msg}");
+        // The gate held: the station did not complete.
+        let s = store.read_state("r").unwrap().unwrap();
+        assert_eq!(s.stations["prove"].status, Status::InProgress);
+    }
+
+    /// F13: an attached-but-useless proof is refused too, each gap named
+    /// precisely (block mismatch vs no measured values).
+    #[test]
+    fn human_prove_approve_flags_empty_and_mismatched_proofs() {
+        use darkrun_api::proof::{BenchProof, Proof, Surface};
+
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        crate::proof::set_surface(&store, "r", "api").expect("classify");
+        park_at_checkpoint(&store, "r", "prove");
+
+        // A bench surface carrying NO block at all: proof block mismatch.
+        let blockless = Proof { surface: Surface::Api, web: None, bench: None };
+        crate::proof::attach_proof(&store, "r", blockless, Some("prove".into())).unwrap();
+        let err = checkpoint_decide(&store, "r", true, None).expect_err("mismatch refused");
+        assert!(err.to_string().contains("proof block mismatch"), "{err}");
+
+        // The right block, carrying nothing: no measurement.
+        let empty = Proof::bench(Surface::Api, BenchProof::default());
+        crate::proof::attach_proof(&store, "r", empty, Some("prove".into())).unwrap();
+        let err = checkpoint_decide(&store, "r", true, None).expect_err("empty refused");
+        assert!(err.to_string().contains("no measured values"), "{err}");
+    }
+
+    /// F13: measured evidence clears the human Prove gate with no override.
+    #[test]
+    fn human_prove_approve_with_evidence_passes() {
+        use darkrun_api::proof::{BenchProof, Proof, Surface};
+
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        crate::proof::set_surface(&store, "r", "api").expect("classify");
+        park_at_checkpoint(&store, "r", "prove");
+
+        let proof = Proof::bench(
+            Surface::Api,
+            BenchProof { p95: Some(2.5), ..Default::default() },
+        );
+        crate::proof::attach_proof(&store, "r", proof, Some("prove".into())).unwrap();
+        checkpoint_decide(&store, "r", true, None).expect("approve with evidence");
+        let s = store.read_state("r").unwrap().unwrap();
+        assert_eq!(s.stations["prove"].status, Status::Completed);
+    }
+
+    /// F13: the explicit `override: no-evidence` token records the decision,
+    /// preserving the operator's words and the override in the feedback trail
+    /// (settled, so it never routes as rework).
+    #[test]
+    fn human_prove_approve_with_override_token_passes_and_is_recorded() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        crate::proof::set_surface(&store, "r", "api").expect("classify");
+        park_at_checkpoint(&store, "r", "prove");
+
+        let note = "override: no-evidence, demo build, numbers land with the harden pass";
+        checkpoint_decide(&store, "r", true, Some(note.into())).expect("override approve");
+        let s = store.read_state("r").unwrap().unwrap();
+        assert_eq!(s.stations["prove"].status, Status::Completed);
+
+        let raw = store.read_feedback_raw("r").unwrap();
+        let doc = raw.get("fb-prove-override").expect("override trail recorded");
+        assert!(doc.contains("status: addressed"), "settled, not rework: {doc}");
+        assert!(doc.contains(note), "operator feedback preserved: {doc}");
+        // The settled trail note must not preempt the run track.
+        let pos = derive_position(&store, "r").expect("derive");
+        assert_ne!(pos.track, Track::Feedback, "override note routed as rework");
+    }
+
+    /// F13: request-changes is NEVER evidence-blocked; a reject with no proof
+    /// holds the station and routes the feedback as usual.
+    #[test]
+    fn human_prove_reject_is_never_evidence_blocked() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        crate::proof::set_surface(&store, "r", "api").expect("classify");
+        park_at_checkpoint(&store, "r", "prove");
+
+        checkpoint_decide(&store, "r", false, Some("measure it properly".into()))
+            .expect("reject passes");
+        let s = store.read_state("r").unwrap().unwrap();
+        assert_eq!(s.stations["prove"].status, Status::Blocked);
+    }
+
+    /// F13: the evidence gate scopes to the Prove station's POST-execution
+    /// checkpoint on classified runs; everything else keeps its behavior.
+    #[test]
+    fn evidence_gate_scopes_to_the_prove_checkpoint() {
+        let (_d, store1) = store();
+        let (_d2, store2) = store();
+        let (_d3, store3) = store();
+
+        // A non-Prove station approves without any proof, even classified.
+        run_start(&store1, "r", "software", None, Mode::Solo, "full").expect("start");
+        crate::proof::set_surface(&store1, "r", "api").expect("classify");
+        park_at_checkpoint(&store1, "r", "build");
+        checkpoint_decide(&store1, "r", true, None).expect("non-prove approve passes");
+        assert_eq!(
+            store1.read_state("r").unwrap().unwrap().stations["build"].status,
+            Status::Completed
+        );
+
+        // An UNCLASSIFIED run's prove gate is not held (mirrors the Auto hold,
+        // which only fires once Shape recorded a surface to route by).
+        run_start(&store2, "q", "software", None, Mode::Solo, "full").expect("start");
+        park_at_checkpoint(&store2, "q", "prove");
+        checkpoint_decide(&store2, "q", true, None).expect("unclassified approve passes");
+        assert_eq!(
+            store2.read_state("q").unwrap().unwrap().stations["prove"].status,
+            Status::Completed
+        );
+
+        // The PRE-execution user gate at prove is not evidence-gated either:
+        // nothing has been manufactured yet, so there is nothing to measure.
+        run_start(&store3, "p", "software", None, Mode::Solo, "full").expect("start");
+        crate::proof::set_surface(&store3, "p", "api").expect("classify");
+        let factory = crate::factory::resolve_factory("software").unwrap();
+        let mut state = store3.read_state("p").unwrap().unwrap();
+        for name in factory.station_names() {
+            if name == "prove" {
+                break;
+            }
+            ensure_station(&mut state, &factory, &name).unwrap().status = Status::Completed;
+        }
+        let st = ensure_station(&mut state, &factory, "prove").unwrap();
+        st.status = Status::InProgress;
+        st.phase = StationPhase::UserGate;
+        st.elaborated = true;
+        state.active_station = "prove".to_string();
+        store3.write_state("p", &state).unwrap();
+        // A decomposed unit waits behind the gate, as in the real flow.
+        let unit = Unit {
+            slug: "p-u".into(),
+            frontmatter: darkrun_core::domain::UnitFrontmatter {
+                status: Status::Pending,
+                station: Some("prove".into()),
+                ..Default::default()
+            },
+            title: "p-u".into(),
+            body: String::new(),
+        };
+        store3.write_unit("p", &unit).unwrap();
+        checkpoint_decide(&store3, "p", true, None).expect("pre-execution approve passes");
+        assert_eq!(
+            store3.read_state("p").unwrap().unwrap().stations["prove"].phase,
+            StationPhase::Manufacture,
+            "the approve released the manufacture wave without evidence"
+        );
     }
 
     /// A station carrying OPEN annotations auto-surfaces the resolved
