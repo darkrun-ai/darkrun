@@ -39,3 +39,4 @@
 {"action":"spec","at":"2026-07-12T02:20:48.400564+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"shape"}
 {"at":"2026-07-12T05:14:27.616598+00:00","event":"darkrun.station.dropped","next":"build","run":"darkrun-sim","station":"shape"}
 {"action":"spec","at":"2026-07-12T05:14:52.357039+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"action":"fix_feedback","at":"2026-07-12T05:42:35.097192+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
