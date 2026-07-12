@@ -439,6 +439,12 @@ fn announce_engine(
                 "darkrun: discovery descriptor written to {}",
                 registry.descriptor_path().display()
             );
+            // Backfill the durable project record so this session's repo shows up
+            // in the desktop even if it was never added by hand. Best-effort and
+            // idempotent (an existing record, with its added_at, is kept).
+            if let Err(e) = crate::registry::ensure_project_registered(repo_root) {
+                eprintln!("darkrun: could not register project for discovery: {e}");
+            }
             Some(registry)
         }
         Err(e) => {

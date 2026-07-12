@@ -21,6 +21,7 @@
 //! trail for debugging and tolerates engines that die without running their
 //! shutdown hook.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
@@ -596,6 +597,137 @@ pub fn list_projects_in(root: &Path) -> io::Result<Vec<ProjectRecord>> {
     Ok(projects)
 }
 
+/// The newest engine descriptor in a slug directory, LIVE or historical.
+///
+/// [`list_live_engines_in`] deliberately ignores dead pids and `.stale` records;
+/// this does the opposite, for BACKFILL: it reads every `engine-*.json` (and its
+/// retired `engine-*.json.stale` sibling), alive or long gone, and returns the
+/// one written most recently (by `started_at`). It is how a project that has RUN
+/// but was never explicitly registered is recovered, since the descriptor carries
+/// the `repo_root` the session ran against.
+fn newest_engine_descriptor_in(slug_path: &Path) -> Option<EngineDescriptor> {
+    let entries = fs::read_dir(slug_path).ok()?;
+    let mut newest: Option<EngineDescriptor> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Any engine record, active (`engine-<pid>.json`) or retired
+        // (`engine-<pid>.json.stale`); both hold a usable repo_root.
+        if !name.starts_with("engine-") || !name.contains(".json") {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok(desc) = serde_json::from_slice::<EngineDescriptor>(&bytes) else {
+            continue;
+        };
+        // RFC3339 timestamps sort lexicographically in chronological order.
+        let newer = newest
+            .as_ref()
+            .map(|cur| desc.started_at > cur.started_at)
+            .unwrap_or(true);
+        if newer {
+            newest = Some(desc);
+        }
+    }
+    newest
+}
+
+/// Every project darkrun knows about on this machine: registered `project.json`
+/// records UNIONED with projects inferred from engine descriptors.
+///
+/// [`list_projects`] surfaces only projects that were explicitly registered (Add
+/// a project, or the boot-time backfill in [`ensure_project_registered`]). But a
+/// session an agent started before that backfill existed leaves only an engine
+/// descriptor behind, never a `project.json`. This recovers those: for any slug
+/// dir with no registry record, it synthesizes one from the newest engine
+/// descriptor whose repo root still exists on disk, so the desktop surfaces every
+/// repo you have actually run against, live or idle, without a manual add.
+///
+/// Worktree engine dirs collapse onto their canonical project (a linked worktree
+/// resolves to the main checkout, [`slug_for`]), and a descriptor whose repo root
+/// is gone (a deleted clone, a retired worktree with no surviving checkout) is
+/// skipped, mirroring the prune in [`list_projects_in`].
+#[cfg(not(tarpaulin_include))] // resolves the real home dir; logic via list_known_projects_in
+pub fn list_known_projects() -> io::Result<Vec<ProjectRecord>> {
+    match default_root() {
+        Some(root) => list_known_projects_in(&root),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Like [`list_known_projects`] but scans an explicit `root`. Used by tests.
+pub fn list_known_projects_in(root: &Path) -> io::Result<Vec<ProjectRecord>> {
+    // The durable registry first (already pruned + identity-healed), keyed by
+    // slug so a synthesized record never shadows a real registration.
+    let mut by_slug: BTreeMap<String, ProjectRecord> = list_projects_in(root)?
+        .into_iter()
+        .map(|rec| (rec.slug.clone(), rec))
+        .collect();
+
+    let slug_dirs = match fs::read_dir(root) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(by_slug.into_values().collect())
+        }
+        Err(e) => return Err(e),
+    };
+    for slug_entry in slug_dirs.flatten() {
+        let slug_path = slug_entry.path();
+        if !slug_path.is_dir() {
+            continue;
+        }
+        let Some(desc) = newest_engine_descriptor_in(&slug_path) else {
+            continue;
+        };
+        // The session ran against `repo_root`; a project IS its git repo, so
+        // resolve a worktree to its main checkout, and skip it when that checkout
+        // no longer exists (nothing left to open).
+        let canonical = resolve_project_root(&desc.repo_root);
+        if !canonical.exists() {
+            continue;
+        }
+        let slug = slug_for(&canonical);
+        by_slug.entry(slug.clone()).or_insert_with(|| ProjectRecord {
+            slug,
+            name: display_name_for(&canonical),
+            path: canonical,
+            added_at: Some(desc.started_at.clone()),
+        });
+    }
+    Ok(by_slug.into_values().collect())
+}
+
+/// Ensure a durable [`ProjectRecord`] exists for `repo_root`, preserving any
+/// record already there.
+///
+/// Called on engine boot so every session that runs makes its project visible to
+/// the desktop, even one an agent started without ever touching Add a project. An
+/// existing record wins (its `added_at` and display name are kept); only a missing
+/// one is written. Best-effort: callers ignore the error.
+#[cfg(not(tarpaulin_include))] // resolves the real home dir; logic via ensure_project_registered_in
+pub fn ensure_project_registered(repo_root: &Path) -> io::Result<ProjectRecord> {
+    let root = default_root().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "could not resolve home directory for the darkrun discovery registry",
+        )
+    })?;
+    ensure_project_registered_in(&root, repo_root)
+}
+
+/// Like [`ensure_project_registered`] but under an explicit registry `root`. Used
+/// by tests to point the tree at a temp dir.
+pub fn ensure_project_registered_in(root: &Path, repo_root: &Path) -> io::Result<ProjectRecord> {
+    let canonical = resolve_project_root(repo_root);
+    let slug = slug_for(&canonical);
+    if let Some(existing) = read_project_record_in(root, &slug)? {
+        return Ok(existing);
+    }
+    register_project_in(root, repo_root, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1022,4 +1154,51 @@ mod tests {
         assert!(rec.slug.starts_with("widgets-"), "{}", rec.slug);
     }
 
+    #[test]
+    fn list_known_projects_in_recovers_a_session_that_was_never_registered() {
+        let reg = tempfile::tempdir().unwrap();
+        // An existing repo dir a session ran against.
+        let repo = tempfile::tempdir().unwrap();
+        // The engine wrote its descriptor, then died (only a `.stale` record left).
+        // Crucially, NO project.json was ever written.
+        let registry = EngineRegistry::with_root(reg.path(), repo.path());
+        registry.announce(sample_addr(), "claude").unwrap();
+        registry.mark_stale().unwrap();
+
+        // The durable registry alone sees nothing (no project.json).
+        assert!(list_projects_in(reg.path()).unwrap().is_empty());
+
+        // The union recovers the project from the historical engine descriptor.
+        let known = list_known_projects_in(reg.path()).unwrap();
+        assert_eq!(known.len(), 1, "the run's repo should surface as a project");
+        assert_eq!(known[0].slug, slug_for(&resolve_project_root(repo.path())));
+        assert!(known[0].path.exists(), "the synthesized path is a real checkout");
+    }
+
+    #[test]
+    fn list_known_projects_in_does_not_duplicate_a_registered_project() {
+        let reg = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        // Explicitly registered AND has an engine descriptor for the same repo.
+        register_project_in(reg.path(), repo.path(), Some("Reg".to_string())).unwrap();
+        EngineRegistry::with_root(reg.path(), repo.path())
+            .announce(sample_addr(), "claude")
+            .unwrap();
+
+        let known = list_known_projects_in(reg.path()).unwrap();
+        assert_eq!(known.len(), 1, "one repo yields one project, not a duplicate");
+        assert_eq!(known[0].name.as_deref(), Some("Reg"), "the registration wins");
+    }
+
+    #[test]
+    fn ensure_project_registered_in_writes_once_then_preserves() {
+        let reg = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        // First call materializes a fresh record.
+        let first = ensure_project_registered_in(reg.path(), repo.path()).unwrap();
+        assert!(first.added_at.is_some(), "a new registration is stamped");
+        // A second call must return the SAME record, never rewriting added_at.
+        let second = ensure_project_registered_in(reg.path(), repo.path()).unwrap();
+        assert_eq!(first, second, "an existing record is preserved, not rewritten");
+    }
 }

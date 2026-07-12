@@ -1246,7 +1246,10 @@ fn ProjectCard(proj: Project) -> Element {
 ///
 /// Idempotent on slug; returns projects sorted by name for a stable order.
 fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
-    let mut by_slug: BTreeMap<String, Project> = darkrun_mcp::registry::list_projects()
+    // Every project known locally: the durable registry UNIONED with projects
+    // inferred from engine descriptors (a session that ran but was never added by
+    // hand still surfaces, keyed by the repo it ran against).
+    let mut by_slug: BTreeMap<String, Project> = darkrun_mcp::registry::list_known_projects()
         .unwrap_or_default()
         .into_iter()
         .map(|rec| {
@@ -1279,6 +1282,33 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
 
     by_slug.into_values().collect()
 }
+
+/// Whether to offer the native "Browse" folder picker. True everywhere the app
+/// actually runs a desktop file dialog (macOS Finder, and the platform dialog on
+/// Linux/Windows); false on iOS, which has no folder picker.
+const SHOW_BROWSE: bool = cfg!(not(target_os = "ios"));
+
+/// Open the native folder picker and, if the user chooses a directory, set it as
+/// the Local-repo path — so a local repo is chosen in Finder, not typed. Runs the
+/// dialog off the render (its future resolves when the user picks or cancels).
+#[cfg(not(target_os = "ios"))]
+fn spawn_folder_pick(mut value: Signal<String>, mut status: Signal<Option<String>>) {
+    spawn(async move {
+        if let Some(handle) = rfd::AsyncFileDialog::new()
+            .set_title("Choose a local git repository")
+            .pick_folder()
+            .await
+        {
+            value.set(handle.path().display().to_string());
+            status.set(None);
+        }
+    });
+}
+
+/// iOS has no folder picker; the Browse button is compiled out ([`SHOW_BROWSE`]),
+/// so this stub only exists to keep the call site type-checking on that target.
+#[cfg(target_os = "ios")]
+fn spawn_folder_pick(_value: Signal<String>, _status: Signal<Option<String>>) {}
 
 /// The two add-a-project entry points: a **Git URL** (clone + register) and a
 /// **Local repo** (register an existing git checkout). Both must be git repos; the
@@ -1317,7 +1347,7 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
     let current = *mode.read();
     let placeholder = match current {
         AddMode::Git => "https://github.com/acme/storefront.git",
-        AddMode::Local => "/Users/you/dev/acme/storefront",
+        AddMode::Local => "Browse\u{2026} or type a path to a git checkout",
     };
     let action_label = match current {
         AddMode::Git => "Clone & add",
@@ -1376,6 +1406,17 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
                     value: "{value}",
                     oninput: move |evt| value.set(evt.value()),
                 }
+                // Local repo: choose the checkout in Finder rather than typing a
+                // path. The text field still reflects (and accepts) the choice.
+                if current == AddMode::Local && SHOW_BROWSE {
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        tone: Tone::Neutral,
+                        disabled: busy_now,
+                        on_click: move |_| spawn_folder_pick(value, status),
+                        "Browse\u{2026}"
+                    }
+                }
                 Button {
                     variant: ButtonVariant::Primary,
                     tone: Tone::Accent,
@@ -1396,8 +1437,8 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
             }
             p { style: "{note_style}",
                 "Git URL \u{2192} darkrun clones it (into the path you choose), then registers it. \
-                 Local repo \u{2192} pick a path to an existing git checkout. Either way it must be \
-                 a git repo; the project slug + .darkrun/ live in the working tree."
+                 Local repo \u{2192} Browse to an existing git checkout (or type its path). Either \
+                 way it must be a git repo; the project slug + .darkrun/ live in the working tree."
             }
             if let Some(msg) = status.read().clone() {
                 p {
