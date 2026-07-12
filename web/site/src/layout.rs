@@ -68,6 +68,7 @@ pub fn Shell() -> Element {
                 div { style: "display:flex;gap:18px;flex-wrap:wrap;",
                     NavLink { to: Route::BigPicture {}, label: "Big picture" }
                     NavLink { to: Route::Workflows {}, label: "Workflows" }
+                    NavLink { to: Route::Review {}, label: "Review" }
                     NavLink { to: Route::About {}, label: "About" }
                     NavLink { to: Route::Changelog {}, label: "Changelog" }
                     NavLink { to: Route::Privacy {}, label: "Privacy" }
