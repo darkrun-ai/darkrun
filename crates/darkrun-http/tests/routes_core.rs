@@ -1704,3 +1704,113 @@ async fn run_asset_serves_a_file_and_guards_traversal() {
         esc.status()
     );
 }
+
+// ── Path-traversal guard (HTTP-1 write, HTTP-2 read, unit routes) ─────────────
+
+/// Build a state whose store root is a directory we keep a handle to, so a test
+/// can assert nothing was written OUTSIDE that root.
+fn state_rooted_at(root: &std::path::Path) -> AppState {
+    AppState::new(StateStore::new(root), Limits::default())
+}
+
+#[tokio::test]
+async fn create_feedback_rejects_a_traversal_run_slug() {
+    // HTTP-1: an unsanitized run slug in `create_feedback` was an arbitrary-WRITE
+    // vector: `../../pwned` escaped `.darkrun/` and the repo root. It must now
+    // 400 at the route, and nothing must land outside the store root.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    std::fs::create_dir_all(root.join(".darkrun")).unwrap();
+    let state = state_rooted_at(&root);
+
+    let resp = send(
+        build_router(state),
+        post_json(
+            "/api/feedback/..%2f..%2fpwned/frame",
+            &json!({ "title": "pwned", "body": "escaped the sandbox" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // No feedback doc was written beside/above the store root.
+    let escaped = root.parent().unwrap().join("pwned");
+    assert!(
+        !escaped.exists(),
+        "a traversal slug wrote outside the root: {}",
+        escaped.display()
+    );
+}
+
+#[tokio::test]
+async fn get_run_asset_rejects_a_traversal_slug() {
+    // HTTP-2: `get_run_asset` checked the trailing asset path but NOT the run
+    // slug, so a traversal slug was an arbitrary-READ vector. Plant a secret
+    // beside the root and confirm the traversal slug 400s without leaking it.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    std::fs::create_dir_all(root.join(".darkrun")).unwrap();
+    let secret_dir = root.parent().unwrap().join("secretdir").join("assets");
+    std::fs::create_dir_all(&secret_dir).unwrap();
+    std::fs::write(secret_dir.join("secret.txt"), b"TOP-SECRET").unwrap();
+    let state = state_rooted_at(&root);
+
+    let resp = send(
+        build_router(state),
+        get("/api/runs/..%2f..%2fsecretdir/asset/secret.txt"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // The body is the 400 envelope, never the secret's bytes.
+    let body = body_bytes(resp).await;
+    assert!(
+        !body.windows(b"TOP-SECRET".len()).any(|w| w == b"TOP-SECRET"),
+        "the traversal slug leaked a file outside the root"
+    );
+}
+
+#[tokio::test]
+async fn unit_reset_rejects_a_traversal_segment() {
+    // The unit routes join both `run` and `unit` as path components; a traversal
+    // in either must 400 before the store reads/writes the unit doc.
+    let state = test_state();
+    let bad_unit = send(
+        build_router(state.clone()),
+        post_empty("/api/unit/r/..%2f..%2fpwn/reset"),
+    )
+    .await;
+    assert_eq!(bad_unit.status(), StatusCode::BAD_REQUEST);
+
+    let bad_run = send(
+        build_router(state),
+        post_empty("/api/unit/..%2f..%2fpwn/u/reset"),
+    )
+    .await;
+    assert_eq!(bad_run.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn feedback_routes_still_accept_real_slugs() {
+    // Regression: the traversal guard must not reject the legitimate slugs the
+    // desktop uses. A real run/station round-trips (201 created).
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    std::fs::create_dir_all(root.join(".darkrun")).unwrap();
+    let state = state_rooted_at(&root);
+
+    let resp = send(
+        build_router(state),
+        post_json(
+            "/api/feedback/quiet-canyon-1a2b/frame",
+            &json!({ "title": "real", "body": "a legitimate finding" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    // It landed UNDER the run's feedback dir, inside the store root.
+    let fb = root
+        .join(".darkrun")
+        .join("quiet-canyon-1a2b")
+        .join("feedback");
+    assert!(fb.join("FB-01.md").exists(), "the real feedback doc is missing");
+}

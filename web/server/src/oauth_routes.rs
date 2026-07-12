@@ -378,10 +378,42 @@ fn success_page(provider: Provider) -> Response {
         .into_response()
 }
 
+/// HTML-escape a string before it is interpolated into an error page.
+///
+/// The OAuth callback reflects provider-supplied input back to the browser: the
+/// `error` / `error_description` query params (when the provider denies) and the
+/// `:provider` path segment (when it names an unknown provider). Interpolated
+/// raw, a crafted callback URL such as
+/// `…/callback?error=x&error_description=<script>…</script>` would execute script
+/// on `darkrun.ai` and could read the browse GitHub token out of `localStorage`.
+/// Escaping the five HTML-significant characters neutralizes that: any reflected
+/// value can only ever render as inert text, never as markup or an attribute
+/// breakout.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// A branded error page with the given status and message.
 fn error_page(status: StatusCode, heading: &str, detail: &str) -> Response {
+    // Both `heading` and `detail` can carry reflected request input (the
+    // `:provider` segment, the provider's `error` / `error_description`), so
+    // escape them before they reach the HTML. Never interpolate raw request
+    // input into the returned page.
+    let heading = html_escape(heading);
+    let detail = html_escape(detail);
     let body = page_shell(
-        heading,
+        &heading,
         &format!(
             r#"<div class="badge">darkrun</div>
       <h1>{heading}</h1>

@@ -200,10 +200,19 @@ jobs:
           ref: ${{ needs.version.outputs.ref }}
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          # Node 24 ships npm 11.x. OIDC trusted publishing needs npm >= 11.5.1,
+          # so we still top-up to the latest below. That upgrade only SUCCEEDS on
+          # a Node new enough for npm@11's `engines`: on the old Node 20 pin,
+          # `npm install -g npm@latest` DIES on the engine check, which is what
+          # left v0.10.0 stuck as a draft. Pinning Node 24 is the fix; the
+          # upgrade step then reliably lands npm >= 11.5.1.
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      # Trusted publishing needs npm >= 11.5.1; Node 20 ships an older npm.
+      # Guarantee npm >= 11.5.1 for OIDC trusted publishing. Node 24's bundled
+      # npm predates the trusted-publishing GA, so top it up; this command
+      # succeeds on Node 24 (unlike Node 20, where it aborted on npm@11's engine
+      # requirement).
       - name: Upgrade npm for OIDC trusted publishing
         run: npm install -g npm@latest
 
@@ -230,17 +239,46 @@ jobs:
             chmod +x "npm/${plat}/bin/"* || true
           done
 
+      # Idempotent-safe publish: a re-run of a partially-failed release must not
+      # hard-fail on a version npm already has. npm answers a re-publish of an
+      # existing version with a 403 ("cannot publish over previously published
+      # versions"), so we probe the registry first and skip anything already
+      # live (only genuinely-new packages are published). `npm view <name>@<ver>`
+      # exits non-zero (E404) when the version is absent, which is the publish
+      # signal; a clean exit means it's already up.
       - name: Publish per-arch sub-packages
         shell: bash
         run: |
+          set -euo pipefail
+          publish_if_new() {
+            dir="$1"
+            name=$(node -p "require('./${dir}/package.json').name")
+            version=$(node -p "require('./${dir}/package.json').version")
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "::notice::${name}@${version} already published, skipping"
+            else
+              # `./` prefix is required: npm reads a bare `npm/darwin-arm64` as a
+              # GitHub `owner/repo` shorthand and tries to git-clone it.
+              npm publish "./${dir}" --access public
+            fi
+          }
           for plat in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
-            # `./` prefix is required: npm reads a bare `npm/darwin-arm64` as a
-            # GitHub `owner/repo` shorthand and tries to git-clone it.
-            npm publish "./npm/${plat}" --access public
+            publish_if_new "npm/${plat}"
           done
 
+      # Same idempotent guard for the main package so a retry after the sub-pkgs
+      # already landed doesn't fail on the plugin's own already-published version.
       - name: Publish main darkrun package (plugin)
-        run: npm publish ./plugin --access public
+        shell: bash
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./plugin/package.json').name")
+          version=$(node -p "require('./plugin/package.json').version")
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "::notice::${name}@${version} already published, skipping"
+          else
+            npm publish ./plugin --access public
+          fi
 
   publish-release:
     # Un-draft the GitHub Release only after the binaries are attached AND npm is

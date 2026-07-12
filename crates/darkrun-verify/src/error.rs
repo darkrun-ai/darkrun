@@ -18,6 +18,14 @@ pub enum VerifyError {
     #[error("invalid target: {0}")]
     Target(String),
 
+    /// The capture reached Chrome's own error page or an HTTP error response
+    /// (the target was unreachable or served an error), so there is no real
+    /// page to prove. Distinct from [`Target`](VerifyError::Target) (a malformed
+    /// URL): the URL was well-formed, the destination just did not answer with a
+    /// real page.
+    #[error("target unreachable: {0}")]
+    Unreachable(String),
+
     /// The load harness could not reach or complete against its target.
     #[error("load harness error: {0}")]
     Load(String),

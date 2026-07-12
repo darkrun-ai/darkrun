@@ -40,9 +40,11 @@ pub mod web;
 pub use audit::{
     audit_snapshot, ContrastSample, DomSnapshot, ImageInfo, PageVitals, TouchTarget,
 };
-pub use bench::{bench_proof_into, load_http, summarize, LoadOpts};
+pub use bench::{assess, bench_proof_into, load_http, summarize, LoadOpts, LoadReport};
 pub use error::{Result, VerifyError};
-pub use web::{shape_web_proof, validate_target, verify_web, web_proof_into, WebOpts};
+pub use web::{
+    shape_web_proof, unreachable_reason, validate_target, verify_web, web_proof_into, Reach, WebOpts,
+};
 
 // Re-export the surface-routed proof types so callers can stay on one import.
 pub use darkrun_api::{AuditResult, BenchProof, Proof, Surface, WebProof};
@@ -79,8 +81,11 @@ pub async fn prove_web(url: &str, surface: Surface, opts: &WebOpts) -> Result<Pr
 /// Capture a surface-tagged [`Proof`] for a bench surface by running the HTTP
 /// load harness. A thin convenience over [`load_http`] + [`bench_proof_into`].
 pub async fn prove_load(url: &str, surface: Surface, opts: &LoadOpts) -> Result<Proof> {
-    let bench = load_http(url, opts).await?;
-    Ok(bench_proof_into(bench, surface))
+    // A high failure rate errors inside `load_http`, so a Proof is only produced
+    // for a target that actually held up; the surface-tagged block carries the
+    // percentiles over the successful requests.
+    let report = load_http(url, opts).await?;
+    Ok(bench_proof_into(report.proof, surface))
 }
 
 #[cfg(test)]

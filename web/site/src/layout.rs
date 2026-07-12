@@ -12,6 +12,18 @@ use crate::ui::theme;
 /// wordmark and primary nav, the routed `Outlet`, and a footer.
 #[component]
 pub fn Shell() -> Element {
+    // Per-route <head>: sync the <title>, the single canonical link, and the
+    // description / social meta to the ACTIVE route. The SPA otherwise serves
+    // index.html's static (homepage) head on every page, so all ~50 subpages
+    // would self-canonicalize to `/` and share one title, which is invisible to
+    // search. Reading the route here subscribes the Shell to navigation, and
+    // `use_reactive!` re-runs the sync whenever the path changes.
+    let path = use_route::<Route>().to_string();
+    let head = crate::seo::head_sync_script(&crate::seo::page_meta(&path));
+    use_effect(use_reactive!(|head| {
+        let _ = document::eval(&head);
+    }));
+
     // The base color with ~93% alpha so the blur shows through. `color-mix`
     // keeps it theme-aware (a hex-alpha suffix can't ride on a `var()`).
     let header = format!(

@@ -32,9 +32,12 @@ impl StateStore {
         self.run_dir(slug).join("annotations")
     }
 
-    /// The JSON path for one annotation.
+    /// The JSON path for one annotation. The `id` is passed through the same
+    /// `contained()` backstop every other leaf uses, so a traversing id can
+    /// never escape `annotations/` even though ids are engine-minted today.
     pub fn annotation_path(&self, slug: &str, id: &str) -> PathBuf {
-        self.annotations_dir(slug).join(format!("{id}.json"))
+        self.annotations_dir(slug)
+            .join(format!("{}.json", crate::state::contained(id)))
     }
 
     /// Write (or overwrite) an annotation's JSON record. The store does not

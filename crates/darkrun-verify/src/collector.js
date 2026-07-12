@@ -136,6 +136,19 @@
     js_heap_used: mem,
   };
 
+  // --- reachability ----------------------------------------------------------
+  // The Rust layer refuses to shape a proof when the browser landed on an error
+  // page instead of the real target. Two signals, both collected here so the
+  // decision stays pure Rust:
+  //   * chrome_error_page: Chrome renders its own network-error interstitial
+  //     (DNS failure, connection refused/reset) inside a `#main-frame-error`
+  //     container. Its presence means the server was never reached.
+  //   * http_status: PerformanceNavigationTiming.responseStatus is the main
+  //     document's HTTP status (Chrome 109+). 0 for file://, data:, and failed
+  //     net requests; >= 400 means the target served an error page.
+  const chrome_error_page = !!document.getElementById("main-frame-error");
+  const http_status = typeof nav.responseStatus === "number" ? nav.responseStatus : 0;
+
   return JSON.stringify({
     dom: {
       text_contrasts,
@@ -150,5 +163,6 @@
       has_lang,
     },
     vitals,
+    reach: { chrome_error_page, http_status },
   });
 })()
