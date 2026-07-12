@@ -1,8 +1,8 @@
 {
-  "signature": "spec@shape|st=frame;units=2;done=2;pass=6;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed]",
+  "signature": "spec@build|st=build;units=2;done=2;pass=6;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed]",
   "count": 1,
-  "updated_at": 1783822846,
+  "updated_at": 1783833290,
   "recent": [
-    "spec@shape|st=frame;units=2;done=2;pass=6;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed]"
+    "spec@build|st=build;units=2;done=2;pass=6;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed]"
   ]
 }

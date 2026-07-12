@@ -13,11 +13,13 @@
   "stations": {
     "build": {
       "station": "build",
-      "status": "pending",
+      "status": "in_progress",
       "phase": "spec",
       "checkpoint": {
         "kind": "ask"
-      }
+      },
+      "branch": "darkrun/darkrun-sim/build",
+      "started_at": "2026-07-12T05:14:50.498209+00:00"
     },
     "frame": {
       "station": "frame",
