@@ -14,7 +14,7 @@
     "build": {
       "station": "build",
       "status": "in_progress",
-      "phase": "review",
+      "phase": "user_gate",
       "elaborated": true,
       "checkpoint": {
         "kind": "ask"
