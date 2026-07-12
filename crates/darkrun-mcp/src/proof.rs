@@ -281,6 +281,26 @@ pub fn get_proof(
     })
 }
 
+/// Whether a station carries a POPULATED objective proof — real evidence, not a
+/// bare placeholder. Reads the station-scoped proof (falling back to the
+/// run-level one) and returns whether its measurement block is populated
+/// ([`Proof::is_evidence`]). Absent, unreadable, or empty → `false`.
+///
+/// This is the check the Prove auto-lock gate uses: `attach_proof` deliberately
+/// RECORDS a right-surface-but-empty proof so the agent can see (via the
+/// response's `block_matches_surface` flag) exactly what is still missing, but a
+/// dark/Auto Prove checkpoint must not lock on that placeholder. It clears only
+/// once a proof carrying actual numbers (or a terminal snapshot) is attached.
+pub fn station_proof_is_evidence(store: &StateStore, slug: &str, station: &str) -> bool {
+    let Ok(ps) = read_store(store, slug) else {
+        return false;
+    };
+    ps.stations
+        .get(station)
+        .or(ps.run.as_ref())
+        .is_some_and(Proof::is_evidence)
+}
+
 /// Render a station's attached proof as a markdown comment body — the durable,
 /// linkable asset posted onto the station's change request (D5). `None` when no
 /// proof is attached for the station (nothing to upload). The proof's measured
@@ -451,9 +471,13 @@ mod tests {
     }
 
     #[test]
-    fn block_mismatch_is_surfaced_not_rejected() {
-        // A visual surface carrying no web block is *recorded* but flagged —
-        // the attach succeeds so the agent can see exactly what's missing.
+    fn block_mismatch_is_recorded_flagged_and_never_counts_as_evidence() {
+        // A visual surface carrying no web block is *recorded* but flagged — the
+        // attach succeeds so the agent can see exactly what's missing (the
+        // response's `block_matches_surface` is false). Recording is NOT
+        // acceptance: the placeholder must never satisfy the Prove gate, so
+        // `station_proof_is_evidence` reports false for it. The gate holds until
+        // real numbers are attached (see the Prove auto-lock hold in `position`).
         let (_d, store) = store();
         started(&store, "r");
         set_surface(&store, "r", "desktop").unwrap();
@@ -465,6 +489,23 @@ mod tests {
         let resp = attach_proof(&store, "r", proof, None).unwrap();
         assert!(resp.ok);
         assert!(!resp.block_matches_surface, "missing web block must be flagged");
+        assert!(
+            !station_proof_is_evidence(&store, "r", "prove"),
+            "an empty/placeholder proof must not count as gate-clearing evidence"
+        );
+
+        // An empty-but-present block (right surface, zero measurement) is also
+        // recorded and also not evidence.
+        let empty = Proof::web(ApiSurface::Desktop, WebProof::default());
+        assert!(attach_proof(&store, "r", empty, None).unwrap().ok);
+        assert!(!station_proof_is_evidence(&store, "r", "prove"));
+
+        // A populated proof IS evidence — the gate can clear.
+        let mut vitals = BTreeMap::new();
+        vitals.insert("lcp".to_string(), 900.0);
+        let real = Proof::web(ApiSurface::Desktop, WebProof { vitals, ..Default::default() });
+        assert!(attach_proof(&store, "r", real, None).unwrap().ok);
+        assert!(station_proof_is_evidence(&store, "r", "prove"));
     }
 
     #[test]
