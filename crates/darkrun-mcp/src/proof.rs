@@ -299,6 +299,88 @@ pub fn station_proof_markdown(store: &StateStore, slug: &str, station: &str) -> 
     ))
 }
 
+/// The literal feedback token that lets an operator approve the Prove
+/// station's HUMAN checkpoint without measured evidence. The evidence gate in
+/// [`crate::position::checkpoint_decide`] names it in its refusal message, and
+/// an approve that carries it is recorded with the override noted in the
+/// feedback trail: the escape hatch is always explicit and always audited.
+pub const NO_EVIDENCE_OVERRIDE: &str = "override: no-evidence";
+
+/// Why a station's attached proof does NOT count as measured evidence at a
+/// gate. `None` from [`station_proof_evidence_gap`] means the proof qualifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceGap {
+    /// No proof is attached at all (station-scoped or run-level).
+    NoProof,
+    /// A proof is attached but lacks the measurement block its surface routes
+    /// to (a visual surface without a `web` block, a bench surface without a
+    /// `bench` block).
+    BlockMismatch,
+    /// The proof carries no measured values anywhere: no vitals, audits, or
+    /// snapshot, and no bench numbers. An assertion, not a measurement.
+    NoMeasurement,
+}
+
+impl EvidenceGap {
+    /// The human phrasing the gate refusal and the override trail note share,
+    /// naming exactly what is missing.
+    pub fn describe(self) -> &'static str {
+        match self {
+            EvidenceGap::NoProof => "no proof is attached for this station",
+            EvidenceGap::BlockMismatch => {
+                "the attached proof lacks the measurement block its surface routes to \
+                 (proof block mismatch)"
+            }
+            EvidenceGap::NoMeasurement => {
+                "the attached proof carries no measured values (proof has no measurement)"
+            }
+        }
+    }
+}
+
+/// Whether a station's attached proof counts as measurement-bearing EVIDENCE:
+/// `None` when it does, `Some(gap)` naming exactly what is missing when it
+/// does not. Resolves the proof the way [`station_proof_markdown`] does
+/// (station-scoped, falling back to run-level). An unreadable proof store
+/// counts as no proof: the safe direction is to hold the gate, never to wave
+/// a corrupt document through.
+pub fn station_proof_evidence_gap(
+    store: &StateStore,
+    slug: &str,
+    station: &str,
+) -> Option<EvidenceGap> {
+    let ps = read_store(store, slug).unwrap_or_default();
+    let proof = match ps.stations.get(station).or(ps.run.as_ref()) {
+        Some(p) => p,
+        None => return Some(EvidenceGap::NoProof),
+    };
+    if !proof.block_matches_surface() {
+        return Some(EvidenceGap::BlockMismatch);
+    }
+    if !proof_has_measurement(proof) {
+        return Some(EvidenceGap::NoMeasurement);
+    }
+    None
+}
+
+/// Whether a proof carries at least one MEASURED value: a vital, an audit
+/// result, or a snapshot in the web block, or any percentile / throughput /
+/// sample count in the bench block. This is the "numbers, not assertions"
+/// floor an attached-but-empty proof fails.
+fn proof_has_measurement(proof: &Proof) -> bool {
+    let web = proof.web.as_ref().is_some_and(|w| {
+        !w.vitals.is_empty() || !w.audits.is_empty() || w.screenshot_url.is_some()
+    });
+    let bench = proof.bench.as_ref().is_some_and(|b| {
+        b.p50.is_some()
+            || b.p95.is_some()
+            || b.p99.is_some()
+            || b.throughput.is_some()
+            || b.samples.is_some()
+    });
+    web || bench
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +624,84 @@ mod tests {
         // No proof attached → both the station-scoped and run-level reads error.
         assert!(get_proof(&store, "r", Some("prove".into())).is_err());
         assert!(get_proof(&store, "r", None).is_err());
+    }
+
+    /// F13: the evidence classifier names exactly what is missing, in the
+    /// order a fixer would repair it: attach at all, right block, real numbers.
+    #[test]
+    fn evidence_gap_names_exactly_whats_missing() {
+        let (_d, store) = store();
+        started(&store, "r");
+        set_surface(&store, "r", "api").unwrap();
+
+        // Nothing attached at all.
+        assert_eq!(
+            station_proof_evidence_gap(&store, "r", "prove"),
+            Some(EvidenceGap::NoProof)
+        );
+        // Attached, but no block where the bench surface routes.
+        let blockless = Proof { surface: ApiSurface::Api, web: None, bench: None };
+        attach_proof(&store, "r", blockless, Some("prove".into())).unwrap();
+        assert_eq!(
+            station_proof_evidence_gap(&store, "r", "prove"),
+            Some(EvidenceGap::BlockMismatch)
+        );
+        // The right block, carrying nothing.
+        attach_proof(
+            &store,
+            "r",
+            Proof::bench(ApiSurface::Api, BenchProof::default()),
+            Some("prove".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            station_proof_evidence_gap(&store, "r", "prove"),
+            Some(EvidenceGap::NoMeasurement)
+        );
+        // One real number qualifies.
+        attach_proof(
+            &store,
+            "r",
+            Proof::bench(ApiSurface::Api, BenchProof { p95: Some(2.0), ..Default::default() }),
+            Some("prove".into()),
+        )
+        .unwrap();
+        assert_eq!(station_proof_evidence_gap(&store, "r", "prove"), None);
+    }
+
+    /// F13: the classifier resolves like `station_proof_markdown`: a run-level
+    /// proof covers a station with no scoped one.
+    #[test]
+    fn evidence_gap_falls_back_to_the_run_level_proof() {
+        let (_d, store) = store();
+        started(&store, "r");
+        set_surface(&store, "r", "cli").unwrap();
+        // A terminal snapshot attached run-level satisfies the prove lookup.
+        let snap = Proof {
+            surface: ApiSurface::Cli,
+            web: Some(WebProof {
+                screenshot_url: Some("/snap/out.txt".into()),
+                ..Default::default()
+            }),
+            bench: None,
+        };
+        attach_proof(&store, "r", snap, None).unwrap();
+        assert_eq!(station_proof_evidence_gap(&store, "r", "prove"), None);
+    }
+
+    /// F13: `block_matches_surface` is vacuously true for cli/tui, but an
+    /// entirely empty proof still asserts nothing measurable.
+    #[test]
+    fn a_blockless_terminal_proof_is_no_measurement() {
+        let (_d, store) = store();
+        started(&store, "r");
+        set_surface(&store, "r", "cli").unwrap();
+        let empty = Proof { surface: ApiSurface::Cli, web: None, bench: None };
+        attach_proof(&store, "r", empty, None).unwrap();
+        assert_eq!(
+            station_proof_evidence_gap(&store, "r", "prove"),
+            Some(EvidenceGap::NoMeasurement)
+        );
     }
 
     #[test]

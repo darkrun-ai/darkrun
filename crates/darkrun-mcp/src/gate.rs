@@ -10,8 +10,9 @@
 //! have run before [`crate::position::checkpoint_decide`]. A run can lock a
 //! checkpoint without ever calling it (dark/Auto mode never does). It is
 //! deliberately not a gate — the ENFORCED checkpoint guarantees live in the
-//! engine: the open-`must`/`should` severity gate and the Prove missing-proof
-//! hold, both in [`crate::position`]. Treat `gate_review` as a review AID the
+//! engine: the open-`must`/`should` severity gate, the Prove missing-proof
+//! auto-lock hold, and the Prove evidence gate on the human approve, all in
+//! [`crate::position`]. Treat `gate_review` as a review AID the
 //! operator/agent may run, not a precondition the engine checks.
 
 use std::path::Path;
