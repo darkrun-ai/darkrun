@@ -1802,12 +1802,14 @@ fn render_markdown_with_marks(body: &str, marks: &[TextMark]) -> Element {
     let meta_html = frontmatter
         .map(darkrun_ui::markdown::frontmatter_html)
         .unwrap_or_default();
-    // A fenced leading block with no flat scalars renders no chips; fall back to
-    // rendering the WHOLE doc so the fenced content is never silently dropped.
-    let body_html = if meta_html.is_empty() && frontmatter.is_some_and(|f| !f.trim().is_empty()) {
-        darkrun_ui::markdown::to_html(body)
-    } else {
-        darkrun_ui::markdown::to_html(md_body)
+    // A fenced leading block with no flat scalars renders no chips. It must not
+    // vanish: `to_html` drops a leading `---` fence as metadata, so reconstruct
+    // the fence content ahead of the body (fence markers removed) and render that.
+    let body_html = match frontmatter {
+        Some(fm) if meta_html.is_empty() && !fm.trim().is_empty() => {
+            darkrun_ui::markdown::to_html(&format!("{fm}\n\n{md_body}"))
+        }
+        _ => darkrun_ui::markdown::to_html(md_body),
     };
     rsx! {
         div {

@@ -274,8 +274,16 @@ pub fn to_html_doc(src: &str) -> String {
     match split_frontmatter(src) {
         (Some(block), body) => {
             let header = frontmatter_html(block);
-            if header.is_empty() && !block.trim().is_empty() {
-                return to_html(src);
+            if header.is_empty() {
+                // The leading `---` block held no flat scalars, so it is NOT a
+                // metadata header. It must not vanish: `to_html` drops a leading
+                // `---` fence as YAML metadata, so rendering the raw source would
+                // eat the fenced lines. Reconstruct without the fence markers so
+                // the content (a list, prose) renders as ordinary markdown.
+                if block.trim().is_empty() {
+                    return to_html(body);
+                }
+                return to_html(&format!("{block}\n\n{body}"));
             }
             format!("{header}{}", to_html(body))
         }
@@ -547,3 +555,4 @@ mod tests {
         assert!(!html.contains('\u{00e2}'), "no Latin-1 mojibake: {html}");
     }
 }
+
