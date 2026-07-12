@@ -246,4 +246,44 @@ mod tests {
             StationPhase::Spec
         );
     }
+
+    /// The derivation reaches Checkpoint on exactly the approval roles it is
+    /// given: it has no privileged "user" role. The non-dark Audit wedge (DF-4/
+    /// RM-6) came from a caller injecting an approval role that no flow ever
+    /// stamps; this pins the pure contract so a signed unit advances on the real
+    /// reviewer roles alone. An UNSTAMPED extra role, however, correctly holds at
+    /// Audit, proving the wedge is a function of the role LIST, not the module.
+    #[test]
+    fn checkpoint_needs_only_the_given_approval_roles() {
+        use crate::domain::IterationResult;
+        let review_roles = roles(&["value", "feasibility"]);
+        let workers = roles(&["make"]);
+        let mut a = unit("a");
+        for r in &review_roles {
+            a.frontmatter.reviews.insert(r.clone(), signed());
+        }
+        a.frontmatter.iterations.push(UnitIteration {
+            worker: "make".into(), result: Some(IterationResult::Advance), ..Default::default()
+        });
+        // Approvals for the REAL reviewer roles → Checkpoint, no phantom needed.
+        for r in &review_roles {
+            a.frontmatter.approvals.insert(r.clone(), signed());
+        }
+        assert_eq!(
+            derive_station_phase(
+                std::slice::from_ref(&a), &workers, &review_roles, &review_roles, Some(true), false
+            ),
+            StationPhase::Checkpoint
+        );
+        // Add an approval role nothing stamps and it pins at Audit forever: the
+        // exact shape of the shipped wedge, reproduced at the derivation.
+        let mut approval_roles = review_roles.clone();
+        approval_roles.push("user".into());
+        assert_eq!(
+            derive_station_phase(
+                std::slice::from_ref(&a), &workers, &review_roles, &approval_roles, Some(true), false
+            ),
+            StationPhase::Audit
+        );
+    }
 }
