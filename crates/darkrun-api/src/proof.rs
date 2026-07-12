@@ -117,6 +117,16 @@ impl WebProof {
     pub fn all_audits_pass(&self) -> bool {
         self.audits.iter().all(|a| a.pass)
     }
+
+    /// Whether this block carries any real measurement — at least one captured
+    /// web vital or a11y audit. A bare/`default()` block (no vitals, no audits)
+    /// is NOT a measurement: it is a placeholder that must not count as evidence.
+    /// A lone screenshot is deliberately excluded (it proves a snapshot exists,
+    /// not that the vitals/audits were run) — it satisfies only the terminal
+    /// snapshot route, handled in [`Proof::is_evidence`].
+    pub fn has_measurement(&self) -> bool {
+        !self.vitals.is_empty() || !self.audits.is_empty()
+    }
 }
 
 /// The benchmark block of a [`Proof`] — populated for bench surfaces
@@ -141,6 +151,19 @@ pub struct BenchProof {
     /// Number of samples the percentiles were computed over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub samples: Option<u64>,
+}
+
+impl BenchProof {
+    /// Whether this block carries any real measurement — at least one populated
+    /// numeric field (a percentile, throughput, or sample count). An all-`None`
+    /// (`default()`) block is a placeholder, not evidence.
+    pub fn has_measurement(&self) -> bool {
+        self.p50.is_some()
+            || self.p95.is_some()
+            || self.p99.is_some()
+            || self.throughput.is_some()
+            || self.samples.is_some()
+    }
 }
 
 /// The PROOF payload — a run's attached objective evidence.
@@ -191,6 +214,29 @@ impl Proof {
             self.bench.is_some()
         } else {
             true
+        }
+    }
+
+    /// Whether this proof is real objective EVIDENCE — the matching block is not
+    /// only present ([`block_matches_surface`](Proof::block_matches_surface)) but
+    /// POPULATED with measurement. This is the stronger bar a Prove/Audit gate
+    /// enforces before it may auto-lock: a right-surface-but-empty block (an
+    /// agent's `default()` placeholder) matches the surface yet proves nothing,
+    /// so it must not clear the gate.
+    ///
+    /// - visual → a `web` block with at least one vital or audit,
+    /// - bench → a `bench` block with at least one populated numeric field,
+    /// - terminal → a `web` block carrying the captured snapshot
+    ///   (`screenshot_url`) or a measurement.
+    pub fn is_evidence(&self) -> bool {
+        if self.surface.is_visual() {
+            self.web.as_ref().is_some_and(WebProof::has_measurement)
+        } else if self.surface.is_bench() {
+            self.bench.as_ref().is_some_and(BenchProof::has_measurement)
+        } else {
+            self.web
+                .as_ref()
+                .is_some_and(|w| w.screenshot_url.is_some() || w.has_measurement())
         }
     }
 }
@@ -345,6 +391,47 @@ mod tests {
         assert_eq!(json["station"], "prove");
         let back: ProofAttachRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.proof.surface, Surface::Api);
+    }
+
+    #[test]
+    fn is_evidence_requires_a_populated_block_not_mere_presence() {
+        // A visual surface with an EMPTY web block matches the surface (block is
+        // present) but is NOT evidence — nothing was measured.
+        let empty_web = Proof::web(Surface::WebUi, WebProof::default());
+        assert!(empty_web.block_matches_surface(), "empty block still matches route");
+        assert!(!empty_web.is_evidence(), "empty block is not evidence");
+
+        // One captured vital is enough to count.
+        let mut vitals = BTreeMap::new();
+        vitals.insert("lcp".to_string(), 1200.0);
+        let real_web = Proof::web(Surface::WebUi, WebProof { vitals, ..Default::default() });
+        assert!(real_web.is_evidence());
+
+        // A visual surface whose only signal is a screenshot is still NOT a
+        // measurement — the vitals/audits were never run.
+        let shot_only = Proof::web(
+            Surface::Desktop,
+            WebProof { screenshot_url: Some("/s.png".into()), ..Default::default() },
+        );
+        assert!(!shot_only.is_evidence(), "a lone screenshot is not a visual measurement");
+
+        // A bench surface with an all-None block matches the route but is empty.
+        let empty_bench = Proof::bench(Surface::Api, BenchProof::default());
+        assert!(empty_bench.block_matches_surface());
+        assert!(!empty_bench.is_evidence(), "all-None bench block is not evidence");
+        let real_bench = Proof::bench(Surface::Api, BenchProof { p95: Some(2.0), ..Default::default() });
+        assert!(real_bench.is_evidence());
+
+        // A terminal surface is satisfied by its captured snapshot.
+        let snapshot = Proof {
+            surface: Surface::Cli,
+            web: Some(WebProof { screenshot_url: Some("/out.txt".into()), ..Default::default() }),
+            bench: None,
+        };
+        assert!(snapshot.is_evidence(), "a terminal snapshot IS its evidence");
+        // …but a terminal proof with no block at all is not.
+        let bare_terminal = Proof { surface: Surface::Cli, web: None, bench: None };
+        assert!(!bare_terminal.is_evidence());
     }
 
     #[test]

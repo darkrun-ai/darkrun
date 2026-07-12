@@ -69,6 +69,9 @@ pub enum Route {
         Browse {},
         #[route("/browse/:..rest")]
         BrowseTarget { rest: Vec<String> },
+        // `/review` is linked from the footer nav (see layout.rs). `/preview` is
+        // an intentional deep-link fixture gallery for screenshotting the session
+        // views, so it stays out of the nav but remains pre-rendered for the SSG.
         #[route("/review")]
         Review {},
         #[route("/preview")]

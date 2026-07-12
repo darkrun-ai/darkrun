@@ -572,8 +572,11 @@ fn station_units<'a>(units: &'a [Unit], station: &str) -> Vec<&'a Unit> {
 
 /// The per-Unit Pass-loop iteration budget. A unit whose `pass` index climbs
 /// past this is escalated rather than looped forever — the darkrun parity for
-/// the predecessor's `loop_halted` / `escalate` runaway guard.
-const MAX_PASSES: u32 = 8;
+/// the predecessor's `loop_halted` / `escalate` runaway guard. Enforced twice:
+/// as a manager escalation here in [`derive_position`], and as a hard write-time
+/// backstop in [`crate::units::record_iteration`] so a caller that ignores the
+/// escalation still cannot grow a wedged unit forever.
+pub(crate) const MAX_PASSES: u32 = 8;
 
 /// How many OPEN annotations the manager resolves into the next action's
 /// re-reference bundle. The severity tally still reflects every open ask; this
@@ -1171,9 +1174,45 @@ fn walk_feedback(store: &StateStore, slug: &str, station: &str) -> Result<Option
     }))
 }
 
+/// The leading `---`-fenced YAML frontmatter of a feedback doc — the text
+/// between the opening `---` fence line and the next `---` line — or the WHOLE
+/// doc when it has no opening fence (legacy/unfenced docs keep the prior
+/// whole-doc scan).
+///
+/// Classification (`status`/`station`/`severity`/`kind`) reads ONLY this block,
+/// so a reviewer-authored body line like `status: done` written in prose can no
+/// longer flip a doc's open/severity/kind classification. All engine-written
+/// feedback docs carry the fence; bounding to it is what makes the class robust.
+fn feedback_frontmatter(raw: &str) -> &str {
+    // Skip blank lines preceding the opening fence.
+    let mut rest = raw;
+    while let Some((first, tail)) = rest.split_once('\n') {
+        if first.trim().is_empty() {
+            rest = tail;
+        } else {
+            break;
+        }
+    }
+    // The doc must OPEN with a bare `---` fence line to carry frontmatter.
+    let after_open = match rest.split_once('\n') {
+        Some((first, tail)) if first.trim() == "---" => tail,
+        _ => return raw,
+    };
+    // Frontmatter runs until the first CLOSING `---` fence line.
+    let mut consumed = 0usize;
+    for line in after_open.split_inclusive('\n') {
+        if line.trim() == "---" {
+            return &after_open[..consumed];
+        }
+        consumed += line.len();
+    }
+    // No closing fence (malformed): best-effort — everything after the open.
+    after_open
+}
+
 /// Severity rank for ordering: blocker=0 (most urgent) … unranked=4.
 fn feedback_severity_rank(raw: &str) -> u8 {
-    for line in raw.lines() {
+    for line in feedback_frontmatter(raw).lines() {
         if let Some(rest) = line.trim().strip_prefix("severity:") {
             return match rest.trim().trim_matches('"').to_ascii_lowercase().as_str() {
                 "blocker" => 0,
@@ -1191,7 +1230,7 @@ fn feedback_severity_rank(raw: &str) -> u8 {
 /// than a fix. Reads a `kind:` frontmatter line; `question` → true. Absent →
 /// false (a plain fix), keeping legacy feedback backward-compatible.
 fn feedback_is_question(raw: &str) -> bool {
-    for line in raw.lines() {
+    for line in feedback_frontmatter(raw).lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("kind:") {
             return rest.trim().trim_matches('"').eq_ignore_ascii_case("question");
@@ -1203,7 +1242,7 @@ fn feedback_is_question(raw: &str) -> bool {
 /// The station a feedback doc targets, or empty for a RUN-SCOPE finding (a
 /// closeout / cross-station item that belongs to the run, not one station).
 fn feedback_station(raw: &str) -> String {
-    for line in raw.lines() {
+    for line in feedback_frontmatter(raw).lines() {
         if let Some(rest) = line.trim().strip_prefix("station:") {
             return rest.trim().trim_matches('"').to_string();
         }
@@ -1214,7 +1253,7 @@ fn feedback_station(raw: &str) -> String {
 /// Whether a feedback document is still open (no terminal status line).
 fn feedback_open(raw: &str) -> bool {
     let terminal = ["closed", "rejected", "addressed", "answered", "non_actionable"];
-    for line in raw.lines() {
+    for line in feedback_frontmatter(raw).lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("status:") {
             let status = rest.trim().trim_matches('"').to_ascii_lowercase();
@@ -1662,22 +1701,27 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
             // Missing-proof hold — Prove's core guarantee ("carries numbers,
             // not assertions"). The Prove station must not AUTO-lock on the
             // agent's word alone: when the run is classified to a surface and
-            // the gate would auto-advance (dark/Auto mode) but no objective
-            // proof has been attached for the station, HOLD and escalate.
-            // Attaching a proof (`darkrun_proof_attach`) clears it on the next
-            // tick. Gated on Auto only — solo/team surface the missing proof to
-            // the human reviewer at their gate, so they are not force-held here.
+            // the gate would auto-advance (dark/Auto mode) but no VALID objective
+            // proof has been attached for the station, HOLD and escalate. A valid
+            // proof is not mere presence — an empty/placeholder block (attach
+            // records it flagged so the agent sees what's missing) is not
+            // evidence, so a dark/Auto run can no longer clear Prove with an
+            // empty or mismatched proof. Attaching a proof carrying real numbers
+            // (or a terminal snapshot) clears it on the next tick. Gated on Auto
+            // only — solo/team surface the missing proof to the human reviewer at
+            // their gate, so they are not force-held here.
             if station.as_str() == darkrun_core::domain::Position::Prove.dir()
                 && matches!(kind, CheckpointKind::Auto)
                 && run.surface().is_some()
-                && crate::proof::station_proof_markdown(store, slug, &station).is_none()
+                && !crate::proof::station_proof_is_evidence(store, slug, &station)
             {
                 RunAction::Escalate {
                     run: slug.to_string(),
                     station: station.clone(),
                     reason: format!(
                         "The '{station}' station cannot auto-lock without objective proof: \
-                         the run is classified to a surface but no measurement is attached. \
+                         the run is classified to a surface but no populated measurement is \
+                         attached (an empty or surface-mismatched proof does not count). \
                          Record the measured evidence with darkrun_proof_attach before the \
                          checkpoint — Prove carries numbers, not assertions."
                     ),
@@ -1688,10 +1732,33 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
                     .get(&station)
                     .and_then(|st| st.pr_ref.clone())
                     .unwrap_or_default();
-                RunAction::ExternalReviewRequested {
-                    run: slug.to_string(),
-                    station: station.clone(),
-                    target,
+                // Stuck-gate escalation: a discrete external gate that has FAILED
+                // to open its review PR/MR for `DISCRETE_GATE_MAX_FAILURES` ticks
+                // in a row is surfaced as a distinct blocker — the operator sees
+                // the gate is stuck and can fix hosting (or merge by hand) rather
+                // than the run holding silently forever. Only when no PR exists
+                // yet (an open PR is a healthy hold, awaiting the human's merge).
+                if target.is_empty()
+                    && discrete_gate_failures(store, slug, &station) >= DISCRETE_GATE_MAX_FAILURES
+                {
+                    RunAction::Escalate {
+                        run: slug.to_string(),
+                        station: station.clone(),
+                        reason: format!(
+                            "The '{station}' station's discrete Checkpoint has repeatedly failed \
+                             to open a review PR/MR ({} consecutive attempts). The gate is stuck. \
+                             Check the hosting client (gh/glab auth, remote, branch protection) \
+                             and push access, then re-tick — or resolve the gate by opening and \
+                             merging the change request manually.",
+                            discrete_gate_failures(store, slug, &station),
+                        ),
+                    }
+                } else {
+                    RunAction::ExternalReviewRequested {
+                        run: slug.to_string(),
+                        station: station.clone(),
+                        target,
+                    }
                 }
             } else {
                 RunAction::Checkpoint {
@@ -2204,6 +2271,64 @@ pub fn render_prompt(store: &StateStore, slug: &str, action: &RunAction) -> Resu
     Ok(Some(rendered))
 }
 
+/// Consecutive discrete-gate open failures after which a persistently-stuck
+/// gate is SURFACED to the operator (as an `Escalate`) rather than silently
+/// re-tried forever. Small: an open that fails this many ticks in a row is a
+/// real hosting problem the operator needs to see, not a transient blip.
+const DISCRETE_GATE_MAX_FAILURES: u32 = 3;
+
+/// The on-disk discrete-gate health ledger: per-station count of CONSECUTIVE
+/// failures to open the station's review PR/MR. Persisted to
+/// `.darkrun/<run>/discrete_gate.json`. A successful open (or an
+/// already-open PR) clears the station's entry, so the count reflects only an
+/// ongoing, unbroken failure streak.
+fn read_discrete_gate_failures(store: &StateStore, slug: &str) -> std::collections::BTreeMap<String, u32> {
+    let path = store.run_dir(slug).join("discrete_gate.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// The current consecutive open-failure count for a station (0 when healthy).
+fn discrete_gate_failures(store: &StateStore, slug: &str, station: &str) -> u32 {
+    read_discrete_gate_failures(store, slug).get(station).copied().unwrap_or(0)
+}
+
+/// Record a discrete-gate open FAILURE for a station: bump its consecutive
+/// count, persist, and emit an observability event so the failure is never
+/// silently swallowed. Returns the new count. Best-effort persistence.
+fn note_discrete_gate_failure(store: &StateStore, slug: &str, station: &str, reason: &str) -> u32 {
+    let mut map = read_discrete_gate_failures(store, slug);
+    let count = map.entry(station.to_string()).or_insert(0);
+    *count += 1;
+    let count = *count;
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(store.run_dir(slug).join("discrete_gate.json"), json);
+    }
+    crate::events::emit(
+        store,
+        slug,
+        "darkrun.discrete_gate.open_failed",
+        serde_json::json!({ "station": station, "reason": reason, "consecutive_failures": count }),
+    );
+    count
+}
+
+/// Clear a station's discrete-gate failure streak (an open succeeded, or its PR
+/// already exists). No-op when the station was already healthy. Best-effort.
+fn clear_discrete_gate_failure(store: &StateStore, slug: &str, station: &str) {
+    let mut map = read_discrete_gate_failures(store, slug);
+    if map.remove(station).is_some() {
+        let path = store.run_dir(slug).join("discrete_gate.json");
+        if map.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else if let Ok(json) = serde_json::to_string_pretty(&map) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+}
+
 /// Apply any pending UI-requested unit resets (the `reset_requested` flag). A
 /// non-MCP surface (the desktop review UI) flags a wedged unit by setting the
 /// flag on its frontmatter; this consumes the flag by performing the full
@@ -2280,15 +2405,22 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
             let head = crate::lifecycle::station_branch(slug, &station);
             let base = crate::lifecycle::run_main_branch(slug);
             // #7: the head branch must be on origin before the PR can open.
-            // Push it with non-fast-forward recovery (best-effort — a push
-            // failure leaves the gate holding rather than crashing the tick).
+            // Push it with non-fast-forward recovery. A push failure is no longer
+            // silently swallowed: it's recorded on the gate-health ledger and, if
+            // it persists, surfaces to the operator (see the `External` branch of
+            // `derive_position`) instead of the gate holding forever in silence.
             let repo_root = cascade_repo_root(store);
+            let mut push_error: Option<String> = None;
             if let Ok(git) = Git::open(&repo_root) {
                 let wt = crate::lifecycle::station_worktree_path(&repo_root, slug, &station);
                 // Push from the station's own worktree when it exists, else the
                 // repo root (the branch ref still resolves there).
                 let from = if wt.exists() { wt } else { repo_root.clone() };
-                let _ = crate::hosting::push_head_with_nff_recovery(&git, &from, &head);
+                if let crate::hosting::PushOutcome::Failed { note } =
+                    crate::hosting::push_head_with_nff_recovery(&git, &from, &head)
+                {
+                    push_error = Some(note);
+                }
             }
             let req = crate::hosting::OpenRequest {
                 head,
@@ -2300,6 +2432,9 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
                 ),
             };
             if let Some(pr_ref) = hosting.open_draft(&req) {
+                // The open succeeded — clear any prior failure streak so the gate
+                // returns to normal holding.
+                clear_discrete_gate_failure(store, slug, &station);
                 // D5: attach the station's objective proof to the change request
                 // as a durable, linkable asset — posted once, here, since the PR
                 // opens exactly once (the next tick polls instead). Best-effort:
@@ -2313,6 +2448,16 @@ fn resolve_discrete_gate<H: crate::hosting::Hosting>(
                     st.pr_status = Some(PrStatus::Draft);
                     store.write_state(slug, &state)?;
                 }
+            } else {
+                // Hosting is available but the PR could not be opened (a push
+                // failure upstream, an API rejection, …). Record the failure so a
+                // PERSISTENT inability to open surfaces as a distinct, operator-
+                // visible escalation instead of an invisible forever-hold.
+                let reason = match &push_error {
+                    Some(e) => format!("failed to open review PR/MR (push error: {e})"),
+                    None => "hosting returned no PR reference when opening the review PR/MR".to_string(),
+                };
+                note_discrete_gate_failure(store, slug, &station, &reason);
             }
             Ok(())
         }
@@ -3392,6 +3537,138 @@ fn nonclobber_feedback_id(store: &StateStore, slug: &str, base: &str) -> Result<
     }
 }
 
+// ── Pre-checkpoint gate-review ledger ────────────────────────────────────────
+//
+// `darkrun_gate_review` is the pre-checkpoint code review (dispatch Reviewers,
+// file findings, fix). It used to be purely ADVISORY: it wrote no durable mark
+// and nothing required it before a checkpoint locked, so a human-in-the-loop
+// station could lock with ZERO review. It now records a durable stamp here, and
+// an ask/external `checkpoint_decide` requires that stamp before it may lock a
+// station that carries un-reviewed code changes. Dark/Auto runs bypass (they
+// never stop for review by design).
+
+/// The run slug a gate review applies to, resolved from context the way the tool
+/// layer resolves a slug when the caller doesn't pass one: the current git
+/// branch, else the sole live (non-archived) run, else the active-run pointer.
+/// `None` when nothing is unambiguously resolvable.
+fn resolve_review_run(store: &StateStore) -> Option<String> {
+    let repo_root = cascade_repo_root(store);
+    if let Ok(git) = Git::open(&repo_root) {
+        if let Ok(Some(branch)) = git.current_branch() {
+            if let Some(slug) = slug_from_run_branch(&branch) {
+                if store.read_run(&slug).is_ok() {
+                    return Some(slug);
+                }
+            }
+        }
+    }
+    if let Ok(slugs) = store.list_runs() {
+        let live: Vec<String> = slugs
+            .into_iter()
+            .filter(|s| {
+                store
+                    .read_run(s)
+                    .map(|r| !r.frontmatter.archived.unwrap_or(false))
+                    .unwrap_or(false)
+            })
+            .collect();
+        if let [only] = live.as_slice() {
+            return Some(only.clone());
+        }
+    }
+    store.active_run().ok().flatten()
+}
+
+/// Extract a run slug from a `darkrun/<slug>/<segment>` branch name, or `None`
+/// for any non-run branch (so an ordinary feature branch never resolves as a run).
+fn slug_from_run_branch(branch: &str) -> Option<String> {
+    let rest = branch.strip_prefix(&format!("{}/", crate::lifecycle::BRANCH_PREFIX))?;
+    let (slug, _segment) = rest.split_once('/')?;
+    (!slug.is_empty()).then(|| slug.to_string())
+}
+
+/// Read the per-station gate-review ledger (`station → reviewed_at`) for a run.
+fn read_gate_reviews(store: &StateStore, slug: &str) -> std::collections::BTreeMap<String, String> {
+    let path = store.run_dir(slug).join("gate_review.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Whether a gate review has been recorded for a run's station.
+fn has_gate_review(store: &StateStore, slug: &str, station: &str) -> bool {
+    read_gate_reviews(store, slug).contains_key(station)
+}
+
+/// Record a gate-review stamp for the run the review applies to (resolved from
+/// context), scoped to that run's CURRENT station. This is the durable mark
+/// `darkrun_gate_review` leaves so the checkpoint gate can require it.
+/// Best-effort: no resolvable run/station, or an unwritable ledger, records
+/// nothing (the review result is still returned to the caller).
+pub(crate) fn record_active_gate_review(store: &StateStore) {
+    let Some(slug) = resolve_review_run(store) else {
+        return;
+    };
+    let Ok(run) = store.read_run(&slug) else {
+        return;
+    };
+    let Some(factory) = resolve_factory_for(store, &run.frontmatter.factory) else {
+        return;
+    };
+    let state = store.read_state(&slug).ok().flatten().unwrap_or_default();
+    let Some(station) = current_station(&factory, &state) else {
+        return;
+    };
+    let mut map = read_gate_reviews(store, &slug);
+    map.insert(station.clone(), Utc::now().to_rfc3339());
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(store.run_dir(&slug).join("gate_review.json"), json);
+    }
+    crate::events::emit(
+        store,
+        &slug,
+        "darkrun.gate_review.recorded",
+        serde_json::json!({ "station": station }),
+    );
+}
+
+/// Enforce the pre-checkpoint gate review before a HUMAN-IN-THE-LOOP lock.
+///
+/// An ask/external checkpoint may not lock a station whose code changes have not
+/// been through the pre-checkpoint gate review (`darkrun_gate_review`, which
+/// records the stamp). The requirement fires ONLY when there is something to
+/// review — a non-empty working-tree diff in a real git repo — so a docs-only or
+/// no-diff station, and every non-git run, lock freely. Dark/Auto bypasses: a
+/// dark run never stops for review by design.
+fn require_gate_review(
+    store: &StateStore,
+    slug: &str,
+    station: &str,
+    kind: CheckpointKind,
+) -> Result<()> {
+    if !matches!(kind, CheckpointKind::Ask | CheckpointKind::External) {
+        return Ok(()); // dark/Auto (and Await) never hold for review.
+    }
+    let repo_root = cascade_repo_root(store);
+    let Ok(git) = Git::open(&repo_root) else {
+        return Ok(()); // nothing to review outside a git repo.
+    };
+    let has_changes = git
+        .diff_stat("HEAD")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !has_changes || has_gate_review(store, slug, station) {
+        return Ok(());
+    }
+    Err(McpError::InvalidInput(format!(
+        "cannot lock the '{station}' checkpoint: its code changes have not been through the \
+         pre-checkpoint gate review. Run `darkrun_gate_review` (dispatch the station's \
+         Reviewers, file findings, fix, re-check) — that records the review — then approve. \
+         Dark mode bypasses this; solo/team must review before a station locks."
+    )))
+}
+
 /// Apply an operator decision to the active station's Checkpoint.
 ///
 /// `approved == true` advances the station (mirrors an `auto`/approved gate);
@@ -3457,6 +3734,12 @@ pub fn checkpoint_decide(
                 open.bar_label().unwrap_or_default(),
             )));
         }
+        // ── Gate-review gate: no human-in-the-loop lock with zero review ─────
+        // An ask/external checkpoint carrying un-reviewed code changes must have
+        // been through `darkrun_gate_review` (which records a durable stamp)
+        // before it can lock. Dark/Auto bypasses; a no-diff / no-git station has
+        // nothing to review and locks freely.
+        require_gate_review(store, slug, &station, effective_checkpoint_kind(&state))?;
     }
 
     let mut landed_station: Option<String> = None;
@@ -3609,6 +3892,49 @@ mod tests {
             Some(RunAction::FeedbackQuestion { feedback_id, .. }) => assert_eq!(feedback_id, "fb-00"),
             other => panic!("expected question preempt, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn feedback_classification_is_bounded_to_the_frontmatter_fence() {
+        // A reviewer-authored BODY line must never flip classification. Each doc
+        // below carries a benign frontmatter but a body line that, under a naive
+        // whole-doc scan, would hijack status/severity/kind/station.
+        let sneaky_status =
+            "---\nstatus: pending\n---\nWe agreed the status: done comment was premature.\n";
+        assert!(
+            feedback_open(sneaky_status),
+            "a `status: done` line in the BODY must not close an open finding"
+        );
+
+        let sneaky_kind =
+            "---\nstatus: pending\n---\nIs this a question: yes? still a plain fix.\nkind: question\n";
+        assert!(
+            !feedback_is_question(sneaky_kind),
+            "a `kind: question` line in the BODY must not reclassify a fix as a question"
+        );
+
+        let sneaky_sev =
+            "---\nstatus: pending\n---\nThis is not really a severity: blocker situation.\n";
+        assert_eq!(
+            feedback_severity_rank(sneaky_sev),
+            4,
+            "a `severity: blocker` line in the BODY must not rank an unranked finding"
+        );
+
+        let sneaky_station =
+            "---\nstatus: pending\nstation: build\n---\nrelated to the station: harden work\n";
+        assert_eq!(
+            feedback_station(sneaky_station),
+            "build",
+            "the frontmatter `station:` wins over a body `station:` line"
+        );
+
+        // The real frontmatter values are still read correctly.
+        assert!(!feedback_open("---\nstatus: closed\n---\nbody\n"));
+        assert!(feedback_is_question("---\nkind: question\n---\nbody\n"));
+        assert_eq!(feedback_severity_rank("---\nseverity: high\n---\nbody\n"), 1);
+        // A legacy/unfenced doc keeps the whole-doc scan (backward compatible).
+        assert!(!feedback_open("status: closed\nbody\n"));
     }
 
     #[test]
@@ -6316,6 +6642,197 @@ mod tests {
         assert_eq!(
             after.stations.get("frame").and_then(|s| s.pr_ref.as_deref()),
             Some("https://example.test/pr/1")
+        );
+    }
+
+    #[test]
+    fn discrete_gate_that_cannot_open_a_pr_escalates_after_persistent_failure() {
+        use darkrun_core::domain::{Checkpoint, CheckpointKind, Station, StationPhase, Status};
+        // Hosting is available but every attempt to open the PR fails.
+        struct FailingHosting;
+        impl crate::hosting::Hosting for FailingHosting {
+            fn available(&self) -> bool { true }
+            fn open_draft(&self, _req: &crate::hosting::OpenRequest) -> Option<String> { None }
+            fn merge_state(&self, _pr_ref: &str) -> crate::hosting::MergeState {
+                crate::hosting::MergeState::Open
+            }
+        }
+        let dir = tempdir().unwrap();
+        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["init", "-q"]).status().unwrap();
+        let store = StateStore::new(dir.path());
+        run_start(&store, "r", "software", None, Mode::Team, "full").unwrap();
+        let mut state = store.read_state("r").unwrap().unwrap();
+        state.mode = Mode::Team;
+        state.active_station = "frame".into();
+        state.stations.insert("frame".into(), Station {
+            station: "frame".into(), status: Status::Active, phase: StationPhase::Checkpoint,
+            elaborated: true, checkpoint: Some(Checkpoint { kind: CheckpointKind::External, entered_at: None, outcome: None }),
+            branch: None, pr_ref: None, pr_status: None,
+            pr_ready_at: None, pr_merged_at: None, verifier_nonce: None,
+            started_at: None, completed_at: None,
+        });
+        store.write_state("r", &state).unwrap();
+
+        // One failure still holds as an ordinary external-review request.
+        resolve_discrete_gate(&store, "r", &FailingHosting).unwrap();
+        assert!(
+            matches!(
+                derive_position(&store, "r").unwrap().action,
+                Some(RunAction::ExternalReviewRequested { .. })
+            ),
+            "a single open failure still holds, not escalates"
+        );
+
+        // A persistent failure streak crosses the threshold and surfaces a
+        // distinct, operator-visible escalation instead of holding silently.
+        for _ in 1..DISCRETE_GATE_MAX_FAILURES {
+            resolve_discrete_gate(&store, "r", &FailingHosting).unwrap();
+        }
+        assert_eq!(discrete_gate_failures(&store, "r", "frame"), DISCRETE_GATE_MAX_FAILURES);
+        match derive_position(&store, "r").unwrap().action {
+            Some(RunAction::Escalate { reason, station, .. }) => {
+                assert_eq!(station, "frame");
+                assert!(reason.contains("stuck"), "reason names the stuck gate: {reason}");
+            }
+            other => panic!("expected a stuck-gate Escalate, got {other:?}"),
+        }
+
+        // Recovery: once hosting can open the PR again, the streak clears.
+        struct WorkingHosting;
+        impl crate::hosting::Hosting for WorkingHosting {
+            fn available(&self) -> bool { true }
+            fn open_draft(&self, _req: &crate::hosting::OpenRequest) -> Option<String> {
+                Some("https://example.test/pr/9".into())
+            }
+            fn merge_state(&self, _pr_ref: &str) -> crate::hosting::MergeState {
+                crate::hosting::MergeState::Open
+            }
+        }
+        resolve_discrete_gate(&store, "r", &WorkingHosting).unwrap();
+        assert_eq!(
+            discrete_gate_failures(&store, "r", "frame"),
+            0,
+            "a successful open clears the failure streak"
+        );
+    }
+
+    #[test]
+    fn gate_review_gate_blocks_an_unreviewed_ask_lock_and_clears_once_reviewed() {
+        use std::process::Command;
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git").arg("-C").arg(root).args(args).status().unwrap().success(),
+                "git {args:?}"
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t.t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join(".gitignore"), ".darkrun/\n").unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+
+        let store = StateStore::new(root);
+        // `quick` ⇒ the first (current) station is `build`, so a recorded review
+        // and the enforcement target the same station.
+        run_start(&store, "r", "software", None, Mode::Solo, "quick").unwrap();
+
+        // A clean tree has nothing to review → an ask lock is not gated.
+        assert!(require_gate_review(&store, "r", "build", CheckpointKind::Ask).is_ok());
+
+        // Un-reviewed tracked changes appear.
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        // Dark/Auto never holds for review, even with a dirty tree.
+        assert!(require_gate_review(&store, "r", "build", CheckpointKind::Auto).is_ok());
+        // Ask/External with un-reviewed changes and no recorded review is blocked.
+        let err = require_gate_review(&store, "r", "build", CheckpointKind::Ask).unwrap_err();
+        assert!(matches!(err, McpError::InvalidInput(_)));
+        assert!(format!("{err}").contains("gate review"), "{err}");
+        assert!(require_gate_review(&store, "r", "build", CheckpointKind::External).is_err());
+
+        // Running the gate review records the durable stamp, which clears the gate.
+        let _ = crate::gate::gate_review(root);
+        assert!(has_gate_review(&store, "r", "build"), "gate_review recorded a stamp");
+        assert!(require_gate_review(&store, "r", "build", CheckpointKind::Ask).is_ok());
+        assert!(require_gate_review(&store, "r", "build", CheckpointKind::External).is_ok());
+    }
+
+    #[test]
+    fn dark_prove_holds_without_populated_evidence_then_clears_with_it() {
+        use darkrun_api::proof::{Proof as ApiProof, Surface as ApiSurface, WebProof};
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Dark, "quick").unwrap();
+        // Classify the run to a visual surface so the Prove gate demands a
+        // real measurement.
+        crate::proof::set_surface(&store, "r", "web-ui").unwrap();
+
+        // Park the run at prove's checkpoint. Dark mode ⇒ the effective gate is
+        // Auto, so the missing-proof hold applies.
+        let mut state = store.read_state("r").unwrap().unwrap();
+        state.mode = Mode::Dark;
+        state.plan = vec!["prove".into()];
+        state.active_station = "prove".into();
+        state.stations.insert(
+            "prove".into(),
+            Station {
+                station: "prove".into(),
+                status: Status::Active,
+                phase: StationPhase::Checkpoint,
+                elaborated: true,
+                checkpoint: Some(Checkpoint {
+                    kind: CheckpointKind::Auto,
+                    entered_at: None,
+                    outcome: None,
+                }),
+                branch: None,
+                pr_ref: None,
+                pr_status: None,
+                pr_ready_at: None,
+                pr_merged_at: None,
+                verifier_nonce: None,
+                started_at: None,
+                completed_at: None,
+            },
+        );
+        store.write_state("r", &state).unwrap();
+
+        // No proof at all → the Prove gate cannot auto-lock; it escalates.
+        let pos = derive_position(&store, "r").unwrap();
+        assert!(
+            matches!(pos.action, Some(RunAction::Escalate { .. })),
+            "no proof ⇒ escalate, got {:?}",
+            pos.action
+        );
+
+        // An empty (right-surface-but-unpopulated) proof is RECORDED but is not
+        // evidence, so the gate still holds — a dark run can no longer clear
+        // Prove with an empty proof.
+        let empty = ApiProof::web(ApiSurface::WebUi, WebProof::default());
+        crate::proof::attach_proof(&store, "r", empty, Some("prove".into())).unwrap();
+        let pos = derive_position(&store, "r").unwrap();
+        assert!(
+            matches!(pos.action, Some(RunAction::Escalate { .. })),
+            "empty proof ⇒ still escalate, got {:?}",
+            pos.action
+        );
+
+        // A populated proof carries real numbers → the hold clears and the
+        // checkpoint action derives.
+        let mut vitals = std::collections::BTreeMap::new();
+        vitals.insert("lcp".to_string(), 1100.0);
+        let real = ApiProof::web(ApiSurface::WebUi, WebProof { vitals, ..Default::default() });
+        crate::proof::attach_proof(&store, "r", real, Some("prove".into())).unwrap();
+        let pos = derive_position(&store, "r").unwrap();
+        assert!(
+            matches!(
+                pos.action,
+                Some(RunAction::Checkpoint { kind: CheckpointKind::Auto, .. })
+            ),
+            "populated proof ⇒ checkpoint, got {:?}",
+            pos.action
         );
     }
 

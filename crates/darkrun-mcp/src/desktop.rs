@@ -436,6 +436,25 @@ fn launch_direct(bin: PathBuf, port: u16, repo_root: &Path, session: Option<&str
 #[cfg(target_os = "macos")]
 const INSTALLED_BUNDLE_ID: &str = "ai.darkrun.app";
 
+/// The custom-scheme deep link that points the app at a run's live Review:
+/// `darkrun://review/<slug>`.
+///
+/// Passed to `open` as the URL argument (see [`launch_installed`]) so an
+/// ALREADY-RUNNING app receives it through tao `Event::Opened` (parsed by
+/// `wire::parse_review_deeplink`) and navigates to the live run. The env-only
+/// relaunch (`--env DARKRUN_PORT=…`) is IGNORED by a warm app — macOS never
+/// re-injects `--env` into a running process — which is why an app pinned at a
+/// since-recycled ephemeral port kept subscribing to a dead port and never
+/// registered presence. The deep link is what makes a warm app FOLLOW the run,
+/// while `--env` still seeds a COLD launch.
+///
+/// The slug is a kebab-case run slug (`[a-z0-9-]`), safe verbatim in a URL path.
+/// Pure over the slug, so the built URL is unit-tested.
+#[cfg(target_os = "macos")]
+fn review_deeplink(session: &str) -> String {
+    format!("darkrun://review/{session}")
+}
+
 /// Open the **installed** app (Mac App Store / TestFlight) by bundle id via
 /// LaunchServices, pointed at the engine `port`.
 ///
@@ -451,21 +470,32 @@ fn launch_installed(port: u16, repo_root: &Path, session: Option<&str>) -> Launc
     let log = log_path(repo_root);
     let _ = open_log(repo_root); // ensure .darkrun/ exists for open's redirect
     let mut cmd = Command::new("open");
-    cmd.arg("-n")
-        .arg("-b")
-        .arg(INSTALLED_BUNDLE_ID)
-        .arg("--env")
-        .arg(format!("DARKRUN_PORT={port}"));
+    cmd.arg("-b").arg(INSTALLED_BUNDLE_ID);
+    // Open a NEW instance only when there's no run to deep-link to. With a run,
+    // we pass its deep link as the `open` URL argument (below): macOS routes it
+    // to an ALREADY-RUNNING instance via the GetURL apple event (tao
+    // `Event::Opened`), so the warm app FOLLOWS the live engine. `-n` would
+    // instead spawn a redundant second window still stuck on a stale env port,
+    // which is exactly the surfacing failure we're fixing.
+    if session.is_none() {
+        cmd.arg("-n");
+    }
+    cmd.arg("--env").arg(format!("DARKRUN_PORT={port}"));
     if let Some(s) = session {
+        // COLD launch reads these from the fresh process env; a warm app ignores
+        // them (macOS doesn't re-inject `--env`) and navigates via the deep link.
         cmd.arg("--env").arg(format!("DARKRUN_SESSION_ID={s}"));
+    }
+    cmd.arg("--stdout").arg(&log).arg("--stderr").arg(&log);
+    // The run's deep link, LAST so `open` reads it as the URL to open with the
+    // bundle. Delivered to a running instance as `Event::Opened`; on a cold
+    // launch tao queues it and replays it once the event loop starts.
+    if let Some(s) = session {
+        cmd.arg(review_deeplink(s));
     }
     // `open -b` exits non-zero when the bundle id isn't installed, so a failure
     // here is a real "not installed" signal — surface it as NotFound.
     let ok = cmd
-        .arg("--stdout")
-        .arg(&log)
-        .arg("--stderr")
-        .arg(&log)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -616,6 +646,19 @@ mod tests {
         touch(&exe);
         touch(&ws.join("Cargo.toml"));
         assert!(dev_workspace_from(&exe).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn review_deeplink_is_the_custom_scheme_review_url() {
+        // The URL a warm-app launch hands to `open` — the custom-scheme review
+        // link the running app parses (`wire::parse_review_deeplink`) to follow
+        // the live run. A kebab-case slug passes through verbatim.
+        assert_eq!(
+            review_deeplink("quiet-tumbling-canyon"),
+            "darkrun://review/quiet-tumbling-canyon"
+        );
+        assert_eq!(review_deeplink("r"), "darkrun://review/r");
     }
 
     #[cfg(target_os = "macos")]

@@ -15,8 +15,8 @@ mod runs;
 mod workspace;
 
 use darkrun_api::session::{
-    DirectionSessionPayload, PickerSessionPayload, QuestionSessionPayload, ReviewSessionPayload,
-    SessionPayload,
+    DirectionSessionPayload, PickerSessionPayload, ProofSessionPayload, QuestionSessionPayload,
+    ReviewSessionPayload, SessionPayload, ViewSessionPayload, VisualReviewSessionPayload,
 };
 use darkrun_ui::prelude::*;
 use darkrun_ui::tokens;
@@ -152,6 +152,9 @@ pub fn App() -> Element {
         // session components resolve against, plus the html/body reset (dark
         // surface, no default margin) — without it the body showed a white frame.
         style { "{tokens::THEME_CSS}" }
+        // The scoped `.dr-md` rules so agent-authored prose (station narrative,
+        // interactive prompts) renders as formatted markdown, matching the desktop.
+        style { "{darkrun_ui::markdown::CSS}" }
         document::Title { "darkrun" }
         div { style: "{shell}",
             Header {}
@@ -169,6 +172,7 @@ pub fn App() -> Element {
                     RemoteState::Connecting => rsx! { Status { text: "Connecting to your run\u{2026}" } },
                     RemoteState::Reconnecting => rsx! { Status { text: "Reconnecting\u{2026}" } },
                     RemoteState::Live(payload) => live_view(&payload, commands, cmd_outcome),
+                    RemoteState::Offline => rsx! { Offline {} },
                 }
             }
         }
@@ -308,6 +312,47 @@ fn NoTarget() -> Element {
     }
 }
 
+/// The terminal "connection lost" surface, shown when the relay retry budget is
+/// spent (see [`remote::run_connection`]). Distinct from the transient
+/// `Reconnecting` status: the connection loop has GIVEN UP, so this states that
+/// plainly and offers an explicit retry (a full reload re-runs the whole connect
+/// flow) instead of leaving the operator on a silent spinner forever.
+#[component]
+pub(crate) fn Offline() -> Element {
+    rsx! {
+        div { style: "text-align:center;padding:48px 0;",
+            p {
+                style: format!(
+                    "font-family:{};font-size:16px;color:{};margin:0 0 8px;",
+                    tokens::FONT_SANS, tokens::TEXT,
+                ),
+                "Connection lost."
+            }
+            p {
+                style: format!(
+                    "font-family:{};font-size:13px;color:{};margin:0 0 20px;",
+                    tokens::FONT_SANS, tokens::TEXT_MUTED,
+                ),
+                "We couldn't reach your run after several tries. It may have finished, \
+                 or the machine running it went offline."
+            }
+            button {
+                style: format!(
+                    "padding:8px 18px;border:none;border-radius:6px;cursor:pointer;\
+                     background:{};color:{};font-family:{};font-size:14px;font-weight:600;",
+                    tokens::ACCENT, tokens::ON_ACCENT, tokens::FONT_SANS,
+                ),
+                onclick: move |_| {
+                    if let Some(win) = web_sys::window() {
+                        let _ = win.location().reload();
+                    }
+                },
+                "Try again"
+            }
+        }
+    }
+}
+
 /// The `/review/:id` landing shown when the link carried no live relay target.
 ///
 /// The full review link also carries `?relay&session&token`, which drives the
@@ -362,9 +407,187 @@ pub(crate) fn live_view(
         SessionPayload::Question(p) => question_view(p, commands, cmd_outcome),
         SessionPayload::Direction(p) => direction_view(p, commands, cmd_outcome),
         SessionPayload::Picker(p) => picker_view(p, commands, cmd_outcome),
-        // `remote::session_payload` never stores the other variants; nothing to
-        // render here.
-        _ => rsx! {},
+        // The read-only surfaces: not the desktop's full interactive review, but a
+        // basic rendering so the pane isn't blank when the run parks on one.
+        SessionPayload::View(p) => view_view(p),
+        SessionPayload::VisualReview(p) => visual_review_view(p),
+        SessionPayload::Proof(p) => proof_view(p),
+    }
+}
+
+/// A basic render of a non-blocking artifact **View** the engine mirrored onto
+/// the run feed: the run/station header plus the browsable artifacts as a simple
+/// list (label + path, a thumbnail when one is present). Read-only here: the
+/// full artifact stage lives on the desktop; this just keeps the pane meaningful
+/// instead of dropping the payload.
+fn view_view(payload: &ViewSessionPayload) -> Element {
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:16px;",
+            InteractiveHeader {
+                kind: "view".to_string(),
+                run: Some(payload.run_slug.clone()),
+                title: payload.station.clone(),
+                prompt: String::new(),
+                context: None,
+            }
+            if payload.artifacts.is_empty() {
+                { empty_note("No artifacts to browse in this view yet.") }
+            } else {
+                div { style: "display:flex;flex-direction:column;gap:8px;",
+                    for art in payload.artifacts.iter() {
+                        div {
+                            style: format!(
+                                "display:flex;align-items:center;gap:12px;padding:10px 14px;\
+                                 border:1px solid {};border-radius:8px;background:{};",
+                                tokens::BORDER, tokens::SURFACE_RAISED,
+                            ),
+                            if let Some(thumb) = &art.thumbnail_url {
+                                img {
+                                    src: "{thumb}",
+                                    style: format!(
+                                        "width:48px;height:48px;object-fit:cover;border-radius:4px;border:1px solid {};",
+                                        tokens::BORDER,
+                                    ),
+                                }
+                            }
+                            div { style: "display:flex;flex-direction:column;gap:2px;min-width:0;",
+                                span {
+                                    style: format!("font-family:{};font-size:14px;color:{};", tokens::FONT_SANS, tokens::TEXT),
+                                    "{art.label}"
+                                }
+                                span {
+                                    style: format!(
+                                        "font-family:{};font-size:12px;color:{};word-break:break-all;",
+                                        tokens::FONT_MONO, tokens::TEXT_MUTED,
+                                    ),
+                                    "{art.path}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A basic render of a **VisualReview** session: the run/station header, the
+/// optional prompt (as markdown), the output screenshot under review, and any
+/// annotations already on record. Read-only (dropping pins from the web isn't
+/// wired yet), but the payload is no longer discarded to a blank pane.
+fn visual_review_view(payload: &VisualReviewSessionPayload) -> Element {
+    let prompt = payload.prompt.clone().filter(|p| !p.is_empty());
+    let annotations = payload.annotations.clone().filter(|a| !a.is_empty());
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:16px;",
+            InteractiveHeader {
+                kind: "visual review".to_string(),
+                run: payload.run_slug.clone(),
+                title: payload.station.clone(),
+                prompt: String::new(),
+                context: None,
+            }
+            if let Some(prompt) = prompt {
+                { markdown(&prompt, &format!("font-size:15px;color:{};", tokens::TEXT)) }
+            }
+            if let Some(url) = &payload.screenshot_url {
+                img {
+                    src: "{url}",
+                    style: format!(
+                        "width:100%;border-radius:8px;border:1px solid {};",
+                        tokens::BORDER,
+                    ),
+                }
+            }
+            match annotations {
+                Some(a) => rsx! {
+                    div { style: "display:flex;flex-direction:column;gap:8px;",
+                        for pin in a.pins.iter() {
+                            div {
+                                style: format!(
+                                    "padding:8px 12px;border:1px solid {};border-radius:6px;background:{};\
+                                     font-family:{};font-size:13px;color:{};",
+                                    tokens::BORDER, tokens::SURFACE_RAISED, tokens::FONT_SANS, tokens::TEXT_MUTED,
+                                ),
+                                "{pin.note}"
+                            }
+                        }
+                        for comment in a.comments.iter() {
+                            div {
+                                style: format!(
+                                    "padding:8px 12px;border:1px solid {};border-radius:6px;background:{};\
+                                     font-family:{};font-size:13px;color:{};",
+                                    tokens::BORDER, tokens::SURFACE_RAISED, tokens::FONT_SANS, tokens::TEXT_MUTED,
+                                ),
+                                "{comment}"
+                            }
+                        }
+                    }
+                },
+                None => rsx! {
+                    { empty_note("Annotate this output from the desktop or the native app to leave feedback.") }
+                },
+            }
+        }
+    }
+}
+
+/// A basic render of a **Proof** session: the run/station header plus which
+/// surface was measured. The full metric panel (web vitals / bench percentiles)
+/// lives on the desktop; this states what evidence exists so the payload isn't
+/// dropped to a blank pane.
+fn proof_view(payload: &ProofSessionPayload) -> Element {
+    let surface = format!("{:?}", payload.proof.surface).to_lowercase();
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:16px;",
+            InteractiveHeader {
+                kind: "proof".to_string(),
+                run: payload.run_slug.clone(),
+                title: payload.station.clone(),
+                prompt: String::new(),
+                context: None,
+            }
+            div {
+                style: format!(
+                    "padding:12px 14px;border:1px solid {};border-radius:8px;background:{};\
+                     font-family:{};font-size:13px;color:{};line-height:1.5;",
+                    tokens::BORDER, tokens::SURFACE_RAISED, tokens::FONT_SANS, tokens::TEXT_MUTED,
+                ),
+                "Objective evidence recorded for the "
+                span { style: format!("color:{};", tokens::TEXT), "{surface}" }
+                " surface. Open the run on the desktop app for the full metrics."
+            }
+        }
+    }
+}
+
+/// A muted, bordered "nothing here" note: the shared empty state for the
+/// read-only views, so an empty payload reads as intentional rather than broken.
+fn empty_note(text: &str) -> Element {
+    rsx! {
+        p {
+            style: format!(
+                "font-family:{};font-size:13px;color:{};margin:0;padding:16px;\
+                 border:1px dashed {};border-radius:8px;text-align:center;",
+                tokens::FONT_SANS, tokens::TEXT_FAINT, tokens::BORDER,
+            ),
+            "{text}"
+        }
+    }
+}
+
+/// Render agent-authored prose as formatted markdown through the shared
+/// `darkrun_ui` renderer, the same [`darkrun_ui::markdown::to_html`] the desktop
+/// uses, so the web surface matches instead of showing raw text. `style` is
+/// applied inline to the `.dr-md` container (color/size overrides win over the
+/// scoped rules); the `.dr-md` CSS itself is injected once per shell.
+fn markdown(text: &str, style: &str) -> Element {
+    rsx! {
+        div {
+            class: "dr-md",
+            style: "{style}",
+            dangerous_inner_html: darkrun_ui::markdown::to_html(text),
+        }
     }
 }
 
@@ -463,18 +686,16 @@ fn session_view(
                                         ),
                                         "{station}"
                                     }
-                                    p {
-                                        style: format!(
-                                            "font-family:{};font-size:13px;color:{};margin:0;white-space:pre-wrap;line-height:1.5;",
-                                            tokens::FONT_SANS, tokens::TEXT_MUTED,
-                                        ),
-                                        "{body}"
-                                    }
+                                    { markdown(body, &format!("font-size:13px;color:{};", tokens::TEXT_MUTED)) }
                                 }
                             }
                         }
                     },
-                    None => rsx! {},
+                    // No outcomes and no briefs yet: say so, so an empty review
+                    // reads as "nothing recorded here yet" rather than a blank pane.
+                    None => rsx! {
+                        { empty_note("No station narrative yet: this review has no recorded briefs or outcomes.") }
+                    },
                 }
             }
         }
@@ -788,19 +1009,10 @@ fn InteractiveHeader(
                 }
             }
             if !prompt.is_empty() {
-                p {
-                    style: format!("font-family:{};font-size:15px;color:{};margin:0;line-height:1.5;", tokens::FONT_SANS, tokens::TEXT),
-                    "{prompt}"
-                }
+                { markdown(&prompt, &format!("font-size:15px;color:{};", tokens::TEXT)) }
             }
             if let Some(context) = context {
-                p {
-                    style: format!(
-                        "font-family:{};font-size:13px;color:{};margin:0;white-space:pre-wrap;line-height:1.5;",
-                        tokens::FONT_SANS, tokens::TEXT_MUTED,
-                    ),
-                    "{context}"
-                }
+                { markdown(&context, &format!("font-size:13px;color:{};", tokens::TEXT_MUTED)) }
             }
         }
     }
@@ -838,10 +1050,7 @@ fn OptionCard(
                 "{label}"
             }
             if let Some(description) = description {
-                span {
-                    style: format!("font-family:{};font-size:13px;color:{};line-height:1.5;", tokens::FONT_SANS, tokens::TEXT_MUTED),
-                    "{description}"
-                }
+                { markdown(&description, &format!("font-size:13px;color:{};", tokens::TEXT_MUTED)) }
             }
         }
     }
