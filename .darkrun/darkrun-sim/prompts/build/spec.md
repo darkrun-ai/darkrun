@@ -85,25 +85,26 @@ Write every Unit with `darkrun_unit_create`, with the full anatomy:
 - **`model`** — match the tier to the risk: `opus` for architectural, cascading-failure, or deepest-reasoning work, `sonnet` (default) for known patterns plus judgment, `haiku` only for purely mechanical edits.
 
 
-There are no Units yet. You are creating them.
+### Units already on record
+
+- `ci-gates`
+
+- `fixture-schema`
+
+- `replay-route`
+
+- `sim-spine`
+
+Reconcile these against what the explorers found — extend, split, or tighten them; don't blindly accept them.
 
 
 
 
-
-## Collaborate with the operator — required before this spec locks
-
-This run is in a **collaborative mode**, and the station will not advance to Review until you have actually involved the operator in shaping the spec. Do not author the whole spec solo and surface it only at the gate — bring the operator in *now*, while the frame is still soft:
-
-- Surface the open framing questions and the consequential choices to the operator with `darkrun_question` (a decision) or `darkrun_direction` (a direction to steer), and fold their answers into the spec.
-- When the spec genuinely reflects that collaboration, call **`darkrun_elaborate_seal`** for this station — that clears the hold and the next tick advances to Review.
-
-If you advance without involving the operator, the station stays in Spec; a stalled, non-collaborative Spec escalates to the operator rather than slipping past them. (`dark` mode pre-elaborates once up front and doesn't gate here.)
 
 
 ## Done when
 
-The spec names the risk, lists Units with testable completion criteria and dependencies, marks what's out of scope, the operator has been involved and `darkrun_elaborate_seal` is called, and it's written to the station's spec artifact. Then call `darkrun_tick`.
+The spec names the risk, lists Units with testable completion criteria and dependencies, marks what's out of scope, and it's written to the station's spec artifact. Then call `darkrun_tick`.
 
 ---
 
