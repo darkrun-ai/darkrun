@@ -185,15 +185,41 @@ pub const APP_GROUP: &str = "group.ai.darkrun";
 /// same cloned repos). Everywhere else it's the home directory, preserving the
 /// historical `~/.darkrun` + `~/darkrun` layout exactly.
 fn data_home() -> Option<PathBuf> {
-    let home = dirs::home_dir().or_else(home_dir_env)?;
     #[cfg(target_os = "macos")]
     {
+        // The REAL user home, sandbox-proof. Inside the Mac App Store sandbox,
+        // `$HOME` (and therefore `dirs::home_dir`) points at the app's OWN
+        // container (`~/Library/Containers/<bundle-id>/Data`), so joining the
+        // group-container suffix there yields a path that does not exist — the
+        // store app then read an EMPTY registry (no engines, no projects) while
+        // the unsandboxed engine wrote to the real one, and the two never met.
+        // `getpwuid` still reports `/Users/<name>` under the sandbox, and the
+        // `com.apple.security.application-groups` entitlement grants access to
+        // the real group container BY PATH, however the path was derived.
+        let home = real_user_home()
+            .or_else(dirs::home_dir)
+            .or_else(home_dir_env)?;
         Some(home.join("Library").join("Group Containers").join(APP_GROUP))
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let home = dirs::home_dir().or_else(home_dir_env)?;
         Some(home)
     }
+}
+
+/// The current user's passwd-database home directory (`getpwuid`), which names
+/// the real `/Users/<name>` even when the process runs inside an app sandbox
+/// that rewrites `$HOME`. `None` when the lookup fails (then callers fall back
+/// to the environment-derived home).
+#[cfg(target_os = "macos")]
+#[cfg(not(tarpaulin_include))] // thin wrapper over the passwd database
+fn real_user_home() -> Option<PathBuf> {
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|u| u.dir)
+        .filter(|d| !d.as_os_str().is_empty())
 }
 
 /// Resolve the default discovery root (`~/.darkrun`, or the app-group container's

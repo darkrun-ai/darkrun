@@ -158,6 +158,10 @@ pub async fn serve_stdio_on(
             crate::position::checkpoint_decide(&ds, run, approved, fb).is_ok()
         })
     };
+    // With the durable decider in place, tell the shared session registry so the
+    // MCP advance HOLDS at operator gates (a registry with no decision path
+    // keeps the immediate-return contract instead of waiting forever).
+    state.sessions.enable_durable_decisions();
     // Durability: every interactive session (question / direction / picker) the
     // registry upserts — on raise AND on answer — is written to the run's
     // `interactive/` dir, so an open question and its eventual answer survive an

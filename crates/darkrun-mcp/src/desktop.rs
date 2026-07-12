@@ -229,6 +229,14 @@ fn sync_bundle_exe(bundle: &Path, bin: &Path) -> std::io::Result<()> {
         std::fs::copy(bin, &exe)?;
         // Bump the bundle mtime so LaunchServices refreshes the cached icon.
         let _ = Command::new("touch").arg(bundle).status();
+        // Ad-hoc re-sign the bundle so it carries a resource seal. The copied
+        // binary has only its linker's Mach-O signature; without the bundle
+        // seal, modern macOS refuses the launch (RBS error 5 / POSIX 153
+        // "Launchd job spawn failed"), silently, into the launch log.
+        let _ = Command::new("codesign")
+            .args(["--force", "--deep", "-s", "-"])
+            .arg(bundle)
+            .status();
     }
     Ok(())
 }
@@ -262,9 +270,15 @@ fn spawn_build_then_launch(
             // After the build, copy the freshly-built binary INTO the bundle (a
             // real executable, not a symlink) so macOS keeps the bundle/icon
             // association, then `touch` the .app so LaunchServices re-reads it
-            // (busting a stale icon cache), then launch.
+            // (busting a stale icon cache), ad-hoc RE-SIGN the bundle, then
+            // launch. The re-sign is load-bearing: the copied binary carries
+            // only its linker's Mach-O signature with no bundle resource seal,
+            // and modern macOS refuses to spawn such a bundle (RBS error 5 /
+            // POSIX 153 "Launchd job spawn failed" — observed silently killing
+            // every dev-desktop launch on a machine once it upgraded).
             Ok(bundle) => format!(
                 "cargo build -p darkrun-desktop{rel} && rm -f {exe} && cp {bin} {exe} && touch {bnd} && \
+                 codesign --force --deep -s - {bnd} && \
                  exec open -n {bnd} --env DARKRUN_PORT={port}{sess} --stdout {log} --stderr {log}",
                 bin = sh_quote(bin),
                 // `rm` first so we replace any stale symlink instead of copying

@@ -145,6 +145,13 @@ pub struct SessionRegistry {
     /// disk without the HTTP answer handlers needing to know how. Shared across
     /// clones (the engine installs it once, after construction).
     persist: Arc<Mutex<Option<PersistHook>>>,
+    /// Whether a DURABLE gate-decision path exists for this registry: flipped by
+    /// the engine when it installs the HTTP layer's gate-decider hook (see
+    /// `AppState::with_gate_decider`). The MCP advance only HOLDS at an operator
+    /// gate when this is set — a context where no decision can ever land (a bare
+    /// registry in tests, an engine-less embedding) keeps the immediate-return
+    /// contract instead of blocking on an answer that cannot arrive.
+    durable_decisions: Arc<AtomicBool>,
 }
 
 /// A durability callback: persist a session payload (e.g. to the run's
@@ -161,6 +168,19 @@ impl SessionRegistry {
     /// clone of this registry, so handlers that hold a clone persist too.
     pub fn on_persist(&self, hook: PersistHook) {
         *self.persist.lock().expect("session registry poisoned") = Some(hook);
+    }
+
+    /// Mark that a DURABLE gate-decision path exists (see `durable_decisions`).
+    /// The engine calls this when it installs the gate-decider hook; shared
+    /// across every clone of this registry.
+    pub fn enable_durable_decisions(&self) {
+        self.durable_decisions.store(true, Ordering::Release);
+    }
+
+    /// Whether a durable gate-decision path exists — the precondition for the
+    /// MCP advance to HOLD at an operator gate (see `durable_decisions`).
+    pub fn durable_decisions_enabled(&self) -> bool {
+        self.durable_decisions.load(Ordering::Acquire)
     }
 
     /// Run the persist hook for `payload`, if one is installed.

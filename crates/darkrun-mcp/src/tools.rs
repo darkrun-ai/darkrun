@@ -292,14 +292,26 @@ impl DarkrunServer {
 
     /// Whether `darkrun_advance` should BLOCK on this action instead of returning
     /// it: it is a live OPERATOR gate (the pre-execution `UserGate` or a non-auto
-    /// post-execution `Checkpoint`), the run is NOT autonomous, AND a human
-    /// surface is live (a present client or a push-acked device →
-    /// [`SurfaceMode::Await`]).
+    /// post-execution `Checkpoint`), the run is NOT autonomous, and a DURABLE
+    /// decision path exists (the engine installed the HTTP gate-decider —
+    /// [`SessionRegistry::durable_decisions_enabled`]).
     ///
-    /// A dark / autonomous / headless run is NEVER held — it returns `false`
-    /// here so the agent gets the gate action immediately (today's behavior).
-    /// That keeps a lights-out run from wedging on an operator who will never
-    /// answer, and preserves the standalone/relay surfacing path (web_url).
+    /// The surface decision ([`surface_mode`](crate::desktop::surface_mode) —
+    /// hold via the live mirror / push vs LAUNCH the app) picks HOW the gate
+    /// reaches the operator; it must never decide WHETHER the agent waits.
+    /// Holding only on `Await` meant that with no desktop connected the advance
+    /// RETURNED the gate to the agent while the app was still launching — so the
+    /// agent asked the operator to progress in chat, which is exactly the
+    /// babysitting the gates exist to remove. The freshly-launched app finds the
+    /// session (it is registered before the launch), the operator decides there,
+    /// and the held advance resolves; if nobody ever answers, the hold degrades
+    /// to the bounded `pending_gate` keepalive, never a wedge.
+    ///
+    /// The durable-decider requirement keeps two contexts on the immediate-return
+    /// contract: a dark / autonomous / headless run (an operator who will never
+    /// answer must not wedge a lights-out run), and an embedding with no landing
+    /// path for a decision (a bare registry in tests, an engine-less host) where
+    /// blocking would wait on an answer that cannot arrive.
     fn gate_should_hold(&self, action: &crate::position::RunAction, slug: &str) -> bool {
         use crate::position::RunAction;
         let is_operator_gate = match action {
@@ -309,13 +321,9 @@ impl DarkrunServer {
             }
             _ => false,
         };
-        if !is_operator_gate || self.run_is_autonomous(slug) {
-            return false;
-        }
-        matches!(
-            crate::desktop::surface_mode(self.sessions.presence(), self.sessions.has_ack(slug)),
-            crate::desktop::SurfaceMode::Await
-        )
+        is_operator_gate
+            && !self.run_is_autonomous(slug)
+            && self.sessions.durable_decisions_enabled()
     }
 
     /// The blocking half of `darkrun_advance`: when `action` sits on a live
@@ -3732,7 +3740,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_should_hold_needs_a_live_surface_and_an_interactive_run() {
+    async fn gate_should_hold_on_operator_gates_regardless_of_surface() {
         let dir = tempdir().unwrap();
         let sessions = SessionRegistry::new();
         let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
@@ -3741,10 +3749,18 @@ mod tests {
             run: "s".into(),
             station: "frame".into(),
         };
-        // No client attached → SurfaceMode::Launch → do NOT hold (surface the
-        // gate elsewhere instead of blocking on an operator who isn't watching).
+        // With NO durable decision path (no gate-decider installed), advance
+        // must not hold: nothing could ever resolve it.
         assert!(!server.gate_should_hold(&gate, "s"));
-        // A live desktop → hold at the gate.
+        // The engine installs the decider and flips the registry flag.
+        sessions.enable_durable_decisions();
+        // No client attached (SurfaceMode::Launch): the advance still HOLDS —
+        // the launch fires the app open, and returning the gate to the agent
+        // instead would make it ask the operator to progress in chat (the
+        // reported bug). The surface decision picks HOW the gate reaches the
+        // operator, never WHETHER the agent waits.
+        assert!(server.gate_should_hold(&gate, "s"));
+        // A live desktop (SurfaceMode::Await) holds too.
         let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
         assert!(server.gate_should_hold(&gate, "s"));
         // A non-gate action never holds, even with a live surface.
@@ -3761,6 +3777,8 @@ mod tests {
         use darkrun_api::{ReviewSessionPayload, SessionPayload, SessionStatus};
         let dir = tempdir().unwrap();
         let sessions = SessionRegistry::new();
+        // A durable decision path exists (the engine's hook) → gates HOLD.
+        sessions.enable_durable_decisions();
         // A live desktop → presence Live, so the gate HOLDS (Await mode).
         let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
         let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
@@ -3796,6 +3814,7 @@ mod tests {
     async fn advance_gate_hold_returns_pending_gate_on_timeout() {
         let dir = tempdir().unwrap();
         let sessions = SessionRegistry::new();
+        sessions.enable_durable_decisions(); // a decision path exists → holds apply
         let _slot = sessions.try_acquire_ws_slot(8).expect("slot"); // presence Live
         let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
         drive_to_user_gate(&server.store(), "r");
@@ -3832,6 +3851,7 @@ mod tests {
         use darkrun_api::{ReviewSessionPayload, SessionPayload, SessionStatus};
         let dir = tempdir().unwrap();
         let sessions = SessionRegistry::new();
+        sessions.enable_durable_decisions(); // a decision path exists → holds apply
         // A live desktop → presence Live, so the gate WOULD hold (Await mode).
         let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
         let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
