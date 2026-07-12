@@ -113,6 +113,18 @@ variable "manage_www" {
   default     = true
 }
 
+variable "manage_relay" {
+  description = "Map + point relay.<web_domain> at the darkrun-web service (web mapping + dns CNAME). relay.<web_domain> is the wss:// base the engine dials by default (web/server DEFAULT_RELAY_PUBLIC_URL), so this must resolve for the default remote dial to work. The DNS CNAME is published whenever manage_dns is on; the Cloud Run mapping still respects manage_domain_mapping (the verified-owner step)."
+  type        = bool
+  default     = true
+}
+
+variable "firebase_hosting_a_records" {
+  description = "A records for app.<web_domain>, the Firebase-Hosting web app (site darkrun-app). Firebase Hosting custom domains are console/API-driven: connect app.<web_domain> in the Firebase console (Hosting -> Add custom domain), which issues an ownership TXT challenge, provisions the managed TLS cert, and then shows the exact A record IPs — paste those here. Empty (default) leaves app.<web_domain> unmanaged in DNS so Terraform never points it at a guessed/stale Firebase IP."
+  type        = list(string)
+  default     = []
+}
+
 variable "manage_domain_mapping" {
   description = "Let Terraform create the Cloud Run domain mappings. Default false — the mappings need a verified domain owner, which the TFC service account can't be, so they're created out-of-band by a verified human and Terraform leaves them alone (DNS records stay in Terraform)."
   type        = bool

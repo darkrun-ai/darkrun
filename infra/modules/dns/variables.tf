@@ -21,6 +21,30 @@ variable "manage_www" {
   default     = true
 }
 
+variable "manage_relay" {
+  description = "Also create a relay CNAME -> Cloud Run (needs the relay domain mapping in the web module to serve). relay.<domain> is the wss:// base the engine dials by default, so this should be on for the default remote dial to resolve."
+  type        = bool
+  default     = true
+}
+
+variable "relay_subdomain" {
+  description = "Subdomain label for the relay CNAME (default \"relay\" => relay.<domain>)."
+  type        = string
+  default     = "relay"
+}
+
+variable "app_subdomain" {
+  description = "Subdomain label for the Firebase-Hosting web app A record (default \"app\" => app.<domain>)."
+  type        = string
+  default     = "app"
+}
+
+variable "firebase_hosting_a_records" {
+  description = "A records for the app.<domain> Firebase Hosting custom domain. COPY THESE FROM THE FIREBASE CONSOLE when you connect app.<domain> (Hosting -> Add custom domain): the console issues an ownership TXT challenge and provisions the managed cert, then shows the exact A record IPs. Empty (default) leaves app.<domain> unmanaged in DNS until you supply them."
+  type        = list(string)
+  default     = []
+}
+
 variable "ttl" {
   description = "TTL (seconds) for the records."
   type        = number
