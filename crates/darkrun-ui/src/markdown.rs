@@ -255,12 +255,6 @@ pub fn looks_like_markdown(src: &str) -> bool {
     body.contains("**") || body.contains("~~") || body.matches('`').count() >= 2 || body.contains("](")
 }
 
-/// Scoped CSS for markdown rendered by [`to_html`], plus the frontmatter chip
-/// header. The single source of truth for `.dr-md` styling — inject it once on
-/// any surface that renders `to_html` output (session views, the review
-/// annotate stage, the artifact browser) so headings, code, tables, and
-/// blockquotes look identical everywhere.
-
 /// Render a whole markdown DOCUMENT: a doc with frontmatter gets its pairs as a
 /// chip row ([`frontmatter_html`]) ahead of the rendered body instead of a raw
 /// `---` block; a doc without frontmatter renders exactly like [`to_html`].
@@ -291,6 +285,11 @@ pub fn to_html_doc(src: &str) -> String {
     }
 }
 
+/// Scoped CSS for markdown rendered by [`to_html`], plus the frontmatter chip
+/// header. The single source of truth for `.dr-md` styling — inject it once on
+/// any surface that renders `to_html` output (session views, the review
+/// annotate stage, the artifact browser) so headings, code, tables, and
+/// blockquotes look identical everywhere.
 pub const CSS: &str = "\
 .dr-md{font-family:var(--dr-font-sans);color:var(--dr-text);line-height:1.55;}\
 .dr-md h1{font-size:20px;font-weight:700;margin:2px 0 10px;line-height:1.25;}\
