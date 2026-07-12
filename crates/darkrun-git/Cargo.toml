@@ -11,7 +11,7 @@ description = "darkrun git worktree management — pure-Rust gitoxide backend (n
 # Pure-Rust git (gitoxide), C-free end to end: default features avoid the
 # zlib-ng/`max-performance` C path; `merge` is the three-way tree/blob merge;
 # the network transport uses reqwest + rustls (pure Rust, no curl/openssl C).
-gix = { version = "0.84", features = [
+gix = { version = "0.85", features = [
     "merge",
     "blocking-network-client",
     "blocking-http-transport-reqwest-rust-tls",
