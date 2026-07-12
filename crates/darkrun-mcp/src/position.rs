@@ -891,10 +891,19 @@ fn resolve_phase(
         return recorded;
     };
     // Pre-execution gate not yet crossed: the review work is done (derived is at
-    // Manufacture or later) but the station is still recorded at Review, so the
-    // Review action never dispatched to stamp the gate. Hold for the operator.
+    // Manufacture or later) but the station is still recorded BEFORE the gate, so
+    // the Review action never dispatched to stamp it. Hold for the operator.
+    //
+    // `recorded` must cover BOTH pre-gate beats, not just Review: the same
+    // early-stamp race (a fanned-out reviewer subagent stamps every role before
+    // the seal/Review tick advances `recorded` past Spec) can freeze `recorded`
+    // at Spec while derived jumps to Manufacture. Matching only Review let that
+    // one-phase-earlier race skip the UserGate outright (the Spec action that
+    // would move `recorded` to Review never dispatches again once reviews are
+    // signed). Holding here is safe: derived reaching Manufacture means the units
+    // exist and are stamped, so decomposition already happened.
     if !autopilot
-        && recorded == StationPhase::Review
+        && matches!(recorded, StationPhase::Spec | StationPhase::Review)
         && matches!(
             derived,
             StationPhase::Manufacture | StationPhase::Audit | StationPhase::Checkpoint
@@ -3236,11 +3245,25 @@ fn complete_station(
     }
     // Advance to the next station in the run's plan (not the factory's full
     // order) — a right-sized run skips the stations its plan omits.
+    //
+    // Only START the next station when it has not begun yet. Re-completing an
+    // UPSTREAM station (a drift re-open, DF-8) must NOT reset an already-started
+    // or completed downstream station back to Pending/Spec: that clobbered the
+    // downstream Completed state and cascaded one station at a time down the whole
+    // tail. When the next station is already underway/done the run is past it, so
+    // leave it (and the cursor) alone; the derived position re-resolves the real
+    // frontier on the next tick.
     if let Some(next_name) = next_in_plan(factory, state, station) {
-        let st = ensure_station(state, factory, &next_name)?;
-        st.status = Status::Pending;
-        st.phase = StationPhase::Spec;
-        state.active_station = next_name;
+        let next_started = state
+            .stations
+            .get(&next_name)
+            .is_some_and(|s| matches!(s.status, Status::Completed | Status::InProgress));
+        if !next_started {
+            let st = ensure_station(state, factory, &next_name)?;
+            st.status = Status::Pending;
+            st.phase = StationPhase::Spec;
+            state.active_station = next_name;
+        }
     }
     Ok(())
 }

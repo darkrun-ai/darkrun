@@ -34,6 +34,15 @@ pub fn is_terminal(status: FeedbackStatus) -> bool {
     TERMINAL.contains(&status)
 }
 
+/// Whether a terminal status means a FIX LANDED (as opposed to "no change /
+/// invalid"). Only these re-orient the run against a material finding's
+/// invalidated premises: `addressed` and `closed` carry a real change, while
+/// `answered` / `non_actionable` / `rejected` mean the finding needs no code
+/// change and the signed stamps must stand. See [`set_status`].
+pub fn fix_landed(status: FeedbackStatus) -> bool {
+    matches!(status, FeedbackStatus::Addressed | FeedbackStatus::Closed)
+}
+
 fn status_str(status: FeedbackStatus) -> &'static str {
     match status {
         FeedbackStatus::Pending => "pending",
@@ -509,18 +518,16 @@ pub fn set_status(
         return Err(McpError::FeedbackSettled(id.to_string()));
     }
     fb.status = status;
-    // DF-7: a material finding re-orients the run on ANY terminal resolution, not
-    // only a `closed` one that happened to carry a reply. `darkrun_feedback_resolve`
-    // routes `addressed`/`answered`/`non_actionable` through here, and a drift item
-    // is naturally resolved as `addressed` (a fix landed) — so if only
-    // `close_with_reply` re-opened the invalidated stamps, three of the four
-    // terminal statuses would silently drop the material invalidation and the run
-    // would never re-sign against the changed premise. Re-open here too whenever the
-    // finding declared `invalidates` and the transition is terminal; a finding with
-    // no `invalidates` (a cosmetic change) is a no-op, so non-material resolutions
-    // are unaffected. See [`apply_invalidation`] (which also re-opens a locked
-    // station, DF-8).
-    if is_terminal(fb.status) {
+    // DF-7: a material finding re-orients the run when a FIX LANDED, not on any
+    // terminal resolution. `close_with_reply` alone dropped the invalidation for
+    // the other fix-landed statuses; but re-opening on EVERY terminal status
+    // over-corrected: `rejected` / `non_actionable` / `answered` mean "no code
+    // change / invalid, stop re-dispatching", so re-opening the locked station and
+    // clearing the human's signed stamp for them is wrong. Fire only for a
+    // fix-landed resolution (`addressed` / `closed`), and only when the finding
+    // declared `invalidates` (a cosmetic finding is a no-op). See
+    // [`apply_invalidation`] (which re-opens a locked station, DF-8).
+    if fix_landed(fb.status) {
         apply_invalidation(store, run, &fb)?;
     }
     store.write_feedback_raw(run, id, &serialize(&fb))?;
