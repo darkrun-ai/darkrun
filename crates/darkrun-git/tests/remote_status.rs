@@ -1618,18 +1618,17 @@ fn derive(url: &str) -> Option<(String, String, String)> {
         // scp-like: git@host:owner/repo
         let (host, path) = rest.split_once(':')?;
         (host.to_string(), path.to_string())
-    } else if let Some(rest) = u
-        .strip_prefix("ssh://")
-        .or_else(|| u.strip_prefix("https://"))
-        .or_else(|| u.strip_prefix("http://"))
-    {
-        // Drop optional user@ then split host[:port]/path.
+    } else {
+        // ssh:// / https:// / http:// — drop optional user@ then split
+        // host[:port]/path.
+        let rest = u
+            .strip_prefix("ssh://")
+            .or_else(|| u.strip_prefix("https://"))
+            .or_else(|| u.strip_prefix("http://"))?;
         let rest = rest.split_once('@').map(|(_, r)| r).unwrap_or(rest);
         let (hostport, path) = rest.split_once('/')?;
         let host = hostport.split_once(':').map(|(h, _)| h).unwrap_or(hostport);
         (host.to_string(), path.to_string())
-    } else {
-        return None;
     };
 
     // owner is everything up to the last segment; repo is the final segment.
