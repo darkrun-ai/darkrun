@@ -143,7 +143,7 @@ pub mod validate {
 /// already rejects a hostile component with `400`
 /// ([`validate::is_valid_slug`]), and this makes the store safe even against a
 /// caller that bypasses that edge, so no join can walk out of `.darkrun/`.
-fn contained(s: &str) -> Cow<'_, str> {
+pub(crate) fn contained(s: &str) -> Cow<'_, str> {
     // Fast path: a plain component (no separators, not a `.`/`..` selector) is
     // safe to use verbatim. This is every legitimate slug/id the engine mints,
     // so containment is identity for real state and only rewrites hostile input.
