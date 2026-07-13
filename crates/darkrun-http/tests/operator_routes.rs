@@ -327,3 +327,83 @@ async fn run_list_open_drift_is_zero_without_drift_feedback() {
     let body = body_json(send(build_router(state), get("/api/runs")).await).await;
     assert_eq!(body["runs"][0]["open_drift"], 0);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST /api/annotation/:run/:id/resolve: the desktop's annotation-close verb
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A minimal OPEN `must` annotation on `build`/`payment` — the kind that blocks a
+/// clean Approve until it's resolved.
+fn open_must_annotation(id: &str) -> darkrun_api::annotation::Annotation {
+    serde_json::from_value(json!({
+        "id": id,
+        "created_at": "2026-07-01T00:00:00Z",
+        "author": "human",
+        "work_item": { "kind": "output", "id": "payment", "station": "build" },
+        "artifact": null,
+        "anchor": null,
+        "expression": null,
+        "comment": "fix the total",
+        "ask": { "kind": "change", "severity": "must" },
+        "suggestion": null,
+        "status": "open"
+    }))
+    .expect("minimal annotation")
+}
+
+#[tokio::test]
+async fn resolve_annotation_closes_a_blocking_annotation() {
+    use darkrun_api::annotation::AnnotationStatus;
+    let (state, store) = state_with_store();
+    store.write_annotation("ann-run", &open_must_annotation("anno_1")).unwrap();
+
+    // Default status (`addressed`) — no body key needed.
+    let resp = send(
+        build_router(state),
+        post_json("/api/annotation/ann-run/anno_1/resolve", &json!({})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["annotation"]["status"], "addressed");
+    // The status landed on disk, so the severity gate no longer counts it as open.
+    let back = store.read_annotation("ann-run", "anno_1").unwrap().unwrap();
+    assert_eq!(back.status, AnnotationStatus::Addressed);
+}
+
+#[tokio::test]
+async fn resolve_annotation_dismiss_and_bad_status_and_404() {
+    use darkrun_api::annotation::AnnotationStatus;
+    let (state, store) = state_with_store();
+    store.write_annotation("ann-run", &open_must_annotation("anno_2")).unwrap();
+
+    // `dismissed` is the no-code-change resolution.
+    let resp = send(
+        build_router(state.clone()),
+        post_json("/api/annotation/ann-run/anno_2/resolve", &json!({ "status": "dismissed" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        store.read_annotation("ann-run", "anno_2").unwrap().unwrap().status,
+        AnnotationStatus::Dismissed
+    );
+
+    // An unknown resolution is a 400 (not a silent no-op).
+    store.write_annotation("ann-run", &open_must_annotation("anno_3")).unwrap();
+    let resp = send(
+        build_router(state.clone()),
+        post_json("/api/annotation/ann-run/anno_3/resolve", &json!({ "status": "banana" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // An unknown annotation is a 404.
+    let resp = send(
+        build_router(state),
+        post_json("/api/annotation/ann-run/ghost/resolve", &json!({})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

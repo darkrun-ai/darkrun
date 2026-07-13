@@ -620,6 +620,12 @@ fn every_tick_through_a_station_carries_a_prompt() {
         let t = run_tick(&store, "r").expect("tick");
         let prompt = t.prompt.expect("prompt on every tick");
         assert!(!prompt.trim().is_empty(), "empty prompt for action {:?}", t.action);
+        if let RunAction::Spec { station, .. } = &t.action {
+            // Solo holds the Spec until the elaboration is sealed, so walk it
+            // legitimately (an off-gate approve can no longer force it through).
+            darkrun_mcp::position::elaborate_seal(&store, "r", station).expect("seal");
+            continue;
+        }
         if matches!(t.action, RunAction::UserGate { .. }) {
             // Clear the pre-execution operator gate so the walk continues.
             checkpoint_decide(&store, "r", true, None).expect("clear gate");

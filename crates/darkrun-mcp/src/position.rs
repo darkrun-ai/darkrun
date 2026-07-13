@@ -821,11 +821,18 @@ fn derived_station_phase(su: &[&Unit], def: &StationDef, autopilot: bool) -> Opt
         return None;
     }
     let owned: Vec<Unit> = su.iter().map(|u| (*u).clone()).collect();
+    // The review roles (pre-execute) and approval roles (post-execute) are BOTH
+    // exactly the station's declared reviewers, in EVERY mode. The operator's
+    // per-station sign-off is NOT a synthetic per-unit "user" approval role: it
+    // is the Checkpoint decision (`checkpoint_decide`), a distinct gate the
+    // engine holds at. Older code injected a "user" approval role here in
+    // non-dark modes, but nothing (no tool, prompt, or flow) ever stamps it, so
+    // the pure derivation pinned every solo/team station at `Audit` forever,
+    // leaving Reflect and the Checkpoint unreachable. Conflating the human gate
+    // with a phantom per-unit approval was the bug; the human gate lives at the
+    // Checkpoint, so the derivation depends only on the real reviewers.
     let review_roles = def.reviewers.clone();
-    let mut approval_roles = def.reviewers.clone();
-    if !autopilot {
-        approval_roles.push("user".to_string());
-    }
+    let approval_roles = def.reviewers.clone();
     Some(darkrun_core::derive::derive_station_phase(
         &owned,
         &def.workers,
@@ -834,6 +841,89 @@ fn derived_station_phase(su: &[&Unit], def: &StationDef, autopilot: bool) -> Opt
         Some(true),
         autopilot,
     ))
+}
+
+/// Reconcile the SHARED pure derivation with the engine's RECORDED phase to
+/// produce the phase the cursor actually dispatches on.
+///
+/// [`derive_station_phase`](darkrun_core::derive::derive_station_phase) is a pure
+/// function of on-disk unit signals: it knows Spec/Review/Manufacture/Audit/
+/// Checkpoint but NOTHING about the two engine-only beats the recorded phase
+/// carries: the pre-execution operator `UserGate` and the post-Audit `Reflect`
+/// retrospective. Left to itself the derived signal would silently skip both
+/// whenever the underlying stamps happen to land out of step with the cursor's
+/// ticks. This reconciliation reinserts them, and is where solo/team runs used to
+/// wedge. `derived == None` means no signals are stamped yet, so the recorded
+/// phase drives verbatim (the imperative fallback).
+///
+/// - **UserGate (bypass fix).** An interactive station must PAUSE for the
+///   operator to review the spec before any Unit is manufactured. That hold is
+///   recorded only when the `Review` action ticks (its arm stamps
+///   `recorded = UserGate`). If the reviewers stamp their sign-off BEFORE that
+///   tick (a legitimate race, e.g. a fanned-out reviewer subagent returns first),
+///   the derivation jumps straight past `Review` to `Manufacture` and the gate
+///   is skipped. So while the station still sits at `Review` with the review gate
+///   already satisfied (derived at Manufacture or later), hold at `UserGate`
+///   instead. It is crossed exactly once, when `checkpoint_decide` advances the
+///   recorded phase to `Manufacture`; from there `recorded` is past `Review` and
+///   this never re-fires. Autopilot (dark) has no operator gate, so it is exempt.
+///
+/// - **Reflect (reachability).** The pure derivation has no `Reflect` step: once
+///   the approvals are signed it reports `Checkpoint` directly. But the station
+///   still owes the autonomous `Reflect` retrospective, which the recorded phase
+///   parks at (the `Audit` action stamps `recorded = Reflect`). So when the
+///   derivation says `Checkpoint` while the recorded beat is still `Reflect`,
+///   surface `Reflect`; its action then advances `recorded` to `Checkpoint` and
+///   the next tick lets the gate fire. This holds in every mode: `Reflect` is not
+///   a stop, so it does not change dark's lights-out progression.
+fn resolve_phase(
+    recorded: StationPhase,
+    derived: Option<StationPhase>,
+    autopilot: bool,
+) -> StationPhase {
+    // A held UserGate is AUTHORITATIVE: once parked at the operator gate the
+    // derived signals (which know nothing of it) must not skip it back into
+    // Manufacture. Cleared only by `checkpoint_decide`, which advances `recorded`.
+    if recorded == StationPhase::UserGate {
+        return StationPhase::UserGate;
+    }
+    let Some(derived) = derived else {
+        return recorded;
+    };
+    // Pre-execution gate not yet crossed: the review work is done but the station
+    // is recorded BEFORE the gate, so the Review action never dispatched to stamp
+    // it. Hold for the operator. The pre-gate window spans both Spec and Review,
+    // but what counts as "the gate would be skipped" differs by which beat froze:
+    //
+    // - recorded == Review is immediately pre-gate, so any forward derived
+    //   (Manufacture / Audit / Checkpoint) means the gate is about to be jumped.
+    // - recorded == Spec catches the one-phase-earlier early-stamp race: a
+    //   fanned-out reviewer subagent stamps every role before the seal/Review
+    //   tick advances `recorded` past Spec, so derived jumps to MANUFACTURE while
+    //   `recorded` is stuck at Spec (and the Spec action never re-dispatches once
+    //   reviews are signed). Only derived == Manufacture is that race. A derived
+    //   Audit/Checkpoint from Spec is NOT the gate race, it is the post-work
+    //   quality-gate re-enforcement path (a rework unsigned an approval after
+    //   manufacture), which must SURFACE its Checkpoint here, not hold at a
+    //   pre-execution gate the run is already past.
+    let pre_gate_skip = match recorded {
+        StationPhase::Review => matches!(
+            derived,
+            StationPhase::Manufacture | StationPhase::Audit | StationPhase::Checkpoint
+        ),
+        StationPhase::Spec => derived == StationPhase::Manufacture,
+        _ => false,
+    };
+    if !autopilot && pre_gate_skip {
+        return StationPhase::UserGate;
+    }
+    // The Reflect retrospective sits between Audit-complete and the gate: the
+    // derivation reports Checkpoint, but the recorded beat has only reached
+    // Reflect. Surface Reflect until its action advances `recorded` to Checkpoint.
+    if derived == StationPhase::Checkpoint && recorded == StationPhase::Reflect {
+        return StationPhase::Reflect;
+    }
+    derived
 }
 
 /// The ordered station names this run walks: its explicit right-sized `plan`,
@@ -1569,16 +1659,9 @@ pub fn derive_position(store: &StateStore, slug: &str) -> Result<Position> {
     // (the same `darkrun_core::derive` the HTTP browse and website run); until the
     // engine stamps those signals it falls back to the recorded/imperative phase.
     let autopilot = run.frontmatter.mode == Mode::Dark;
-    // A held USER gate is AUTHORITATIVE: once the cursor parks at the
-    // pre-execution operator gate, the derived signals (which know nothing of the
-    // gate) must not skip it back into Manufacture. The gate is cleared only by
-    // `darkrun_checkpoint_decide`, which advances the recorded phase past it.
     let recorded = station_phase(&state, &station);
-    let phase = if recorded == StationPhase::UserGate {
-        StationPhase::UserGate
-    } else {
-        derived_station_phase(&su, def, autopilot).unwrap_or(recorded)
-    };
+    let derived = derived_station_phase(&su, def, autopilot);
+    let phase = resolve_phase(recorded, derived, autopilot);
 
     let spec_action = || RunAction::Spec {
         run: slug.to_string(),
@@ -3168,11 +3251,25 @@ fn complete_station(
     }
     // Advance to the next station in the run's plan (not the factory's full
     // order) — a right-sized run skips the stations its plan omits.
+    //
+    // Only START the next station when it has not begun yet. Re-completing an
+    // UPSTREAM station (a drift re-open, DF-8) must NOT reset an already-started
+    // or completed downstream station back to Pending/Spec: that clobbered the
+    // downstream Completed state and cascaded one station at a time down the whole
+    // tail. When the next station is already underway/done the run is past it, so
+    // leave it (and the cursor) alone; the derived position re-resolves the real
+    // frontier on the next tick.
     if let Some(next_name) = next_in_plan(factory, state, station) {
-        let st = ensure_station(state, factory, &next_name)?;
-        st.status = Status::Pending;
-        st.phase = StationPhase::Spec;
-        state.active_station = next_name;
+        let next_started = state
+            .stations
+            .get(&next_name)
+            .is_some_and(|s| matches!(s.status, Status::Completed | Status::InProgress));
+        if !next_started {
+            let st = ensure_station(state, factory, &next_name)?;
+            st.status = Status::Pending;
+            st.phase = StationPhase::Spec;
+            state.active_station = next_name;
+        }
     }
     Ok(())
 }
@@ -3670,6 +3767,24 @@ fn require_gate_review(
     )))
 }
 
+/// Whether `station` is genuinely parked at a post-execution Checkpoint hold
+/// that [`checkpoint_decide`] may resolve with an approve: the recorded phase is
+/// `Checkpoint` AND its checkpoint slot has been ENTERED (`entered_at` set) but
+/// not yet DECIDED (`outcome` empty). The slot is pre-seeded at ensure-time, so
+/// `entered_at` (not mere presence) is what distinguishes a cursor holding at the
+/// gate from a station that has not reached it. The pre-execution `UserGate` is a
+/// separate hold, resolved on its own path in [`checkpoint_decide`] before this
+/// is consulted.
+fn station_at_checkpoint_hold(state: &RunState, station: &str) -> bool {
+    state.stations.get(station).is_some_and(|st| {
+        matches!(st.phase, StationPhase::Checkpoint)
+            && st
+                .checkpoint
+                .as_ref()
+                .is_some_and(|c| c.entered_at.is_some() && c.outcome.is_none())
+    })
+}
+
 /// Apply an operator decision to the active station's Checkpoint.
 ///
 /// `approved == true` advances the station (mirrors an `auto`/approved gate);
@@ -3719,6 +3834,26 @@ pub fn checkpoint_decide(
         }
         store.write_state(slug, &state)?;
         return run_tick(store, slug);
+    }
+
+    // ── Off-gate approve guard ───────────────────────────────────────────
+    // `checkpoint_decide` resolves a HELD gate: the pre-execution UserGate
+    // (handled above) or a post-execution Checkpoint the cursor has parked at.
+    // An approve that arrives while the station is still mid-flight (Spec /
+    // Review / Manufacture / Audit / Reflect, with no Checkpoint entered) must
+    // NOT silently complete the station: doing so short-circuits Manufacture,
+    // Audit, and the gate itself, turning a blind approve into "skip the whole
+    // station". Refuse it as a no-op error so the operator's sign-off can only
+    // land where a decision is genuinely pending. A block / request-changes
+    // stays legal off-gate (it files feedback and holds), so only the approve
+    // path is guarded here.
+    if approved && !station_at_checkpoint_hold(&state, &station) {
+        return Err(McpError::InvalidInput(format!(
+            "no checkpoint is awaiting a decision on station '{station}': the cursor is \
+             not holding at a gate (it is at phase {:?}). Advance the run to its \
+             Checkpoint before approving (an approve cannot skip Manufacture/Audit).",
+            station_phase(&state, &station),
+        )));
     }
 
     // ── Severity gate: open must/should annotations block a clean Approve ────
@@ -3918,7 +4053,8 @@ mod tests {
         };
         assert!(derived_station_phase(&[&bare], def, false).is_none());
         // A unit that has run a Pass beat carries a signal → a phase derives, in
-        // both gate modes (autopilot drops the `user` approval role).
+        // both gate modes (the approval roles are the station's real reviewers in
+        // either mode; there is no synthetic `user` approval role).
         let mut u = bare.clone();
         u.frontmatter.iterations.push(darkrun_core::domain::UnitIteration {
             worker: "make".into(),
@@ -5195,6 +5331,162 @@ mod tests {
         assert_eq!(json["action"], "reflect");
         assert_eq!(json["run"], "r");
         assert_eq!(json["station"], "frame");
+    }
+
+    /// The phase reconciliation is the single point where the pure derivation's
+    /// two blind spots (the pre-execution UserGate and the post-Audit Reflect
+    /// beat) are reinserted. Each arm below is a regression against a shipped
+    /// wedge / bypass.
+    #[test]
+    fn resolve_phase_reinserts_usergate_and_reflect() {
+        use StationPhase::*;
+        // No signals yet → the recorded phase drives verbatim.
+        assert_eq!(resolve_phase(Manufacture, None, false), Manufacture);
+        // A held UserGate is authoritative: derived signals (which don't know the
+        // gate) must not skip it back into Manufacture.
+        assert_eq!(resolve_phase(UserGate, Some(Manufacture), false), UserGate);
+
+        // DF-6/RM-3, UserGate bypass: reviews signed early (derived past Review)
+        // while still recorded at Review must HOLD at the operator gate, not run
+        // straight into Manufacture.
+        assert_eq!(resolve_phase(Review, Some(Manufacture), false), UserGate);
+        assert_eq!(resolve_phase(Review, Some(Audit), false), UserGate);
+        assert_eq!(resolve_phase(Review, Some(Checkpoint), false), UserGate);
+        // The ordinary path is untouched: reviews not yet signed → dispatch Review
+        // (its action stamps recorded=UserGate for the next tick).
+        assert_eq!(resolve_phase(Review, Some(Review), false), Review);
+        // Dark has no operator gate, so it never holds at UserGate.
+        assert_eq!(resolve_phase(Review, Some(Manufacture), true), Manufacture);
+        // Once the gate is crossed (recorded past Review) it never re-fires.
+        assert_eq!(resolve_phase(Manufacture, Some(Manufacture), false), Manufacture);
+        // The SAME early-stamp race one beat earlier: reviews all signed before
+        // the Spec/seal tick advanced `recorded`, so derived jumps to Manufacture
+        // while recorded is still Spec. That must HOLD at the pre-execution gate
+        // too (matching recorded==Review only let this one-phase-earlier race skip
+        // the operator gate outright).
+        assert_eq!(resolve_phase(Spec, Some(Manufacture), false), UserGate);
+        // But a derived Checkpoint from Spec is NOT the gate race: it is the
+        // post-manufacture quality-gate re-enforcement path (a rework unsigned an
+        // approval), which must SURFACE its Checkpoint, not hold at a pre-execution
+        // gate the run is already past.
+        assert_eq!(resolve_phase(Spec, Some(Checkpoint), false), Checkpoint);
+
+        // DF-4/RM-6, Reflect reachability: once approvals are signed the pure
+        // derivation reports Checkpoint, but the Reflect retrospective is still
+        // owed (recorded parks at Reflect). Surface Reflect until its action
+        // advances recorded to Checkpoint; then the gate fires.
+        assert_eq!(resolve_phase(Reflect, Some(Checkpoint), false), Reflect);
+        assert_eq!(resolve_phase(Reflect, Some(Checkpoint), true), Reflect);
+        assert_eq!(resolve_phase(Checkpoint, Some(Checkpoint), false), Checkpoint);
+        // Derived Audit (approvals not yet signed) is passed through even when the
+        // recorded beat already reached Reflect (rework unsigned an approval).
+        assert_eq!(resolve_phase(Reflect, Some(Audit), false), Audit);
+    }
+
+    /// CS-1/DF-5: `checkpoint_decide` may only resolve a genuine, entered,
+    /// undecided Checkpoint hold. `station_at_checkpoint_hold` is that predicate.
+    #[test]
+    fn checkpoint_hold_requires_an_entered_undecided_gate() {
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        let mut state = store.read_state("r").unwrap().unwrap();
+        let factory = crate::factory::resolve_factory("software").unwrap();
+        let st = ensure_station(&mut state, &factory, "frame").unwrap();
+
+        // Fresh Spec phase, pre-seeded (but never entered) checkpoint slot: NOT a
+        // hold, so a blind approve here would skip the whole station.
+        st.phase = StationPhase::Spec;
+        assert!(!station_at_checkpoint_hold(&state, "frame"));
+
+        // Phase at Checkpoint but the slot was never ENTERED: still not a hold.
+        let st = state.stations.get_mut("frame").unwrap();
+        st.phase = StationPhase::Checkpoint;
+        st.checkpoint = Some(Checkpoint {
+            kind: CheckpointKind::Ask,
+            entered_at: None,
+            outcome: None,
+        });
+        assert!(!station_at_checkpoint_hold(&state, "frame"));
+
+        // Entered + undecided at Checkpoint: THIS is the hold an approve resolves.
+        let st = state.stations.get_mut("frame").unwrap();
+        st.checkpoint = Some(Checkpoint {
+            kind: CheckpointKind::Ask,
+            entered_at: Some("2026-01-01T00:00:00Z".into()),
+            outcome: None,
+        });
+        assert!(station_at_checkpoint_hold(&state, "frame"));
+
+        // Already decided: the gate is spent, no longer awaiting a decision.
+        let st = state.stations.get_mut("frame").unwrap();
+        st.checkpoint = Some(Checkpoint {
+            kind: CheckpointKind::Ask,
+            entered_at: Some("2026-01-01T00:00:00Z".into()),
+            outcome: Some(CheckpointOutcome::Advanced),
+        });
+        assert!(!station_at_checkpoint_hold(&state, "frame"));
+    }
+
+    /// DF-4/RM-6 end-to-end at the cursor: a solo station whose REAL reviewer
+    /// approval roles are all stamped must reach Reflect (the retrospective is
+    /// solicited) and then Checkpoint, NOT wedge at Audit awaiting a "user"
+    /// approval that no flow produces. This is the regression for the shipped
+    /// non-dark Audit wedge.
+    #[test]
+    fn solo_station_reaches_reflect_then_checkpoint_on_real_reviewer_approvals() {
+        use darkrun_core::domain::{IterationResult, Stamp, Status, Unit, UnitFrontmatter, UnitIteration};
+
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full").expect("start");
+        let factory = crate::factory::resolve_factory("software").unwrap();
+        let def = factory.station("frame").unwrap();
+        let stamp = || Some(Stamp { at: "2026-01-01T00:00:00Z".into() });
+
+        // A frame unit signed by every REAL reviewer (reviews + approvals), Pass
+        // loop done on the terminal worker, and NO synthetic "user" approval.
+        let mut fm = UnitFrontmatter {
+            status: Status::Completed,
+            station: Some("frame".into()),
+            ..Default::default()
+        };
+        for r in &def.reviewers {
+            fm.reviews.insert(r.clone(), stamp());
+            fm.approvals.insert(r.clone(), stamp());
+        }
+        fm.iterations.push(UnitIteration {
+            worker: def.workers.last().cloned().unwrap_or_default(),
+            result: Some(IterationResult::Advance),
+            ..Default::default()
+        });
+        store
+            .write_unit("r", &Unit { slug: "frame-u".into(), frontmatter: fm, title: "u".into(), body: String::new() })
+            .unwrap();
+
+        // The Audit action leaves the recorded beat at Reflect. With the real
+        // reviewers signed the cursor must SURFACE Reflect (not loop on Audit).
+        let mut state = store.read_state("r").unwrap().unwrap();
+        state.stations.get_mut("frame").unwrap().phase = StationPhase::Reflect;
+        state.stations.get_mut("frame").unwrap().status = Status::InProgress;
+        state.stations.get_mut("frame").unwrap().elaborated = true;
+        store.write_state("r", &state).unwrap();
+
+        let t = run_tick(&store, "r").expect("tick");
+        assert!(
+            matches!(t.action, RunAction::Reflect { ref station, .. } if station == "frame"),
+            "real reviewers signed → Reflect, not an Audit wedge: {:?}",
+            t.action
+        );
+        // Reflect advanced the recorded beat to Checkpoint; the gate now fires.
+        assert_eq!(
+            store.read_state("r").unwrap().unwrap().stations["frame"].phase,
+            StationPhase::Checkpoint
+        );
+        let t2 = run_tick(&store, "r").expect("tick");
+        assert!(
+            matches!(t2.action, RunAction::Checkpoint { .. }),
+            "reflect → checkpoint gate: {:?}",
+            t2.action
+        );
     }
 
     #[test]

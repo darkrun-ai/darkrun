@@ -117,13 +117,25 @@ impl Durable {
     /// Decompose a wave of units (with optional deps) through a fresh store.
     fn decompose(&self, station: &str, units: &[(&str, &[&str])]) {
         let store = self.reopen();
-        for (slug, deps) in units {
+        // Consume the station's declared inputs so the runtime input-coverage
+        // gate is satisfied: a downstream station (e.g. `specify`) requires the
+        // upstream artifacts, and a wave that declares none legitimately can't
+        // reach its gate. Spread across the wave the way the shared Harness does:
+        // the FIRST unit carries them (collective coverage is enough).
+        let inputs = store
+            .read_run(&self.slug)
+            .ok()
+            .and_then(|r| darkrun_mcp::resolve_factory(&r.frontmatter.factory))
+            .and_then(|f| f.station(station).map(|d| d.inputs.clone()))
+            .unwrap_or_default();
+        for (idx, (slug, deps)) in units.iter().enumerate() {
             let unit = Unit {
                 slug: (*slug).to_string(),
                 frontmatter: UnitFrontmatter {
                     status: Status::Pending,
                     station: Some(station.to_string()),
                     depends_on: deps.iter().map(|d| d.to_string()).collect(),
+                    inputs: if idx == 0 { inputs.clone() } else { Vec::new() },
                     ..Default::default()
                 },
                 title: (*slug).to_string(),
