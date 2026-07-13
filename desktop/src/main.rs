@@ -19,6 +19,7 @@ use darkrun_desktop::{map, wire};
 
 mod home;
 mod review;
+mod signin;
 
 use dioxus::desktop::{Config, WindowBuilder};
 use wire::ConnConfig;

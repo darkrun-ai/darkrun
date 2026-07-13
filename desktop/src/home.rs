@@ -40,8 +40,10 @@ use std::path::PathBuf;
 use darkrun_api::RunSummary;
 use darkrun_harness::Harness;
 use darkrun_ui::prelude::*;
+use darkrun_vcs::Provider;
 
 use crate::review::ReviewApp;
+use crate::signin::{RepoPicker, SignInPanel};
 use crate::wire::{self, ConnConfig, DiscoveredEngine};
 
 /// A project the shell lists in the sidebar: a working dir keyed by its
@@ -1385,6 +1387,23 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
     let mut status = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
 
+    // Sign-in state for the repo picker: which providers currently have a stored
+    // credential (seeded on mount from ~/.darkrun/credentials), and a bump the
+    // picker refetches on when a new provider signs in. Owned here so the Git tab
+    // can gate the picker on being signed in.
+    let mut signed_in = use_signal(Vec::<Provider>::new);
+    let signin_bump = use_signal(|| 0u32);
+    use_effect(move || {
+        // Read the credential store off the UI thread so a slow disk never stalls
+        // first paint; the panel/picker react once it lands.
+        spawn(async move {
+            let providers = tokio::task::spawn_blocking(crate::signin::read_signed_in)
+                .await
+                .unwrap_or_default();
+            signed_in.set(providers);
+        });
+    });
+
     let heading = format!(
         "margin:0;font-family:{sans};font-size:13px;font-weight:700;\
          text-transform:uppercase;letter-spacing:0.04em;color:{text};",
@@ -1459,6 +1478,22 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
                     on_pick: move |_| { mode.set(AddMode::Git); status.set(None); } }
                 ModeTab { label: "Local repo", active: current == AddMode::Local,
                     on_pick: move |_| { mode.set(AddMode::Local); status.set(None); } }
+            }
+            // Git URL tab: sign in with GitHub/GitLab, then pick from your
+            // permitted repos. The raw URL entry below stays as a fallback. A
+            // picked repo clones through the SAME add_project path (now
+            // authenticated by darkrun-git's credentials_for) as a typed URL.
+            if current == AddMode::Git {
+                SignInPanel { signed_in, signin_bump }
+                if !signed_in.read().is_empty() {
+                    RepoPicker {
+                        reload: signin_bump,
+                        on_pick: move |clone_url: String| {
+                            let dest_raw = dest.read().trim().to_string();
+                            start_git_clone(clone_url, dest_raw, busy, status, value, refresh);
+                        },
+                    }
+                }
             }
             div { style: "display:flex;gap:8px;margin-top:10px;align-items:center;",
                 input {
@@ -1639,6 +1674,50 @@ fn add_project(mode: AddMode, raw: &str, dest_override: Option<&str>) -> Result<
             ))
         }
     }
+}
+
+/// Clone a Git URL through the add-a-project path, writing progress back to the
+/// form's status line. Used by the repo picker (a picked repo hands us its clone
+/// URL); the manual "Clone & add" button drives the same [`add_project`] path
+/// inline.
+///
+/// **Non-blocking**: the clone is network-bound, so it runs on `spawn_blocking`
+/// and the result is written back to `status`. On success `refresh` is bumped so
+/// the sidebar + welcome re-read the registry, and `value` (the manual URL field)
+/// is cleared. `busy` guards against a double submit.
+fn start_git_clone(
+    raw: String,
+    dest_raw: String,
+    mut busy: Signal<bool>,
+    mut status: Signal<Option<String>>,
+    mut value: Signal<String>,
+    mut refresh: Signal<u32>,
+) {
+    if *busy.peek() {
+        return;
+    }
+    if let Err(err) = validate_add_input(AddMode::Git, &raw) {
+        status.set(Some(err));
+        return;
+    }
+    busy.set(true);
+    status.set(Some("Cloning\u{2026}".to_string()));
+    spawn(async move {
+        let result =
+            tokio::task::spawn_blocking(move || add_project(AddMode::Git, &raw, Some(&dest_raw)))
+                .await
+                .unwrap_or_else(|e| Err(format!("internal error: {e}")));
+        match result {
+            Ok(note) => {
+                status.set(Some(note));
+                let n = *refresh.peek();
+                refresh.set(n.wrapping_add(1));
+                value.set(String::new());
+            }
+            Err(err) => status.set(Some(err)),
+        }
+        busy.set(false);
+    });
 }
 
 /// A small tab chip for the add-a-project entry-point switch.
