@@ -184,7 +184,10 @@ fn open_drift(state: &AppState, slug: &str) -> u32 {
         .unwrap_or_default()
         .into_iter()
         .map(|(id, content)| FeedbackDoc::parse(&id, &content))
-        .filter(|doc| doc.origin == FeedbackOrigin::Drift && doc.status.blocks_gate())
+        // `is_open`, not `blocks_gate`: an ESCALATED drift item still needs the
+        // operator, so the chip must count it (the engine counts it against the
+        // drift cascade too). Only terminal resolutions drop off.
+        .filter(|doc| doc.origin == FeedbackOrigin::Drift && doc.status.is_open())
         .count() as u32
 }
 
