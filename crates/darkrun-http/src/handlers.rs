@@ -213,8 +213,37 @@ pub async fn review_decide(
         }
     }
 
-    // Reflect the decision back onto the session payload and re-register it so
-    // subscribers see the resolved state.
+    // Durable land FIRST, then flip the session. The ENGINE reads the on-disk
+    // StateStore, and its `checkpoint_decide` is authoritative: it re-enforces the
+    // severity gate AND the Prove-evidence gate. If it REFUSES the decision (an
+    // approve with no measured evidence at Prove, say), surface that as a 409 and
+    // do NOT flip the in-memory session to Approved: otherwise the operator sees a
+    // false success while the gate stays held on disk and the run wedges. An
+    // ad-hoc review (no `run_slug`) has nothing to land, so it proceeds straight
+    // to the flip.
+    let run_slug = review.run_slug.clone();
+    if let Some(run) = run_slug.as_deref() {
+        if let Err(reason) =
+            state.decide_gate(run, decision == ReviewDecision::Approved, req.feedback.clone())
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": reason,
+                    "session_id": id,
+                    "decision": match decision {
+                        ReviewDecision::Approved => "approved",
+                        ReviewDecision::ChangesRequested => "changes_requested",
+                    },
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // The land succeeded (or this is an ad-hoc review): reflect the decision back
+    // onto the session payload and re-register it so subscribers see the resolved
+    // state.
     review.decision = Some(
         match decision {
             ReviewDecision::Approved => "approved",
@@ -222,10 +251,6 @@ pub async fn review_decide(
         }
         .to_string(),
     );
-    // Capture the durable-land inputs before `review` is moved into the upsert:
-    // the run the gate belongs to and the feedback body to route on a block.
-    let run_slug = review.run_slug.clone();
-    let gate_feedback = req.feedback.clone();
     review.feedback = req.feedback;
     review.annotations = req.annotations;
     review.status = match decision {
@@ -233,18 +258,6 @@ pub async fn review_decide(
         ReviewDecision::ChangesRequested => SessionStatus::ChangesRequested,
     };
     state.sessions.upsert(SessionPayload::Review(review));
-
-    // Durable land: the in-memory session flip above is what the desktop sees,
-    // but the ENGINE reads the on-disk StateStore. When this review names a real
-    // run, mirror the decision into it via the installed gate-decider hook so
-    // `run_tick` walks past the gate (approve → complete/release; block → route
-    // the feedback as rework). Best-effort: a land failure still returns 200 with
-    // the session flipped — the operator's action is not lost. The engine's own
-    // `checkpoint_decide` re-enforces the severity gate, so this cannot approve
-    // over open must/should annotations (already refused above regardless).
-    if let Some(run) = run_slug.as_deref() {
-        let _ = state.decide_gate(run, decision == ReviewDecision::Approved, gate_feedback);
-    }
 
     (
         StatusCode::OK,
@@ -610,7 +623,19 @@ pub async fn attach_proof(
 /// `GET /api/proof/:run` — return a run's attached objective-evidence proof.
 /// `404` when no proof has been attached for the run.
 pub async fn get_proof(State(state): State<AppState>, Path(run): Path<String>) -> Response {
-    match state.proofs.get(&run) {
+    // The in-memory registry is populated by the HTTP POST (`attach_proof`).
+    if let Some((proof, station)) = state.proofs.get(&run) {
+        return (
+            StatusCode::OK,
+            Json(ProofGetResponse { run, station, proof }),
+        )
+            .into_response();
+    }
+    // Fallback to the on-disk store: the AGENT attaches proof via the MCP
+    // `darkrun_proof_attach` tool, which writes `.darkrun/<run>/proof.json` and
+    // never touches this in-memory registry. Without this the desktop's
+    // proof-at-the-gate view 404s on the primary (agent-attached) evidence.
+    match read_disk_proof(&state.store, &run) {
         Some((proof, station)) => (
             StatusCode::OK,
             Json(ProofGetResponse { run, station, proof }),
@@ -618,6 +643,34 @@ pub async fn get_proof(State(state): State<AppState>, Path(run): Path<String>) -
             .into_response(),
         None => not_found("proof", &run),
     }
+}
+
+/// Read a run's on-disk `proof.json` (written by the engine's proof-attach tool)
+/// and return the most relevant proof: the run-level (unscoped) one if present,
+/// else the first station-scoped proof. `None` when the file is absent or
+/// unreadable. Mirrors the disk shape the engine serializes (a run-level slot
+/// plus a station map) without depending on `darkrun-mcp`.
+fn read_disk_proof(
+    store: &darkrun_core::StateStore,
+    run: &str,
+) -> Option<(darkrun_api::proof::Proof, Option<String>)> {
+    #[derive(serde::Deserialize)]
+    struct DiskProof {
+        #[serde(default)]
+        run: Option<darkrun_api::proof::Proof>,
+        #[serde(default)]
+        stations: std::collections::BTreeMap<String, darkrun_api::proof::Proof>,
+    }
+    let path = store.run_dir(run).join("proof.json");
+    let bytes = std::fs::read(path).ok()?;
+    let disk: DiskProof = serde_json::from_slice(&bytes).ok()?;
+    if let Some(proof) = disk.run {
+        return Some((proof, None));
+    }
+    disk.stations
+        .into_iter()
+        .next()
+        .map(|(station, proof)| (proof, Some(station)))
 }
 
 /// Project one on-disk reply line (`author: text`) onto the wire
