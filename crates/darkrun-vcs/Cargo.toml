@@ -17,7 +17,7 @@ thiserror.workspace = true
 # darkrun-git rides through gitoxide.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 # OS CSPRNG for the OAuth/relay `state` nonce (getrandom, never a seeded PRNG).
-getrandom = "0.3"
+getrandom = "0.4"
 # Structured warning when the repo-list page walk hits its pagination cap.
 tracing = "0.1"
 
