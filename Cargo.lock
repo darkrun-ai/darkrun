@@ -1532,6 +1532,7 @@ dependencies = [
  "darkrun-mcp",
  "darkrun-telemetry",
  "darkrun-ui",
+ "darkrun-vcs",
  "dioxus",
  "dioxus-ssr",
  "dirs",

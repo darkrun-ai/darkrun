@@ -38,6 +38,12 @@ darkrun-core = { workspace = true }
 # before registering them.
 darkrun-git = { workspace = true }
 
+# Provider sign-in + repo listing: the desktop drives the SAME browser-broker
+# OAuth login the CLI's `darkrun auth login` uses (minting a provider credential
+# into ~/.darkrun/credentials, NOT the relay-access token), reads which providers
+# are signed in, and lists the operator's permitted repos to pick a clone target.
+darkrun-vcs = { workspace = true }
+
 # Home-directory resolution for the default clone root (~/darkrun).
 dirs = { workspace = true }
 
