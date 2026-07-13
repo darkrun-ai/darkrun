@@ -1054,14 +1054,17 @@ fn MainPane(
         Selection::Run { port, slug, project } => {
             let mut run_cfg = cfg.with_session(slug.clone());
             run_cfg.port = port;
-            // The selected run's live summary, looked up in ITS OWN project's run
-            // list (not the first same-slug run across all projects): run slugs
-            // are unique only per project, so two projects with a same-slug run
-            // would otherwise render the wrong run's open_drift count on this
-            // header. The drift chip reads that count.
+            // The selected run's live summary, matched by (slug, PORT): run slugs
+            // are unique only per project, so a slug-only scan across every
+            // project's run map could return a same-slug run from the wrong
+            // project. The port is the run's live engine (Selection::Run carries
+            // it), so a same-slug run in another project, served by a different
+            // engine, has a different port and is not confused for this one. The
+            // drift chip reads that run's count. (`project` is the name, not the
+            // runs_map's slug key, so it can't drive the lookup directly.)
             let drift = runs_map
-                .get(&project)
-                .and_then(|runs| runs.get(&slug))
+                .values()
+                .find_map(|runs| runs.get(&slug).filter(|(p, _)| *p == port))
                 .map(|(_, r)| r.open_drift)
                 .filter(|n| *n > 0);
             // Archive is reversible and needs no confirm (the run_archive
