@@ -890,25 +890,31 @@ fn resolve_phase(
     let Some(derived) = derived else {
         return recorded;
     };
-    // Pre-execution gate not yet crossed: the review work is done (derived is at
-    // Manufacture or later) but the station is still recorded BEFORE the gate, so
-    // the Review action never dispatched to stamp it. Hold for the operator.
+    // Pre-execution gate not yet crossed: the review work is done but the station
+    // is recorded BEFORE the gate, so the Review action never dispatched to stamp
+    // it. Hold for the operator. The pre-gate window spans both Spec and Review,
+    // but what counts as "the gate would be skipped" differs by which beat froze:
     //
-    // `recorded` must cover BOTH pre-gate beats, not just Review: the same
-    // early-stamp race (a fanned-out reviewer subagent stamps every role before
-    // the seal/Review tick advances `recorded` past Spec) can freeze `recorded`
-    // at Spec while derived jumps to Manufacture. Matching only Review let that
-    // one-phase-earlier race skip the UserGate outright (the Spec action that
-    // would move `recorded` to Review never dispatches again once reviews are
-    // signed). Holding here is safe: derived reaching Manufacture means the units
-    // exist and are stamped, so decomposition already happened.
-    if !autopilot
-        && matches!(recorded, StationPhase::Spec | StationPhase::Review)
-        && matches!(
+    // - recorded == Review is immediately pre-gate, so any forward derived
+    //   (Manufacture / Audit / Checkpoint) means the gate is about to be jumped.
+    // - recorded == Spec catches the one-phase-earlier early-stamp race: a
+    //   fanned-out reviewer subagent stamps every role before the seal/Review
+    //   tick advances `recorded` past Spec, so derived jumps to MANUFACTURE while
+    //   `recorded` is stuck at Spec (and the Spec action never re-dispatches once
+    //   reviews are signed). Only derived == Manufacture is that race. A derived
+    //   Audit/Checkpoint from Spec is NOT the gate race, it is the post-work
+    //   quality-gate re-enforcement path (a rework unsigned an approval after
+    //   manufacture), which must SURFACE its Checkpoint here, not hold at a
+    //   pre-execution gate the run is already past.
+    let pre_gate_skip = match recorded {
+        StationPhase::Review => matches!(
             derived,
             StationPhase::Manufacture | StationPhase::Audit | StationPhase::Checkpoint
-        )
-    {
+        ),
+        StationPhase::Spec => derived == StationPhase::Manufacture,
+        _ => false,
+    };
+    if !autopilot && pre_gate_skip {
         return StationPhase::UserGate;
     }
     // The Reflect retrospective sits between Audit-complete and the gate: the
@@ -5353,9 +5359,16 @@ mod tests {
         assert_eq!(resolve_phase(Review, Some(Manufacture), true), Manufacture);
         // Once the gate is crossed (recorded past Review) it never re-fires.
         assert_eq!(resolve_phase(Manufacture, Some(Manufacture), false), Manufacture);
-        // A directly-signed unit whose recorded phase never left Spec is a
-        // synthetic setup, not the gate race, so do NOT hold it at UserGate (the
-        // post-review quality-gate hold depends on Checkpoint surfacing here).
+        // The SAME early-stamp race one beat earlier: reviews all signed before
+        // the Spec/seal tick advanced `recorded`, so derived jumps to Manufacture
+        // while recorded is still Spec. That must HOLD at the pre-execution gate
+        // too (matching recorded==Review only let this one-phase-earlier race skip
+        // the operator gate outright).
+        assert_eq!(resolve_phase(Spec, Some(Manufacture), false), UserGate);
+        // But a derived Checkpoint from Spec is NOT the gate race: it is the
+        // post-manufacture quality-gate re-enforcement path (a rework unsigned an
+        // approval), which must SURFACE its Checkpoint, not hold at a pre-execution
+        // gate the run is already past.
         assert_eq!(resolve_phase(Spec, Some(Checkpoint), false), Checkpoint);
 
         // DF-4/RM-6, Reflect reachability: once approvals are signed the pure
