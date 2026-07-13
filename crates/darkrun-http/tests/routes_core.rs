@@ -699,7 +699,7 @@ fn capture_gate(state: AppState) -> (AppState, GateCalls) {
     let sink = calls.clone();
     let state = state.with_gate_decider(move |run, approved, fb| {
         sink.lock().unwrap().push((run.to_string(), approved, fb));
-        true
+        Ok(())
     });
     (state, calls)
 }
@@ -766,6 +766,31 @@ async fn decide_does_not_call_the_hook_for_an_adhoc_review_with_no_run() {
         calls.lock().unwrap().is_empty(),
         "no run slug → the durable gate-decider is never invoked"
     );
+}
+
+#[tokio::test]
+async fn decide_approve_refused_by_the_gate_returns_409_and_does_not_flip_the_session() {
+    // The engine's checkpoint_decide can REFUSE an approve (a Prove gate with no
+    // measured evidence). The HTTP layer must surface that as a 409 and leave the
+    // session Pending, not report a false success with the session flipped to
+    // Approved while the on-disk gate stays held.
+    let state = test_state().with_gate_decider(|_, _, _| {
+        Err("Prove needs measured evidence before it can lock".to_string())
+    });
+    state.sessions.upsert(review("gd-refuse"));
+    let resp = send(
+        build_router(state.clone()),
+        post_json("/review/gd-refuse/decide", &json!({ "decision": "approved" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    // The session was NOT flipped to Approved.
+    match state.sessions.get("gd-refuse") {
+        Some(SessionPayload::Review(r)) => {
+            assert_ne!(r.status, SessionStatus::Approved, "session must stay unresolved on a refused land");
+        }
+        other => panic!("expected the review session to remain, got {other:?}"),
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

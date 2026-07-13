@@ -155,7 +155,13 @@ pub async fn serve_stdio_on(
     let state = {
         let ds = state.store.clone();
         state.with_gate_decider(move |run, approved, fb| {
-            crate::position::checkpoint_decide(&ds, run, approved, fb).is_ok()
+            // Carry the refusal reason (not just a bool): checkpoint_decide
+            // rejects a Prove approve with no measured evidence, or an approve
+            // over open must/should, so the HTTP layer can surface it instead of
+            // reporting a false success.
+            crate::position::checkpoint_decide(&ds, run, approved, fb)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
     };
     // With the durable decider in place, tell the shared session registry so the

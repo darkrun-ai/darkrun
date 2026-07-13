@@ -637,7 +637,11 @@ pub type SurfaceResolver = Arc<dyn Fn(&str) + Send + Sync>;
 /// (that would be circular), so the engine (darkrun-mcp) installs a closure
 /// wrapping its `checkpoint_decide` — the same posture as [`SurfaceResolver`]
 /// and [`SessionMaterializer`]. The signature is `(run, approved, feedback)`.
-pub type GateDecider = Arc<dyn Fn(&str, bool, Option<String>) -> bool + Send + Sync>;
+/// The durable gate-decision hook the engine installs. Returns `Ok(())` when the
+/// decision landed on disk, or `Err(reason)` when a gate guard REFUSED it (an
+/// approve over open must/should, or a Prove approve with no measured evidence) so
+/// the HTTP layer can surface the refusal instead of reporting a false success.
+pub type GateDecider = Arc<dyn Fn(&str, bool, Option<String>) -> Result<(), String> + Send + Sync>;
 
 /// The shared application state threaded through every handler.
 #[derive(Clone)]
@@ -705,7 +709,7 @@ impl AppState {
     /// wraps its `checkpoint_decide` here so a review decision lands on disk.
     pub fn with_gate_decider(
         mut self,
-        f: impl Fn(&str, bool, Option<String>) -> bool + Send + Sync + 'static,
+        f: impl Fn(&str, bool, Option<String>) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
         self.gate_decider = Some(Arc::new(f));
         self
@@ -732,14 +736,20 @@ impl AppState {
     }
 
     /// Land an operator's gate decision durably via the installed gate-decider
-    /// hook (see `gate_decider`). Returns whether the land succeeded; `false`
-    /// when no hook is installed (the standalone HTTP server case) or the land
-    /// failed — the caller treats this as best-effort, never blocking the
-    /// in-memory session flip on it.
-    pub fn decide_gate(&self, run: &str, approved: bool, feedback: Option<String>) -> bool {
+    /// hook (see `gate_decider`). `Ok(())` when the decision landed (or when no
+    /// hook is installed, the standalone HTTP server case, where the in-memory
+    /// flip is authoritative and there is nothing to land). `Err(reason)` when a
+    /// gate guard REFUSED it, so the caller surfaces the refusal rather than
+    /// reporting a false success.
+    pub fn decide_gate(
+        &self,
+        run: &str,
+        approved: bool,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
         match &self.gate_decider {
             Some(hook) => hook(run, approved, feedback),
-            None => false,
+            None => Ok(()),
         }
     }
 }
@@ -982,10 +992,10 @@ mod tests {
         let state = AppState::new(StateStore::new("."), Limits::default()).with_gate_decider(
             move |run, approved, fb| {
                 *sink.lock().unwrap() = Some((run.to_string(), approved, fb));
-                true
+                Ok(())
             },
         );
-        assert!(state.decide_gate("run-x", true, Some("looks good".into())));
+        assert!(state.decide_gate("run-x", true, Some("looks good".into())).is_ok());
         assert_eq!(
             captured.lock().unwrap().clone(),
             Some(("run-x".to_string(), true, Some("looks good".to_string())))
@@ -993,10 +1003,20 @@ mod tests {
     }
 
     #[test]
-    fn decide_gate_is_a_noop_false_when_no_hook_is_installed() {
-        // The standalone HTTP server (no engine) installs no hook — decide_gate
-        // must not panic and reports the no-op with `false`.
+    fn decide_gate_surfaces_a_hook_refusal() {
+        // A gate guard that refuses (a Prove approve with no evidence) is carried
+        // out as an Err so the HTTP layer can 409 instead of reporting success.
+        let state = AppState::new(StateStore::new("."), Limits::default())
+            .with_gate_decider(|_, _, _| Err("Prove needs measured evidence".to_string()));
+        let err = state.decide_gate("run-x", true, None).unwrap_err();
+        assert!(err.contains("evidence"), "{err}");
+    }
+
+    #[test]
+    fn decide_gate_is_ok_noop_when_no_hook_is_installed() {
+        // The standalone HTTP server (no engine) installs no hook — decide_gate is
+        // a no-op Ok (the in-memory flip is authoritative, nothing to land).
         let state = AppState::new(StateStore::new("."), Limits::default());
-        assert!(!state.decide_gate("run-x", true, None));
+        assert!(state.decide_gate("run-x", true, None).is_ok());
     }
 }
