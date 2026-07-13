@@ -53,7 +53,7 @@ dioxus = { version = "0.7", features = ["desktop"] }
 # Live session feed: an async WebSocket client to ws://127.0.0.1:PORT/ws/session/:id.
 # tokio is already the workspace async runtime; tungstenite is its companion WS impl.
 tokio = { workspace = true }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
 
 # (De)serialization of the wire payloads.
