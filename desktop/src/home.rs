@@ -1049,15 +1049,24 @@ fn MainPane(
     runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
     refresh: Signal<u32>,
 ) -> Element {
+    // A failed archive must be visible, not silent: a swallowed error is
+    // indistinguishable from a slow poll. Set on failure, cleared on success.
+    let archive_err = use_signal(|| None::<String>);
     match selection.read().clone() {
         Selection::Run { port, slug, project } => {
             let mut run_cfg = cfg.with_session(slug.clone());
             run_cfg.port = port;
-            // The selected run's live summary out of the sidebar's per-project
-            // run lists; the drift chip reads its open_drift count.
+            // The selected run's live summary, matched by (slug, PORT): run slugs
+            // are unique only per project, so a slug-only scan across every
+            // project's run map could return a same-slug run from the wrong
+            // project. The port is the run's live engine (Selection::Run carries
+            // it), so a same-slug run in another project, served by a different
+            // engine, has a different port and is not confused for this one. The
+            // drift chip reads that run's count. (`project` is the name, not the
+            // runs_map's slug key, so it can't drive the lookup directly.)
             let drift = runs_map
                 .values()
-                .find_map(|runs| runs.get(&slug))
+                .find_map(|runs| runs.get(&slug).filter(|(p, _)| *p == port))
                 .map(|(_, r)| r.open_drift)
                 .filter(|n| *n > 0);
             // Archive is reversible and needs no confirm (the run_archive
@@ -1066,15 +1075,24 @@ fn MainPane(
             let archive_cfg = run_cfg.clone();
             let archive_slug = slug.clone();
             let mut selection_done = selection;
+            let mut archive_err_sig = archive_err;
             let on_archive = move |_| {
                 let cfg = archive_cfg.clone();
                 let slug = archive_slug.clone();
                 spawn(async move {
-                    if wire::submit_run_archive(&cfg, &slug, true).await.is_ok() {
-                        selection_done.set(Selection::None);
+                    match wire::submit_run_archive(&cfg, &slug, true).await {
+                        Ok(()) => {
+                            archive_err_sig.set(None);
+                            selection_done.set(Selection::None);
+                        }
+                        // Surface the failure: keep the run selected (it was NOT
+                        // archived) and show why, so a failed archive can't read
+                        // as a slow poll.
+                        Err(e) => archive_err_sig.set(Some(format!("Couldn't archive: {e}"))),
                     }
                 });
             };
+            let archive_err_banner = archive_err.read().clone();
             // Key by run slug+port so selecting a different run REMOUNTS
             // ReviewApp — otherwise its one-shot session feed keeps streaming the
             // previous run while the checkpoint bar targets the new one (a
@@ -1089,6 +1107,20 @@ fn MainPane(
                     crumb: project.clone(),
                     drift,
                     on_archive: Some(EventHandler::new(on_archive)),
+                }
+                if let Some(msg) = archive_err_banner {
+                    div {
+                        style: format!(
+                            "margin:8px 16px 0;padding:8px 12px;border-radius:6px;font-size:12px;\
+                             font-family:{mono};color:{danger};background:{surface};\
+                             border:1px solid {border};",
+                            mono = tokens::FONT_MONO,
+                            danger = tokens::var::STATUS_DANGER,
+                            surface = tokens::var::SURFACE_OVERLAY,
+                            border = tokens::var::BORDER,
+                        ),
+                        "{msg}"
+                    }
                 }
                 {review}
             }

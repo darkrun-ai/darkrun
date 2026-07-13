@@ -433,6 +433,19 @@ fn launch(bin: PathBuf, port: u16, repo_root: &Path, session: Option<&str>) -> L
 
 #[cfg(not(target_os = "macos"))]
 fn launch(bin: PathBuf, port: u16, repo_root: &Path, session: Option<&str>) -> Launch {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // Non-macOS has no warm-app deep-link handoff (that path is macOS-only), so
+    // per-run gate surfacing would spawn a NEW window on every gate. Launch at
+    // most once per engine process: the first gate opens the app, and later gates
+    // rely on the desktop poller's current-focus navigation to steer the already
+    // open window (the same effect the macOS `app_running` dedupe gives). A
+    // relaunch after the user closes the app is not handled here; the desktop
+    // does not SHIP on non-macOS (Linux/Windows are compile-check targets), so
+    // this is a dev-only edge, and a window storm is the worse failure to avoid.
+    static LAUNCHED: AtomicBool = AtomicBool::new(false);
+    if LAUNCHED.swap(true, Ordering::SeqCst) {
+        return Launch::Launched(bin);
+    }
     launch_direct(bin, port, repo_root, session)
 }
 
