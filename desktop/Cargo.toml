@@ -33,6 +33,11 @@ darkrun-mcp = { workspace = true }
 # Domain types — the `ProjectRecord` the registry persists and the desktop reads.
 darkrun-core = { workspace = true }
 
+# Engine-free reader — projects a repo's on-disk `.darkrun/` state into the same
+# browse payloads the HTTP server serves, so the desktop can render a run
+# read-only when NO engine is connected (the offline run view).
+darkrun-browse = { workspace = true }
+
 # Clone & register — the desktop clones a Git URL into ~/darkrun/<name> directly
 # (in-process via gitoxide, no `git` CLI shell-out) and validates local repos
 # before registering them.

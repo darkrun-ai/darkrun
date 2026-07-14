@@ -98,6 +98,10 @@ enum Selection {
     None,
     /// A live run opened into its Review: the bound port + the run slug.
     Run { port: u16, slug: String, project: String },
+    /// A run read straight off disk when NO engine is serving the project: the
+    /// project root `path` (to build a `StateStore`) + the run slug. Opens the
+    /// read-only [`OfflineRunDetail`] instead of the live Review.
+    OfflineRun { path: String, slug: String, project: String },
     /// A project with no live engine — show the per-harness one-step command.
     NoEngine { name: String, path: String },
     /// The settings page (theme, …), opened from the toolbar gear.
@@ -140,6 +144,12 @@ pub fn HomeApp(
     let runs_by_project =
         use_signal(BTreeMap::<String, BTreeMap<String, (u16, RunSummary)>>::new);
 
+    // The per-project OFFLINE run lists (project SLUG -> the runs read straight
+    // off that project's on-disk `.darkrun/` state), populated ONLY for projects
+    // with no live engine. Lets the sidebar list an idle project's runs and the
+    // main pane open them read-only ([`OfflineRunDetail`]), with no engine up.
+    let offline_runs = use_signal(BTreeMap::<String, Vec<RunSummary>>::new);
+
     // What the main pane shows. A pinned launch opens straight to that run (the
     // project label is filled in by the focus poller's first tick); otherwise the
     // shell opens with nothing selected.
@@ -179,10 +189,16 @@ pub fn HomeApp(
     // The first iteration runs immediately (no leading sleep) so the tree fills on
     // launch; subsequent iterations poll on an interval.
     let mut last_focus = use_signal(|| None::<String>);
+    // The idle-project signature the offline reader last projected, so the
+    // per-run disk read (and its git revwalks) recomputes only when the set of
+    // no-engine projects CHANGES, not every tick (nothing writes an idle run).
+    let offline_key = use_signal(Vec::<String>::new);
     {
         let base = cfg.clone();
         let mut selection = selection;
         let mut runs_by_project = runs_by_project;
+        let mut offline_runs = offline_runs;
+        let mut offline_key = offline_key;
         use_future(move || {
             let base = base.clone();
             async move {
@@ -280,6 +296,37 @@ pub fn HomeApp(
                         runs_by_project.set(map);
                     }
 
+                    // 6. Offline run lists. Every registered project with NO live
+                    //    engine but an on-disk `.darkrun/` reads its runs straight
+                    //    off disk (the SAME projection the browse API serves), so
+                    //    the sidebar lists them and the main pane opens them
+                    //    read-only with no engine up. The registry read, the
+                    //    `.darkrun` probes, and the per-run git revwalks are
+                    //    blocking, so the whole projection runs on `spawn_blocking`;
+                    //    it recomputes only when the idle-project set CHANGES (an
+                    //    engine started/stopped, a project was added/dropped) rather
+                    //    than every tick, since nothing writes an idle run.
+                    let found_for_offline = found.clone();
+                    let prev_key = offline_key.peek().clone();
+                    let projected = tokio::task::spawn_blocking(move || {
+                        let projects = load_projects(&found_for_offline);
+                        let key = offline_projects_key(&projects);
+                        // Only pay for the per-run git revwalks when the idle set moved.
+                        let runs = (key != prev_key).then(|| read_offline_runs(&projects));
+                        (key, runs)
+                    })
+                    .await;
+                    if let Ok((key, runs)) = projected {
+                        if key != *offline_key.peek() {
+                            offline_key.set(key);
+                        }
+                        if let Some(runs) = runs {
+                            if runs != *offline_runs.peek() {
+                                offline_runs.set(runs);
+                            }
+                        }
+                    }
+
                     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
                 }
             }
@@ -314,6 +361,9 @@ pub fn HomeApp(
     let _ = refresh.read();
     let projects = load_projects(&engines.read());
     let runs_map = runs_by_project.read().clone();
+    // The offline (no-engine) run lists, keyed by project slug: the sidebar
+    // nests them under an idle project the same way it nests live runs.
+    let offline_map = offline_runs.read().clone();
     let live_count = engines.read().len();
 
     rsx! {
@@ -326,6 +376,7 @@ pub fn HomeApp(
                 Sidebar {
                     projects: projects.clone(),
                     runs_map: runs_map.clone(),
+                    offline_runs: offline_map.clone(),
                     selection,
                     mine_only,
                     search,
@@ -598,6 +649,8 @@ fn ThemeControl() -> Element {
 fn Sidebar(
     projects: Vec<Project>,
     runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
+    /// Per-project (slug-keyed) run lists read off disk for no-engine projects.
+    offline_runs: BTreeMap<String, Vec<RunSummary>>,
     selection: Signal<Selection>,
     mine_only: Signal<bool>,
     search: Signal<String>,
@@ -656,6 +709,7 @@ fn Sidebar(
                                 .get(&proj.slug)
                                 .map(|m| m.values().cloned().collect())
                                 .unwrap_or_default(),
+                            offline: offline_runs.get(&proj.slug).cloned().unwrap_or_default(),
                             selection,
                             mine_only,
                             search,
@@ -826,6 +880,10 @@ fn SidebarEmpty(mine_only: Signal<bool>, has_projects: bool) -> Element {
 fn ProjectSection(
     proj: Project,
     runs: Vec<(u16, RunSummary)>,
+    /// This project's runs read off disk (populated only when it has no live
+    /// engine). A non-empty list makes an idle project EXPAND to its runs (opened
+    /// read-only) rather than routing its header to the no-engine one-step view.
+    offline: Vec<RunSummary>,
     selection: Signal<Selection>,
     mine_only: Signal<bool>,
     search: Signal<String>,
@@ -840,6 +898,11 @@ fn ProjectSection(
     let shown: Vec<(u16, RunSummary)> = runs
         .iter()
         .filter(|(_, r)| run_matches(r, mine, &q))
+        .cloned()
+        .collect();
+    let shown_offline: Vec<RunSummary> = offline
+        .iter()
+        .filter(|r| run_matches(r, mine, &q))
         .cloned()
         .collect();
 
@@ -862,14 +925,21 @@ fn ProjectSection(
         border = tokens::var::BORDER,
     );
 
-    // Clicking the header of a NO-ENGINE project opens its one-step view; for a
-    // live project the header just toggles collapse.
+    // A project the sidebar drills into: a live engine, OR an idle project whose
+    // runs we can still read off disk. Both EXPAND to a run list; only a truly
+    // empty idle project routes its header to the no-engine one-step view.
+    let live = proj.is_live();
+    let has_offline = !offline.is_empty();
+    let expandable = live || has_offline;
+    let count_shown = if live { shown.len() } else { shown_offline.len() };
+
+    // Clicking the header toggles collapse for an expandable project; a truly
+    // idle project (no engine, no on-disk runs) opens its one-step view instead.
     let proj_for_header = proj.clone();
     let mut selection_hdr = selection;
-    let live = proj.is_live();
     let path_label = proj.path.display().to_string();
     let on_header = move |_| {
-        if live {
+        if expandable {
             let now = *expanded.peek();
             expanded.set(!now);
         } else {
@@ -888,8 +958,8 @@ fn ProjectSection(
                     style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                     "{proj.name}"
                 }
-                if live {
-                    span { style: "{ct}", "{shown.len()}" }
+                if expandable {
+                    span { style: "{ct}", "{count_shown}" }
                 } else {
                     span {
                         style: format!(
@@ -901,19 +971,37 @@ fn ProjectSection(
                     }
                 }
             }
-            if live && is_open {
+            if expandable && is_open {
                 div { style: "{runs_wrap}",
-                    for (port, run) in shown.iter() {
-                        RunRow {
-                            run: run.clone(),
-                            project: proj.name.clone(),
-                            // The port of the ENGINE this run came from — a
-                            // worktree run opens against the worktree engine.
-                            port: *port,
-                            selection,
-                            drawer_open,
+                    if live {
+                        for (port, run) in shown.iter() {
+                            RunRow {
+                                run: run.clone(),
+                                project: proj.name.clone(),
+                                // The port of the ENGINE this run came from — a
+                                // worktree run opens against the worktree engine.
+                                port: *port,
+                                selection,
+                                drawer_open,
+                            }
+                        }
+                    } else {
+                        // No engine: each row opens the read-only OfflineRunDetail
+                        // rooted at the project path (port is unused offline).
+                        for run in shown_offline.iter() {
+                            RunRow {
+                                run: run.clone(),
+                                project: proj.name.clone(),
+                                port: 0,
+                                offline_path: Some(proj.path.display().to_string()),
+                                selection,
+                                drawer_open,
+                            }
                         }
                     }
+                    // The one-step affordance: start a new worktree run on a live
+                    // project, or bring an engine up on an idle one (both open the
+                    // per-harness command scoped to this project).
                     NewRunRow {
                         name: proj.name.clone(),
                         path: proj.path.display().to_string(),
@@ -933,12 +1021,19 @@ fn RunRow(
     run: RunSummary,
     project: String,
     port: u16,
+    /// When set, this row is an OFFLINE run read from disk (the project has no
+    /// live engine): selecting it opens the read-only [`OfflineRunDetail`] rooted
+    /// at this project path. `None` is a live run (opens the Review against
+    /// `port`).
+    #[props(default)]
+    offline_path: Option<String>,
     selection: Signal<Selection>,
     drawer_open: Signal<bool>,
 ) -> Element {
-    // Is this row the open one?
+    // Is this row the open one? Match either selection kind by slug (the same
+    // slug-only match the live path already uses).
     let selected = match &*selection.read() {
-        Selection::Run { slug, .. } => slug == &run.slug,
+        Selection::Run { slug, .. } | Selection::OfflineRun { slug, .. } => slug == &run.slug,
         _ => false,
     };
 
@@ -976,11 +1071,20 @@ fn RunRow(
             role: "button",
             tabindex: "0",
             onclick: move |_| {
-                selection.set(Selection::Run {
-                    port,
-                    slug: slug.clone(),
-                    project: project.clone(),
-                });
+                match &offline_path {
+                    // Offline: open the disk-read detail rooted at the project path.
+                    Some(path) => selection.set(Selection::OfflineRun {
+                        path: path.clone(),
+                        slug: slug.clone(),
+                        project: project.clone(),
+                    }),
+                    // Live: open the Review against the engine serving this run.
+                    None => selection.set(Selection::Run {
+                        port,
+                        slug: slug.clone(),
+                        project: project.clone(),
+                    }),
+                }
                 // Close the drawer after a pick on a narrow window.
                 drawer_open.set(false);
             },
@@ -1125,6 +1229,10 @@ fn MainPane(
                 {review}
             }
         }
+        Selection::OfflineRun { path, slug, project } => rsx! {
+            MainHeader { name: slug.clone(), crumb: project.clone() }
+            OfflineRunDetail { path, slug, project }
+        },
         Selection::NoEngine { name, path } => rsx! {
             MainHeader { name: name.clone(), crumb: path.clone() }
             div { style: "padding:16px;",
@@ -1138,6 +1246,282 @@ fn MainPane(
         Selection::None => rsx! {
             Welcome { projects: projects.clone(), refresh }
         },
+    }
+}
+
+/// A read-only view of a run projected straight from its on-disk `.darkrun/`
+/// state, shown when NO engine is serving the project. It reads the SAME
+/// projection the engine's browse API serves ([`darkrun_browse`]), so an offline
+/// run looks like a live one, only without the controls to act on it. Bringing
+/// an engine up (the banner + the sidebar's one-step command) is what unlocks
+/// deciding, annotating, and advancing (a later slice).
+///
+/// The reads are small, local file reads done synchronously in render (the same
+/// way [`load_projects`] reads the registry): point a `StateStore` at the project
+/// path and project it, with no engine, socket, or signal plumbing.
+#[component]
+fn OfflineRunDetail(path: String, slug: String, project: String) -> Element {
+    // `project` rides in for the pane header (rendered by the caller); the body
+    // reads everything it shows from disk.
+    let _ = &project;
+    let store = darkrun_core::StateStore::new(&path);
+    let detail = darkrun_browse::run_detail(&store, &slug);
+
+    let wrap = "padding:16px;display:flex;flex-direction:column;gap:14px;max-width:880px;";
+
+    // No run on disk under this slug: stop at the banner + a small note rather
+    // than a dead pane.
+    let Some(detail) = detail else {
+        return rsx! {
+            div { style: "{wrap}",
+                OfflineBanner {}
+                Card {
+                    p {
+                        style: format!("margin:0;font-size:13px;color:{};", tokens::var::TEXT_MUTED),
+                        "This run wasn't found on disk (nothing under .darkrun/ for "
+                        code {
+                            style: format!(
+                                "font-family:{};color:{};", tokens::FONT_MONO, tokens::var::TEXT_FAINT,
+                            ),
+                            "{slug}"
+                        }
+                        ")."
+                    }
+                }
+            }
+        };
+    };
+
+    // The active station's feedback + any attached objective-evidence proof.
+    let feedback = darkrun_browse::feedback_for_station(&store, &slug, &detail.active_station);
+    let proof = darkrun_browse::read_disk_proof(&store, &slug);
+
+    let section_label = format!(
+        "font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:{faint};\
+         font-family:{mono};margin:0 0 6px;",
+        faint = tokens::var::TEXT_FAINT,
+        mono = tokens::FONT_MONO,
+    );
+    let list = "display:flex;flex-direction:column;gap:6px;";
+    let item_row = format!(
+        "display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid {border};\
+         border-radius:7px;background:{overlay};font-size:12.5px;color:{text};",
+        border = tokens::var::BORDER,
+        overlay = tokens::var::SURFACE_OVERLAY,
+        text = tokens::var::TEXT,
+    );
+    let item_name = format!(
+        "font-weight:600;color:{text};overflow:hidden;text-overflow:ellipsis;\
+         white-space:nowrap;",
+        text = tokens::var::TEXT,
+    );
+    let item_meta = format!(
+        "font-family:{mono};font-size:11px;color:{faint};",
+        mono = tokens::FONT_MONO,
+        faint = tokens::var::TEXT_FAINT,
+    );
+    let empty_note = format!(
+        "margin:0;font-size:12px;color:{faint};",
+        faint = tokens::var::TEXT_FAINT,
+    );
+    let title_style = format!(
+        "font-family:{sans};font-size:16px;font-weight:700;color:{text};",
+        sans = tokens::FONT_SANS,
+        text = tokens::var::TEXT,
+    );
+    let summary_meta = format!(
+        "font-family:{mono};font-size:12px;color:{muted};margin-top:6px;\
+         display:flex;flex-wrap:wrap;gap:10px;",
+        mono = tokens::FONT_MONO,
+        muted = tokens::var::TEXT_MUTED,
+    );
+    let fb_card = format!(
+        "border:1px solid {border};border-radius:7px;background:{overlay};padding:10px 12px;\
+         display:flex;flex-direction:column;gap:6px;",
+        border = tokens::var::BORDER,
+        overlay = tokens::var::SURFACE_OVERLAY,
+    );
+    let fb_head = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+    let fb_body = format!(
+        "margin:0;font-size:12.5px;line-height:1.5;color:{muted};white-space:pre-wrap;",
+        muted = tokens::var::TEXT_MUTED,
+    );
+
+    rsx! {
+        div { style: "{wrap}",
+            OfflineBanner {}
+
+            // Summary: title, lifecycle status, active position, progress.
+            Card {
+                div { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
+                    span { style: "{title_style}", "{detail.title}" }
+                    Badge { tone: run_status_tone(&detail.status), filled: true, "{detail.status}" }
+                }
+                div { style: "{summary_meta}",
+                    span { "station \u{b7} {detail.active_station}" }
+                    if let Some(phase) = detail.phase.as_ref() {
+                        span { "phase \u{b7} {phase}" }
+                    }
+                    span { "{detail.progress.completed}/{detail.progress.total} stations" }
+                    span { "factory \u{b7} {detail.factory}" }
+                }
+            }
+
+            // Stations the run walks.
+            div {
+                div { style: "{section_label}", "Stations" }
+                if detail.stations.is_empty() {
+                    p { style: "{empty_note}", "No stations recorded yet." }
+                } else {
+                    div { style: "{list}",
+                        for st in detail.stations.iter() {
+                            {
+                                let tone = run_status_tone(&st.status);
+                                let when = st
+                                    .completed_at
+                                    .as_ref()
+                                    .map(|t| format!("done \u{b7} {t}"))
+                                    .or_else(|| {
+                                        st.started_at.as_ref().map(|t| format!("started \u{b7} {t}"))
+                                    });
+                                rsx! {
+                                    div { style: "{item_row}",
+                                        span { style: "{item_name}", "{st.name}" }
+                                        Badge { tone, "{st.status}" }
+                                        if let Some(phase) = st.phase.as_ref() {
+                                            span { style: "{item_meta}", "{phase}" }
+                                        }
+                                        span { style: "flex:1;" }
+                                        if let Some(when) = when {
+                                            span { style: "{item_meta}", "{when}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Units on the active station.
+            div {
+                div { style: "{section_label}", "Units \u{b7} {detail.active_station}" }
+                if detail.units.is_empty() {
+                    p { style: "{empty_note}", "No units on the active station." }
+                } else {
+                    div { style: "{list}",
+                        for unit in detail.units.iter() {
+                            div { style: "{item_row}",
+                                span { style: "{item_name}", "{unit.title}" }
+                                Badge { tone: run_status_tone(&unit.status), "{unit.status}" }
+                                span { style: "flex:1;" }
+                                span { style: "{item_meta}", "{unit.slug}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The active station's feedback (read-only; no decide/reply controls).
+            div {
+                div { style: "{section_label}", "Feedback \u{b7} {detail.active_station}" }
+                if feedback.items.is_empty() {
+                    p { style: "{empty_note}", "No feedback on this station." }
+                } else {
+                    div { style: "{list}",
+                        for item in feedback.items.iter() {
+                            div { style: "{fb_card}",
+                                div { style: "{fb_head}",
+                                    span { style: "{item_name}", "{item.title}" }
+                                    Badge { tone: feedback_tone(item.status), "{feedback_status_str(item.status)}" }
+                                    Badge { tone: Tone::Neutral, "{feedback_origin_str(item.origin)}" }
+                                }
+                                if !item.body.is_empty() {
+                                    p { style: "{fb_body}", "{item.body}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // A small indicator when objective-evidence proof is attached on disk.
+            if let Some((proof, station)) = proof.as_ref() {
+                div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                    Badge { tone: Tone::Info, filled: true, "proof attached" }
+                    span { style: "{item_meta}", "surface \u{b7} {proof.surface.as_str()}" }
+                    if let Some(station) = station.as_ref() {
+                        span { style: "{item_meta}", "station \u{b7} {station}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The read-only banner shown atop [`OfflineRunDetail`]: no engine is serving
+/// this project, so the view is a projection of disk with no controls to act.
+#[component]
+fn OfflineBanner() -> Element {
+    let banner = format!(
+        "display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:8px;\
+         background:{overlay};border:1px solid {border};border-top:2px solid {warn};\
+         font-size:12.5px;color:{muted};",
+        overlay = tokens::var::SURFACE_OVERLAY,
+        border = tokens::var::BORDER,
+        warn = tokens::var::STATUS_WARN,
+        muted = tokens::var::TEXT_MUTED,
+    );
+    rsx! {
+        div { style: "{banner}",
+            Badge { tone: Tone::Warn, filled: true, "read-only" }
+            span { "No engine connected. Bring an engine up to act on this run." }
+        }
+    }
+}
+
+/// The lowercase display string for a feedback item's lifecycle status.
+fn feedback_status_str(status: darkrun_api::FeedbackStatus) -> &'static str {
+    use darkrun_api::FeedbackStatus as S;
+    match status {
+        S::Pending => "pending",
+        S::Fixing => "fixing",
+        S::Addressed => "addressed",
+        S::Answered => "answered",
+        S::NonActionable => "non-actionable",
+        S::Escalated => "escalated",
+        S::Closed => "closed",
+        S::Rejected => "rejected",
+    }
+}
+
+/// The display string for where a feedback item originated.
+fn feedback_origin_str(origin: darkrun_api::FeedbackOrigin) -> &'static str {
+    use darkrun_api::FeedbackOrigin as O;
+    match origin {
+        O::AdversarialReview => "adversarial review",
+        O::StudioReview => "studio review",
+        O::EngineReview => "engine review",
+        O::Drift => "drift",
+        O::Discovery => "discovery",
+        O::ExternalPr => "external PR",
+        O::ExternalMr => "external MR",
+        O::UserVisual => "visual note",
+        O::UserChat => "chat",
+        O::UserQuestion => "question",
+        O::UserRevisit => "revisit",
+        O::Agent => "agent",
+    }
+}
+
+/// A [`Tone`] for a feedback item's lifecycle status, driving its status badge.
+fn feedback_tone(status: darkrun_api::FeedbackStatus) -> Tone {
+    use darkrun_api::FeedbackStatus as S;
+    match status {
+        S::Closed | S::Answered | S::Addressed | S::NonActionable => Tone::Ok,
+        S::Fixing => Tone::Info,
+        S::Pending | S::Escalated => Tone::Warn,
+        S::Rejected => Tone::Danger,
     }
 }
 
@@ -1376,6 +1760,44 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
     }
 
     by_slug.into_values().collect()
+}
+
+/// A stable signature of the IDLE projects the offline reader scans: each project
+/// with no live engine and an on-disk `.darkrun/`, as `slug@path`, sorted. The
+/// poller recomputes the offline run lists only when THIS changes (an engine
+/// started/stopped, a project was added or dropped), not every tick, since
+/// nothing writes an idle project's runs while it sits idle.
+fn offline_projects_key(projects: &[Project]) -> Vec<String> {
+    let mut key: Vec<String> = projects
+        .iter()
+        .filter(|p| p.port.is_none() && p.path.join(".darkrun").is_dir())
+        .map(|p| format!("{}@{}", p.slug, p.path.display()))
+        .collect();
+    key.sort();
+    key
+}
+
+/// Read every idle (no live engine) project's runs straight off its on-disk
+/// `.darkrun/` state, keyed by project SLUG. A project contributes only when it
+/// has no live port AND a `.darkrun/` directory; the projection is the SAME one
+/// the engine's browse API serves ([`darkrun_browse::list_runs`]), so an offline
+/// run reads identically to a live one. **Blocking** (local file reads plus
+/// per-run git revwalks), so call it off the render thread. Projects with no
+/// readable runs are omitted, so the sidebar can tell "idle with runs" from a
+/// truly empty idle project.
+fn read_offline_runs(projects: &[Project]) -> BTreeMap<String, Vec<RunSummary>> {
+    let mut out = BTreeMap::new();
+    for proj in projects {
+        if proj.port.is_some() || !proj.path.join(".darkrun").is_dir() {
+            continue;
+        }
+        let store = darkrun_core::StateStore::new(&proj.path);
+        let runs = darkrun_browse::list_runs(&store).runs;
+        if !runs.is_empty() {
+            out.insert(proj.slug.clone(), runs);
+        }
+    }
+    out
 }
 
 /// Whether to offer the native "Browse" folder picker. True everywhere the app
@@ -2142,11 +2564,11 @@ mod data_render_tests {
             runs_map.insert("store-ab12cd34".to_string(), by_run);
             rsx! {
                 Sidebar {
-                    projects: vec![proj()], runs_map, selection,
+                    projects: vec![proj()], runs_map, offline_runs: BTreeMap::new(), selection,
                     mine_only: mine, search, drawer_open: drawer, live_count: 1,
                 }
                 ProjectSection {
-                    proj: proj(), runs: vec![(58616u16, run())], selection,
+                    proj: proj(), runs: vec![(58616u16, run())], offline: vec![], selection,
                     mine_only: mine, search, drawer_open: drawer,
                 }
                 RunRow { run: run(), project: "store".to_string(), port: 58616, selection, drawer_open: drawer }
@@ -2154,6 +2576,37 @@ mod data_render_tests {
         }
         let html = render(App);
         assert!(html.contains("Storefront") || html.contains("store") || !html.is_empty());
+    }
+
+    #[test]
+    fn offline_project_section_expands_and_run_row_selects_offline() {
+        // An IDLE project (port None) carrying an offline run list expands to its
+        // runs (no engine); selecting one routes to Selection::OfflineRun.
+        fn App() -> Element {
+            let selection = use_signal(|| Selection::None);
+            let mine = use_signal(|| false);
+            let search = use_signal(String::new);
+            let drawer = use_signal(|| true);
+            let idle = Project {
+                slug: "store-ab12cd34".into(),
+                name: "store".into(),
+                path: "/tmp/store".into(),
+                port: None,
+                harness: None,
+            };
+            rsx! {
+                ProjectSection {
+                    proj: idle, runs: vec![], offline: vec![run()], selection,
+                    mine_only: mine, search, drawer_open: drawer,
+                }
+                RunRow {
+                    run: run(), project: "store".to_string(), port: 0,
+                    offline_path: Some("/tmp/store".to_string()), selection, drawer_open: drawer,
+                }
+            }
+        }
+        let html = render(App);
+        assert!(!html.is_empty());
     }
 }
 
@@ -2229,6 +2682,19 @@ mod main_pane_render_tests {
         let html = render(Run);
         assert!(html.contains("drift 2"), "the drift chip renders: {html}");
         assert!(html.contains("archive"), "the archive affordance renders: {html}");
+        // OfflineRun: the read-only disk view. The path has no `.darkrun/`, so the
+        // detail is None and the pane shows the banner + not-found note.
+        fn Offline() -> Element {
+            let sel = use_signal(|| Selection::OfflineRun {
+                path: "/tmp/darkrun-no-such-repo".into(),
+                slug: "r".into(),
+                project: "store".into(),
+            });
+            let refresh = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh } }
+        }
+        let offline = render(Offline);
+        assert!(offline.contains("read-only"), "the read-only banner renders: {offline}");
     }
 }
 
@@ -2538,5 +3004,54 @@ mod helper_tests {
         // GUI harness — the open-the-editor instruction.
         let gui = launch_command(Harness::Cursor, "/tmp/p", false, None);
         assert!(gui.starts_with("open "));
+    }
+
+    fn idle_project(path: std::path::PathBuf) -> Project {
+        Project { slug: "widget".into(), name: "widget".into(), path, port: None, harness: None }
+    }
+
+    #[test]
+    fn offline_projects_key_lists_only_idle_repos_with_darkrun() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".darkrun")).unwrap();
+        let idle = idle_project(repo.path().to_path_buf());
+        // Idle + on-disk `.darkrun/` → one signature entry.
+        assert_eq!(offline_projects_key(std::slice::from_ref(&idle)).len(), 1);
+        // A LIVE project (has a port) is excluded even with disk state.
+        let live = Project { port: Some(9), ..idle.clone() };
+        assert!(offline_projects_key(std::slice::from_ref(&live)).is_empty());
+        // Idle but no `.darkrun/` is excluded.
+        let bare = tempfile::tempdir().unwrap();
+        let no_dr = idle_project(bare.path().to_path_buf());
+        assert!(offline_projects_key(std::slice::from_ref(&no_dr)).is_empty());
+    }
+
+    #[test]
+    fn read_offline_runs_projects_idle_repo_state_and_skips_live() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = darkrun_core::StateStore::new(repo.path());
+        let run = darkrun_core::domain::Run {
+            slug: "widget-1".into(),
+            title: "Widget".into(),
+            frontmatter: darkrun_core::domain::RunFrontmatter {
+                // Title is resolved from frontmatter on the write→read roundtrip.
+                title: Some("Widget".into()),
+                factory: "app".into(),
+                active_station: "frame".into(),
+                status: darkrun_core::domain::Status::Active,
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        store.write_run(&run).unwrap();
+
+        // An idle project with disk state contributes its runs, keyed by slug.
+        let idle = idle_project(repo.path().to_path_buf());
+        let map = read_offline_runs(std::slice::from_ref(&idle));
+        assert_eq!(map.get("widget").map(Vec::len), Some(1));
+        assert_eq!(map["widget"][0].slug, "widget-1");
+        // A live project (has a port) is skipped even with disk state.
+        let live = Project { port: Some(1), ..idle.clone() };
+        assert!(read_offline_runs(std::slice::from_ref(&live)).is_empty());
     }
 }
