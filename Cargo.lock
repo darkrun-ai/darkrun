@@ -1483,6 +1483,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "darkrun-browse"
+version = "0.10.0"
+dependencies = [
+ "darkrun-api",
+ "darkrun-core",
+ "darkrun-git",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "darkrun-cli"
 version = "0.10.0"
 dependencies = [
@@ -1603,6 +1615,7 @@ version = "0.10.0"
 dependencies = [
  "axum",
  "darkrun-api",
+ "darkrun-browse",
  "darkrun-core",
  "darkrun-git",
  "futures-util",

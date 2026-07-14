@@ -13,7 +13,6 @@
 //!
 //! Entry point: [`serve`] — what darkrun-cli calls to start the server.
 
-mod feedback_doc;
 mod handlers;
 mod listen;
 mod ratelimit;
