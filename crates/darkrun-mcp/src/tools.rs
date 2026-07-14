@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::schemars::JsonSchema;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use serde::{Deserialize, Serialize};
@@ -408,7 +408,7 @@ fn pending_gate_keepalive(slug: &str) -> serde_json::Value {
 fn ok_json<T: Serialize>(value: &T) -> std::result::Result<CallToolResult, ErrorData> {
     match serde_json::to_value(value) {
         Ok(v) => Ok(CallToolResult::structured(ensure_object(v))),
-        Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+        Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
             "serialization error: {e}"
         ))])),
     }
@@ -429,7 +429,7 @@ fn ensure_object(v: serde_json::Value) -> serde_json::Value {
 }
 
 fn err_text(message: impl std::fmt::Display) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(message.to_string())])
+    CallToolResult::error(vec![ContentBlock::text(message.to_string())])
 }
 
 /// Map an artifact write error into an agent-actionable tool result. A guarded
@@ -439,7 +439,7 @@ fn err_text(message: impl std::fmt::Display) -> CallToolResult {
 /// retry that would re-clobber. Any other error stringifies as usual.
 fn artifact_write_error(e: crate::error::McpError) -> CallToolResult {
     if let crate::error::McpError::Core(darkrun_core::CoreError::Conflict(c)) = &e {
-        return CallToolResult::error(vec![Content::text(format!(
+        return CallToolResult::error(vec![ContentBlock::text(format!(
             "WRITE CONFLICT — {} changed since you read it. Do NOT retry blindly: \
              re-read, reconcile your change into the current content below, then \
              retry with expected_sha={}.\n\n--- current content ---\n{}",
@@ -3642,7 +3642,7 @@ impl ServerHandler for DarkrunServer {
             Some(p) => {
                 let mut result = rmcp::model::GetPromptResult::new(vec![
                     rmcp::model::PromptMessage::new_text(
-                        rmcp::model::PromptMessageRole::User,
+                        rmcp::model::Role::User,
                         p.body,
                     ),
                 ]);
