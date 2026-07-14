@@ -25,19 +25,17 @@ use axum::{
     Json,
 };
 use darkrun_api::{
-    AuthorType, DirectionSelectRequest, DirectionSelectResponse, FeedbackCreateRequest,
-    FeedbackCreateResponse, FeedbackDeleteResponse, FeedbackItem, FeedbackListResponse,
-    FeedbackReply, FeedbackReplyCreateRequest,
-    FeedbackReplyCreateResponse, FeedbackStatus, FeedbackUpdateRequest, FeedbackUpdateResponse,
-    OutputReviewRequest, OutputReviewResponse, PickerSelectRequest, PickerSelectResponse,
-    ProofAttachRequest, ProofAttachResponse, ProofGetResponse, PushAckRequest, PushAckResponse,
-    QuestionAnswerRequest,
+    DirectionSelectRequest, DirectionSelectResponse, FeedbackCreateRequest, FeedbackCreateResponse,
+    FeedbackDeleteResponse, FeedbackReplyCreateRequest, FeedbackReplyCreateResponse, FeedbackStatus,
+    FeedbackUpdateRequest, FeedbackUpdateResponse, OutputReviewRequest, OutputReviewResponse,
+    PickerSelectRequest, PickerSelectResponse, ProofAttachRequest, ProofAttachResponse,
+    ProofGetResponse, PushAckRequest, PushAckResponse, QuestionAnswerRequest,
     QuestionAnswerResponse, ReviewDecision, ReviewDecisionRequest, ReviewDecisionResponse,
     SessionPayload, SessionStatus,
 };
 use serde_json::json;
 
-use crate::feedback_doc::{self, FeedbackDoc};
+use darkrun_browse::{next_id, FeedbackDoc};
 use crate::state::AppState;
 
 /// `GET /health` — liveness/readiness probe. Always `200 ok` once the router
@@ -511,7 +509,7 @@ pub async fn visual_review_annotate(
     let station = review.station.clone().unwrap_or_default();
 
     let existing = state.store.read_feedback_raw(&run).unwrap_or_default();
-    let fb_id = feedback_doc::next_id(existing.keys());
+    let fb_id = next_id(existing.keys());
     let title = req.title.clone().unwrap_or_else(|| {
         match review.artifact_path.as_deref() {
             Some(path) => format!("Visual review: {path}"),
@@ -635,64 +633,13 @@ pub async fn get_proof(State(state): State<AppState>, Path(run): Path<String>) -
     // `darkrun_proof_attach` tool, which writes `.darkrun/<run>/proof.json` and
     // never touches this in-memory registry. Without this the desktop's
     // proof-at-the-gate view 404s on the primary (agent-attached) evidence.
-    match read_disk_proof(&state.store, &run) {
+    match darkrun_browse::read_disk_proof(&state.store, &run) {
         Some((proof, station)) => (
             StatusCode::OK,
             Json(ProofGetResponse { run, station, proof }),
         )
             .into_response(),
         None => not_found("proof", &run),
-    }
-}
-
-/// Read a run's on-disk `proof.json` (written by the engine's proof-attach tool)
-/// and return the most relevant proof: the run-level (unscoped) one if present,
-/// else the first station-scoped proof. `None` when the file is absent or
-/// unreadable. Mirrors the disk shape the engine serializes (a run-level slot
-/// plus a station map) without depending on `darkrun-mcp`.
-fn read_disk_proof(
-    store: &darkrun_core::StateStore,
-    run: &str,
-) -> Option<(darkrun_api::proof::Proof, Option<String>)> {
-    #[derive(serde::Deserialize)]
-    struct DiskProof {
-        #[serde(default)]
-        run: Option<darkrun_api::proof::Proof>,
-        #[serde(default)]
-        stations: std::collections::BTreeMap<String, darkrun_api::proof::Proof>,
-    }
-    let path = store.run_dir(run).join("proof.json");
-    let bytes = std::fs::read(path).ok()?;
-    let disk: DiskProof = serde_json::from_slice(&bytes).ok()?;
-    if let Some(proof) = disk.run {
-        return Some((proof, None));
-    }
-    disk.stations
-        .into_iter()
-        .next()
-        .map(|(station, proof)| (proof, Some(station)))
-}
-
-/// Project one on-disk reply line (`author: text`) onto the wire
-/// [`FeedbackReply`]. The sidecar stores replies as flat strings with no
-/// per-reply timestamp, so `created_at` is honestly empty rather than invented.
-/// A line with no `author:` prefix is attributed to `user` (the flat format's
-/// only untagged writer).
-fn wire_reply(line: &str) -> FeedbackReply {
-    let (author, body) = match line.split_once(':') {
-        Some((a, b)) if !a.trim().is_empty() => (a.trim().to_string(), b.trim().to_string()),
-        _ => ("user".to_string(), line.trim().to_string()),
-    };
-    let author_type = if author.eq_ignore_ascii_case("user") {
-        AuthorType::Human
-    } else {
-        AuthorType::Agent
-    };
-    FeedbackReply {
-        author,
-        author_type,
-        body,
-        created_at: String::new(),
     }
 }
 
@@ -713,29 +660,13 @@ pub async fn list_feedback(
     if let Some(resp) = reject_unsafe_segment("station", &station) {
         return resp;
     }
-    let raw = state.store.read_feedback_raw(&run).unwrap_or_default();
-    let mut items: Vec<FeedbackItem> = raw
-        .into_iter()
-        .map(|(id, content)| FeedbackDoc::parse(&id, &content))
-        .filter(|doc| doc.matches_station(&station))
-        .map(|doc| {
-            let mut item = doc.to_item();
-            // `to_item` projects the frontmatter; the reply thread rides along
-            // here so the list payload is the full record.
-            item.replies = doc.replies.iter().map(|r| wire_reply(r)).collect();
-            item
-        })
-        .collect();
-    items.sort_by(|a, b| a.feedback_id.cmp(&b.feedback_id));
-
     (
         StatusCode::OK,
-        Json(FeedbackListResponse {
-            run,
-            station,
-            count: items.len(),
-            items,
-        }),
+        Json(darkrun_browse::feedback_for_station(
+            &state.store,
+            &run,
+            &station,
+        )),
     )
         .into_response()
 }
@@ -765,7 +696,7 @@ pub async fn create_feedback(
     }
 
     let existing = state.store.read_feedback_raw(&run).unwrap_or_default();
-    let id = feedback_doc::next_id(existing.keys());
+    let id = next_id(existing.keys());
 
     // `FeedbackDoc::new_user` always stamps `user` as the author: any
     // client-supplied author crosses the trust boundary and is discarded.
@@ -1070,18 +1001,5 @@ mod tests {
         // A non-boolean `approved` is not the alias.
         assert!(decision_from_body(&json!({ "approved": "yes" })).is_none());
         assert!(decision_from_body(&json!("approved")).is_none());
-    }
-
-    #[test]
-    fn wire_reply_splits_author_and_body() {
-        let r = wire_reply("agent: applied the fix");
-        assert_eq!(r.author, "agent");
-        assert_eq!(r.author_type, AuthorType::Agent);
-        assert_eq!(r.body, "applied the fix");
-        // The `user` author reads as human; an untagged line defaults to user.
-        assert_eq!(wire_reply("user: thanks").author_type, AuthorType::Human);
-        let bare = wire_reply("just text");
-        assert_eq!(bare.author, "user");
-        assert_eq!(bare.body, "just text");
     }
 }
