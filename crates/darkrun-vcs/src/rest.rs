@@ -37,7 +37,7 @@ pub struct RepoInfo {
 }
 
 /// Apply the standard auth + accept headers for `provider` to `request`.
-fn authorize(request: HttpRequest, provider: Provider, cred: &Credential) -> HttpRequest {
+pub(crate) fn authorize(request: HttpRequest, provider: Provider, cred: &Credential) -> HttpRequest {
     let request = request
         .header("Authorization", cred.authorization_header())
         .header("User-Agent", USER_AGENT);
@@ -51,7 +51,7 @@ fn authorize(request: HttpRequest, provider: Provider, cred: &Credential) -> Htt
 
 /// Turn a non-2xx response into a typed [`VcsError::Api`], extracting the
 /// provider's error message where possible.
-fn api_error(provider: Provider, response: &HttpResponse) -> VcsError {
+pub(crate) fn api_error(provider: Provider, response: &HttpResponse) -> VcsError {
     let message = response
         .json::<serde_json::Value>()
         .ok()

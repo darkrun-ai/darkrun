@@ -30,6 +30,7 @@
 
 #![deny(missing_docs)]
 
+pub mod detect;
 pub mod error;
 pub mod native;
 pub mod oauth;
@@ -48,6 +49,7 @@ pub use native::{
     PollOutcome, RelayPoll, ReqwestTransport, Sleeper, APP_BASE_ENV, DEFAULT_APP_BASE,
     DEFAULT_WEB_BASE, WEB_BASE_ENV,
 };
+pub use detect::remote_has_darkrun_artifacts;
 pub use repos::{list_repos, Repo};
 pub use oauth::{
     authorize_url, exchange_code, percent_encode, refresh_access_token, refresh_before_use,
