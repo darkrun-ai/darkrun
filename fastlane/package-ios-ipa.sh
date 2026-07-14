@@ -117,7 +117,14 @@ set_orientations "UISupportedInterfaceOrientations~ipad"
 # Build + compile the app-icon asset catalog. dx doesn't produce one, so altool
 # rejects the bundle for a missing CFBundleIconName + missing 120/152px icons.
 # actool compiles Assets.car into the app and emits the CFBundleIcons keys.
-ICON_SRC="$ROOT/desktop/assets/icon.png"
+#
+# Use the FULL-BLEED source (icon-ios.png), not the rounded-tile desktop icon.
+# iOS masks every app icon into its own squircle; feeding it the rounded-tile
+# source double-masks it (iOS's squircle around the baked rounded rect + margin),
+# which renders as "a square within the rounded rect" on iOS and on Apple-Silicon
+# Macs running the Designed-for-iPad build. icon-ios.png fills the canvas edge to
+# edge so iOS's mask yields one clean rounded rect. See mockups/icons/darkrun-icon-ios.svg.
+ICON_SRC="$ROOT/desktop/assets/icon-ios.png"
 if [ -f "$ICON_SRC" ]; then
   ICONSET="/tmp/dr-assets.xcassets/AppIcon.appiconset"
   rm -rf /tmp/dr-assets.xcassets; mkdir -p "$ICONSET"
