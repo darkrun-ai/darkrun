@@ -455,12 +455,14 @@ fn announce_engine(
                 "darkrun: discovery descriptor written to {}",
                 registry.descriptor_path().display()
             );
-            // Backfill the durable project record so this session's repo shows up
-            // in the desktop even if it was never added by hand. Best-effort and
-            // idempotent (an existing record, with its added_at, is kept).
-            if let Err(e) = crate::registry::ensure_project_registered(repo_root) {
-                eprintln!("darkrun: could not register project for discovery: {e}");
-            }
+            // NOTE: we deliberately do NOT backfill a durable project record here.
+            // The catalog's source of truth is the provider (the GitHub/GitLab repos
+            // you signed in to and picked) plus explicit local adds — never "any repo
+            // that happened to boot an engine." Auto-registering on boot flooded the
+            // desktop with every scratch/worktree repo an agent ever ran against. The
+            // LIVE engine descriptor above is enough for a running session to surface
+            // (see registry::list_live_engines + the desktop's engine overlay); it
+            // self-retires when the pid dies, so it never lingers as a ghost project.
             Some(registry)
         }
         Err(e) => {
