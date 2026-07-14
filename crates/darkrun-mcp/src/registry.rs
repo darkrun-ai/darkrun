@@ -21,7 +21,6 @@
 //! trail for debugging and tolerates engines that die without running their
 //! shutdown hook.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
@@ -645,58 +644,17 @@ pub fn list_projects_in(root: &Path) -> io::Result<Vec<ProjectRecord>> {
     Ok(projects)
 }
 
-/// The newest engine descriptor in a slug directory, LIVE or historical.
+/// Every project darkrun knows about on this machine: the EXPLICITLY-registered
+/// `project.json` records (from Add-a-project), unioned across the active and the
+/// legacy (pre-migration) discovery roots.
 ///
-/// [`list_live_engines_in`] deliberately ignores dead pids and `.stale` records;
-/// this does the opposite, for BACKFILL: it reads every `engine-*.json` (and its
-/// retired `engine-*.json.stale` sibling), alive or long gone, and returns the
-/// one written most recently (by `started_at`). It is how a project that has RUN
-/// but was never explicitly registered is recovered, since the descriptor carries
-/// the `repo_root` the session ran against.
-fn newest_engine_descriptor_in(slug_path: &Path) -> Option<EngineDescriptor> {
-    let entries = fs::read_dir(slug_path).ok()?;
-    let mut newest: Option<EngineDescriptor> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        // Any engine record, active (`engine-<pid>.json`) or retired
-        // (`engine-<pid>.json.stale`); both hold a usable repo_root.
-        if !name.starts_with("engine-") || !name.contains(".json") {
-            continue;
-        }
-        let Ok(bytes) = fs::read(&path) else { continue };
-        let Ok(desc) = serde_json::from_slice::<EngineDescriptor>(&bytes) else {
-            continue;
-        };
-        // RFC3339 timestamps sort lexicographically in chronological order.
-        let newer = newest
-            .as_ref()
-            .map(|cur| desc.started_at > cur.started_at)
-            .unwrap_or(true);
-        if newer {
-            newest = Some(desc);
-        }
-    }
-    newest
-}
-
-/// Every project darkrun knows about on this machine: registered `project.json`
-/// records UNIONED with projects inferred from engine descriptors.
-///
-/// [`list_projects`] surfaces only projects that were explicitly registered (Add
-/// a project, or the boot-time backfill in [`ensure_project_registered`]). But a
-/// session an agent started before that backfill existed leaves only an engine
-/// descriptor behind, never a `project.json`. This recovers those: for any slug
-/// dir with no registry record, it synthesizes one from the newest engine
-/// descriptor whose repo root still exists on disk, so the desktop surfaces every
-/// repo you have actually run against, live or idle, without a manual add.
-///
-/// Worktree engine dirs collapse onto their canonical project (a linked worktree
-/// resolves to the main checkout, [`slug_for`]), and a descriptor whose repo root
-/// is gone (a deleted clone, a retired worktree with no surviving checkout) is
-/// skipped, mirroring the prune in [`list_projects_in`].
+/// It does NOT infer projects from engine descriptors. The catalog's source of
+/// truth is the provider (the GitHub/GitLab repos you signed in to and picked)
+/// plus explicit local adds. A repo that merely ran an engine is a LIVE-session
+/// signal, surfaced separately via [`list_live_engines`] and the desktop's engine
+/// overlay, and it self-retires when the session ends — it is never promoted to a
+/// permanent project. (Inferring projects from descriptors flooded the desktop
+/// with every scratch/worktree repo an agent had ever run against.)
 #[cfg(not(tarpaulin_include))] // resolves the real home dir; logic via list_known_projects_in
 pub fn list_known_projects() -> io::Result<Vec<ProjectRecord>> {
     let Some(root) = default_root() else {
@@ -713,45 +671,15 @@ pub fn list_known_projects() -> io::Result<Vec<ProjectRecord>> {
 }
 
 /// Like [`list_known_projects`] but scans an explicit `root`. Used by tests.
+///
+/// Returns ONLY explicitly-registered projects (a durable `project.json`, written
+/// by Add-a-project). It deliberately does NOT synthesize catalog entries from
+/// engine descriptors: a repo that merely ran an engine is a LIVE-session signal
+/// (surfaced separately via [`list_live_engines`] and the desktop's engine
+/// overlay), not a permanent project. Auto-synthesis flooded the desktop with
+/// every scratch/worktree repo an agent had ever run against.
 pub fn list_known_projects_in(root: &Path) -> io::Result<Vec<ProjectRecord>> {
-    // The durable registry first (already pruned + identity-healed), keyed by
-    // slug so a synthesized record never shadows a real registration.
-    let mut by_slug: BTreeMap<String, ProjectRecord> = list_projects_in(root)?
-        .into_iter()
-        .map(|rec| (rec.slug.clone(), rec))
-        .collect();
-
-    let slug_dirs = match fs::read_dir(root) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(by_slug.into_values().collect())
-        }
-        Err(e) => return Err(e),
-    };
-    for slug_entry in slug_dirs.flatten() {
-        let slug_path = slug_entry.path();
-        if !slug_path.is_dir() {
-            continue;
-        }
-        let Some(desc) = newest_engine_descriptor_in(&slug_path) else {
-            continue;
-        };
-        // The session ran against `repo_root`; a project IS its git repo, so
-        // resolve a worktree to its main checkout, and skip it when that checkout
-        // no longer exists (nothing left to open).
-        let canonical = resolve_project_root(&desc.repo_root);
-        if !canonical.exists() {
-            continue;
-        }
-        let slug = slug_for(&canonical);
-        by_slug.entry(slug.clone()).or_insert_with(|| ProjectRecord {
-            slug,
-            name: display_name_for(&canonical),
-            path: canonical,
-            added_at: Some(desc.started_at.clone()),
-        });
-    }
-    Ok(by_slug.into_values().collect())
+    list_projects_in(root)
 }
 
 /// Like [`list_known_projects_in`] but ALSO unions a READ-ONLY scan of a
@@ -772,15 +700,18 @@ pub fn list_known_projects_with_legacy_in(
     Ok(projects)
 }
 
-/// READ-ONLY scan of a legacy (pre-migration) discovery tree.
+/// READ-ONLY scan of a legacy (pre-migration) discovery tree for EXPLICITLY
+/// registered projects.
 ///
-/// Mirrors what [`list_known_projects_in`] surfaces per slug dir (a registered
-/// `project.json`, else the newest engine descriptor), with one hard rule: the
+/// Surfaces only slug dirs that carry a durable `project.json` (an explicit
+/// Add-a-project from before the container migration), with one hard rule: the
 /// legacy tree is HISTORY, not state this engine owns. Nothing is pruned,
-/// healed, or migrated; stale identities are re-keyed IN MEMORY (a worktree
+/// healed, or migrated; a stale identity is re-keyed IN MEMORY (a worktree
 /// resolves to its main checkout) and a record whose canonical repo root no
-/// longer exists is simply skipped. Unreadable or malformed entries are
-/// skipped too (an absent tree scans empty, never errors).
+/// longer exists is skipped. It does NOT synthesize catalog entries from engine
+/// descriptors — a repo that only ran an engine is a live-session signal, not a
+/// permanent project (see [`list_known_projects_in`]). Unreadable or malformed
+/// entries are skipped too (an absent tree scans empty, never errors).
 pub fn list_legacy_projects_in(root: &Path) -> Vec<ProjectRecord> {
     let mut projects: Vec<ProjectRecord> = Vec::new();
     let Ok(slug_dirs) = fs::read_dir(root) else {
@@ -791,19 +722,15 @@ pub fn list_legacy_projects_in(root: &Path) -> Vec<ProjectRecord> {
         if !slug_path.is_dir() {
             continue;
         }
-        // A registered record wins over a descriptor-synthesized one, matching
-        // the union order in list_known_projects_in.
-        let record = fs::read(slug_path.join(PROJECT_RECORD_FILE))
+        // Only an explicitly-registered record surfaces; engine-only slug dirs
+        // are skipped (no descriptor synthesis).
+        let Some(rec) = fs::read(slug_path.join(PROJECT_RECORD_FILE))
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<ProjectRecord>(&bytes).ok());
-        let (source_root, name, added_at) = match record {
-            Some(rec) => (rec.path, rec.name, rec.added_at),
-            None => match newest_engine_descriptor_in(&slug_path) {
-                Some(desc) => (desc.repo_root, None, Some(desc.started_at)),
-                None => continue,
-            },
+            .and_then(|bytes| serde_json::from_slice::<ProjectRecord>(&bytes).ok())
+        else {
+            continue;
         };
-        let canonical = resolve_project_root(&source_root);
+        let canonical = resolve_project_root(&rec.path);
         if !canonical.exists() {
             continue;
         }
@@ -813,9 +740,9 @@ pub fn list_legacy_projects_in(root: &Path) -> Vec<ProjectRecord> {
         }
         projects.push(ProjectRecord {
             slug,
-            name: name.or_else(|| display_name_for(&canonical)),
+            name: rec.name.or_else(|| display_name_for(&canonical)),
             path: canonical,
-            added_at,
+            added_at: rec.added_at,
         });
     }
     projects
@@ -824,10 +751,12 @@ pub fn list_legacy_projects_in(root: &Path) -> Vec<ProjectRecord> {
 /// Ensure a durable [`ProjectRecord`] exists for `repo_root`, preserving any
 /// record already there.
 ///
-/// Called on engine boot so every session that runs makes its project visible to
-/// the desktop, even one an agent started without ever touching Add a project. An
-/// existing record wins (its `added_at` and display name are kept); only a missing
-/// one is written. Best-effort: callers ignore the error.
+/// An explicit-registration helper (idempotent): an existing record wins (its
+/// `added_at` and display name are kept); only a missing one is written.
+/// Best-effort: callers ignore the error. NOTE: this is deliberately NOT called on
+/// engine boot — auto-registering every repo that ran an engine flooded the
+/// desktop catalog. The catalog is fed only by explicit Add-a-project; a live
+/// session surfaces through its engine descriptor instead.
 #[cfg(not(tarpaulin_include))] // resolves the real home dir; logic via ensure_project_registered_in
 pub fn ensure_project_registered(repo_root: &Path) -> io::Result<ProjectRecord> {
     let root = default_root().ok_or_else(|| {
@@ -1277,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn list_known_projects_in_recovers_a_session_that_was_never_registered() {
+    fn list_known_projects_in_ignores_a_session_that_was_never_registered() {
         let reg = tempfile::tempdir().unwrap();
         // An existing repo dir a session ran against.
         let repo = tempfile::tempdir().unwrap();
@@ -1287,14 +1216,16 @@ mod tests {
         registry.announce(sample_addr(), "claude").unwrap();
         registry.mark_stale().unwrap();
 
-        // The durable registry alone sees nothing (no project.json).
+        // The durable registry sees nothing (no project.json)...
         assert!(list_projects_in(reg.path()).unwrap().is_empty());
-
-        // The union recovers the project from the historical engine descriptor.
+        // ...and the catalog does NOT promote it to a permanent project. A repo
+        // that merely ran an engine is a live-session signal (surfaced via the
+        // engine overlay while the session is up), never an auto-added project.
         let known = list_known_projects_in(reg.path()).unwrap();
-        assert_eq!(known.len(), 1, "the run's repo should surface as a project");
-        assert_eq!(known[0].slug, slug_for(&resolve_project_root(repo.path())));
-        assert!(known[0].path.exists(), "the synthesized path is a real checkout");
+        assert!(
+            known.is_empty(),
+            "an unregistered run must not become a catalog entry: {known:?}"
+        );
     }
 
     #[test]
@@ -1313,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_union_surfaces_orphaned_history_without_writing_to_it() {
+    fn legacy_union_surfaces_orphaned_registrations_without_writing_to_it() {
         // Two roots: the ACTIVE container tree and the pre-migration legacy tree.
         let container = tempfile::tempdir().unwrap();
         let legacy = tempfile::tempdir().unwrap();
@@ -1322,7 +1253,8 @@ mod tests {
         // root moved) whose repo still exists on disk.
         let old_repo = tempfile::tempdir().unwrap();
         register_project_in(legacy.path(), old_repo.path(), Some("Old".into())).unwrap();
-        // ...and a legacy session that left ONLY an engine descriptor behind.
+        // ...and a legacy session that left ONLY an engine descriptor behind. It
+        // must NOT surface: an unregistered run is not a catalog entry.
         let old_run_repo = tempfile::tempdir().unwrap();
         let engine = EngineRegistry::with_root(legacy.path(), old_run_repo.path());
         engine.announce(sample_addr(), "claude").unwrap();
@@ -1352,8 +1284,12 @@ mod tests {
             list_known_projects_with_legacy_in(container.path(), legacy.path()).unwrap();
         let slugs: Vec<&str> = known.iter().map(|p| p.slug.as_str()).collect();
         assert!(slugs.contains(&slug_for(old_repo.path()).as_str()), "{slugs:?}");
-        assert!(slugs.contains(&slug_for(old_run_repo.path()).as_str()), "{slugs:?}");
         assert!(slugs.contains(&slug_for(new_repo.path()).as_str()), "{slugs:?}");
+        // The descriptor-only legacy run is NOT promoted to a project.
+        assert!(
+            !slugs.contains(&slug_for(old_run_repo.path()).as_str()),
+            "an unregistered legacy run must not surface: {slugs:?}"
+        );
         assert!(!slugs.contains(&"ghost-00000000"), "a vanished repo stays hidden");
 
         // READ-ONLY: the legacy tree's entries are untouched. The ghost
