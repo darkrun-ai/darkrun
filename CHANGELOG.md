@@ -2,6 +2,54 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.11.0](https://github.com/darkrun-ai/darkrun/compare/v0.10.0...v0.11.0) (2026-07-14)
+
+
+### Features
+
+* **desktop:** auto-detect run history as projects + Finder-pick local repos ([8e07c6b](https://github.com/darkrun-ai/darkrun/commit/8e07c6b1ec38f402e3d6c8be7948653abd890582))
+* **desktop:** sign in with GitHub/GitLab and pick a permitted repo (authenticated clone) ([f51a536](https://github.com/darkrun-ai/darkrun/commit/f51a536085b3d55f3b398246e5472f30b8ed5bb2))
+* **desktop:** sign in with GitHub/GitLab and pick a permitted repo (authenticated clone) ([#223](https://github.com/darkrun-ai/darkrun/issues/223)) ([dae755d](https://github.com/darkrun-ai/darkrun/commit/dae755d96ef48b925a3bce783d08d7ad762c6231))
+
+
+### Bug Fixes
+
+* **app:** render markdown, add offline state, stop dropping payloads ([609a64c](https://github.com/darkrun-ai/darkrun/commit/609a64cae6a958d49b90f81c8b0356c97c36bded))
+* close from-scratch gap-report findings (gate surfacing, review markdown, evidence gates, web app, site, infra) ([#216](https://github.com/darkrun-ai/darkrun/issues/216)) ([8bcbf63](https://github.com/darkrun-ai/darkrun/commit/8bcbf632847157868396864cbe9f2aa8749d55d1))
+* **core:** route the annotation leaf through the containment backstop too ([af3867e](https://github.com/darkrun-ai/darkrun/commit/af3867e3588515832675429d45452faa88459bd5))
+* **desktop:** close the operator-surface gaps (markdown browsing, replies, proof at the gate, archive) ([8ee5e6c](https://github.com/darkrun-ai/darkrun/commit/8ee5e6cf6868a9c47b485b5241504e12ca070426))
+* **desktop:** match the drift-chip run by (slug, port), not project name ([347d0fa](https://github.com/darkrun-ai/darkrun/commit/347d0fae99d019e5b92c27cff89112c30f15da97))
+* **engine:** close evidence + correctness holes at the checkpoint gates ([da2fbf4](https://github.com/darkrun-ai/darkrun/commit/da2fbf4f2e6be45cbc70b767908c8e305a696760))
+* **engine:** close the B+D audit residuals (UserGate-at-Spec, drift re-orient cascade + over-broad trigger) ([ca674f9](https://github.com/darkrun-ai/darkrun/commit/ca674f92d593c2e56d59bcbf832364f29aeb13d6))
+* **engine:** land station work onto run-main (the manufactured code never reached the base branch) ([#219](https://github.com/darkrun-ai/darkrun/issues/219)) ([22b7270](https://github.com/darkrun-ai/darkrun/commit/22b7270d2f712d94ee1b4f6f6f4df125d6e89292))
+* **engine:** land station work onto run-main (worktree_is_dirty ignored .darkrun-only dirt) ([f2506c7](https://github.com/darkrun-ai/darkrun/commit/f2506c7c1e16c5adebf86da2bbd3e1706da8ee17))
+* **engine:** let non-dark runs reach Reflect+Checkpoint; gate checkpoint_decide to a real hold ([d80b18a](https://github.com/darkrun-ai/darkrun/commit/d80b18abee5fac2a35a85a1fa1274701d31cdf3e))
+* **engine:** narrow the UserGate-at-Spec hold to the early-stamp race only ([6ecc9ee](https://github.com/darkrun-ai/darkrun/commit/6ecc9eeecba764e1b7f6fbbe99e054c0d03c0981))
+* **engine:** require evidence (or an explicit override) at the human Prove gate ([d1e3f1d](https://github.com/darkrun-ai/darkrun/commit/d1e3f1de1645f82342d68079093882442cdb25f4))
+* **engine:** unify feedback ids, wire annotation-close, retire sessions on reset, re-orient on drift close ([4c7401d](https://github.com/darkrun-ai/darkrun/commit/4c7401d212fa460623c4e1fa740df1ba53e04e72))
+* **engine:** unwedge non-dark runs (Reflect+Checkpoint), gate checkpoint_decide, unify feedback ids, wire annotation-close, retire sessions on reset, safe drift re-orient ([#221](https://github.com/darkrun-ai/darkrun/issues/221)) ([ec5c83b](https://github.com/darkrun-ai/darkrun/commit/ec5c83b79f26a234fd781d748b85adc73e4e80ca))
+* gate hold + sandbox registry + dev-bundle seal + 3 gap-close bundles (discovery, operator surface, platform edges, vcs extraction) ([#218](https://github.com/darkrun-ai/darkrun/issues/218)) ([17e69c0](https://github.com/darkrun-ai/darkrun/commit/17e69c04990e97bfc49c8fb92cb359508094f880))
+* **gates+desktop:** hold at every operator gate; sandbox-proof the registry; seal the dev bundle ([aeee7a0](https://github.com/darkrun-ai/darkrun/commit/aeee7a076bda0665b3b22696ea38bee80fbd098d))
+* **gate:** surface gates to a running app via deep link + engine-follow ([40a08c6](https://github.com/darkrun-ai/darkrun/commit/40a08c623c7ac0253d52e771b7d1b34454c3679c))
+* **git:** satisfy clippy 1.97 question_mark in the remote_status fixture parser ([dbbad70](https://github.com/darkrun-ai/darkrun/commit/dbbad7041523979f4a2d372961f7acef8d18fd9e))
+* **git:** satisfy clippy 1.97 question_mark in the remote_status fixture parser ([b9b5cc9](https://github.com/darkrun-ai/darkrun/commit/b9b5cc97caf9058ec6474778767b46f7a3ad350c))
+* **http:** surface a refused gate decision (no false success); read agent-attached proof from disk ([479edf9](https://github.com/darkrun-ai/darkrun/commit/479edf9819437fc9607200e74902dd5ae798a25e))
+* **http:** surface refused gate decisions (no false success) + read agent-attached proof from disk ([#222](https://github.com/darkrun-ai/darkrun/issues/222)) ([7074e37](https://github.com/darkrun-ai/darkrun/commit/7074e374e74df4882ed4d901e39582d4f84d2b60))
+* **infra:** resolve relay. dial + deploy GitHub App creds ([2deaf6f](https://github.com/darkrun-ai/darkrun/commit/2deaf6fef2994796170ae26fa4cad632e862befe))
+* **ios:** full-bleed app icon (stop iOS double-masking the rounded tile) ([#234](https://github.com/darkrun-ai/darkrun/issues/234)) ([44e8395](https://github.com/darkrun-ai/darkrun/commit/44e8395e49850b96a5ba305060b63120d4d990d0))
+* **ios:** use a full-bleed app icon so iOS stops double-masking it ([5512d65](https://github.com/darkrun-ai/darkrun/commit/5512d652d31f5f29758ce83e0257b12fa4c0f92f))
+* low-severity UX residuals (drift-chip slug collision + escalated count, visible archive errors, non-macOS window guard) ([#224](https://github.com/darkrun-ai/darkrun/issues/224)) ([da670a9](https://github.com/darkrun-ai/darkrun/commit/da670a9efdd6d4aca6dfb604214113df85924172))
+* **merge:** unify frontmatter rendering + never-drop guarantee + drop vulnerable quick-xml ([c4dc2cd](https://github.com/darkrun-ai/darkrun/commit/c4dc2cd6eff09217468501b276e92c64550e689d))
+* **platform:** legacy-tree discovery, warm-app deep link, per-run presence, TestFlight idempotency ([067805a](https://github.com/darkrun-ai/darkrun/commit/067805aa7c752439c02bad36a4ae36578b494385))
+* **release+site:** unblock the release pipeline, per-route canonicals, honest statusline + verify/bench ([9dc7c8b](https://github.com/darkrun-ai/darkrun/commit/9dc7c8b890db8baca61f830e348fb2ffb4c64615))
+* **review:** render markdown for all review artifacts, not raw source ([14b9331](https://github.com/darkrun-ai/darkrun/commit/14b93312d354b16c4cd12b2c8ead0eca0fed9831))
+* **security+release:** reject path-traversal slugs + escape OAuth callback; unblock release, per-route canonicals, honest statusline/verify/bench ([#220](https://github.com/darkrun-ai/darkrun/issues/220)) ([340c0f6](https://github.com/darkrun-ai/darkrun/commit/340c0f628bace41619edb2a575ecfba179ee1323))
+* **security:** reject path-traversal slugs at the route + store; escape the OAuth callback ([e5656aa](https://github.com/darkrun-ai/darkrun/commit/e5656aa9193ca4df3e808cd1d52e7780d29d72f3))
+* **site:** make /preview and /review showcases deliver their pitch ([2236db8](https://github.com/darkrun-ai/darkrun/commit/2236db8920919c938514d982aaefdccb40f111ca))
+* **statusline+relay:** keep review chips live at the UserGate; point remote access at a host that exists ([0e7263f](https://github.com/darkrun-ai/darkrun/commit/0e7263f0e78c82aa01887b6965583a127b046d69))
+* the low-severity UX residuals from the bundle audits ([3f43e9a](https://github.com/darkrun-ai/darkrun/commit/3f43e9a2089a1646b58a5a4ae78ec6c352eec85a))
+* **ui:** move CSS doc comment onto its const (empty-line-after-doc lint) ([82d135c](https://github.com/darkrun-ai/darkrun/commit/82d135c83ccd09cde2f8ce5905e5695bcc1d640b))
+
 ## [0.10.0](https://github.com/darkrun-ai/darkrun/compare/v0.9.0...v0.10.0) (2026-07-08)
 
 
