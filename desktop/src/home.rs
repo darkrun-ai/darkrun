@@ -1264,6 +1264,11 @@ fn OfflineRunDetail(path: String, slug: String, project: String) -> Element {
     // `project` rides in for the pane header (rendered by the caller); the body
     // reads everything it shows from disk.
     let _ = &project;
+    // A local refresh counter: the "Request changes" form bumps it after a
+    // successful sidecar write, and reading it here re-subscribes this render so
+    // the synchronous disk reads below re-run and the new note shows at once.
+    let refresh = use_signal(|| 0u32);
+    let _ = refresh.read();
     let store = darkrun_core::StateStore::new(&path);
     let detail = darkrun_browse::run_detail(&store, &slug);
 
@@ -1455,6 +1460,111 @@ fn OfflineRunDetail(path: String, slug: String, project: String) -> Element {
                     }
                 }
             }
+
+            // The one offline write: leave the agent a change request. It writes a
+            // PENDING feedback sidecar the resuming engine picks up on its own.
+            RequestChangesForm {
+                path: path.clone(),
+                slug: slug.clone(),
+                station: detail.active_station.clone(),
+                refresh,
+            }
+        }
+    }
+}
+
+/// The one offline affordance under the read-only run view: leave the agent a
+/// change request. It writes a PENDING feedback sidecar (the SAME model the
+/// engine's HTTP create path uses) straight to `.darkrun/feedback/`. The engine
+/// resumes by a pure disk read and its feedback track (Track B) preempts on any
+/// pending doc, so a resuming engine picks this up on its own with nothing
+/// running here. It ONLY writes the feedback sidecar; it never touches
+/// `state.json` (the engine's authority) and offers no approve (advancing
+/// manufacturing needs the agent).
+#[component]
+fn RequestChangesForm(path: String, slug: String, station: String, refresh: Signal<u32>) -> Element {
+    let mut body = use_signal(String::new);
+    let mut status = use_signal(|| None::<String>);
+    let mut refresh = refresh;
+
+    let label = format!(
+        "font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:{faint};\
+         font-family:{mono};margin:0 0 6px;",
+        faint = tokens::var::TEXT_FAINT,
+        mono = tokens::FONT_MONO,
+    );
+    let textarea_style = format!(
+        "width:100%;box-sizing:border-box;min-height:54px;padding:9px 12px;\
+         border-radius:6px;border:1px solid {border};background:{base};\
+         color:{text};font-family:{sans};font-size:13px;resize:vertical;",
+        border = tokens::var::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        text = tokens::var::TEXT,
+        sans = tokens::FONT_SANS,
+    );
+    let note_style = format!(
+        "font-family:{mono};font-size:11.5px;color:{accent};margin:8px 0 0;",
+        mono = tokens::FONT_MONO,
+        accent = tokens::var::ACCENT,
+    );
+
+    let on_submit = move |_| {
+        let text = body.read().trim().to_string();
+        if text.is_empty() {
+            status.set(Some("Enter a change request first.".to_string()));
+            return;
+        }
+        // Write ONLY the PENDING feedback sidecar: mint the next id off the run's
+        // existing docs, build the same user-authored doc the engine's create
+        // path uses, and write it. A resuming engine's feedback track preempts on
+        // the pending doc, so nothing else (least of all state.json) is touched.
+        let store = darkrun_core::StateStore::new(&path);
+        let existing: Vec<String> = store
+            .read_feedback_raw(&slug)
+            .unwrap_or_default()
+            .into_keys()
+            .collect();
+        let id = darkrun_browse::next_id(existing.iter());
+        let doc = darkrun_browse::FeedbackDoc::new_user(
+            id.clone(),
+            station.clone(),
+            "Change request".to_string(),
+            text,
+        );
+        match store.write_feedback_raw(&slug, &id, &doc.render()) {
+            Ok(()) => {
+                body.set(String::new());
+                // Bump the parent's counter so its synchronous feedback read
+                // re-runs and the new note shows immediately.
+                let n = *refresh.peek();
+                refresh.set(n.wrapping_add(1));
+                status.set(Some("Saved. The agent picks this up when it resumes.".to_string()));
+            }
+            Err(err) => status.set(Some(format!("Couldn't save the change request: {err}"))),
+        }
+    };
+
+    rsx! {
+        Card {
+            div { style: "{label}", "Request changes" }
+            textarea {
+                style: "{textarea_style}",
+                placeholder: "Describe the change the agent should make\u{2026}",
+                value: "{body}",
+                oninput: move |evt| body.set(evt.value()),
+            }
+            div { style: "display:flex;align-items:center;gap:10px;margin-top:8px;",
+                Button {
+                    variant: ButtonVariant::Primary,
+                    tone: Tone::Accent,
+                    disabled: body.read().trim().is_empty(),
+                    on_click: on_submit,
+                    "Request changes"
+                }
+            }
+            if let Some(msg) = status.read().clone() {
+                p { style: "{note_style}", "{msg}" }
+            }
         }
     }
 }
@@ -1475,7 +1585,7 @@ fn OfflineBanner() -> Element {
     rsx! {
         div { style: "{banner}",
             Badge { tone: Tone::Warn, filled: true, "read-only" }
-            span { "No engine connected. Bring an engine up to act on this run." }
+            span { "No engine connected. You can request changes below; the agent picks them up when it resumes." }
         }
     }
 }
@@ -2695,6 +2805,70 @@ mod main_pane_render_tests {
         }
         let offline = render(Offline);
         assert!(offline.contains("read-only"), "the read-only banner renders: {offline}");
+    }
+}
+
+#[cfg(test)]
+mod request_changes_tests {
+    /// The offline "Request changes" write path, exercised through the SAME calls
+    /// the handler makes: mint the next id, build the user-authored PENDING doc,
+    /// write the sidecar. A resuming engine's feedback track preempts on a pending
+    /// doc, so this is exactly how the note gets picked up on resume, and it
+    /// surfaces on the station through the same projection the engine serves.
+    #[test]
+    fn request_changes_writes_pending_feedback_picked_up_on_station() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = darkrun_core::StateStore::new(repo.path());
+        let slug = "run-1";
+        let station = "build";
+
+        // Mint off the (empty) existing set, exactly like the handler.
+        let existing: Vec<String> = store
+            .read_feedback_raw(slug)
+            .unwrap_or_default()
+            .into_keys()
+            .collect();
+        let id = darkrun_browse::next_id(existing.iter());
+        assert_eq!(id, "FB-01");
+        let doc = darkrun_browse::FeedbackDoc::new_user(
+            id.clone(),
+            station.to_string(),
+            "Change request".to_string(),
+            "Tighten the empty-state copy.".to_string(),
+        );
+        store.write_feedback_raw(slug, &id, &doc.render()).unwrap();
+
+        // The resuming engine reads the SAME projection: the note shows on the
+        // station as PENDING (the status Track B preempts on), authored by the
+        // user.
+        let listed = darkrun_browse::feedback_for_station(&store, slug, station);
+        assert_eq!(listed.count, 1);
+        let item = &listed.items[0];
+        assert_eq!(item.feedback_id, "FB-01");
+        assert_eq!(item.status, darkrun_api::FeedbackStatus::Pending);
+        assert_eq!(item.origin, darkrun_api::FeedbackOrigin::UserVisual);
+        assert_eq!(item.body, "Tighten the empty-state copy.");
+
+        // A second request mints the next id off the now-non-empty set and both
+        // list on the station.
+        let existing2: Vec<String> = store
+            .read_feedback_raw(slug)
+            .unwrap_or_default()
+            .into_keys()
+            .collect();
+        let id2 = darkrun_browse::next_id(existing2.iter());
+        assert_eq!(id2, "FB-02");
+        let doc2 = darkrun_browse::FeedbackDoc::new_user(
+            id2.clone(),
+            station.to_string(),
+            "Change request".to_string(),
+            "Second note.".to_string(),
+        );
+        store.write_feedback_raw(slug, &id2, &doc2.render()).unwrap();
+        assert_eq!(
+            darkrun_browse::feedback_for_station(&store, slug, station).count,
+            2,
+        );
     }
 }
 
