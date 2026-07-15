@@ -43,7 +43,7 @@ use darkrun_ui::prelude::*;
 use darkrun_vcs::Provider;
 
 use crate::review::ReviewApp;
-use crate::signin::{RepoPicker, SignInPanel};
+use crate::signin::{provider_icon, RemoteArtifactRepo, RepoPicker, SignInPanel};
 use crate::wire::{self, ConnConfig, DiscoveredEngine};
 
 /// A project the shell lists in the sidebar: a working dir keyed by its
@@ -176,6 +176,60 @@ pub fn HomeApp(
     // Bumped after a clone/register so the sidebar re-reads the on-disk registry
     // immediately, rather than waiting for the next discovery tick.
     let refresh = use_signal(|| 0u32);
+
+    // Provider sign-in state, OWNED here so both the add-a-project surface (its
+    // repo picker) and the sidebar's clone-on-open discovery share one source of
+    // truth: `signed_in` is the providers with a stored credential, `signin_bump`
+    // ticks when a new provider signs in. Seeded on mount off the UI thread so a
+    // slow disk never stalls first paint.
+    let mut signed_in = use_signal(Vec::<Provider>::new);
+    let signin_bump = use_signal(|| 0u32);
+    use_effect(move || {
+        spawn(async move {
+            let providers = tokio::task::spawn_blocking(crate::signin::read_signed_in)
+                .await
+                .unwrap_or_default();
+            signed_in.set(providers);
+        });
+    });
+
+    // CLONE-ON-OPEN catalog: repos on the operator's providers that already carry
+    // darkrun artifacts but aren't cloned locally yet. The provider is the source
+    // of truth, so these surface automatically; opening one clones it and it drops
+    // off (it becomes a normal local project). Discovered off the render thread
+    // whenever sign-in state changes (a provider signed in) OR the local project
+    // set changes (a fresh clone should drop off). NOT on the 1.2s poller, since
+    // the scan makes many provider API calls. Cached in the signal between triggers.
+    let remote_repos = use_signal(Vec::<RemoteArtifactRepo>::new);
+    {
+        let mut remote_repos = remote_repos;
+        use_effect(move || {
+            // Establish the reactive dependencies: a sign-in, a sign-in bump, or a
+            // clone/register (refresh) re-runs the scan.
+            let _ = signed_in.read();
+            let _ = signin_bump.read();
+            let _ = refresh.read();
+            // No signed-in providers means nothing to scan: clear and skip the
+            // network entirely.
+            if signed_in.peek().is_empty() {
+                remote_repos.set(Vec::new());
+                return;
+            }
+            spawn(async move {
+                let scanned = tokio::task::spawn_blocking(|| {
+                    let known = darkrun_mcp::registry::list_known_projects().unwrap_or_default();
+                    crate::signin::discover_remote_artifact_repos(&known)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("internal error: {e}")));
+                // On a scan error leave the last good list in place (transient);
+                // an Ok result (possibly empty) replaces it.
+                if let Ok(list) = scanned {
+                    remote_repos.set(list);
+                }
+            });
+        });
+    }
 
     // The shell's single poller, driving three things every tick so the sidebar
     // stays live without a relaunch:
@@ -377,10 +431,13 @@ pub fn HomeApp(
                     projects: projects.clone(),
                     runs_map: runs_map.clone(),
                     offline_runs: offline_map.clone(),
+                    remote_repos: remote_repos.read().clone(),
                     selection,
                     mine_only,
                     search,
                     drawer_open,
+                    refresh,
+                    signin_bump,
                     live_count,
                 }
                 main { class: "dr-shell-main",
@@ -390,6 +447,8 @@ pub fn HomeApp(
                         projects: projects.clone(),
                         runs_map: runs_map.clone(),
                         refresh,
+                        signed_in,
+                        signin_bump,
                     }
                 }
             }
@@ -651,10 +710,17 @@ fn Sidebar(
     runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
     /// Per-project (slug-keyed) run lists read off disk for no-engine projects.
     offline_runs: BTreeMap<String, Vec<RunSummary>>,
+    /// Repos on the operator's providers that already carry darkrun artifacts but
+    /// aren't cloned locally yet: the CLONE-ON-OPEN section below the projects.
+    remote_repos: Vec<RemoteArtifactRepo>,
     selection: Signal<Selection>,
     mine_only: Signal<bool>,
     search: Signal<String>,
     drawer_open: Signal<bool>,
+    /// Bumped after a clone-on-open so the catalog + remote discovery re-run.
+    refresh: Signal<u32>,
+    /// Bumped alongside `refresh` after a clone-on-open to re-trigger discovery.
+    signin_bump: Signal<u32>,
     live_count: usize,
 ) -> Element {
     let open = *drawer_open.read();
@@ -716,6 +782,12 @@ fn Sidebar(
                             drawer_open,
                         }
                     }
+                }
+                // The CLONE-ON-OPEN catalog: repos on the operator's providers that
+                // already carry darkrun artifacts but aren't cloned yet. Shown only
+                // when non-empty, as a distinct section below the local projects.
+                if !remote_repos.is_empty() {
+                    RemoteRepoSection { remote_repos, refresh, signin_bump }
                 }
             }
             div { style: "{foot}",
@@ -1143,6 +1215,145 @@ fn NewRunRow(name: String, path: String, selection: Signal<Selection>) -> Elemen
     }
 }
 
+/// The CLONE-ON-OPEN section under the sidebar's local projects: repos on the
+/// operator's providers that already carry darkrun artifacts but aren't cloned
+/// locally yet. The provider is the source of truth, so these surface
+/// automatically; opening a row clones the repo (the SAME [`add_project`] path the
+/// add-a-project form uses), after which it becomes a normal local project and
+/// drops off this list. The caller renders this only when the list is non-empty.
+#[component]
+fn RemoteRepoSection(
+    remote_repos: Vec<RemoteArtifactRepo>,
+    refresh: Signal<u32>,
+    signin_bump: Signal<u32>,
+) -> Element {
+    let wrap = format!(
+        "margin:8px 0 2px;border-top:1px solid {border};padding-top:8px;",
+        border = tokens::var::BORDER,
+    );
+    let head = "padding:2px 8px 6px;display:flex;align-items:center;gap:7px;";
+    let head_label = format!(
+        "margin:0;font-family:{mono};font-size:10.5px;font-weight:600;\
+         text-transform:uppercase;letter-spacing:0.05em;color:{faint};",
+        mono = tokens::FONT_MONO,
+        faint = tokens::var::TEXT_FAINT,
+    );
+    rsx! {
+        div { style: "{wrap}",
+            div { style: "{head}",
+                span { style: "{head_label}", "Available on your providers" }
+                Badge { tone: Tone::Neutral, "{remote_repos.len()}" }
+            }
+            for repo in remote_repos.iter() {
+                RemoteRepoRow { repo: repo.clone(), refresh, signin_bump }
+            }
+        }
+    }
+}
+
+/// One CLONE-ON-OPEN row: the repo's owner-qualified name, a provider tag, and a
+/// "clone to open" chip. Clicking it clones the repo through [`add_project`] and
+/// shows a per-row "cloning…" state; on success it bumps `refresh` + `signin_bump`
+/// so the catalog + remote discovery re-run and the now-local repo drops off the
+/// list. A clone failure surfaces inline under the row.
+#[component]
+fn RemoteRepoRow(
+    repo: RemoteArtifactRepo,
+    refresh: Signal<u32>,
+    signin_bump: Signal<u32>,
+) -> Element {
+    let mut cloning = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let is_cloning = *cloning.read();
+    let err = error.read().clone();
+
+    let row = format!(
+        "display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:6px;\
+         cursor:pointer;color:{muted};",
+        muted = tokens::var::TEXT_MUTED,
+    );
+    let name = format!(
+        "flex:1;min-width:0;font-family:{mono};font-size:12px;color:{text};\
+         overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+        mono = tokens::FONT_MONO,
+        text = tokens::var::TEXT,
+    );
+    let tag = format!(
+        "flex:none;display:inline-flex;align-items:center;gap:4px;\
+         font-family:{mono};font-size:10px;color:{faint};",
+        mono = tokens::FONT_MONO,
+        faint = tokens::var::TEXT_FAINT,
+    );
+    let state = format!(
+        "flex:none;font-family:{mono};font-size:10px;color:{color};\
+         border:1px solid {border};border-radius:4px;padding:0 5px;line-height:1.6;",
+        mono = tokens::FONT_MONO,
+        color = if is_cloning { tokens::var::ACCENT } else { tokens::var::TEXT_FAINT },
+        border = tokens::var::BORDER,
+    );
+    let err_style = format!(
+        "margin:0 0 5px 8px;font-family:{mono};font-size:10.5px;color:{danger};",
+        mono = tokens::FONT_MONO,
+        danger = tokens::var::STATUS_DANGER,
+    );
+
+    let clone_url = repo.clone_url.clone();
+    let mut refresh = refresh;
+    let mut signin_bump = signin_bump;
+    rsx! {
+        div { style: "margin:1px 0;",
+            div {
+                style: "{row}",
+                role: "button",
+                tabindex: "0",
+                title: "Clone {repo.full_name} to open it",
+                onclick: move |_| {
+                    // Guard a double click while a clone is in flight.
+                    if *cloning.peek() {
+                        return;
+                    }
+                    cloning.set(true);
+                    error.set(None);
+                    let raw = clone_url.clone();
+                    spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            add_project(AddMode::Git, &raw, None)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("internal error: {e}")));
+                        match result {
+                            Ok(_) => {
+                                // Now a local project: bump both signals so the
+                                // catalog re-reads and discovery re-scans (which
+                                // dedups this repo away). `cloning` stays set: the
+                                // row is about to drop on the next discovery pass.
+                                let n = *refresh.peek();
+                                refresh.set(n.wrapping_add(1));
+                                let b = *signin_bump.peek();
+                                signin_bump.set(b.wrapping_add(1));
+                            }
+                            Err(e) => {
+                                error.set(Some(e));
+                                cloning.set(false);
+                            }
+                        }
+                    });
+                },
+                span { style: "{name}", "{repo.full_name}" }
+                span { style: "{tag}",
+                    {provider_icon(repo.provider)}
+                    "{repo.provider.display_name()}"
+                }
+                span { style: "{state}", if is_cloning { "cloning\u{2026}" } else { "clone to open" } }
+            }
+            if let Some(msg) = err {
+                p { style: "{err_style}", "Couldn't clone: {msg}" }
+            }
+        }
+    }
+}
+
 /// The main pane: renders the selected run's Review, a no-engine one-step view, or
 /// (with nothing selected) the projects / add-a-project welcome surface.
 #[component]
@@ -1152,6 +1363,10 @@ fn MainPane(
     projects: Vec<Project>,
     runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
     refresh: Signal<u32>,
+    /// Provider sign-in state, threaded down to the add-a-project repo picker.
+    signed_in: Signal<Vec<Provider>>,
+    /// Bumped when a provider signs in; the repo picker refetches on it.
+    signin_bump: Signal<u32>,
 ) -> Element {
     // A failed archive must be visible, not silent: a swallowed error is
     // indistinguishable from a slow poll. Set on failure, cleared on success.
@@ -1244,7 +1459,7 @@ fn MainPane(
             SettingsPage {}
         },
         Selection::None => rsx! {
-            Welcome { projects: projects.clone(), refresh }
+            Welcome { projects: projects.clone(), refresh, signed_in, signin_bump }
         },
     }
 }
@@ -1738,7 +1953,15 @@ fn MainHeader(
 /// shows its runs; an idle project opens its no-engine view), and the
 /// add-a-project form.
 #[component]
-fn Welcome(projects: Vec<Project>, refresh: Signal<u32>) -> Element {
+fn Welcome(
+    projects: Vec<Project>,
+    refresh: Signal<u32>,
+    /// Provider sign-in state, owned by the shell and forwarded to the form's
+    /// repo picker so a sign-in also re-triggers the sidebar's remote discovery.
+    signed_in: Signal<Vec<Provider>>,
+    /// Bumped when a provider signs in.
+    signin_bump: Signal<u32>,
+) -> Element {
     // Fill the whole main pane — no max-width/centering. The inner content
     // (projects grid + add-project form) should use the full available width.
     let shell = "padding:24px;display:flex;flex-direction:column;gap:16px;";
@@ -1769,7 +1992,7 @@ fn Welcome(projects: Vec<Project>, refresh: Signal<u32>) -> Element {
                 }
                 AddProjectCard {}
             }
-            AddProjectForm { refresh }
+            AddProjectForm { refresh, signed_in, signin_bump }
         }
     }
 }
@@ -1944,29 +2167,21 @@ fn spawn_folder_pick(_value: Signal<String>, _status: Signal<Option<String>>) {}
 /// Both paths execute for real (see [`add_project`]). On success `refresh` is
 /// bumped so the sidebar + welcome re-read the registry and the new project shows.
 #[component]
-fn AddProjectForm(refresh: Signal<u32>) -> Element {
+fn AddProjectForm(
+    refresh: Signal<u32>,
+    /// Provider sign-in state, OWNED by the shell (`HomeApp`) so the sidebar's
+    /// clone-on-open discovery shares one source of truth: which providers have a
+    /// stored credential, gating the repo picker on being signed in.
+    signed_in: Signal<Vec<Provider>>,
+    /// Bumped when a new provider signs in; the repo picker refetches on it and
+    /// the shell's remote discovery re-runs.
+    signin_bump: Signal<u32>,
+) -> Element {
     let mut mode = use_signal(|| AddMode::Git);
     let mut value = use_signal(String::new);
     let mut dest = use_signal(String::new);
     let mut status = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
-
-    // Sign-in state for the repo picker: which providers currently have a stored
-    // credential (seeded on mount from ~/.darkrun/credentials), and a bump the
-    // picker refetches on when a new provider signs in. Owned here so the Git tab
-    // can gate the picker on being signed in.
-    let mut signed_in = use_signal(Vec::<Provider>::new);
-    let signin_bump = use_signal(|| 0u32);
-    use_effect(move || {
-        // Read the credential store off the UI thread so a slow disk never stalls
-        // first paint; the panel/picker react once it lands.
-        spawn(async move {
-            let providers = tokio::task::spawn_blocking(crate::signin::read_signed_in)
-                .await
-                .unwrap_or_default();
-            signed_in.set(providers);
-        });
-    });
 
     let heading = format!(
         "margin:0;font-family:{sans};font-size:13px;font-weight:700;\
@@ -2672,10 +2887,13 @@ mod data_render_tests {
             by_run.insert("r".to_string(), (58616u16, run()));
             let mut runs_map = BTreeMap::new();
             runs_map.insert("store-ab12cd34".to_string(), by_run);
+            let refresh = use_signal(|| 0u32);
+            let signin_bump = use_signal(|| 0u32);
             rsx! {
                 Sidebar {
-                    projects: vec![proj()], runs_map, offline_runs: BTreeMap::new(), selection,
-                    mine_only: mine, search, drawer_open: drawer, live_count: 1,
+                    projects: vec![proj()], runs_map, offline_runs: BTreeMap::new(),
+                    remote_repos: vec![], selection,
+                    mine_only: mine, search, drawer_open: drawer, refresh, signin_bump, live_count: 1,
                 }
                 ProjectSection {
                     proj: proj(), runs: vec![(58616u16, run())], offline: vec![], selection,
@@ -2717,6 +2935,27 @@ mod data_render_tests {
         }
         let html = render(App);
         assert!(!html.is_empty());
+    }
+
+    #[test]
+    fn remote_repo_section_renders_clone_on_open_rows() {
+        // The CLONE-ON-OPEN section renders its heading and, per repo, the
+        // owner-qualified name, the provider tag, and the "clone to open" chip.
+        fn App() -> Element {
+            let refresh = use_signal(|| 0u32);
+            let signin_bump = use_signal(|| 0u32);
+            let repos = vec![RemoteArtifactRepo {
+                provider: Provider::GitHub,
+                name: "darkrun".into(),
+                full_name: "jwaldrip/darkrun".into(),
+                clone_url: "https://github.com/jwaldrip/darkrun.git".into(),
+            }];
+            rsx! { RemoteRepoSection { remote_repos: repos, refresh, signin_bump } }
+        }
+        let html = render(App);
+        assert!(html.contains("Available on your providers"), "{html}");
+        assert!(html.contains("jwaldrip/darkrun"), "{html}");
+        assert!(html.contains("clone to open"), "{html}");
     }
 }
 
@@ -2765,21 +3004,27 @@ mod main_pane_render_tests {
         fn None_() -> Element {
             let sel = use_signal(|| Selection::None);
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh, signed_in, signin_bump } }
         }
         let _ = render(None_);
         // NoEngine — the per-harness start command.
         fn NoEngine() -> Element {
             let sel = use_signal(|| Selection::NoEngine { name: "store".into(), path: "/tmp/store".into() });
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh, signed_in, signin_bump } }
         }
         let _ = render(NoEngine);
         // Settings — the theme/settings page.
         fn Settings() -> Element {
             let sel = use_signal(|| Selection::Settings);
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![], runs_map: BTreeMap::new(), refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![], runs_map: BTreeMap::new(), refresh, signed_in, signin_bump } }
         }
         let _ = render(Settings);
         // Run: embeds the live Review for a selected run, with the header's
@@ -2787,7 +3032,9 @@ mod main_pane_render_tests {
         fn Run() -> Element {
             let sel = use_signal(|| Selection::Run { port: 58616, slug: "r".into(), project: "store".into() });
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: drifted_runs_map(), refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: drifted_runs_map(), refresh, signed_in, signin_bump } }
         }
         let html = render(Run);
         assert!(html.contains("drift 2"), "the drift chip renders: {html}");
@@ -2801,7 +3048,9 @@ mod main_pane_render_tests {
                 project: "store".into(),
             });
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh, signed_in, signin_bump } }
         }
         let offline = render(Offline);
         assert!(offline.contains("read-only"), "the read-only banner renders: {offline}");
@@ -2931,11 +3180,15 @@ mod component_render_tests {
     fn welcome_and_project_cards_render_live_and_idle() {
         fn WithProjects() -> Element {
             let refresh = use_signal(|| 0u32);
-            rsx! { Welcome { projects: vec![proj("store", true), proj("docs", false)], refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { Welcome { projects: vec![proj("store", true), proj("docs", false)], refresh, signed_in, signin_bump } }
         }
         fn Empty() -> Element {
             let refresh = use_signal(|| 0u32);
-            rsx! { Welcome { projects: vec![], refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { Welcome { projects: vec![], refresh, signed_in, signin_bump } }
         }
         fn Cards() -> Element {
             rsx! {
@@ -2953,8 +3206,10 @@ mod component_render_tests {
     fn add_project_form_card_and_tabs_render() {
         fn Form() -> Element {
             let refresh = use_signal(|| 0u32);
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
             rsx! {
-                AddProjectForm { refresh }
+                AddProjectForm { refresh, signed_in, signin_bump }
                 AddProjectCard {}
                 ModeTab { label: "Git URL".to_string(), active: true, on_pick: move |_| {} }
                 ModeTab { label: "Local".to_string(), active: false, on_pick: move |_| {} }

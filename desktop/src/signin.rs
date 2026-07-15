@@ -33,8 +33,15 @@
 // Dioxus components are PascalCase by convention (the `rsx!` macro expects it).
 #![allow(non_snake_case)]
 
+use std::collections::HashSet;
+use std::path::Path;
+
+use darkrun_core::domain::ProjectRecord;
 use darkrun_ui::prelude::*;
-use darkrun_vcs::{CredentialStore, Provider, ReqwestTransport, Repo};
+use darkrun_vcs::{
+    parse_remote_url, remote_has_darkrun_artifacts, CredentialStore, Provider, ReqwestTransport,
+    Repo, RepoCoords,
+};
 
 /// The providers with a stored credential right now, read from the default
 /// credential store (`~/.darkrun/credentials`). A missing store / read error
@@ -124,10 +131,160 @@ pub fn clone_url_for(repo: &Repo) -> String {
     }
 }
 
+/// A repo on one of the operator's providers that already carries darkrun
+/// artifacts but is NOT cloned locally yet: a CLONE-ON-OPEN catalog entry.
+///
+/// The desktop catalog's source of truth is the provider: a repo that darkrun has
+/// already run against (a `darkrun/*` branch or a committed `.darkrun/`) surfaces
+/// here automatically. Opening one clones it once (into the shared clone root),
+/// after which it becomes a normal local project and drops off this list.
+#[derive(Clone, PartialEq)]
+pub struct RemoteArtifactRepo {
+    /// The provider the repo lives on.
+    pub provider: Provider,
+    /// The bare repository name (e.g. `darkrun`).
+    pub name: String,
+    /// The owner-qualified path (e.g. `jwaldrip/darkrun`).
+    pub full_name: String,
+    /// The canonical git clone URL (`…/name.git`).
+    pub clone_url: String,
+}
+
+/// Coordinates normalized for dedup: host/owner/repo lowercased so a provider
+/// repo and an already-cloned checkout of it compare equal regardless of case.
+fn normalize_coords(coords: &RepoCoords) -> (String, String, String) {
+    (
+        coords.host.to_ascii_lowercase(),
+        coords.owner.to_ascii_lowercase(),
+        coords.repo.to_ascii_lowercase(),
+    )
+}
+
+/// Whether `coords` matches a repo already known locally (case-insensitive
+/// host/owner/repo). Pure, so the dedup logic is unit-testable without the
+/// network.
+fn is_known(coords: &RepoCoords, known: &HashSet<(String, String, String)>) -> bool {
+    known.contains(&normalize_coords(coords))
+}
+
+/// The `origin` remote URL of the git repo at `path`, when it has one. A non-repo
+/// (or a repo with no `origin`) reads as `None`, so that record is simply skipped
+/// in the dedup set. Mirrors the registry's own `origin_repo_name` open path.
+fn origin_remote_url(path: &Path) -> Option<String> {
+    use darkrun_git::GitBackend;
+    darkrun_git::Git::open(path).ok()?.remote_url("origin").ok()?
+}
+
+/// The normalized coords of every locally-known project's `origin` remote, for
+/// deduping the provider scan against repos already cloned or registered. A
+/// record whose repo or remote can't be read is skipped.
+fn known_repo_coords(known: &[ProjectRecord]) -> HashSet<(String, String, String)> {
+    let mut set = HashSet::new();
+    for record in known {
+        let Some(url) = origin_remote_url(&record.path) else {
+            continue;
+        };
+        let Ok(coords) = parse_remote_url(&url) else {
+            continue;
+        };
+        set.insert(normalize_coords(&coords));
+    }
+    set
+}
+
+/// Discover the repos on the operator's signed-in providers that already carry
+/// darkrun artifacts but are NOT cloned locally yet: the CLONE-ON-OPEN catalog
+/// entries.
+///
+/// For each signed-in provider it lists the permitted repos (the SAME
+/// transport + credential path as [`fetch_permitted_repos`]), skips any whose
+/// coords are already in the local `known` set (already cloned/registered), and
+/// probes the rest with [`remote_has_darkrun_artifacts`]. `Ok(true)` adds the
+/// repo; `Ok(false)` skips a plain repo; a per-repo probe `Err` drops just that
+/// repo (transient, don't fail the whole scan). Results are sorted by owner-
+/// qualified name, case-insensitive.
+///
+/// **Blocking**: makes provider REST calls through [`ReqwestTransport`] and opens
+/// each known repo to read its remote, so it must run on `spawn_blocking`. As with
+/// [`fetch_permitted_repos`], an error is only surfaced when NOTHING could be
+/// listed AND at least one provider errored; an empty result with no errors means
+/// no un-cloned artifact repos were found.
+pub fn discover_remote_artifact_repos(
+    known: &[ProjectRecord],
+) -> Result<Vec<RemoteArtifactRepo>, String> {
+    let known_set = known_repo_coords(known);
+
+    let store = CredentialStore::default_path().map_err(|e| format!("credential store: {e}"))?;
+    let providers = store.list().map_err(|e| format!("read credentials: {e}"))?;
+    if providers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let transport = ReqwestTransport::new().map_err(|e| format!("http client: {e}"))?;
+
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    for provider in providers {
+        // A provider in the list always has a credential, but guard the read
+        // anyway (a concurrent logout could race it) rather than unwrap.
+        let cred = match store.get(provider) {
+            Ok(Some(cred)) => cred,
+            Ok(None) => continue,
+            Err(e) => {
+                errors.push(format!("{}: {e}", provider.display_name()));
+                continue;
+            }
+        };
+        let repos = match darkrun_vcs::list_repos(&transport, provider, &cred) {
+            Ok(repos) => repos,
+            Err(e) => {
+                errors.push(format!("{}: {e}", provider.display_name()));
+                continue;
+            }
+        };
+        for repo in repos {
+            // A repo whose URL we can't parse is unplaceable; skip it.
+            let Ok(coords) = parse_remote_url(&repo.url) else {
+                continue;
+            };
+            // Already cloned/registered locally: it lists as a normal project.
+            if is_known(&coords, &known_set) {
+                continue;
+            }
+            // A per-repo probe failure just drops that repo from this scan (don't
+            // fail the whole walk); Ok(false) skips a repo darkrun never touched.
+            match remote_has_darkrun_artifacts(&transport, provider, &cred, &coords) {
+                Ok(true) => {
+                    let clone_url = clone_url_for(&repo);
+                    out.push(RemoteArtifactRepo {
+                        provider,
+                        name: repo.name,
+                        full_name: repo.full_name,
+                        clone_url,
+                    });
+                }
+                Ok(false) => {}
+                Err(_) => {}
+            }
+        }
+    }
+
+    // Owner-qualified, case-insensitive order so the list is scannable and stable.
+    out.sort_by(|a, b| {
+        a.full_name
+            .to_ascii_lowercase()
+            .cmp(&b.full_name.to_ascii_lowercase())
+    });
+
+    if out.is_empty() && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(out)
+}
+
 /// The provider's brand mark as an inline SVG (self-contained: the desktop
 /// webview does not load Font Awesome, which the website uses for these). `fill`
 /// is `currentColor`, so the mark takes the button's text color.
-fn provider_icon(provider: Provider) -> Element {
+pub(crate) fn provider_icon(provider: Provider) -> Element {
     match provider {
         Provider::GitHub => rsx! {
             svg {
@@ -524,6 +681,57 @@ mod tests {
             ..gh.clone()
         };
         assert_eq!(clone_url_for(&trailing), "https://github.com/o/r.git");
+    }
+
+    #[test]
+    fn is_known_matches_coords_case_insensitively() {
+        // The known set is normalized (lowercased) on insert, so a provider repo
+        // whose coords differ only in case still reads as already-known.
+        let mut known = HashSet::new();
+        known.insert(normalize_coords(&RepoCoords::new("GitHub.com", "Acme", "Widgets")));
+        assert!(is_known(&RepoCoords::new("github.com", "acme", "widgets"), &known));
+        // A different repo under the same owner, a different owner, and a
+        // different host are all distinct — not deduped away.
+        assert!(!is_known(&RepoCoords::new("github.com", "acme", "gadgets"), &known));
+        assert!(!is_known(&RepoCoords::new("github.com", "other", "widgets"), &known));
+        assert!(!is_known(&RepoCoords::new("gitlab.com", "acme", "widgets"), &known));
+    }
+
+    #[test]
+    fn known_repo_coords_reads_origin_and_skips_unreadable_records() {
+        use std::process::Command;
+        // A real git repo carrying an origin remote (mixed case in the URL).
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["remote", "add", "origin", "git@github.com:Acme/Widgets.git"]);
+
+        let good = ProjectRecord {
+            slug: "widgets-00000000".into(),
+            path: repo.path().to_path_buf(),
+            name: None,
+            added_at: None,
+        };
+        // A record pointing at a path that isn't a git repo — skipped, not fatal.
+        let missing = ProjectRecord {
+            slug: "ghost-00000000".into(),
+            path: std::path::PathBuf::from("/nonexistent/ghost-repo"),
+            name: None,
+            added_at: None,
+        };
+
+        let set = known_repo_coords(&[good, missing]);
+        // Only the readable repo contributed, deduped to normalized coords.
+        assert_eq!(set.len(), 1);
+        assert!(is_known(&RepoCoords::new("github.com", "acme", "widgets"), &set));
     }
 }
 
