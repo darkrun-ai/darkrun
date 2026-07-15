@@ -2,6 +2,26 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.12.0](https://github.com/darkrun-ai/darkrun/compare/v0.11.0...v0.12.0) (2026-07-15)
+
+
+### Features
+
+* **desktop:** auto-surface provider repos with darkrun artifacts (clone-on-open) ([a529aeb](https://github.com/darkrun-ai/darkrun/commit/a529aebf8acc8596aea9ee89d997b39bf5341d44))
+* **desktop:** auto-surface provider repos with darkrun artifacts (clone-on-open) ([#241](https://github.com/darkrun-ai/darkrun/issues/241)) ([5f84ab9](https://github.com/darkrun-ai/darkrun/commit/5f84ab9d25d45e8e5fea0645e6f2cbe99ee8d0b7))
+* **desktop:** read a run offline from .darkrun when no engine is connected ([5a8a490](https://github.com/darkrun-ai/darkrun/commit/5a8a4905866af258d3ae2d4234a41bf85e0bba73))
+* **desktop:** read a run offline from .darkrun when no engine is connected ([#239](https://github.com/darkrun-ai/darkrun/issues/239)) ([0683311](https://github.com/darkrun-ai/darkrun/commit/068331117989df365f454d3ff04f7f3a14de985a))
+* **desktop:** request changes offline; a resuming engine picks them up ([88a4c4e](https://github.com/darkrun-ai/darkrun/commit/88a4c4e3c8f6dc2dbb2b1ffe08cef5425988fd30))
+* **desktop:** request changes offline; a resuming engine picks them up ([#240](https://github.com/darkrun-ai/darkrun/issues/240)) ([eefcb4a](https://github.com/darkrun-ai/darkrun/commit/eefcb4abbb9fd0dfb24d3995d5981d0d4b0ad929))
+* **vcs:** detect darkrun artifacts on a remote repo without cloning ([bc40375](https://github.com/darkrun-ai/darkrun/commit/bc40375a8b02ff4496b3c3107395ffe46255881e))
+* **vcs:** detect darkrun artifacts on a remote repo without cloning ([#237](https://github.com/darkrun-ai/darkrun/issues/237)) ([e0a3148](https://github.com/darkrun-ai/darkrun/commit/e0a3148652903a111b61ae91fe617c03ef638d60))
+
+
+### Bug Fixes
+
+* **desktop:** stop auto-listing every local repo that ran an engine ([f605aa7](https://github.com/darkrun-ai/darkrun/commit/f605aa776037ab799800cc2441a60ad03564397d))
+* **desktop:** stop auto-listing every local repo that ran an engine ([#236](https://github.com/darkrun-ai/darkrun/issues/236)) ([75a203d](https://github.com/darkrun-ai/darkrun/commit/75a203d727f3315bd60c045c887216280ee529ec))
+
 ## [0.11.0](https://github.com/darkrun-ai/darkrun/compare/v0.10.0...v0.11.0) (2026-07-14)
 
 
