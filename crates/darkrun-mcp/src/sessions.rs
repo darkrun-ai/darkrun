@@ -166,6 +166,15 @@ pub fn create_show_with_focus(
 
     // Expand the gate into the review payload's approval fields. The desktop
     // renders the checkpoint bar only when `await_active` is set.
+    //
+    // Client contract (Prove gates): the payload's `station` field names the
+    // gated station, so the desktop knows a parked gate is the PROVE gate when
+    // it matches the factory's prove station. The proof itself is deliberately
+    // NOT embedded here: the desktop fetches `GET /api/proof/:run` (404 = no
+    // proof attached) and derives the evidence status from that response
+    // (`Proof::block_matches_surface` plus the block's measured values), so
+    // the review payload stays lean and the proof view is always the freshest
+    // attach rather than a snapshot taken when the gate opened.
     let (gate_type, gate_station, approve_action, await_active) = match gate {
         Some((gt, station, pre_exec)) => {
             let mut chars = station.chars();

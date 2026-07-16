@@ -40,8 +40,10 @@ use std::path::PathBuf;
 use darkrun_api::RunSummary;
 use darkrun_harness::Harness;
 use darkrun_ui::prelude::*;
+use darkrun_vcs::Provider;
 
 use crate::review::ReviewApp;
+use crate::signin::{provider_icon, RemoteArtifactRepo, RepoPicker, SignInPanel};
 use crate::wire::{self, ConnConfig, DiscoveredEngine};
 
 /// A project the shell lists in the sidebar: a working dir keyed by its
@@ -96,6 +98,10 @@ enum Selection {
     None,
     /// A live run opened into its Review: the bound port + the run slug.
     Run { port: u16, slug: String, project: String },
+    /// A run read straight off disk when NO engine is serving the project: the
+    /// project root `path` (to build a `StateStore`) + the run slug. Opens the
+    /// read-only [`OfflineRunDetail`] instead of the live Review.
+    OfflineRun { path: String, slug: String, project: String },
     /// A project with no live engine — show the per-harness one-step command.
     NoEngine { name: String, path: String },
     /// The settings page (theme, …), opened from the toolbar gear.
@@ -138,6 +144,12 @@ pub fn HomeApp(
     let runs_by_project =
         use_signal(BTreeMap::<String, BTreeMap<String, (u16, RunSummary)>>::new);
 
+    // The per-project OFFLINE run lists (project SLUG -> the runs read straight
+    // off that project's on-disk `.darkrun/` state), populated ONLY for projects
+    // with no live engine. Lets the sidebar list an idle project's runs and the
+    // main pane open them read-only ([`OfflineRunDetail`]), with no engine up.
+    let offline_runs = use_signal(BTreeMap::<String, Vec<RunSummary>>::new);
+
     // What the main pane shows. A pinned launch opens straight to that run (the
     // project label is filled in by the focus poller's first tick); otherwise the
     // shell opens with nothing selected.
@@ -165,6 +177,60 @@ pub fn HomeApp(
     // immediately, rather than waiting for the next discovery tick.
     let refresh = use_signal(|| 0u32);
 
+    // Provider sign-in state, OWNED here so both the add-a-project surface (its
+    // repo picker) and the sidebar's clone-on-open discovery share one source of
+    // truth: `signed_in` is the providers with a stored credential, `signin_bump`
+    // ticks when a new provider signs in. Seeded on mount off the UI thread so a
+    // slow disk never stalls first paint.
+    let mut signed_in = use_signal(Vec::<Provider>::new);
+    let signin_bump = use_signal(|| 0u32);
+    use_effect(move || {
+        spawn(async move {
+            let providers = tokio::task::spawn_blocking(crate::signin::read_signed_in)
+                .await
+                .unwrap_or_default();
+            signed_in.set(providers);
+        });
+    });
+
+    // CLONE-ON-OPEN catalog: repos on the operator's providers that already carry
+    // darkrun artifacts but aren't cloned locally yet. The provider is the source
+    // of truth, so these surface automatically; opening one clones it and it drops
+    // off (it becomes a normal local project). Discovered off the render thread
+    // whenever sign-in state changes (a provider signed in) OR the local project
+    // set changes (a fresh clone should drop off). NOT on the 1.2s poller, since
+    // the scan makes many provider API calls. Cached in the signal between triggers.
+    let remote_repos = use_signal(Vec::<RemoteArtifactRepo>::new);
+    {
+        let mut remote_repos = remote_repos;
+        use_effect(move || {
+            // Establish the reactive dependencies: a sign-in, a sign-in bump, or a
+            // clone/register (refresh) re-runs the scan.
+            let _ = signed_in.read();
+            let _ = signin_bump.read();
+            let _ = refresh.read();
+            // No signed-in providers means nothing to scan: clear and skip the
+            // network entirely.
+            if signed_in.peek().is_empty() {
+                remote_repos.set(Vec::new());
+                return;
+            }
+            spawn(async move {
+                let scanned = tokio::task::spawn_blocking(|| {
+                    let known = darkrun_mcp::registry::list_known_projects().unwrap_or_default();
+                    crate::signin::discover_remote_artifact_repos(&known)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("internal error: {e}")));
+                // On a scan error leave the last good list in place (transient);
+                // an Ok result (possibly empty) replaces it.
+                if let Ok(list) = scanned {
+                    remote_repos.set(list);
+                }
+            });
+        });
+    }
+
     // The shell's single poller, driving three things every tick so the sidebar
     // stays live without a relaunch:
     //   1. **Discovery / auto-connect** — re-read `~/.darkrun` so a freshly-booted
@@ -177,10 +243,16 @@ pub fn HomeApp(
     // The first iteration runs immediately (no leading sleep) so the tree fills on
     // launch; subsequent iterations poll on an interval.
     let mut last_focus = use_signal(|| None::<String>);
+    // The idle-project signature the offline reader last projected, so the
+    // per-run disk read (and its git revwalks) recomputes only when the set of
+    // no-engine projects CHANGES, not every tick (nothing writes an idle run).
+    let offline_key = use_signal(Vec::<String>::new);
     {
         let base = cfg.clone();
         let mut selection = selection;
         let mut runs_by_project = runs_by_project;
+        let mut offline_runs = offline_runs;
+        let mut offline_key = offline_key;
         use_future(move || {
             let base = base.clone();
             async move {
@@ -193,7 +265,9 @@ pub fn HomeApp(
 
                     // 2. Per-project run lists, merged across every engine
                     //    serving the project (main checkout + worktrees) and
-                    //    deduped by run slug.
+                    //    deduped by run slug. Held by reference below to resolve a
+                    //    run to the engine CURRENTLY serving it; the signal is
+                    //    committed at the end of the tick, after those reads.
                     let mut map =
                         BTreeMap::<String, BTreeMap<String, (u16, RunSummary)>>::new();
                     for e in &found {
@@ -206,47 +280,104 @@ pub fn HomeApp(
                             }
                         }
                     }
-                    if map != *runs_by_project.peek() {
-                        runs_by_project.set(map);
-                    }
 
                     // 2b. Deep link delivered at RUNTIME — the OS handed the
-                    //     already-running app a darkrun review link, which the
-                    //     tao event handler parsed into the mailbox (see
-                    //     `main.rs`). Drain it and open that review against the
-                    //     launch engine's port (the same authority the pinned
-                    //     launch + focus poller use). Cold-launch links land via
-                    //     `initial_session` instead, so this is the warm path.
+                    //     already-running app a darkrun review link, which the tao
+                    //     event handler parsed into the mailbox (see `main.rs`).
+                    //     Resolve the run to the engine that CURRENTLY serves it
+                    //     from discovery, NOT the launch port: the app may have
+                    //     been launched against a since-recycled ephemeral
+                    //     DARKRUN_PORT (macOS won't re-inject `--env` into a warm
+                    //     app), so following the live engine is what registers
+                    //     presence and lets the gate surface. Falls back to the
+                    //     launch port until discovery lists the run; the
+                    //     port-follow step below then corrects it. Cold-launch
+                    //     links land via `initial_session`, so this is the warm path.
                     if let Some(slug) = wire::take_pending_deeplink() {
+                        let port = port_for_run(&map, &slug).unwrap_or(base.port);
                         let project = found
                             .iter()
-                            .find(|e| e.port == base.port)
+                            .find(|e| e.port == port)
                             .map(engine_display_name)
                             .unwrap_or_default();
-                        selection.set(Selection::Run {
-                            port: base.port,
-                            slug,
-                            project,
-                        });
+                        selection.set(Selection::Run { port, slug, project });
                     }
 
-                    // 3. Current-focus on the launch engine's port.
-                    let mut probe = base.clone();
+                    // 3. Current-focus. `darkrun show` raises the run under the
+                    //    `current` session; navigate on a focus CHANGE, pointing at
+                    //    the engine that OWNS the run (per discovery) rather than
+                    //    only the launch engine — so a run raised on a different or
+                    //    restarted engine still opens live.
+                    let probe = base.clone();
                     let focus = wire::fetch_current_focus(&probe).await;
                     if *last_focus.peek() != focus {
                         last_focus.set(focus.clone());
                         if let Some(slug) = focus {
+                            let port = port_for_run(&map, &slug).unwrap_or(probe.port);
                             let project = found
                                 .iter()
-                                .find(|e| e.port == probe.port)
+                                .find(|e| e.port == port)
                                 .map(engine_display_name)
                                 .unwrap_or_default();
-                            probe.session_id = slug.clone();
-                            selection.set(Selection::Run {
-                                port: probe.port,
-                                slug,
-                                project,
-                            });
+                            selection.set(Selection::Run { port, slug, project });
+                        }
+                    }
+
+                    // 4. Port-follow — an already-OPEN run whose engine RESTARTED
+                    //    on a fresh ephemeral port re-points to the live port, so
+                    //    the Review reconnects (MainPane keys ReviewApp by
+                    //    slug+port, so a changed port remounts it against the live
+                    //    engine) instead of hanging on the dead socket.
+                    let repoint = match &*selection.peek() {
+                        Selection::Run { port, slug, project } => {
+                            repoint_port(*port, port_for_run(&map, slug)).map(|p| {
+                                Selection::Run {
+                                    port: p,
+                                    slug: slug.clone(),
+                                    project: project.clone(),
+                                }
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(sel) = repoint {
+                        selection.set(sel);
+                    }
+
+                    // 5. Commit the run lists (moving `map`) once every read above
+                    //    is done.
+                    if map != *runs_by_project.peek() {
+                        runs_by_project.set(map);
+                    }
+
+                    // 6. Offline run lists. Every registered project with NO live
+                    //    engine but an on-disk `.darkrun/` reads its runs straight
+                    //    off disk (the SAME projection the browse API serves), so
+                    //    the sidebar lists them and the main pane opens them
+                    //    read-only with no engine up. The registry read, the
+                    //    `.darkrun` probes, and the per-run git revwalks are
+                    //    blocking, so the whole projection runs on `spawn_blocking`;
+                    //    it recomputes only when the idle-project set CHANGES (an
+                    //    engine started/stopped, a project was added/dropped) rather
+                    //    than every tick, since nothing writes an idle run.
+                    let found_for_offline = found.clone();
+                    let prev_key = offline_key.peek().clone();
+                    let projected = tokio::task::spawn_blocking(move || {
+                        let projects = load_projects(&found_for_offline);
+                        let key = offline_projects_key(&projects);
+                        // Only pay for the per-run git revwalks when the idle set moved.
+                        let runs = (key != prev_key).then(|| read_offline_runs(&projects));
+                        (key, runs)
+                    })
+                    .await;
+                    if let Ok((key, runs)) = projected {
+                        if key != *offline_key.peek() {
+                            offline_key.set(key);
+                        }
+                        if let Some(runs) = runs {
+                            if runs != *offline_runs.peek() {
+                                offline_runs.set(runs);
+                            }
                         }
                     }
 
@@ -284,6 +415,9 @@ pub fn HomeApp(
     let _ = refresh.read();
     let projects = load_projects(&engines.read());
     let runs_map = runs_by_project.read().clone();
+    // The offline (no-engine) run lists, keyed by project slug: the sidebar
+    // nests them under an idle project the same way it nests live runs.
+    let offline_map = offline_runs.read().clone();
     let live_count = engines.read().len();
 
     rsx! {
@@ -296,10 +430,14 @@ pub fn HomeApp(
                 Sidebar {
                     projects: projects.clone(),
                     runs_map: runs_map.clone(),
+                    offline_runs: offline_map.clone(),
+                    remote_repos: remote_repos.read().clone(),
                     selection,
                     mine_only,
                     search,
                     drawer_open,
+                    refresh,
+                    signin_bump,
                     live_count,
                 }
                 main { class: "dr-shell-main",
@@ -307,7 +445,10 @@ pub fn HomeApp(
                         cfg: cfg.clone(),
                         selection,
                         projects: projects.clone(),
+                        runs_map: runs_map.clone(),
                         refresh,
+                        signed_in,
+                        signin_bump,
                     }
                 }
             }
@@ -319,6 +460,35 @@ pub fn HomeApp(
 /// which matches [`Project::name`].
 fn engine_display_name(e: &DiscoveredEngine) -> String {
     e.slug.clone()
+}
+
+/// The live engine port CURRENTLY serving `run_slug`, resolved from the
+/// per-project run lists discovery built this tick. Searches every project's run
+/// map for the slug and returns the port of the engine that listed it; `None`
+/// when no live engine serves that run (not discovered yet, or it stopped).
+///
+/// This is how an already-running app FOLLOWS the live engine: the app may have
+/// been launched against a since-recycled ephemeral port, so the launch port is
+/// unreliable — the engine that lists the run in `/api/runs` is the one to dial.
+fn port_for_run(
+    runs_map: &BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
+    run_slug: &str,
+) -> Option<u16> {
+    runs_map
+        .values()
+        .find_map(|runs| runs.get(run_slug).map(|(port, _)| *port))
+}
+
+/// Decide whether an OPEN run should re-point to a freshly-discovered engine
+/// port. Returns the new port only when discovery shows the run on a DIFFERENT
+/// live engine than the one currently connected (the engine restarted on a new
+/// ephemeral port); `None` to stay put — same port, or the run isn't in
+/// discovery yet (keep the current connection rather than dropping to nothing).
+fn repoint_port(current: u16, discovered: Option<u16>) -> Option<u16> {
+    match discovered {
+        Some(p) if p != current => Some(p),
+        _ => None,
+    }
 }
 
 /// Shell-local CSS: the responsive collapse to a hamburger drawer and the
@@ -538,10 +708,19 @@ fn ThemeControl() -> Element {
 fn Sidebar(
     projects: Vec<Project>,
     runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
+    /// Per-project (slug-keyed) run lists read off disk for no-engine projects.
+    offline_runs: BTreeMap<String, Vec<RunSummary>>,
+    /// Repos on the operator's providers that already carry darkrun artifacts but
+    /// aren't cloned locally yet: the CLONE-ON-OPEN section below the projects.
+    remote_repos: Vec<RemoteArtifactRepo>,
     selection: Signal<Selection>,
     mine_only: Signal<bool>,
     search: Signal<String>,
     drawer_open: Signal<bool>,
+    /// Bumped after a clone-on-open so the catalog + remote discovery re-run.
+    refresh: Signal<u32>,
+    /// Bumped alongside `refresh` after a clone-on-open to re-trigger discovery.
+    signin_bump: Signal<u32>,
     live_count: usize,
 ) -> Element {
     let open = *drawer_open.read();
@@ -596,12 +775,19 @@ fn Sidebar(
                                 .get(&proj.slug)
                                 .map(|m| m.values().cloned().collect())
                                 .unwrap_or_default(),
+                            offline: offline_runs.get(&proj.slug).cloned().unwrap_or_default(),
                             selection,
                             mine_only,
                             search,
                             drawer_open,
                         }
                     }
+                }
+                // The CLONE-ON-OPEN catalog: repos on the operator's providers that
+                // already carry darkrun artifacts but aren't cloned yet. Shown only
+                // when non-empty, as a distinct section below the local projects.
+                if !remote_repos.is_empty() {
+                    RemoteRepoSection { remote_repos, refresh, signin_bump }
                 }
             }
             div { style: "{foot}",
@@ -766,6 +952,10 @@ fn SidebarEmpty(mine_only: Signal<bool>, has_projects: bool) -> Element {
 fn ProjectSection(
     proj: Project,
     runs: Vec<(u16, RunSummary)>,
+    /// This project's runs read off disk (populated only when it has no live
+    /// engine). A non-empty list makes an idle project EXPAND to its runs (opened
+    /// read-only) rather than routing its header to the no-engine one-step view.
+    offline: Vec<RunSummary>,
     selection: Signal<Selection>,
     mine_only: Signal<bool>,
     search: Signal<String>,
@@ -780,6 +970,11 @@ fn ProjectSection(
     let shown: Vec<(u16, RunSummary)> = runs
         .iter()
         .filter(|(_, r)| run_matches(r, mine, &q))
+        .cloned()
+        .collect();
+    let shown_offline: Vec<RunSummary> = offline
+        .iter()
+        .filter(|r| run_matches(r, mine, &q))
         .cloned()
         .collect();
 
@@ -802,14 +997,21 @@ fn ProjectSection(
         border = tokens::var::BORDER,
     );
 
-    // Clicking the header of a NO-ENGINE project opens its one-step view; for a
-    // live project the header just toggles collapse.
+    // A project the sidebar drills into: a live engine, OR an idle project whose
+    // runs we can still read off disk. Both EXPAND to a run list; only a truly
+    // empty idle project routes its header to the no-engine one-step view.
+    let live = proj.is_live();
+    let has_offline = !offline.is_empty();
+    let expandable = live || has_offline;
+    let count_shown = if live { shown.len() } else { shown_offline.len() };
+
+    // Clicking the header toggles collapse for an expandable project; a truly
+    // idle project (no engine, no on-disk runs) opens its one-step view instead.
     let proj_for_header = proj.clone();
     let mut selection_hdr = selection;
-    let live = proj.is_live();
     let path_label = proj.path.display().to_string();
     let on_header = move |_| {
-        if live {
+        if expandable {
             let now = *expanded.peek();
             expanded.set(!now);
         } else {
@@ -828,8 +1030,8 @@ fn ProjectSection(
                     style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                     "{proj.name}"
                 }
-                if live {
-                    span { style: "{ct}", "{shown.len()}" }
+                if expandable {
+                    span { style: "{ct}", "{count_shown}" }
                 } else {
                     span {
                         style: format!(
@@ -841,19 +1043,37 @@ fn ProjectSection(
                     }
                 }
             }
-            if live && is_open {
+            if expandable && is_open {
                 div { style: "{runs_wrap}",
-                    for (port, run) in shown.iter() {
-                        RunRow {
-                            run: run.clone(),
-                            project: proj.name.clone(),
-                            // The port of the ENGINE this run came from — a
-                            // worktree run opens against the worktree engine.
-                            port: *port,
-                            selection,
-                            drawer_open,
+                    if live {
+                        for (port, run) in shown.iter() {
+                            RunRow {
+                                run: run.clone(),
+                                project: proj.name.clone(),
+                                // The port of the ENGINE this run came from — a
+                                // worktree run opens against the worktree engine.
+                                port: *port,
+                                selection,
+                                drawer_open,
+                            }
+                        }
+                    } else {
+                        // No engine: each row opens the read-only OfflineRunDetail
+                        // rooted at the project path (port is unused offline).
+                        for run in shown_offline.iter() {
+                            RunRow {
+                                run: run.clone(),
+                                project: proj.name.clone(),
+                                port: 0,
+                                offline_path: Some(proj.path.display().to_string()),
+                                selection,
+                                drawer_open,
+                            }
                         }
                     }
+                    // The one-step affordance: start a new worktree run on a live
+                    // project, or bring an engine up on an idle one (both open the
+                    // per-harness command scoped to this project).
                     NewRunRow {
                         name: proj.name.clone(),
                         path: proj.path.display().to_string(),
@@ -873,12 +1093,19 @@ fn RunRow(
     run: RunSummary,
     project: String,
     port: u16,
+    /// When set, this row is an OFFLINE run read from disk (the project has no
+    /// live engine): selecting it opens the read-only [`OfflineRunDetail`] rooted
+    /// at this project path. `None` is a live run (opens the Review against
+    /// `port`).
+    #[props(default)]
+    offline_path: Option<String>,
     selection: Signal<Selection>,
     drawer_open: Signal<bool>,
 ) -> Element {
-    // Is this row the open one?
+    // Is this row the open one? Match either selection kind by slug (the same
+    // slug-only match the live path already uses).
     let selected = match &*selection.read() {
-        Selection::Run { slug, .. } => slug == &run.slug,
+        Selection::Run { slug, .. } | Selection::OfflineRun { slug, .. } => slug == &run.slug,
         _ => false,
     };
 
@@ -916,11 +1143,20 @@ fn RunRow(
             role: "button",
             tabindex: "0",
             onclick: move |_| {
-                selection.set(Selection::Run {
-                    port,
-                    slug: slug.clone(),
-                    project: project.clone(),
-                });
+                match &offline_path {
+                    // Offline: open the disk-read detail rooted at the project path.
+                    Some(path) => selection.set(Selection::OfflineRun {
+                        path: path.clone(),
+                        slug: slug.clone(),
+                        project: project.clone(),
+                    }),
+                    // Live: open the Review against the engine serving this run.
+                    None => selection.set(Selection::Run {
+                        port,
+                        slug: slug.clone(),
+                        project: project.clone(),
+                    }),
+                }
                 // Close the drawer after a pick on a narrow window.
                 drawer_open.set(false);
             },
@@ -979,6 +1215,145 @@ fn NewRunRow(name: String, path: String, selection: Signal<Selection>) -> Elemen
     }
 }
 
+/// The CLONE-ON-OPEN section under the sidebar's local projects: repos on the
+/// operator's providers that already carry darkrun artifacts but aren't cloned
+/// locally yet. The provider is the source of truth, so these surface
+/// automatically; opening a row clones the repo (the SAME [`add_project`] path the
+/// add-a-project form uses), after which it becomes a normal local project and
+/// drops off this list. The caller renders this only when the list is non-empty.
+#[component]
+fn RemoteRepoSection(
+    remote_repos: Vec<RemoteArtifactRepo>,
+    refresh: Signal<u32>,
+    signin_bump: Signal<u32>,
+) -> Element {
+    let wrap = format!(
+        "margin:8px 0 2px;border-top:1px solid {border};padding-top:8px;",
+        border = tokens::var::BORDER,
+    );
+    let head = "padding:2px 8px 6px;display:flex;align-items:center;gap:7px;";
+    let head_label = format!(
+        "margin:0;font-family:{mono};font-size:10.5px;font-weight:600;\
+         text-transform:uppercase;letter-spacing:0.05em;color:{faint};",
+        mono = tokens::FONT_MONO,
+        faint = tokens::var::TEXT_FAINT,
+    );
+    rsx! {
+        div { style: "{wrap}",
+            div { style: "{head}",
+                span { style: "{head_label}", "Available on your providers" }
+                Badge { tone: Tone::Neutral, "{remote_repos.len()}" }
+            }
+            for repo in remote_repos.iter() {
+                RemoteRepoRow { repo: repo.clone(), refresh, signin_bump }
+            }
+        }
+    }
+}
+
+/// One CLONE-ON-OPEN row: the repo's owner-qualified name, a provider tag, and a
+/// "clone to open" chip. Clicking it clones the repo through [`add_project`] and
+/// shows a per-row "cloning…" state; on success it bumps `refresh` + `signin_bump`
+/// so the catalog + remote discovery re-run and the now-local repo drops off the
+/// list. A clone failure surfaces inline under the row.
+#[component]
+fn RemoteRepoRow(
+    repo: RemoteArtifactRepo,
+    refresh: Signal<u32>,
+    signin_bump: Signal<u32>,
+) -> Element {
+    let mut cloning = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let is_cloning = *cloning.read();
+    let err = error.read().clone();
+
+    let row = format!(
+        "display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:6px;\
+         cursor:pointer;color:{muted};",
+        muted = tokens::var::TEXT_MUTED,
+    );
+    let name = format!(
+        "flex:1;min-width:0;font-family:{mono};font-size:12px;color:{text};\
+         overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+        mono = tokens::FONT_MONO,
+        text = tokens::var::TEXT,
+    );
+    let tag = format!(
+        "flex:none;display:inline-flex;align-items:center;gap:4px;\
+         font-family:{mono};font-size:10px;color:{faint};",
+        mono = tokens::FONT_MONO,
+        faint = tokens::var::TEXT_FAINT,
+    );
+    let state = format!(
+        "flex:none;font-family:{mono};font-size:10px;color:{color};\
+         border:1px solid {border};border-radius:4px;padding:0 5px;line-height:1.6;",
+        mono = tokens::FONT_MONO,
+        color = if is_cloning { tokens::var::ACCENT } else { tokens::var::TEXT_FAINT },
+        border = tokens::var::BORDER,
+    );
+    let err_style = format!(
+        "margin:0 0 5px 8px;font-family:{mono};font-size:10.5px;color:{danger};",
+        mono = tokens::FONT_MONO,
+        danger = tokens::var::STATUS_DANGER,
+    );
+
+    let clone_url = repo.clone_url.clone();
+    let mut refresh = refresh;
+    let mut signin_bump = signin_bump;
+    rsx! {
+        div { style: "margin:1px 0;",
+            div {
+                style: "{row}",
+                role: "button",
+                tabindex: "0",
+                title: "Clone {repo.full_name} to open it",
+                onclick: move |_| {
+                    // Guard a double click while a clone is in flight.
+                    if *cloning.peek() {
+                        return;
+                    }
+                    cloning.set(true);
+                    error.set(None);
+                    let raw = clone_url.clone();
+                    spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            add_project(AddMode::Git, &raw, None)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("internal error: {e}")));
+                        match result {
+                            Ok(_) => {
+                                // Now a local project: bump both signals so the
+                                // catalog re-reads and discovery re-scans (which
+                                // dedups this repo away). `cloning` stays set: the
+                                // row is about to drop on the next discovery pass.
+                                let n = *refresh.peek();
+                                refresh.set(n.wrapping_add(1));
+                                let b = *signin_bump.peek();
+                                signin_bump.set(b.wrapping_add(1));
+                            }
+                            Err(e) => {
+                                error.set(Some(e));
+                                cloning.set(false);
+                            }
+                        }
+                    });
+                },
+                span { style: "{name}", "{repo.full_name}" }
+                span { style: "{tag}",
+                    {provider_icon(repo.provider)}
+                    "{repo.provider.display_name()}"
+                }
+                span { style: "{state}", if is_cloning { "cloning\u{2026}" } else { "clone to open" } }
+            }
+            if let Some(msg) = err {
+                p { style: "{err_style}", "Couldn't clone: {msg}" }
+            }
+        }
+    }
+}
+
 /// The main pane: renders the selected run's Review, a no-engine one-step view, or
 /// (with nothing selected) the projects / add-a-project welcome surface.
 #[component]
@@ -986,12 +1361,57 @@ fn MainPane(
     cfg: ConnConfig,
     selection: Signal<Selection>,
     projects: Vec<Project>,
+    runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
     refresh: Signal<u32>,
+    /// Provider sign-in state, threaded down to the add-a-project repo picker.
+    signed_in: Signal<Vec<Provider>>,
+    /// Bumped when a provider signs in; the repo picker refetches on it.
+    signin_bump: Signal<u32>,
 ) -> Element {
+    // A failed archive must be visible, not silent: a swallowed error is
+    // indistinguishable from a slow poll. Set on failure, cleared on success.
+    let archive_err = use_signal(|| None::<String>);
     match selection.read().clone() {
         Selection::Run { port, slug, project } => {
             let mut run_cfg = cfg.with_session(slug.clone());
             run_cfg.port = port;
+            // The selected run's live summary, matched by (slug, PORT): run slugs
+            // are unique only per project, so a slug-only scan across every
+            // project's run map could return a same-slug run from the wrong
+            // project. The port is the run's live engine (Selection::Run carries
+            // it), so a same-slug run in another project, served by a different
+            // engine, has a different port and is not confused for this one. The
+            // drift chip reads that run's count. (`project` is the name, not the
+            // runs_map's slug key, so it can't drive the lookup directly.)
+            let drift = runs_map
+                .values()
+                .find_map(|runs| runs.get(&slug).filter(|(p, _)| *p == port))
+                .map(|(_, r)| r.open_drift)
+                .filter(|n| *n > 0);
+            // Archive is reversible and needs no confirm (the run_archive
+            // semantics); on success deselect, and the poller drops the
+            // archived run from the sidebar on its next tick.
+            let archive_cfg = run_cfg.clone();
+            let archive_slug = slug.clone();
+            let mut selection_done = selection;
+            let mut archive_err_sig = archive_err;
+            let on_archive = move |_| {
+                let cfg = archive_cfg.clone();
+                let slug = archive_slug.clone();
+                spawn(async move {
+                    match wire::submit_run_archive(&cfg, &slug, true).await {
+                        Ok(()) => {
+                            archive_err_sig.set(None);
+                            selection_done.set(Selection::None);
+                        }
+                        // Surface the failure: keep the run selected (it was NOT
+                        // archived) and show why, so a failed archive can't read
+                        // as a slow poll.
+                        Err(e) => archive_err_sig.set(Some(format!("Couldn't archive: {e}"))),
+                    }
+                });
+            };
+            let archive_err_banner = archive_err.read().clone();
             // Key by run slug+port so selecting a different run REMOUNTS
             // ReviewApp — otherwise its one-shot session feed keeps streaming the
             // previous run while the checkpoint bar targets the new one (a
@@ -1001,10 +1421,33 @@ fn MainPane(
                 ReviewApp { key: "{slug}:{port}", cfg: run_cfg }
             };
             rsx! {
-                MainHeader { name: slug.clone(), crumb: project.clone() }
+                MainHeader {
+                    name: slug.clone(),
+                    crumb: project.clone(),
+                    drift,
+                    on_archive: Some(EventHandler::new(on_archive)),
+                }
+                if let Some(msg) = archive_err_banner {
+                    div {
+                        style: format!(
+                            "margin:8px 16px 0;padding:8px 12px;border-radius:6px;font-size:12px;\
+                             font-family:{mono};color:{danger};background:{surface};\
+                             border:1px solid {border};",
+                            mono = tokens::FONT_MONO,
+                            danger = tokens::var::STATUS_DANGER,
+                            surface = tokens::var::SURFACE_OVERLAY,
+                            border = tokens::var::BORDER,
+                        ),
+                        "{msg}"
+                    }
+                }
                 {review}
             }
         }
+        Selection::OfflineRun { path, slug, project } => rsx! {
+            MainHeader { name: slug.clone(), crumb: project.clone() }
+            OfflineRunDetail { path, slug, project }
+        },
         Selection::NoEngine { name, path } => rsx! {
             MainHeader { name: name.clone(), crumb: path.clone() }
             div { style: "padding:16px;",
@@ -1016,8 +1459,394 @@ fn MainPane(
             SettingsPage {}
         },
         Selection::None => rsx! {
-            Welcome { projects: projects.clone(), refresh }
+            Welcome { projects: projects.clone(), refresh, signed_in, signin_bump }
         },
+    }
+}
+
+/// A read-only view of a run projected straight from its on-disk `.darkrun/`
+/// state, shown when NO engine is serving the project. It reads the SAME
+/// projection the engine's browse API serves ([`darkrun_browse`]), so an offline
+/// run looks like a live one, only without the controls to act on it. Bringing
+/// an engine up (the banner + the sidebar's one-step command) is what unlocks
+/// deciding, annotating, and advancing (a later slice).
+///
+/// The reads are small, local file reads done synchronously in render (the same
+/// way [`load_projects`] reads the registry): point a `StateStore` at the project
+/// path and project it, with no engine, socket, or signal plumbing.
+#[component]
+fn OfflineRunDetail(path: String, slug: String, project: String) -> Element {
+    // `project` rides in for the pane header (rendered by the caller); the body
+    // reads everything it shows from disk.
+    let _ = &project;
+    // A local refresh counter: the "Request changes" form bumps it after a
+    // successful sidecar write, and reading it here re-subscribes this render so
+    // the synchronous disk reads below re-run and the new note shows at once.
+    let refresh = use_signal(|| 0u32);
+    let _ = refresh.read();
+    let store = darkrun_core::StateStore::new(&path);
+    let detail = darkrun_browse::run_detail(&store, &slug);
+
+    let wrap = "padding:16px;display:flex;flex-direction:column;gap:14px;max-width:880px;";
+
+    // No run on disk under this slug: stop at the banner + a small note rather
+    // than a dead pane.
+    let Some(detail) = detail else {
+        return rsx! {
+            div { style: "{wrap}",
+                OfflineBanner {}
+                Card {
+                    p {
+                        style: format!("margin:0;font-size:13px;color:{};", tokens::var::TEXT_MUTED),
+                        "This run wasn't found on disk (nothing under .darkrun/ for "
+                        code {
+                            style: format!(
+                                "font-family:{};color:{};", tokens::FONT_MONO, tokens::var::TEXT_FAINT,
+                            ),
+                            "{slug}"
+                        }
+                        ")."
+                    }
+                }
+            }
+        };
+    };
+
+    // The active station's feedback + any attached objective-evidence proof.
+    let feedback = darkrun_browse::feedback_for_station(&store, &slug, &detail.active_station);
+    let proof = darkrun_browse::read_disk_proof(&store, &slug);
+
+    let section_label = format!(
+        "font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:{faint};\
+         font-family:{mono};margin:0 0 6px;",
+        faint = tokens::var::TEXT_FAINT,
+        mono = tokens::FONT_MONO,
+    );
+    let list = "display:flex;flex-direction:column;gap:6px;";
+    let item_row = format!(
+        "display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid {border};\
+         border-radius:7px;background:{overlay};font-size:12.5px;color:{text};",
+        border = tokens::var::BORDER,
+        overlay = tokens::var::SURFACE_OVERLAY,
+        text = tokens::var::TEXT,
+    );
+    let item_name = format!(
+        "font-weight:600;color:{text};overflow:hidden;text-overflow:ellipsis;\
+         white-space:nowrap;",
+        text = tokens::var::TEXT,
+    );
+    let item_meta = format!(
+        "font-family:{mono};font-size:11px;color:{faint};",
+        mono = tokens::FONT_MONO,
+        faint = tokens::var::TEXT_FAINT,
+    );
+    let empty_note = format!(
+        "margin:0;font-size:12px;color:{faint};",
+        faint = tokens::var::TEXT_FAINT,
+    );
+    let title_style = format!(
+        "font-family:{sans};font-size:16px;font-weight:700;color:{text};",
+        sans = tokens::FONT_SANS,
+        text = tokens::var::TEXT,
+    );
+    let summary_meta = format!(
+        "font-family:{mono};font-size:12px;color:{muted};margin-top:6px;\
+         display:flex;flex-wrap:wrap;gap:10px;",
+        mono = tokens::FONT_MONO,
+        muted = tokens::var::TEXT_MUTED,
+    );
+    let fb_card = format!(
+        "border:1px solid {border};border-radius:7px;background:{overlay};padding:10px 12px;\
+         display:flex;flex-direction:column;gap:6px;",
+        border = tokens::var::BORDER,
+        overlay = tokens::var::SURFACE_OVERLAY,
+    );
+    let fb_head = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+    let fb_body = format!(
+        "margin:0;font-size:12.5px;line-height:1.5;color:{muted};white-space:pre-wrap;",
+        muted = tokens::var::TEXT_MUTED,
+    );
+
+    rsx! {
+        div { style: "{wrap}",
+            OfflineBanner {}
+
+            // Summary: title, lifecycle status, active position, progress.
+            Card {
+                div { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
+                    span { style: "{title_style}", "{detail.title}" }
+                    Badge { tone: run_status_tone(&detail.status), filled: true, "{detail.status}" }
+                }
+                div { style: "{summary_meta}",
+                    span { "station \u{b7} {detail.active_station}" }
+                    if let Some(phase) = detail.phase.as_ref() {
+                        span { "phase \u{b7} {phase}" }
+                    }
+                    span { "{detail.progress.completed}/{detail.progress.total} stations" }
+                    span { "factory \u{b7} {detail.factory}" }
+                }
+            }
+
+            // Stations the run walks.
+            div {
+                div { style: "{section_label}", "Stations" }
+                if detail.stations.is_empty() {
+                    p { style: "{empty_note}", "No stations recorded yet." }
+                } else {
+                    div { style: "{list}",
+                        for st in detail.stations.iter() {
+                            {
+                                let tone = run_status_tone(&st.status);
+                                let when = st
+                                    .completed_at
+                                    .as_ref()
+                                    .map(|t| format!("done \u{b7} {t}"))
+                                    .or_else(|| {
+                                        st.started_at.as_ref().map(|t| format!("started \u{b7} {t}"))
+                                    });
+                                rsx! {
+                                    div { style: "{item_row}",
+                                        span { style: "{item_name}", "{st.name}" }
+                                        Badge { tone, "{st.status}" }
+                                        if let Some(phase) = st.phase.as_ref() {
+                                            span { style: "{item_meta}", "{phase}" }
+                                        }
+                                        span { style: "flex:1;" }
+                                        if let Some(when) = when {
+                                            span { style: "{item_meta}", "{when}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Units on the active station.
+            div {
+                div { style: "{section_label}", "Units \u{b7} {detail.active_station}" }
+                if detail.units.is_empty() {
+                    p { style: "{empty_note}", "No units on the active station." }
+                } else {
+                    div { style: "{list}",
+                        for unit in detail.units.iter() {
+                            div { style: "{item_row}",
+                                span { style: "{item_name}", "{unit.title}" }
+                                Badge { tone: run_status_tone(&unit.status), "{unit.status}" }
+                                span { style: "flex:1;" }
+                                span { style: "{item_meta}", "{unit.slug}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The active station's feedback (read-only; no decide/reply controls).
+            div {
+                div { style: "{section_label}", "Feedback \u{b7} {detail.active_station}" }
+                if feedback.items.is_empty() {
+                    p { style: "{empty_note}", "No feedback on this station." }
+                } else {
+                    div { style: "{list}",
+                        for item in feedback.items.iter() {
+                            div { style: "{fb_card}",
+                                div { style: "{fb_head}",
+                                    span { style: "{item_name}", "{item.title}" }
+                                    Badge { tone: feedback_tone(item.status), "{feedback_status_str(item.status)}" }
+                                    Badge { tone: Tone::Neutral, "{feedback_origin_str(item.origin)}" }
+                                }
+                                if !item.body.is_empty() {
+                                    p { style: "{fb_body}", "{item.body}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // A small indicator when objective-evidence proof is attached on disk.
+            if let Some((proof, station)) = proof.as_ref() {
+                div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                    Badge { tone: Tone::Info, filled: true, "proof attached" }
+                    span { style: "{item_meta}", "surface \u{b7} {proof.surface.as_str()}" }
+                    if let Some(station) = station.as_ref() {
+                        span { style: "{item_meta}", "station \u{b7} {station}" }
+                    }
+                }
+            }
+
+            // The one offline write: leave the agent a change request. It writes a
+            // PENDING feedback sidecar the resuming engine picks up on its own.
+            RequestChangesForm {
+                path: path.clone(),
+                slug: slug.clone(),
+                station: detail.active_station.clone(),
+                refresh,
+            }
+        }
+    }
+}
+
+/// The one offline affordance under the read-only run view: leave the agent a
+/// change request. It writes a PENDING feedback sidecar (the SAME model the
+/// engine's HTTP create path uses) straight to `.darkrun/feedback/`. The engine
+/// resumes by a pure disk read and its feedback track (Track B) preempts on any
+/// pending doc, so a resuming engine picks this up on its own with nothing
+/// running here. It ONLY writes the feedback sidecar; it never touches
+/// `state.json` (the engine's authority) and offers no approve (advancing
+/// manufacturing needs the agent).
+#[component]
+fn RequestChangesForm(path: String, slug: String, station: String, refresh: Signal<u32>) -> Element {
+    let mut body = use_signal(String::new);
+    let mut status = use_signal(|| None::<String>);
+    let mut refresh = refresh;
+
+    let label = format!(
+        "font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:{faint};\
+         font-family:{mono};margin:0 0 6px;",
+        faint = tokens::var::TEXT_FAINT,
+        mono = tokens::FONT_MONO,
+    );
+    let textarea_style = format!(
+        "width:100%;box-sizing:border-box;min-height:54px;padding:9px 12px;\
+         border-radius:6px;border:1px solid {border};background:{base};\
+         color:{text};font-family:{sans};font-size:13px;resize:vertical;",
+        border = tokens::var::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        text = tokens::var::TEXT,
+        sans = tokens::FONT_SANS,
+    );
+    let note_style = format!(
+        "font-family:{mono};font-size:11.5px;color:{accent};margin:8px 0 0;",
+        mono = tokens::FONT_MONO,
+        accent = tokens::var::ACCENT,
+    );
+
+    let on_submit = move |_| {
+        let text = body.read().trim().to_string();
+        if text.is_empty() {
+            status.set(Some("Enter a change request first.".to_string()));
+            return;
+        }
+        // Write ONLY the PENDING feedback sidecar: mint the next id off the run's
+        // existing docs, build the same user-authored doc the engine's create
+        // path uses, and write it. A resuming engine's feedback track preempts on
+        // the pending doc, so nothing else (least of all state.json) is touched.
+        let store = darkrun_core::StateStore::new(&path);
+        let existing: Vec<String> = store
+            .read_feedback_raw(&slug)
+            .unwrap_or_default()
+            .into_keys()
+            .collect();
+        let id = darkrun_browse::next_id(existing.iter());
+        let doc = darkrun_browse::FeedbackDoc::new_user(
+            id.clone(),
+            station.clone(),
+            "Change request".to_string(),
+            text,
+        );
+        match store.write_feedback_raw(&slug, &id, &doc.render()) {
+            Ok(()) => {
+                body.set(String::new());
+                // Bump the parent's counter so its synchronous feedback read
+                // re-runs and the new note shows immediately.
+                let n = *refresh.peek();
+                refresh.set(n.wrapping_add(1));
+                status.set(Some("Saved. The agent picks this up when it resumes.".to_string()));
+            }
+            Err(err) => status.set(Some(format!("Couldn't save the change request: {err}"))),
+        }
+    };
+
+    rsx! {
+        Card {
+            div { style: "{label}", "Request changes" }
+            textarea {
+                style: "{textarea_style}",
+                placeholder: "Describe the change the agent should make\u{2026}",
+                value: "{body}",
+                oninput: move |evt| body.set(evt.value()),
+            }
+            div { style: "display:flex;align-items:center;gap:10px;margin-top:8px;",
+                Button {
+                    variant: ButtonVariant::Primary,
+                    tone: Tone::Accent,
+                    disabled: body.read().trim().is_empty(),
+                    on_click: on_submit,
+                    "Request changes"
+                }
+            }
+            if let Some(msg) = status.read().clone() {
+                p { style: "{note_style}", "{msg}" }
+            }
+        }
+    }
+}
+
+/// The read-only banner shown atop [`OfflineRunDetail`]: no engine is serving
+/// this project, so the view is a projection of disk with no controls to act.
+#[component]
+fn OfflineBanner() -> Element {
+    let banner = format!(
+        "display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:8px;\
+         background:{overlay};border:1px solid {border};border-top:2px solid {warn};\
+         font-size:12.5px;color:{muted};",
+        overlay = tokens::var::SURFACE_OVERLAY,
+        border = tokens::var::BORDER,
+        warn = tokens::var::STATUS_WARN,
+        muted = tokens::var::TEXT_MUTED,
+    );
+    rsx! {
+        div { style: "{banner}",
+            Badge { tone: Tone::Warn, filled: true, "read-only" }
+            span { "No engine connected. You can request changes below; the agent picks them up when it resumes." }
+        }
+    }
+}
+
+/// The lowercase display string for a feedback item's lifecycle status.
+fn feedback_status_str(status: darkrun_api::FeedbackStatus) -> &'static str {
+    use darkrun_api::FeedbackStatus as S;
+    match status {
+        S::Pending => "pending",
+        S::Fixing => "fixing",
+        S::Addressed => "addressed",
+        S::Answered => "answered",
+        S::NonActionable => "non-actionable",
+        S::Escalated => "escalated",
+        S::Closed => "closed",
+        S::Rejected => "rejected",
+    }
+}
+
+/// The display string for where a feedback item originated.
+fn feedback_origin_str(origin: darkrun_api::FeedbackOrigin) -> &'static str {
+    use darkrun_api::FeedbackOrigin as O;
+    match origin {
+        O::AdversarialReview => "adversarial review",
+        O::StudioReview => "studio review",
+        O::EngineReview => "engine review",
+        O::Drift => "drift",
+        O::Discovery => "discovery",
+        O::ExternalPr => "external PR",
+        O::ExternalMr => "external MR",
+        O::UserVisual => "visual note",
+        O::UserChat => "chat",
+        O::UserQuestion => "question",
+        O::UserRevisit => "revisit",
+        O::Agent => "agent",
+    }
+}
+
+/// A [`Tone`] for a feedback item's lifecycle status, driving its status badge.
+fn feedback_tone(status: darkrun_api::FeedbackStatus) -> Tone {
+    use darkrun_api::FeedbackStatus as S;
+    match status {
+        S::Closed | S::Answered | S::Addressed | S::NonActionable => Tone::Ok,
+        S::Fixing => Tone::Info,
+        S::Pending | S::Escalated => Tone::Warn,
+        S::Rejected => Tone::Danger,
     }
 }
 
@@ -1061,9 +1890,21 @@ fn SettingsPage() -> Element {
 }
 
 /// The main pane header: the selected run/project name + a breadcrumb (the
-/// owning project, or the project path for a no-engine view).
+/// owning project, or the project path for a no-engine view). A run header
+/// also carries the open-drift chip (when any drift feedback is open) and the
+/// archive affordance.
 #[component]
-fn MainHeader(name: String, crumb: String) -> Element {
+fn MainHeader(
+    name: String,
+    crumb: String,
+    /// Open drift count for the selected run: a warn chip when `Some`.
+    #[props(default)]
+    drift: Option<u32>,
+    /// The archive action for the selected run; `None` hides the control
+    /// (project / settings headers).
+    #[props(default)]
+    on_archive: Option<EventHandler<MouseEvent>>,
+) -> Element {
     let bar = format!(
         "padding:11px 16px;border-bottom:1px solid {border};display:flex;\
          align-items:center;gap:10px;",
@@ -1079,10 +1920,30 @@ fn MainHeader(name: String, crumb: String) -> Element {
         faint = tokens::var::TEXT_FAINT,
         mono = tokens::FONT_MONO,
     );
+    // The archive control matches the review rows' action-chip idiom.
+    let chip = format!(
+        "appearance:none;font-size:11px;color:{muted};border:1px solid {border};\
+         border-radius:5px;padding:3px 9px;cursor:pointer;background:transparent;",
+        muted = tokens::var::TEXT_MUTED,
+        border = tokens::var::BORDER_STRONG,
+    );
     rsx! {
         div { style: "{bar}",
             span { style: "{nm}", "{name}" }
             span { style: "{cr}", "{crumb}" }
+            if let Some(n) = drift {
+                Badge { tone: Tone::Warn, "drift {n}" }
+            }
+            span { style: "flex:1;" }
+            if let Some(archive) = on_archive {
+                button {
+                    class: "dr-run-archive",
+                    style: "{chip}",
+                    title: "Archive this run (reversible; it drops out of the run list)",
+                    onclick: move |evt| archive.call(evt),
+                    "archive"
+                }
+            }
         }
     }
 }
@@ -1092,7 +1953,15 @@ fn MainHeader(name: String, crumb: String) -> Element {
 /// shows its runs; an idle project opens its no-engine view), and the
 /// add-a-project form.
 #[component]
-fn Welcome(projects: Vec<Project>, refresh: Signal<u32>) -> Element {
+fn Welcome(
+    projects: Vec<Project>,
+    refresh: Signal<u32>,
+    /// Provider sign-in state, owned by the shell and forwarded to the form's
+    /// repo picker so a sign-in also re-triggers the sidebar's remote discovery.
+    signed_in: Signal<Vec<Provider>>,
+    /// Bumped when a provider signs in.
+    signin_bump: Signal<u32>,
+) -> Element {
     // Fill the whole main pane — no max-width/centering. The inner content
     // (projects grid + add-project form) should use the full available width.
     let shell = "padding:24px;display:flex;flex-direction:column;gap:16px;";
@@ -1123,7 +1992,7 @@ fn Welcome(projects: Vec<Project>, refresh: Signal<u32>) -> Element {
                 }
                 AddProjectCard {}
             }
-            AddProjectForm { refresh }
+            AddProjectForm { refresh, signed_in, signin_bump }
         }
     }
 }
@@ -1189,7 +2058,10 @@ fn ProjectCard(proj: Project) -> Element {
 ///
 /// Idempotent on slug; returns projects sorted by name for a stable order.
 fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
-    let mut by_slug: BTreeMap<String, Project> = darkrun_mcp::registry::list_projects()
+    // Every project known locally: the durable registry UNIONED with projects
+    // inferred from engine descriptors (a session that ran but was never added by
+    // hand still surfaces, keyed by the repo it ran against).
+    let mut by_slug: BTreeMap<String, Project> = darkrun_mcp::registry::list_known_projects()
         .unwrap_or_default()
         .into_iter()
         .map(|rec| {
@@ -1223,6 +2095,71 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
     by_slug.into_values().collect()
 }
 
+/// A stable signature of the IDLE projects the offline reader scans: each project
+/// with no live engine and an on-disk `.darkrun/`, as `slug@path`, sorted. The
+/// poller recomputes the offline run lists only when THIS changes (an engine
+/// started/stopped, a project was added or dropped), not every tick, since
+/// nothing writes an idle project's runs while it sits idle.
+fn offline_projects_key(projects: &[Project]) -> Vec<String> {
+    let mut key: Vec<String> = projects
+        .iter()
+        .filter(|p| p.port.is_none() && p.path.join(".darkrun").is_dir())
+        .map(|p| format!("{}@{}", p.slug, p.path.display()))
+        .collect();
+    key.sort();
+    key
+}
+
+/// Read every idle (no live engine) project's runs straight off its on-disk
+/// `.darkrun/` state, keyed by project SLUG. A project contributes only when it
+/// has no live port AND a `.darkrun/` directory; the projection is the SAME one
+/// the engine's browse API serves ([`darkrun_browse::list_runs`]), so an offline
+/// run reads identically to a live one. **Blocking** (local file reads plus
+/// per-run git revwalks), so call it off the render thread. Projects with no
+/// readable runs are omitted, so the sidebar can tell "idle with runs" from a
+/// truly empty idle project.
+fn read_offline_runs(projects: &[Project]) -> BTreeMap<String, Vec<RunSummary>> {
+    let mut out = BTreeMap::new();
+    for proj in projects {
+        if proj.port.is_some() || !proj.path.join(".darkrun").is_dir() {
+            continue;
+        }
+        let store = darkrun_core::StateStore::new(&proj.path);
+        let runs = darkrun_browse::list_runs(&store).runs;
+        if !runs.is_empty() {
+            out.insert(proj.slug.clone(), runs);
+        }
+    }
+    out
+}
+
+/// Whether to offer the native "Browse" folder picker. True everywhere the app
+/// actually runs a desktop file dialog (macOS Finder, and the platform dialog on
+/// Linux/Windows); false on iOS, which has no folder picker.
+const SHOW_BROWSE: bool = cfg!(not(target_os = "ios"));
+
+/// Open the native folder picker and, if the user chooses a directory, set it as
+/// the Local-repo path — so a local repo is chosen in Finder, not typed. Runs the
+/// dialog off the render (its future resolves when the user picks or cancels).
+#[cfg(not(target_os = "ios"))]
+fn spawn_folder_pick(mut value: Signal<String>, mut status: Signal<Option<String>>) {
+    spawn(async move {
+        if let Some(handle) = rfd::AsyncFileDialog::new()
+            .set_title("Choose a local git repository")
+            .pick_folder()
+            .await
+        {
+            value.set(handle.path().display().to_string());
+            status.set(None);
+        }
+    });
+}
+
+/// iOS has no folder picker; the Browse button is compiled out ([`SHOW_BROWSE`]),
+/// so this stub only exists to keep the call site type-checking on that target.
+#[cfg(target_os = "ios")]
+fn spawn_folder_pick(_value: Signal<String>, _status: Signal<Option<String>>) {}
+
 /// The two add-a-project entry points: a **Git URL** (clone + register) and a
 /// **Local repo** (register an existing git checkout). Both must be git repos; the
 /// slug + `.darkrun/` live in the working tree.
@@ -1230,7 +2167,16 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
 /// Both paths execute for real (see [`add_project`]). On success `refresh` is
 /// bumped so the sidebar + welcome re-read the registry and the new project shows.
 #[component]
-fn AddProjectForm(refresh: Signal<u32>) -> Element {
+fn AddProjectForm(
+    refresh: Signal<u32>,
+    /// Provider sign-in state, OWNED by the shell (`HomeApp`) so the sidebar's
+    /// clone-on-open discovery shares one source of truth: which providers have a
+    /// stored credential, gating the repo picker on being signed in.
+    signed_in: Signal<Vec<Provider>>,
+    /// Bumped when a new provider signs in; the repo picker refetches on it and
+    /// the shell's remote discovery re-runs.
+    signin_bump: Signal<u32>,
+) -> Element {
     let mut mode = use_signal(|| AddMode::Git);
     let mut value = use_signal(String::new);
     let mut dest = use_signal(String::new);
@@ -1260,7 +2206,7 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
     let current = *mode.read();
     let placeholder = match current {
         AddMode::Git => "https://github.com/acme/storefront.git",
-        AddMode::Local => "/Users/you/dev/acme/storefront",
+        AddMode::Local => "Browse\u{2026} or type a path to a git checkout",
     };
     let action_label = match current {
         AddMode::Git => "Clone & add",
@@ -1312,12 +2258,39 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
                 ModeTab { label: "Local repo", active: current == AddMode::Local,
                     on_pick: move |_| { mode.set(AddMode::Local); status.set(None); } }
             }
+            // Git URL tab: sign in with GitHub/GitLab, then pick from your
+            // permitted repos. The raw URL entry below stays as a fallback. A
+            // picked repo clones through the SAME add_project path (now
+            // authenticated by darkrun-git's credentials_for) as a typed URL.
+            if current == AddMode::Git {
+                SignInPanel { signed_in, signin_bump }
+                if !signed_in.read().is_empty() {
+                    RepoPicker {
+                        reload: signin_bump,
+                        on_pick: move |clone_url: String| {
+                            let dest_raw = dest.read().trim().to_string();
+                            start_git_clone(clone_url, dest_raw, busy, status, value, refresh);
+                        },
+                    }
+                }
+            }
             div { style: "display:flex;gap:8px;margin-top:10px;align-items:center;",
                 input {
                     style: "{input_style}",
                     placeholder: "{placeholder}",
                     value: "{value}",
                     oninput: move |evt| value.set(evt.value()),
+                }
+                // Local repo: choose the checkout in Finder rather than typing a
+                // path. The text field still reflects (and accepts) the choice.
+                if current == AddMode::Local && SHOW_BROWSE {
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        tone: Tone::Neutral,
+                        disabled: busy_now,
+                        on_click: move |_| spawn_folder_pick(value, status),
+                        "Browse\u{2026}"
+                    }
                 }
                 Button {
                     variant: ButtonVariant::Primary,
@@ -1339,8 +2312,8 @@ fn AddProjectForm(refresh: Signal<u32>) -> Element {
             }
             p { style: "{note_style}",
                 "Git URL \u{2192} darkrun clones it (into the path you choose), then registers it. \
-                 Local repo \u{2192} pick a path to an existing git checkout. Either way it must be \
-                 a git repo; the project slug + .darkrun/ live in the working tree."
+                 Local repo \u{2192} Browse to an existing git checkout (or type its path). Either \
+                 way it must be a git repo; the project slug + .darkrun/ live in the working tree."
             }
             if let Some(msg) = status.read().clone() {
                 p {
@@ -1480,6 +2453,50 @@ fn add_project(mode: AddMode, raw: &str, dest_override: Option<&str>) -> Result<
             ))
         }
     }
+}
+
+/// Clone a Git URL through the add-a-project path, writing progress back to the
+/// form's status line. Used by the repo picker (a picked repo hands us its clone
+/// URL); the manual "Clone & add" button drives the same [`add_project`] path
+/// inline.
+///
+/// **Non-blocking**: the clone is network-bound, so it runs on `spawn_blocking`
+/// and the result is written back to `status`. On success `refresh` is bumped so
+/// the sidebar + welcome re-read the registry, and `value` (the manual URL field)
+/// is cleared. `busy` guards against a double submit.
+fn start_git_clone(
+    raw: String,
+    dest_raw: String,
+    mut busy: Signal<bool>,
+    mut status: Signal<Option<String>>,
+    mut value: Signal<String>,
+    mut refresh: Signal<u32>,
+) {
+    if *busy.peek() {
+        return;
+    }
+    if let Err(err) = validate_add_input(AddMode::Git, &raw) {
+        status.set(Some(err));
+        return;
+    }
+    busy.set(true);
+    status.set(Some("Cloning\u{2026}".to_string()));
+    spawn(async move {
+        let result =
+            tokio::task::spawn_blocking(move || add_project(AddMode::Git, &raw, Some(&dest_raw)))
+                .await
+                .unwrap_or_else(|e| Err(format!("internal error: {e}")));
+        match result {
+            Ok(note) => {
+                status.set(Some(note));
+                let n = *refresh.peek();
+                refresh.set(n.wrapping_add(1));
+                value.set(String::new());
+            }
+            Err(err) => status.set(Some(err)),
+        }
+        busy.set(false);
+    });
 }
 
 /// A small tab chip for the add-a-project entry-point switch.
@@ -1853,6 +2870,7 @@ mod data_render_tests {
             started_at: Some("2026-06-05T00:00:00Z".into()),
             authored_by_me: true,
             author: Some("me".into()),
+            open_drift: 0,
         }
     }
 
@@ -1869,13 +2887,16 @@ mod data_render_tests {
             by_run.insert("r".to_string(), (58616u16, run()));
             let mut runs_map = BTreeMap::new();
             runs_map.insert("store-ab12cd34".to_string(), by_run);
+            let refresh = use_signal(|| 0u32);
+            let signin_bump = use_signal(|| 0u32);
             rsx! {
                 Sidebar {
-                    projects: vec![proj()], runs_map, selection,
-                    mine_only: mine, search, drawer_open: drawer, live_count: 1,
+                    projects: vec![proj()], runs_map, offline_runs: BTreeMap::new(),
+                    remote_repos: vec![], selection,
+                    mine_only: mine, search, drawer_open: drawer, refresh, signin_bump, live_count: 1,
                 }
                 ProjectSection {
-                    proj: proj(), runs: vec![(58616u16, run())], selection,
+                    proj: proj(), runs: vec![(58616u16, run())], offline: vec![], selection,
                     mine_only: mine, search, drawer_open: drawer,
                 }
                 RunRow { run: run(), project: "store".to_string(), port: 58616, selection, drawer_open: drawer }
@@ -1884,12 +2905,65 @@ mod data_render_tests {
         let html = render(App);
         assert!(html.contains("Storefront") || html.contains("store") || !html.is_empty());
     }
+
+    #[test]
+    fn offline_project_section_expands_and_run_row_selects_offline() {
+        // An IDLE project (port None) carrying an offline run list expands to its
+        // runs (no engine); selecting one routes to Selection::OfflineRun.
+        fn App() -> Element {
+            let selection = use_signal(|| Selection::None);
+            let mine = use_signal(|| false);
+            let search = use_signal(String::new);
+            let drawer = use_signal(|| true);
+            let idle = Project {
+                slug: "store-ab12cd34".into(),
+                name: "store".into(),
+                path: "/tmp/store".into(),
+                port: None,
+                harness: None,
+            };
+            rsx! {
+                ProjectSection {
+                    proj: idle, runs: vec![], offline: vec![run()], selection,
+                    mine_only: mine, search, drawer_open: drawer,
+                }
+                RunRow {
+                    run: run(), project: "store".to_string(), port: 0,
+                    offline_path: Some("/tmp/store".to_string()), selection, drawer_open: drawer,
+                }
+            }
+        }
+        let html = render(App);
+        assert!(!html.is_empty());
+    }
+
+    #[test]
+    fn remote_repo_section_renders_clone_on_open_rows() {
+        // The CLONE-ON-OPEN section renders its heading and, per repo, the
+        // owner-qualified name, the provider tag, and the "clone to open" chip.
+        fn App() -> Element {
+            let refresh = use_signal(|| 0u32);
+            let signin_bump = use_signal(|| 0u32);
+            let repos = vec![RemoteArtifactRepo {
+                provider: Provider::GitHub,
+                name: "darkrun".into(),
+                full_name: "jwaldrip/darkrun".into(),
+                clone_url: "https://github.com/jwaldrip/darkrun.git".into(),
+            }];
+            rsx! { RemoteRepoSection { remote_repos: repos, refresh, signin_bump } }
+        }
+        let html = render(App);
+        assert!(html.contains("Available on your providers"), "{html}");
+        assert!(html.contains("jwaldrip/darkrun"), "{html}");
+        assert!(html.contains("clone to open"), "{html}");
+    }
 }
 
 #[cfg(test)]
 mod main_pane_render_tests {
     use super::*;
     use crate::wire::ConnConfig;
+    use darkrun_api::runs::StationProgress;
 
     fn render(app: fn() -> Element) -> String {
         let mut dom = VirtualDom::new(app);
@@ -1901,36 +2975,149 @@ mod main_pane_render_tests {
         Project { slug: "store-ab12cd34".into(), name: "store".into(), path: "/tmp/store".into(), port: Some(58616), harness: Some("claude-code".into()) }
     }
 
+    /// A runs map whose single run carries open drift, so the Run selection
+    /// exercises the header's drift-chip lookup.
+    fn drifted_runs_map() -> BTreeMap<String, BTreeMap<String, (u16, RunSummary)>> {
+        let run = RunSummary {
+            slug: "r".into(),
+            title: "Storefront run".into(),
+            factory: "software".into(),
+            active_station: "prove".into(),
+            phase: None,
+            status: "active".into(),
+            progress: StationProgress { completed: 2, total: 6 },
+            started_at: None,
+            authored_by_me: true,
+            author: None,
+            open_drift: 2,
+        };
+        let mut by_run = BTreeMap::new();
+        by_run.insert("r".to_string(), (58616u16, run));
+        let mut map = BTreeMap::new();
+        map.insert("store-ab12cd34".to_string(), by_run);
+        map
+    }
+
     #[test]
     fn main_pane_renders_every_selection_state() {
         // None — the projects / welcome surface.
         fn None_() -> Element {
             let sel = use_signal(|| Selection::None);
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh, signed_in, signin_bump } }
         }
         let _ = render(None_);
         // NoEngine — the per-harness start command.
         fn NoEngine() -> Element {
             let sel = use_signal(|| Selection::NoEngine { name: "store".into(), path: "/tmp/store".into() });
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh, signed_in, signin_bump } }
         }
         let _ = render(NoEngine);
         // Settings — the theme/settings page.
         fn Settings() -> Element {
             let sel = use_signal(|| Selection::Settings);
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![], refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![], runs_map: BTreeMap::new(), refresh, signed_in, signin_bump } }
         }
         let _ = render(Settings);
-        // Run — embeds the live Review for a selected run.
+        // Run: embeds the live Review for a selected run, with the header's
+        // drift chip + archive affordance.
         fn Run() -> Element {
             let sel = use_signal(|| Selection::Run { port: 58616, slug: "r".into(), project: "store".into() });
             let refresh = use_signal(|| 0u32);
-            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: drifted_runs_map(), refresh, signed_in, signin_bump } }
         }
-        let _ = render(Run);
+        let html = render(Run);
+        assert!(html.contains("drift 2"), "the drift chip renders: {html}");
+        assert!(html.contains("archive"), "the archive affordance renders: {html}");
+        // OfflineRun: the read-only disk view. The path has no `.darkrun/`, so the
+        // detail is None and the pane shows the banner + not-found note.
+        fn Offline() -> Element {
+            let sel = use_signal(|| Selection::OfflineRun {
+                path: "/tmp/darkrun-no-such-repo".into(),
+                slug: "r".into(),
+                project: "store".into(),
+            });
+            let refresh = use_signal(|| 0u32);
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { MainPane { cfg: ConnConfig::from_env(), selection: sel, projects: vec![proj()], runs_map: BTreeMap::new(), refresh, signed_in, signin_bump } }
+        }
+        let offline = render(Offline);
+        assert!(offline.contains("read-only"), "the read-only banner renders: {offline}");
+    }
+}
+
+#[cfg(test)]
+mod request_changes_tests {
+    /// The offline "Request changes" write path, exercised through the SAME calls
+    /// the handler makes: mint the next id, build the user-authored PENDING doc,
+    /// write the sidecar. A resuming engine's feedback track preempts on a pending
+    /// doc, so this is exactly how the note gets picked up on resume, and it
+    /// surfaces on the station through the same projection the engine serves.
+    #[test]
+    fn request_changes_writes_pending_feedback_picked_up_on_station() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = darkrun_core::StateStore::new(repo.path());
+        let slug = "run-1";
+        let station = "build";
+
+        // Mint off the (empty) existing set, exactly like the handler.
+        let existing: Vec<String> = store
+            .read_feedback_raw(slug)
+            .unwrap_or_default()
+            .into_keys()
+            .collect();
+        let id = darkrun_browse::next_id(existing.iter());
+        assert_eq!(id, "FB-01");
+        let doc = darkrun_browse::FeedbackDoc::new_user(
+            id.clone(),
+            station.to_string(),
+            "Change request".to_string(),
+            "Tighten the empty-state copy.".to_string(),
+        );
+        store.write_feedback_raw(slug, &id, &doc.render()).unwrap();
+
+        // The resuming engine reads the SAME projection: the note shows on the
+        // station as PENDING (the status Track B preempts on), authored by the
+        // user.
+        let listed = darkrun_browse::feedback_for_station(&store, slug, station);
+        assert_eq!(listed.count, 1);
+        let item = &listed.items[0];
+        assert_eq!(item.feedback_id, "FB-01");
+        assert_eq!(item.status, darkrun_api::FeedbackStatus::Pending);
+        assert_eq!(item.origin, darkrun_api::FeedbackOrigin::UserVisual);
+        assert_eq!(item.body, "Tighten the empty-state copy.");
+
+        // A second request mints the next id off the now-non-empty set and both
+        // list on the station.
+        let existing2: Vec<String> = store
+            .read_feedback_raw(slug)
+            .unwrap_or_default()
+            .into_keys()
+            .collect();
+        let id2 = darkrun_browse::next_id(existing2.iter());
+        assert_eq!(id2, "FB-02");
+        let doc2 = darkrun_browse::FeedbackDoc::new_user(
+            id2.clone(),
+            station.to_string(),
+            "Change request".to_string(),
+            "Second note.".to_string(),
+        );
+        store.write_feedback_raw(slug, &id2, &doc2.render()).unwrap();
+        assert_eq!(
+            darkrun_browse::feedback_for_station(&store, slug, station).count,
+            2,
+        );
     }
 }
 
@@ -1993,11 +3180,15 @@ mod component_render_tests {
     fn welcome_and_project_cards_render_live_and_idle() {
         fn WithProjects() -> Element {
             let refresh = use_signal(|| 0u32);
-            rsx! { Welcome { projects: vec![proj("store", true), proj("docs", false)], refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { Welcome { projects: vec![proj("store", true), proj("docs", false)], refresh, signed_in, signin_bump } }
         }
         fn Empty() -> Element {
             let refresh = use_signal(|| 0u32);
-            rsx! { Welcome { projects: vec![], refresh } }
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
+            rsx! { Welcome { projects: vec![], refresh, signed_in, signin_bump } }
         }
         fn Cards() -> Element {
             rsx! {
@@ -2015,8 +3206,10 @@ mod component_render_tests {
     fn add_project_form_card_and_tabs_render() {
         fn Form() -> Element {
             let refresh = use_signal(|| 0u32);
+            let signed_in = use_signal(Vec::<Provider>::new);
+            let signin_bump = use_signal(|| 0u32);
             rsx! {
-                AddProjectForm { refresh }
+                AddProjectForm { refresh, signed_in, signin_bump }
                 AddProjectCard {}
                 ModeTab { label: "Git URL".to_string(), active: true, on_pick: move |_| {} }
                 ModeTab { label: "Local".to_string(), active: false, on_pick: move |_| {} }
@@ -2057,6 +3250,7 @@ mod helper_tests {
             started_at: Some("2026-06-05T00:00:00Z".into()),
             authored_by_me: mine,
             author: Some(author.into()),
+            open_drift: 0,
         }
     }
     fn proj(name: &str) -> Project {
@@ -2117,6 +3311,35 @@ mod helper_tests {
         }
         assert_eq!(run_dot_color("idle"), tokens::var::TEXT_FAINT);
         assert!(run_sel_bg().ends_with("1f"));
+    }
+
+    #[test]
+    fn port_for_run_selects_the_owning_engine() {
+        // Two projects, each served by its own engine port, each listing one run.
+        let mut a = BTreeMap::new();
+        a.insert("alpha".to_string(), (7001u16, run_with("active", true, "me")));
+        let mut b = BTreeMap::new();
+        b.insert("beta".to_string(), (7002u16, run_with("active", true, "me")));
+        // run_with() slugs both to "store-checkout"; override so the lookup key is
+        // the map key, mirroring how the poller keys by `r.slug`.
+        let map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>> =
+            BTreeMap::from([("proj-a".to_string(), a), ("proj-b".to_string(), b)]);
+        // Each run resolves to the port of the engine that lists it.
+        assert_eq!(port_for_run(&map, "alpha"), Some(7001));
+        assert_eq!(port_for_run(&map, "beta"), Some(7002));
+        // An unknown run resolves to nothing (not yet discovered / stopped).
+        assert_eq!(port_for_run(&map, "missing"), None);
+        assert_eq!(port_for_run(&BTreeMap::new(), "alpha"), None);
+    }
+
+    #[test]
+    fn repoint_port_follows_only_a_moved_engine() {
+        // Engine moved to a new ephemeral port → re-point to it.
+        assert_eq!(repoint_port(7001, Some(7005)), Some(7005));
+        // Same port → stay put (no needless remount).
+        assert_eq!(repoint_port(7001, Some(7001)), None);
+        // Run not in discovery yet → keep the current connection, don't drop it.
+        assert_eq!(repoint_port(7001, None), None);
     }
 
     #[test]
@@ -2210,5 +3433,54 @@ mod helper_tests {
         // GUI harness — the open-the-editor instruction.
         let gui = launch_command(Harness::Cursor, "/tmp/p", false, None);
         assert!(gui.starts_with("open "));
+    }
+
+    fn idle_project(path: std::path::PathBuf) -> Project {
+        Project { slug: "widget".into(), name: "widget".into(), path, port: None, harness: None }
+    }
+
+    #[test]
+    fn offline_projects_key_lists_only_idle_repos_with_darkrun() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".darkrun")).unwrap();
+        let idle = idle_project(repo.path().to_path_buf());
+        // Idle + on-disk `.darkrun/` → one signature entry.
+        assert_eq!(offline_projects_key(std::slice::from_ref(&idle)).len(), 1);
+        // A LIVE project (has a port) is excluded even with disk state.
+        let live = Project { port: Some(9), ..idle.clone() };
+        assert!(offline_projects_key(std::slice::from_ref(&live)).is_empty());
+        // Idle but no `.darkrun/` is excluded.
+        let bare = tempfile::tempdir().unwrap();
+        let no_dr = idle_project(bare.path().to_path_buf());
+        assert!(offline_projects_key(std::slice::from_ref(&no_dr)).is_empty());
+    }
+
+    #[test]
+    fn read_offline_runs_projects_idle_repo_state_and_skips_live() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = darkrun_core::StateStore::new(repo.path());
+        let run = darkrun_core::domain::Run {
+            slug: "widget-1".into(),
+            title: "Widget".into(),
+            frontmatter: darkrun_core::domain::RunFrontmatter {
+                // Title is resolved from frontmatter on the write→read roundtrip.
+                title: Some("Widget".into()),
+                factory: "app".into(),
+                active_station: "frame".into(),
+                status: darkrun_core::domain::Status::Active,
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        store.write_run(&run).unwrap();
+
+        // An idle project with disk state contributes its runs, keyed by slug.
+        let idle = idle_project(repo.path().to_path_buf());
+        let map = read_offline_runs(std::slice::from_ref(&idle));
+        assert_eq!(map.get("widget").map(Vec::len), Some(1));
+        assert_eq!(map["widget"][0].slug, "widget-1");
+        // A live project (has a port) is skipped even with disk state.
+        let live = Project { port: Some(1), ..idle.clone() };
+        assert!(read_offline_runs(std::slice::from_ref(&live)).is_empty());
     }
 }

@@ -12,6 +12,23 @@ locals {
     "GITLAB_CLIENT_ID",
     "GITLAB_CLIENT_SECRET",
   ]
+
+  # The darkrun GitHub App credentials that light up the signed-in workspace
+  # endpoints (web/server/src/github_app.rs::from_env reads GITHUB_APP_ID +
+  # GITHUB_APP_PRIVATE_KEY). Same model as the OAuth pairs: the values live in
+  # Secret Manager ONLY (operator-seeded — `gcloud secrets versions add
+  # GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY`), Terraform just references them by
+  # name and mounts each as an env var of the same name. GITHUB_APP_PRIVATE_KEY is
+  # the App's PEM (multi-line, or with literal \n escapes — from_env normalizes).
+  # Absent secrets fail the plan loudly, the same "bootstrap wasn't run" signal as
+  # the OAuth pairs; once seeded, the workspace lights up with no code change.
+  github_app_secret_ids = [
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+  ]
+
+  # Everything the web service references from Secret Manager and mounts as env.
+  web_secret_ids = concat(local.oauth_secret_ids, local.github_app_secret_ids)
 }
 
 # Enable the GCP services the stack needs. Non-destroying so a `terraform destroy`
@@ -232,8 +249,9 @@ module "web" {
   max_instances       = var.max_instances
   enable_sentry       = var.enable_sentry
   sentry_dsn          = try(module.sentry.dsns["web"], "")
-  external_secret_ids = local.oauth_secret_ids
+  external_secret_ids = local.web_secret_ids
   manage_www          = var.manage_www
+  manage_relay        = var.manage_relay
 
   # Relay + FCM remote push run on this Firebase project. Empty disables both.
   firebase_project = var.firebase_project
@@ -279,6 +297,16 @@ module "dns" {
   domain     = var.web_domain
   zone_name  = var.dns_zone_name
   manage_www = var.manage_www
+
+  # relay.<domain> is the wss:// base the engine dials by default; publish its
+  # CNAME so the default remote dial resolves (the Cloud Run mapping lives in the
+  # web module, gated on manage_domain_mapping).
+  manage_relay = var.manage_relay
+
+  # app.<domain> (Firebase Hosting) A records — operator-supplied, copied from the
+  # Firebase console when the custom domain is connected. Empty leaves app.
+  # unmanaged in DNS (see the variable's doc).
+  firebase_hosting_a_records = var.firebase_hosting_a_records
 
   depends_on = [google_project_service.services]
 }

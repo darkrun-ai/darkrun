@@ -10,6 +10,7 @@ description = "darkrun HTTP + WebSocket review server (axum), bridging the engin
 [dependencies]
 darkrun-core.workspace = true
 darkrun-api.workspace = true
+darkrun-browse.workspace = true
 darkrun-git.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,5 +24,5 @@ tracing = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"

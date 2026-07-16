@@ -2,20 +2,22 @@
 //!
 //! Computes the current diff and hands back review instructions so the agent
 //! can run a deliberate code review before a station's checkpoint locks. The
-//! manager stays a pure read; the diff is read in-process via the pure-Rust
-//! git backend (no `git` CLI).
+//! diff is read in-process via the pure-Rust git backend (no `git` CLI).
 //!
-//! ADVISORY, NOT ENFORCED. This is agent-facing GUIDANCE: it computes the diff
-//! and returns instructions, but it writes NO stamp and nothing requires it to
-//! have run before [`crate::position::checkpoint_decide`]. A run can lock a
-//! checkpoint without ever calling it (dark/Auto mode never does). It is
-//! deliberately not a gate — the ENFORCED checkpoint guarantees live in the
-//! engine: the open-`must`/`should` severity gate and the Prove missing-proof
-//! hold, both in [`crate::position`]. Treat `gate_review` as a review AID the
-//! operator/agent may run, not a precondition the engine checks.
+//! ENFORCED (was advisory). Running the review records a durable per-station
+//! stamp (via [`crate::position::record_active_gate_review`]), and an
+//! ask/external [`crate::position::checkpoint_decide`] REQUIRES that stamp before
+//! it may lock a station carrying un-reviewed code changes — so a human-in-the-
+//! loop station can no longer lock with zero review. Dark/Auto mode bypasses (a
+//! dark run never stops for review by design), as does a no-diff / non-git run
+//! (nothing to review). This joins the engine's other enforced checkpoint
+//! guarantees — the open-`must`/`should` severity gate, the Prove
+//! missing-proof hold, and the Prove evidence gate on the human approve, all
+//! in [`crate::position`].
 
 use std::path::Path;
 
+use darkrun_core::StateStore;
 use darkrun_git::{Git, GitBackend};
 use serde::Serialize;
 
@@ -71,6 +73,13 @@ pub fn gate_review(repo_root: &Path) -> GateReview {
          4. Then decide the checkpoint with `darkrun_checkpoint_decide`."
             .to_string()
     };
+    // Record the durable gate-review stamp for the run this review applies to
+    // (resolved from the branch / sole live run / active-run pointer), scoped to
+    // its current station. This is what turns the review from advice into a
+    // precondition the ask/external checkpoint gate can require. Best-effort: an
+    // unresolvable run simply records nothing.
+    crate::position::record_active_gate_review(&StateStore::new(repo_root));
+
     GateReview {
         stat,
         diff,

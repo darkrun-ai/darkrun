@@ -15,6 +15,7 @@
 use std::time::{Duration, Instant};
 
 use darkrun_api::{BenchProof, Proof, Surface};
+use serde::Serialize;
 
 use crate::error::{Result, VerifyError};
 
@@ -27,6 +28,11 @@ pub struct LoadOpts {
     pub concurrency: usize,
     /// Per-request timeout.
     pub timeout: Duration,
+    /// The fraction of requests (0.0..=1.0) allowed to fail before the whole run
+    /// is treated as a failure. A load run against a mostly-broken target must
+    /// NOT certify as healthy, so above this rate [`load_http`] errors instead of
+    /// returning a proof.
+    pub max_failure_rate: f64,
 }
 
 impl Default for LoadOpts {
@@ -35,6 +41,38 @@ impl Default for LoadOpts {
             requests: 100,
             concurrency: 8,
             timeout: Duration::from_secs(10),
+            // Half the requests failing is already a broken target; refuse to
+            // certify anything worse.
+            max_failure_rate: 0.5,
+        }
+    }
+}
+
+/// A completed HTTP load run: the reduced [`BenchProof`] plus the success /
+/// failure accounting the proof itself does not carry. The proof's percentiles
+/// alone can flatter a broken target (fast-failing requests look fast), so the
+/// counts travel alongside it and a high failure rate fails the run outright.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadReport {
+    /// Total requests attempted.
+    pub requests: u64,
+    /// Requests that returned a 2xx response.
+    pub ok: u64,
+    /// Requests that failed (non-2xx, connection error, timeout, or dropped).
+    pub failed: u64,
+    /// Latency percentiles + throughput over the SUCCESSFUL requests only, so a
+    /// flood of fast-failing requests can't deflate the numbers into looking
+    /// healthy.
+    pub proof: BenchProof,
+}
+
+impl LoadReport {
+    /// The fraction of requests that failed (0.0..=1.0). Zero requests → 0.0.
+    pub fn failure_rate(&self) -> f64 {
+        if self.requests == 0 {
+            0.0
+        } else {
+            self.failed as f64 / self.requests as f64
         }
     }
 }
@@ -89,13 +127,57 @@ pub fn bench_proof_into(proof: BenchProof, surface: Surface) -> Proof {
     Proof::bench(surface, proof)
 }
 
-/// Fire an HTTP load run against `url` and reduce it into a [`BenchProof`].
+/// Reduce the raw outcome of a load run into a [`LoadReport`], FAILING when too
+/// many requests failed. `success_samples_ms` are the latencies of the OK
+/// requests only (the ones the percentiles describe). Anything not counted in
+/// `ok` is a failure, so `failed = requests - ok`.
 ///
-/// Issues `opts.requests` GETs with at most `opts.concurrency` in flight, times
-/// each, and summarizes. A request that fails (connection refused, non-2xx,
-/// timeout) is recorded as its elapsed time so a degraded target still produces
-/// numbers; if *every* request fails the run errors.
-pub async fn load_http(url: &str, opts: &LoadOpts) -> Result<BenchProof> {
+/// **Pure** (no network, no clock), so the honesty rule (a mostly-failing
+/// target can never certify as healthy) is unit-tested directly. Fails with no
+/// report when every request failed, or when the failure rate exceeds
+/// `max_failure_rate`.
+pub fn assess(
+    requests: u64,
+    ok: u64,
+    success_samples_ms: &[f64],
+    wall: Duration,
+    max_failure_rate: f64,
+) -> Result<LoadReport> {
+    let failed = requests.saturating_sub(ok);
+    let failure_rate = if requests == 0 {
+        0.0
+    } else {
+        failed as f64 / requests as f64
+    };
+    // No successes at all is always a failure: there are no numbers to stand
+    // behind, regardless of the configured threshold.
+    if ok == 0 {
+        return Err(VerifyError::Load(format!("all {requests} requests failed")));
+    }
+    if failure_rate > max_failure_rate {
+        return Err(VerifyError::Load(format!(
+            "{failed}/{requests} requests failed ({:.0}% > {:.0}% allowed)",
+            failure_rate * 100.0,
+            max_failure_rate * 100.0
+        )));
+    }
+    Ok(LoadReport {
+        requests,
+        ok,
+        failed,
+        proof: summarize(success_samples_ms, wall),
+    })
+}
+
+/// Fire an HTTP load run against `url` and reduce it into a [`LoadReport`].
+///
+/// Issues `opts.requests` GETs with at most `opts.concurrency` in flight and
+/// times each. Only SUCCESSFUL (2xx) requests feed the percentiles: a failed
+/// request (connection refused, non-2xx, timeout) returns fast and would
+/// otherwise deflate the numbers into looking healthy, so it is counted as a
+/// failure instead of being averaged into the latency. The run errors (no
+/// report) when the failure rate exceeds `opts.max_failure_rate`.
+pub async fn load_http(url: &str, opts: &LoadOpts) -> Result<LoadReport> {
     if opts.requests == 0 {
         return Err(VerifyError::Load("requests must be > 0".into()));
     }
@@ -132,25 +214,19 @@ pub async fn load_http(url: &str, opts: &LoadOpts) -> Result<BenchProof> {
         }));
     }
 
-    let mut samples = Vec::with_capacity(opts.requests as usize);
+    // Only the successful requests' latencies feed the percentiles; every other
+    // outcome (failed response, dropped task) is a failure via `requests - ok`.
+    let mut success_samples = Vec::with_capacity(opts.requests as usize);
     let mut ok = 0u64;
     for t in tasks {
-        if let Ok(Some((ms, success))) = t.await {
-            samples.push(ms);
-            if success {
-                ok += 1;
-            }
+        if let Ok(Some((ms, true))) = t.await {
+            ok += 1;
+            success_samples.push(ms);
         }
     }
     let wall = start.elapsed();
 
-    if ok == 0 {
-        return Err(VerifyError::Load(format!(
-            "all {} requests to {url} failed",
-            opts.requests
-        )));
-    }
-    Ok(summarize(&samples, wall))
+    assess(opts.requests, ok, &success_samples, wall, opts.max_failure_rate)
 }
 
 #[cfg(test)]
@@ -217,5 +293,47 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, VerifyError::Load(_)));
+    }
+
+    #[test]
+    fn assess_refuses_a_mostly_failing_target() {
+        // The dishonest case: 1 of 100 requests succeeded. The old harness handed
+        // back a healthy-looking proof; `assess` must refuse it.
+        let err = assess(100, 1, &[2.0], Duration::from_secs(1), 0.5).unwrap_err();
+        assert!(matches!(err, VerifyError::Load(_)));
+        assert!(err.to_string().contains("99/100"), "surfaces the counts: {err}");
+    }
+
+    #[test]
+    fn assess_refuses_when_every_request_failed() {
+        let err = assess(20, 0, &[], Duration::from_secs(1), 0.9).unwrap_err();
+        assert!(err.to_string().contains("all 20 requests failed"), "got {err}");
+    }
+
+    #[test]
+    fn assess_passes_within_threshold_and_records_the_counts() {
+        // 8 of 10 succeeded (20% failure, under the 50% bar): a report, with the
+        // success/failure accounting surfaced and percentiles over the OK ones.
+        let samples = vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let report = assess(10, 8, &samples, Duration::from_secs(1), 0.5).unwrap();
+        assert_eq!(report.requests, 10);
+        assert_eq!(report.ok, 8);
+        assert_eq!(report.failed, 2);
+        assert_eq!(report.failure_rate(), 0.2);
+        // Percentiles describe the 8 successes only.
+        assert_eq!(report.proof.samples, Some(8));
+        assert!(report.proof.p95.is_some());
+    }
+
+    #[test]
+    fn assess_serializes_the_counts_alongside_the_proof() {
+        // The counts must be visible in the emitted JSON (they are what the
+        // proof block alone omits).
+        let report = assess(4, 4, &[1.0, 2.0, 3.0, 4.0], Duration::from_secs(1), 0.5).unwrap();
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["requests"], 4);
+        assert_eq!(json["ok"], 4);
+        assert_eq!(json["failed"], 0);
+        assert_eq!(json["proof"]["samples"], 4);
     }
 }

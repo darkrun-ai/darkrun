@@ -58,11 +58,16 @@ use crate::relay_registry::SessionRegistry;
 /// doesn't expire a live session.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
-/// The public relay base URL the descriptor API hands clients — the same
-/// `wss://relay.darkrun.ai` the engine dials by default (see
-/// `darkrun_mcp::server::DEFAULT_RELAY_URL`). Overridable via
-/// `DARKRUN_RELAY_PUBLIC_URL` for dev/staging.
-pub const DEFAULT_RELAY_PUBLIC_URL: &str = "wss://relay.darkrun.ai";
+/// The public relay base URL the descriptor API hands clients — the same base
+/// the engine dials by default (see `darkrun_mcp::server::DEFAULT_RELAY_URL`).
+/// Overridable via `DARKRUN_RELAY_PUBLIC_URL` for dev/staging.
+///
+/// The relay is served by THIS web service on the apex host
+/// (`darkrun.ai/relay/…`); `relay.darkrun.ai` has no DNS record today, so
+/// handing that host to clients pointed every remote viewer at NXDOMAIN. If a
+/// dedicated relay host is stood up later, the env override (or flipping this
+/// constant together with the engine's) is the whole migration.
+pub const DEFAULT_RELAY_PUBLIC_URL: &str = "wss://darkrun.ai";
 
 /// The app host whose `/runs/{slug}` route the descriptor targets and the push
 /// click URL opens (the universal link the native apps claim; the web app is the
@@ -722,7 +727,7 @@ pub struct RelayState {
     devices: Arc<dyn DeviceRegistry>,
     push: Arc<dyn PushSender>,
     /// The public relay base URL the descriptor API echoes to clients (e.g.
-    /// `wss://relay.darkrun.ai`). Defaults to [`DEFAULT_RELAY_PUBLIC_URL`].
+    /// `wss://darkrun.ai`). Defaults to [`DEFAULT_RELAY_PUBLIC_URL`].
     relay_public_url: String,
 }
 
@@ -1166,6 +1171,9 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let body = res.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Matches the EXPLICIT with_relay_url above (an arbitrary fixture base,
+        // trailing slash trimmed) — deliberately not the default constant, so
+        // this pins the override + trim behavior.
         assert_eq!(v["relay_url"], "wss://relay.darkrun.ai");
         assert_eq!(v["session"], "quiet-canyon");
         assert_eq!(v["client_token"], "acct-a");

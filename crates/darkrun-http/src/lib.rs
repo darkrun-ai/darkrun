@@ -13,7 +13,6 @@
 //!
 //! Entry point: [`serve`] — what darkrun-cli calls to start the server.
 
-mod feedback_doc;
 mod handlers;
 mod listen;
 mod ratelimit;
@@ -99,6 +98,7 @@ pub fn build_router(app: AppState) -> Router {
         .route("/health", get(handlers::health))
         .route("/api/runs", get(runs::list_runs))
         .route("/api/runs/{slug}", get(runs::get_run))
+        .route("/api/runs/{slug}/archive", post(runs::set_run_archived))
         .route("/api/runs/{slug}/asset/{*path}", get(handlers::get_run_asset))
         .route("/api/session/{id}", get(handlers::get_session))
         .route(
@@ -118,6 +118,10 @@ pub fn build_router(app: AppState) -> Router {
             get(handlers::get_proof).post(handlers::attach_proof),
         )
         .route("/api/advance/{id}", post(handlers::advance))
+        .route(
+            "/api/annotation/{run}/{id}/resolve",
+            post(handlers::resolve_annotation),
+        )
         .route("/api/push/ack", post(handlers::push_ack))
         .route(
             "/api/unit/{run}/{unit}/reset",

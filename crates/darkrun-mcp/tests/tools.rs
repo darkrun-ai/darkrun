@@ -1400,6 +1400,9 @@ fn feedback_create_then_list_get_roundtrip_preserves_body() {
 #[test]
 fn checkpoint_decide_approve_advances_to_next_station() {
     let (_d, server) = started("r");
+    // Approve resolves a genuine gate hold, so walk frame to its Checkpoint
+    // first (an off-gate approve is now refused, not a silent completion).
+    walk_station_to_checkpoint(&server, "r", "frame");
     let res = server
         .darkrun_checkpoint_decide(Parameters(CheckpointDecideInput {
             slug: "r".into(),
@@ -1493,6 +1496,7 @@ fn checkpoint_decide_errors_on_missing_run() {
 #[test]
 fn checkpoint_decide_approve_marks_station_completed_in_show() {
     let (_d, server) = started("r");
+    walk_station_to_checkpoint(&server, "r", "frame");
     server
         .darkrun_checkpoint_decide(Parameters(CheckpointDecideInput {
             slug: "r".into(),
@@ -2698,8 +2702,12 @@ fn feedback_create_many_allocates_padded_ids() {
 #[test]
 fn checkpoint_approve_each_station_independently() {
     let (_d, server) = started("r");
+    // Each approve resolves a real gate hold, so walk each station to its
+    // Checkpoint before deciding it.
+    walk_station_to_checkpoint(&server, "r", "frame");
     let after_frame = approve(&server, "r");
     assert_eq!(after_frame["action"]["station"], "specify");
+    walk_station_to_checkpoint(&server, "r", "specify");
     let after_specify = approve(&server, "r");
     assert_eq!(after_specify["action"]["station"], "shape");
 }
@@ -2707,6 +2715,8 @@ fn checkpoint_approve_each_station_independently() {
 #[test]
 fn checkpoint_decide_reject_routes_then_approve_after_resolve() {
     let (_d, server) = started("r");
+    // Reject a REAL gate: walk frame to its Checkpoint first.
+    walk_station_to_checkpoint(&server, "r", "frame");
     server
         .darkrun_checkpoint_decide(Parameters(CheckpointDecideInput {
             slug: "r".into(),
@@ -2734,7 +2744,9 @@ fn checkpoint_decide_reject_routes_then_approve_after_resolve() {
                 reply: None,
         }))
         .unwrap();
-    // Frame is still blocked but feedback cleared — now approve to advance.
+    // Feedback cleared: the station re-derives to its Checkpoint; re-tick so the
+    // gate re-opens, then approve to advance.
+    next(&server, "r");
     let v = approve(&server, "r");
     assert_eq!(v["action"]["station"], "specify");
 }
@@ -3122,6 +3134,7 @@ fn checkpoint_kind_in_next_is_the_mode_gate() {
 #[test]
 fn run_list_active_station_advances_after_approval() {
     let (_d, server) = started("r");
+    walk_station_to_checkpoint(&server, "r", "frame");
     approve(&server, "r"); // frame -> specify
     let v = body(
         &server
@@ -3848,9 +3861,11 @@ fn feedback_resolve_empty_status_defaults_to_addressed() {
 #[test]
 fn checkpoint_decide_approve_idempotent_via_distinct_stations() {
     // Approving repeatedly walks station by station; each approval is a fresh
-    // decision on the now-current station.
+    // decision on the now-current station's genuine gate hold.
     let (_d, server) = started("r");
+    walk_station_to_checkpoint(&server, "r", "frame");
     let s1 = approve(&server, "r");
+    walk_station_to_checkpoint(&server, "r", "specify");
     let s2 = approve(&server, "r");
     assert_ne!(s1["action"]["station"], s2["action"]["station"]);
 }
@@ -4432,6 +4447,8 @@ fn checkpoint_reject_then_approve_advances_past_build() {
         walk_station_to_checkpoint(&server, "r", st);
         approve(&server, "r");
     }
+    // Reject a REAL gate: walk build to its Checkpoint before deciding it.
+    walk_station_to_checkpoint(&server, "r", "build");
     server
         .darkrun_checkpoint_decide(Parameters(CheckpointDecideInput {
             slug: "r".into(),
@@ -4439,15 +4456,30 @@ fn checkpoint_reject_then_approve_advances_past_build() {
             feedback: Some("rework".into()),
         }))
         .unwrap();
-    // Resolve routed feedback.
+    // Resolve the routed feedback (the gate reject files it under an
+    // engine-chosen id, so read it back rather than guessing).
+    let id = body(
+        &server
+            .darkrun_feedback_list(Parameters(FeedbackListInput {
+                slug: "r".into(),
+                include_settled: true,
+            }))
+            .unwrap(),
+    )[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     server
         .darkrun_feedback_resolve(Parameters(FeedbackResolveInput {
             slug: "r".into(),
-            feedback_id: "fb-01".into(),
+            feedback_id: id,
             status: "addressed".into(),
                 reply: None,
         }))
         .unwrap();
+    // The station re-derives to its Checkpoint; re-tick so the gate re-opens,
+    // then approve to advance past build.
+    next(&server, "r");
     let v = approve(&server, "r");
     assert_eq!(v["action"]["station"], "prove");
 }
@@ -4698,6 +4730,7 @@ fn run_show_reflects_unit_count_indirectly_via_position() {
 #[test]
 fn checkpoint_decide_returns_tick_result_shape() {
     let (_d, server) = started("r");
+    walk_station_to_checkpoint(&server, "r", "frame");
     let v = approve(&server, "r");
     assert!(v.get("run").is_some());
     assert!(v.get("position").is_some());
@@ -5263,6 +5296,7 @@ fn feedback_list_default_include_settled_true_shows_resolved() {
 #[test]
 fn checkpoint_decide_approve_returns_run_field() {
     let (_d, server) = started("my-run");
+    walk_station_to_checkpoint(&server, "my-run", "frame");
     let v = approve(&server, "my-run");
     assert_eq!(v["run"], "my-run");
 }
@@ -5347,6 +5381,7 @@ fn run_show_state_checkpoint_seeded_with_kind() {
 #[test]
 fn checkpoint_decide_records_outcome_advanced_on_approve() {
     let (_d, server) = started("r");
+    walk_station_to_checkpoint(&server, "r", "frame");
     approve(&server, "r");
     let v = body(
         &server
@@ -5383,6 +5418,7 @@ fn checkpoint_decide_records_outcome_blocked_on_reject() {
 #[test]
 fn completed_station_has_completed_at_timestamp() {
     let (_d, server) = started("r");
+    walk_station_to_checkpoint(&server, "r", "frame");
     approve(&server, "r");
     let v = body(
         &server
@@ -5408,6 +5444,7 @@ fn in_progress_station_has_started_at_timestamp() {
 #[test]
 fn next_station_seeded_pending_after_advance() {
     let (_d, server) = started("r");
+    walk_station_to_checkpoint(&server, "r", "frame");
     approve(&server, "r");
     let v = body(
         &server

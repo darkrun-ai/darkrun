@@ -191,6 +191,11 @@ struct AnnotateTarget {
     work_id: String,
     /// Whether this is a visual surface (image / live HTML) or a text surface.
     visual: bool,
+    /// Whether a text surface renders as formatted markdown (agent-authored
+    /// prose/specs) rather than raw source. Decided at construction where the
+    /// artifact's kind is known — a unit spec is always markdown; an output is
+    /// markdown by its declared type; code/json stays raw.
+    markdown: bool,
     /// Screenshot / image URL for a visual surface.
     screenshot_url: Option<String>,
     /// The artifact's TEXT content for a text surface (the real body the
@@ -302,6 +307,37 @@ fn review_body(
     let active_tab = use_signal(|| "units".to_string());
     let annotate_target = use_signal(|| None::<AnnotateTarget>);
     let inbox_open = use_signal(|| false);
+    // The feedback item a reply is being composed on (its `FB-NN` id), set by
+    // the row's reply chip; `None` keeps the composer closed.
+    let reply_target = use_signal(|| None::<String>);
+
+    // --- Proof at the gate (the run's objective evidence) --------------------
+    // Loaded when a gate opens so the checkpoint decision is made against the
+    // MEASURED numbers, not an assertion. Outer `None` = not yet answered;
+    // `Some(None)` = the engine has no proof attached (404).
+    let proof = use_signal(|| None::<Option<darkrun_api::ProofGetResponse>>);
+    // The active gate predicate: only render the checkpoint (and only fetch
+    // the proof) at an actual review/final gate blocking on a decision.
+    let gate_open = review.await_active.unwrap_or(false);
+    {
+        let cfg = cfg.clone();
+        let run = run_slug.clone();
+        use_effect(use_reactive!(|cfg, run, gate_open| {
+            let mut proof = proof;
+            spawn(async move {
+                let (true, Some(run)) = (gate_open, run) else {
+                    return;
+                };
+                match wire::fetch_proof(&cfg, &run).await {
+                    Ok(resp) => proof.set(Some(Some(resp))),
+                    Err(wire::WireError::Status(404)) => proof.set(Some(None)),
+                    // A transport failure leaves the slot unanswered rather
+                    // than claiming "no evidence" about a run we couldn't ask.
+                    Err(_) => {}
+                }
+            });
+        }));
+    }
 
     // The tab strip, with the Feedback tab carrying the open-annotation count
     // (danger-red when any blocker/high is open).
@@ -311,10 +347,6 @@ fn review_body(
     let mut tab_sig = active_tab;
     let mut inbox_sig = inbox_open;
     let inbox_is_open = *inbox_open.read();
-
-    // The active gate predicate: only render the checkpoint at an actual
-    // review/final gate that is currently blocking on a decision.
-    let gate_open = review.await_active.unwrap_or(false);
 
     rsx! {
         // ── The assembly line (TOP) ────────────────────────────────────────
@@ -332,7 +364,21 @@ fn review_body(
 
         // ── The feedback inbox (severity-grouped), toggled from the header ──
         if inbox_is_open {
-            {feedback_inbox_panel(cfg.clone(), run_slug.clone(), station.clone(), feedback, feedback_entries.clone(), &outputs, active_tab, annotate_target, inbox_open)}
+            {feedback_inbox_panel(cfg.clone(), run_slug.clone(), station.clone(), feedback, feedback_entries.clone(), &outputs, active_tab, annotate_target, inbox_open, reply_target)}
+        }
+
+        // ── The reply composer, opened from a feedback row's reply chip ─────
+        if let Some(fb_id) = reply_target.read().clone() {
+            ReplyComposer {
+                // Key by item so switching rows remounts (a fresh draft).
+                key: "{fb_id}",
+                cfg: cfg.clone(),
+                run: run_slug.clone(),
+                station: station.clone(),
+                fb_id,
+                feedback,
+                reply_target,
+            }
         }
 
         // ── The annotate surface, when an artifact is under review ──────────
@@ -384,6 +430,7 @@ fn review_body(
                         active_tab,
                         annotate_target,
                         inbox_open,
+                        reply_target,
                     ));
                     tab_body(&cfg, &active, &units, &outputs, &knowledge, &unit_outputs, &feedback_entries, &review, annotate_target, inbox_open, fb_action)
                 }
@@ -392,8 +439,51 @@ fn review_body(
 
         // ── The single, severity-driven checkpoint control set ──────────────
         if gate_open {
+            // Objective evidence first: the proof's numbers (or, at a prove
+            // gate, an explicit no-evidence state) sit right above the
+            // decision they inform.
+            {proof_at_gate(station.as_deref(), proof.read().clone())}
             {checkpoint_section(cfg, review, decision, open_blockers)}
         }
+    }
+}
+
+/// Whether a station is the objective-evidence station whose gate expects an
+/// attached proof. Matches the software factory's `prove` (and any custom
+/// station carrying `prove` in its name); other stations gate on review, not
+/// measurement, so an absent proof is not called out there.
+fn is_prove_station(station: Option<&str>) -> bool {
+    station.is_some_and(|s| s.to_ascii_lowercase().contains("prove"))
+}
+
+/// The objective-evidence block at an open gate.
+///
+/// A fetched proof renders its surface-routed NUMBERS through the existing
+/// [`ProofPanel`] (the same projection the proof session uses). A confirmed
+/// absence (`Some(None)`, the 404) at a prove gate renders an explicit,
+/// prominent no-evidence state: honesty, not silence. An unanswered fetch
+/// (outer `None`) or an absence at a non-prove gate renders nothing.
+fn proof_at_gate(
+    station: Option<&str>,
+    proof: Option<Option<darkrun_api::ProofGetResponse>>,
+) -> Element {
+    match proof {
+        Some(Some(resp)) => rsx! {
+            ProofPanel { proof: map::proof_view(&resp.proof) }
+        },
+        Some(None) if is_prove_station(station) => rsx! {
+            Card {
+                div { style: "display:flex;align-items:center;gap:10px;",
+                    Badge { tone: Tone::Danger, filled: true, "no evidence attached" }
+                    span {
+                        style: "font-size:12.5px;color:var(--dr-text-muted);",
+                        "This prove gate has no measured proof on the run. \
+                         Approving here signs off without objective evidence."
+                    }
+                }
+            }
+        },
+        _ => rsx! {},
     }
 }
 
@@ -586,17 +676,26 @@ fn unit_tab(
                     let label = unit.title.clone();
                     let work_id = unit.title.clone();
                     let fb_n = feedback_count_for(feedback, &unit.title);
-                    // The unit's real markdown body — the text the reviewer
-                    // selects spans of (matched by the same title resolution
-                    // `unit_view` uses, so the row and its text agree).
-                    let body_text = raw_units
-                        .iter()
-                        .find(|u| {
-                            map::first_str(u, &["title", "name", "slug", "id"]).as_deref()
-                                == Some(unit.title.as_str())
-                        })
+                    // The matched raw unit (by the same title resolution
+                    // `unit_view` uses, so the row, its body, and its criteria
+                    // agree) — source of the reviewer-selectable markdown body
+                    // and the per-criterion met state.
+                    let matched_raw = raw_units.iter().find(|u| {
+                        map::first_str(u, &["title", "name", "slug", "id"]).as_deref()
+                            == Some(unit.title.as_str())
+                    });
+                    let body_text = matched_raw
                         .and_then(|u| u.get("body").and_then(|b| b.as_str()))
                         .map(str::to_string);
+                    // Completion criteria with an optional met flag; fall back to
+                    // the flattened lines (all unchecked) when the raw unit has
+                    // no criteria objects to read a state from.
+                    let criteria_items: Vec<(String, Option<bool>)> = matched_raw
+                        .map(criteria_with_state)
+                        .filter(|c| !c.is_empty())
+                        .unwrap_or_else(|| {
+                            unit.criteria.iter().map(|c| (c.clone(), None)).collect()
+                        });
                     rsx! {
                         div { style: "display:flex;flex-direction:column;gap:6px;",
                             div { style: "display:flex;align-items:center;gap:8px;",
@@ -618,15 +717,21 @@ fn unit_tab(
                                         path: work_id.clone(),
                                         work_id: work_id.clone(),
                                         visual: false,
+                                        // A unit spec is agent-authored markdown
+                                        // prose — render it formatted, not raw.
+                                        markdown: true,
                                         screenshot_url: None,
                                         text: body_text.clone(),
                                     }));
                                 })}
                             }
-                            if !unit.criteria.is_empty() {
+                            if !criteria_items.is_empty() {
                                 ul { style: criteria_list(),
-                                    for line in unit.criteria.iter() {
-                                        li { style: "margin:2px 0;", "{line}" }
+                                    for (line, met) in criteria_items.iter() {
+                                        li { style: criteria_item_style(),
+                                            {criteria_glyph(*met)}
+                                            span { "{line}" }
+                                        }
                                     }
                                 }
                             }
@@ -684,6 +789,8 @@ fn output_tab(
                     // annotate surface so the reviewer selects real spans instead
                     // of a placeholder. Visual artifacts use the screenshot URL.
                     let text = if visual { None } else { out.content.clone() };
+                    // A markdown output renders formatted; code/json stays raw.
+                    let markdown = !visual && output_is_markdown(&out);
                     let fb_n = feedback_count_for(feedback, &out.name);
                     rsx! {
                         div {
@@ -705,6 +812,7 @@ fn output_tab(
                                     path: path.clone(),
                                     work_id: label.clone(),
                                     visual,
+                                    markdown,
                                     screenshot_url: url.clone(),
                                     text: text.clone(),
                                 }));
@@ -736,7 +844,10 @@ fn row_actions(on_review: impl FnMut(MouseEvent) + 'static) -> Element {
     }
 }
 
-/// The Knowledge tab: the run's surfaced knowledge files.
+/// The Knowledge tab: the run's surfaced knowledge files, rendered as formatted
+/// documents through the same markdown path the annotate overlay uses
+/// (frontmatter chips included), so the operator reads a doc, not its source.
+/// A non-markdown name keeps the raw pre block.
 fn knowledge_tab(knowledge: &[darkrun_api::session::KnowledgeFile]) -> Element {
     if knowledge.is_empty() {
         return rsx! {
@@ -745,6 +856,7 @@ fn knowledge_tab(knowledge: &[darkrun_api::session::KnowledgeFile]) -> Element {
     }
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:12px;",
+            style { "{darkrun_ui::markdown::CSS}" }
             for kf in knowledge.iter() {
                 div {
                     div {
@@ -752,12 +864,22 @@ fn knowledge_tab(knowledge: &[darkrun_api::session::KnowledgeFile]) -> Element {
                                 color:var(--dr-text);margin-bottom:4px;",
                         "{kf.name}"
                     }
-                    pre {
-                        style: "margin:0;white-space:pre-wrap;font-family:var(--dr-font-mono);\
-                                font-size:11.5px;color:var(--dr-text-muted);\
-                                background:var(--dr-surface-base);border:1px solid var(--dr-border);\
-                                border-radius:6px;padding:10px;max-height:240px;overflow:auto;",
-                        "{kf.content}"
+                    if kf.name.ends_with(".md") || kf.name.ends_with(".markdown") {
+                        div {
+                            class: "dr-md",
+                            style: "font-size:12.5px;background:var(--dr-surface-base);\
+                                    border:1px solid var(--dr-border);border-radius:6px;\
+                                    padding:12px 14px;max-height:240px;overflow:auto;",
+                            dangerous_inner_html: darkrun_ui::markdown::to_html_doc(&kf.content),
+                        }
+                    } else {
+                        pre {
+                            style: "margin:0;white-space:pre-wrap;font-family:var(--dr-font-mono);\
+                                    font-size:11.5px;color:var(--dr-text-muted);\
+                                    background:var(--dr-surface-base);border:1px solid var(--dr-border);\
+                                    border-radius:6px;padding:10px;max-height:240px;overflow:auto;",
+                            "{kf.content}"
+                        }
                     }
                 }
             }
@@ -793,6 +915,8 @@ fn feedback_tab(
 }
 
 /// The Overview tab: the run-scope reflection + a per-station status digest.
+/// The reflection is agent-authored markdown, so it renders through the same
+/// formatted path as the annotate overlay rather than as raw source.
 fn overview_tab(review: &ReviewSessionPayload) -> Element {
     let reflection = review.reflection.clone();
     rsx! {
@@ -800,11 +924,12 @@ fn overview_tab(review: &ReviewSessionPayload) -> Element {
             if let Some(r) = reflection {
                 if !r.is_empty() {
                     div {
+                        style { "{darkrun_ui::markdown::CSS}" }
                         div { style: section_title(), "Reflection" }
-                        p {
-                            style: "margin:6px 0 0;font-size:12.5px;color:var(--dr-text-muted);\
-                                    white-space:pre-wrap;",
-                            "{r}"
+                        div {
+                            class: "dr-md",
+                            style: "margin-top:6px;font-size:12.5px;color:var(--dr-text-muted);",
+                            dangerous_inner_html: darkrun_ui::markdown::to_html_doc(&r),
                         }
                     }
                 }
@@ -846,10 +971,12 @@ fn feedback_action_handler(
     active_tab: Signal<String>,
     annotate_target: Signal<Option<AnnotateTarget>>,
     inbox_open: Signal<bool>,
+    reply_target: Signal<Option<String>>,
 ) -> impl FnMut((String, FeedbackAction)) + 'static {
     let mut active_tab = active_tab;
     let mut annotate_target = annotate_target;
     let mut inbox_open = inbox_open;
+    let mut reply_target = reply_target;
     move |(id, action): (String, FeedbackAction)| {
         let items = feedback.read().clone();
         // Jump is a surface action: focus the anchored artifact instead of
@@ -868,11 +995,16 @@ fn feedback_action_handler(
             }
             return;
         }
+        // Reply is a surface action too: open the composer on the item.
+        if action == FeedbackAction::Reply {
+            reply_target.set(Some(id));
+            return;
+        }
         // Resolve / dismiss mutate the record's status.
         let new_status = match action {
             FeedbackAction::Resolve => Some(FeedbackStatus::Addressed),
             FeedbackAction::Dismiss => Some(FeedbackStatus::NonActionable),
-            FeedbackAction::Jump => None,
+            FeedbackAction::Jump | FeedbackAction::Reply => None,
         };
         let (Some(status), Some(run), Some(station)) =
             (new_status, run.clone(), station.clone())
@@ -911,6 +1043,7 @@ fn feedback_inbox_panel(
     active_tab: Signal<String>,
     annotate_target: Signal<Option<AnnotateTarget>>,
     inbox_open: Signal<bool>,
+    reply_target: Signal<Option<String>>,
 ) -> Element {
     // Snapshot the outputs so the Jump resolver can match a feedback locator to
     // a declared output (and reuse its visual/path/url) without borrowing.
@@ -924,6 +1057,7 @@ fn feedback_inbox_panel(
         active_tab,
         annotate_target,
         inbox_open,
+        reply_target,
     );
     rsx! {
         Card {
@@ -935,6 +1069,111 @@ fn feedback_inbox_panel(
                 p { style: "color:var(--dr-text-muted);", "No feedback on this station yet." }
             } else {
                 {feedback_inbox(entries, Some(EventHandler::new(on_action)))}
+            }
+        }
+    }
+}
+
+/// The reply composer, opened on a feedback item from its row's reply chip.
+///
+/// POSTs the typed reply to the existing thread route
+/// (`/api/feedback/:run/:station/:id/replies`), then refetches the list so the
+/// new reply renders in the thread, and closes itself. Mirrors the checkpoint's
+/// station-note textarea idiom; the caller keys this by item id so switching
+/// rows starts a fresh draft.
+#[component]
+fn ReplyComposer(
+    cfg: ConnConfig,
+    run: Option<String>,
+    station: Option<String>,
+    fb_id: String,
+    feedback: Signal<Vec<FeedbackItem>>,
+    reply_target: Signal<Option<String>>,
+) -> Element {
+    let mut draft = use_signal(String::new);
+    let submit = use_signal(|| Submit::Idle);
+
+    let send = {
+        let cfg = cfg.clone();
+        let run = run.clone();
+        let station = station.clone();
+        let fb_id = fb_id.clone();
+        move |_| {
+            let body = draft.read().trim().to_string();
+            if body.is_empty() {
+                return;
+            }
+            let mut submit = submit;
+            let (Some(run), Some(station)) = (run.clone(), station.clone()) else {
+                submit.set(Submit::Failed("no run/station to reply into".into()));
+                return;
+            };
+            let cfg = cfg.clone();
+            let fb_id = fb_id.clone();
+            let mut feedback = feedback;
+            let mut reply_target = reply_target;
+            spawn(async move {
+                submit.set(Submit::Sending);
+                let req = darkrun_api::FeedbackReplyCreateRequest {
+                    body,
+                    author: None,
+                    close_as_answered: None,
+                };
+                match wire::submit_feedback_reply(&cfg, &run, &station, &fb_id, &req).await {
+                    Ok(()) => {
+                        // The thread grew server-side; refetch so it renders,
+                        // then close the composer.
+                        if let Ok(resp) = wire::fetch_feedback(&cfg, &run, &station).await {
+                            feedback.set(resp.items);
+                        }
+                        reply_target.set(None);
+                    }
+                    Err(e) => submit.set(Submit::Failed(e.to_string())),
+                }
+            });
+        }
+    };
+
+    let sending = matches!(*submit.read(), Submit::Sending);
+    let mut reply_close = reply_target;
+    let text_style = format!(
+        "width:100%;box-sizing:border-box;min-height:54px;padding:9px 12px;\
+         border-radius:6px;border:1px solid {border};background:{base};\
+         color:{text};font-family:{sans};font-size:13px;resize:vertical;",
+        border = tokens::var::BORDER,
+        base = tokens::var::SURFACE_BASE,
+        text = tokens::var::TEXT,
+        sans = tokens::FONT_SANS,
+    );
+    rsx! {
+        Card {
+            div { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                Badge { tone: Tone::Info, "reply" }
+                span {
+                    style: "flex:1;font-family:var(--dr-font-mono);font-size:12px;\
+                            color:var(--dr-text-muted);",
+                    "{fb_id}"
+                }
+                Button {
+                    variant: ButtonVariant::Ghost,
+                    on_click: move |_| reply_close.set(None),
+                    "close"
+                }
+            }
+            textarea {
+                style: "{text_style}",
+                placeholder: "reply to this feedback\u{2026}",
+                oninput: move |evt| draft.set(evt.value()),
+            }
+            div { style: "display:flex;align-items:center;gap:10px;margin-top:8px;",
+                Button {
+                    variant: ButtonVariant::Primary,
+                    tone: Tone::Accent,
+                    disabled: sending,
+                    on_click: send,
+                    "Send reply"
+                }
+                SubmitStatus { state: submit.read().clone() }
             }
         }
     }
@@ -973,6 +1212,7 @@ fn jump_target(
             path: out.run_relative_path.clone().unwrap_or_else(|| out.name.clone()),
             work_id: out.name.clone(),
             visual,
+            markdown: !visual && output_is_markdown(out),
             // Absolutize the fetch URL so the visual surface actually loads it.
             screenshot_url: out.relative_path.as_deref().map(|u| cfg.artifact_url(u)),
             // A text/code output opens its inline body, not a placeholder.
@@ -980,12 +1220,15 @@ fn jump_target(
         });
     }
 
-    // No declared output — anchor a text surface on the locator directly.
+    // No declared output — anchor a text surface on the locator directly. With
+    // no inline body the surface shows a placeholder, so the markdown flag is
+    // moot; a `.md` locator still renders formatted via the extension check.
     Some(AnnotateTarget {
         label: locator.clone(),
         path: locator.clone(),
         work_id: locator,
         visual: false,
+        markdown: false,
         screenshot_url: None,
         text: None,
     })
@@ -1013,6 +1256,7 @@ fn annotate_panel(
             path: target.path.clone(),
             work_id: target.work_id.clone(),
             visual: target.visual,
+            markdown: target.markdown,
             screenshot_url: target.screenshot_url.clone(),
             text: target.text.clone(),
             persisted,
@@ -1036,6 +1280,11 @@ fn AnnotateSurface(
     path: String,
     work_id: String,
     visual: bool,
+    /// Whether the text surface renders as formatted markdown. Decided at the
+    /// call site where the artifact kind is known (unit spec / output type);
+    /// defaults off for standalone/visual use.
+    #[props(default)]
+    markdown: bool,
     screenshot_url: Option<String>,
     text: Option<String>,
     persisted: Vec<TextMark>,
@@ -1048,8 +1297,11 @@ fn AnnotateSurface(
 ) -> Element {
     let kind = if visual { SurfaceKind::Visual } else { SurfaceKind::Text };
     // Markdown artifacts render as a formatted document in the stage (headings,
-    // lists, bold, code) rather than raw source.
-    let is_markdown = path.ends_with(".md") || path.ends_with(".markdown");
+    // lists, tables, code) with the annotations painted over it, rather than raw
+    // source. The kind is decided at the call site (a unit spec, an output's
+    // declared type); a `.md`/`.markdown` extension is a belt-and-suspenders
+    // fallback for a locator that carried no kind.
+    let is_markdown = markdown || path.ends_with(".md") || path.ends_with(".markdown");
     let default_tool = if visual { AnnotateTool::Pin } else { AnnotateTool::Select };
     let tool = use_signal(|| default_tool);
     // The placed visual marks (pin/rect/arrow/path/highlight) over the surface.
@@ -1481,16 +1733,11 @@ fn annotate_stage(
             } else if let Some(body) = text.as_deref() {
                 {
                     // Markdown artifacts render as a formatted document (the primary
-                    // read); other text (code/json) stays raw with painted marks.
-                    // Either way the stage's mouseup captures the real selection.
+                    // read) with the annotations painted over the rendered body;
+                    // other text (code/json) stays raw with painted marks. Either
+                    // way the stage's mouseup captures the real selection.
                     if markdown {
-                        rsx! {
-                            div {
-                                class: "dr-md",
-                                style: "padding:20px 24px;font-size:14px;",
-                                dangerous_inner_html: darkrun_ui::markdown::to_html(body),
-                            }
-                        }
+                        render_markdown_with_marks(body, &text_marks)
                     } else {
                         render_text_with_marks(body, &text_marks)
                     }
@@ -1541,6 +1788,83 @@ fn mark_span_style(tool: Option<AnnotateTool>, stale: bool) -> String {
         _ => "",
     };
     format!("{base}{deco}")
+}
+
+/// Render a markdown artifact as a formatted document — a frontmatter metadata
+/// header (status/station/role/mode chips) above the CommonMark + GFM body —
+/// with the text annotations painted over it as a numbered rail beneath the
+/// prose. The stage's mouseup captures the live selection off this rendered DOM,
+/// so a reviewer marks the formatted document directly; the rail keeps every
+/// mark (and stale-drift chip) visible instead of dropping them on the rendered
+/// branch. Anchoring stays text+paragraph based, unchanged by the formatting.
+fn render_markdown_with_marks(body: &str, marks: &[TextMark]) -> Element {
+    let (frontmatter, md_body) = darkrun_ui::markdown::split_frontmatter(body);
+    let meta_html = frontmatter
+        .map(darkrun_ui::markdown::frontmatter_html)
+        .unwrap_or_default();
+    // A fenced leading block with no flat scalars renders no chips. It must not
+    // vanish: `to_html` drops a leading `---` fence as metadata, so reconstruct
+    // the fence content ahead of the body (fence markers removed) and render that.
+    let body_html = match frontmatter {
+        Some(fm) if meta_html.is_empty() && !fm.trim().is_empty() => {
+            darkrun_ui::markdown::to_html(&format!("{fm}\n\n{md_body}"))
+        }
+        _ => darkrun_ui::markdown::to_html(md_body),
+    };
+    rsx! {
+        div {
+            class: "dr-md dr-annotate-md",
+            style: "padding:18px 22px;font-size:14px;max-height:72vh;overflow:auto;\
+                    user-select:text;cursor:text;",
+            if !meta_html.is_empty() {
+                div { dangerous_inner_html: "{meta_html}" }
+            }
+            div { dangerous_inner_html: "{body_html}" }
+            if !marks.is_empty() {
+                {annotation_rail(marks)}
+            }
+        }
+    }
+}
+
+/// The annotations rail beneath a rendered markdown document: each [`TextMark`]
+/// as a numbered, tool-styled quote of the anchored span, stale (content-drifted)
+/// anchors flagged amber. This is how marks stay visible over rendered prose,
+/// where inline span-splitting can't align a raw text selection to the tagged
+/// HTML the way it does on the raw branch.
+fn annotation_rail(marks: &[TextMark]) -> Element {
+    rsx! {
+        div {
+            class: "dr-annotate-rail",
+            style: "margin-top:16px;padding-top:12px;border-top:1px solid var(--dr-border);\
+                    display:flex;flex-direction:column;gap:6px;",
+            div {
+                style: "font-family:var(--dr-font-mono);font-size:10px;text-transform:uppercase;\
+                        letter-spacing:0.08em;color:var(--dr-text-faint);",
+                "annotations"
+            }
+            for (i, m) in marks.iter().enumerate() {
+                div { style: "display:flex;align-items:flex-start;gap:8px;line-height:1.5;",
+                    sup {
+                        style: "font-size:9px;font-weight:700;color:var(--dr-on-accent);\
+                                background:var(--dr-accent);border-radius:3px;padding:1px 4px;\
+                                margin-top:2px;flex:0 0 auto;",
+                        "{i + 1}"
+                    }
+                    span { style: mark_span_style(m.tool, m.stale),
+                        "\u{201c}{m.selected_text}\u{201d}"
+                    }
+                    if m.stale {
+                        span {
+                            style: "font-family:var(--dr-font-mono);font-size:11px;\
+                                    color:var(--dr-status-warn);",
+                            "\u{2014} changed since annotated"
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Render the artifact's text with every [`TextMark`] painted in place: each
@@ -1725,6 +2049,85 @@ fn visual_mark_to_pin(mark: &VisualMark) -> VisualReviewPin {
 fn output_is_visual(out: &OutputArtifact) -> bool {
     use darkrun_api::session::OutputArtifactType::*;
     matches!(out.artifact_type, Html | Image | Video)
+}
+
+/// Whether a text output should render as formatted markdown in the annotate
+/// stage. A declared `Markdown` output always does; a generic `File` renders
+/// formatted only when its body reads as markdown (headings/lists/tables/…), so
+/// code and json stay raw. Visual kinds never take this path.
+fn output_is_markdown(out: &OutputArtifact) -> bool {
+    use darkrun_api::session::OutputArtifactType::*;
+    match out.artifact_type {
+        Markdown => true,
+        File => out
+            .content
+            .as_deref()
+            .is_some_and(darkrun_ui::markdown::looks_like_markdown),
+        _ => false,
+    }
+}
+
+/// Completion criteria with an optional met flag, pulled from a raw unit
+/// `Value`. Accepts the same shapes as [`map::extract_criteria`] — a list of
+/// strings or of `{text, …}` objects — and additionally reads a `met` /
+/// `checked` / `done` / `satisfied` boolean off an object so the checklist can
+/// render a met (green) vs. unchecked glyph. String criteria carry no state.
+fn criteria_with_state(unit: &serde_json::Value) -> Vec<(String, Option<bool>)> {
+    use serde_json::Value;
+    for key in ["criteria", "completion_criteria", "acceptance", "checks"] {
+        let Some(arr) = unit.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        let items: Vec<(String, Option<bool>)> = arr
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(s) if !s.trim().is_empty() => Some((s.clone(), None)),
+                Value::Object(_) => {
+                    let text = map::first_str(
+                        item,
+                        &["text", "description", "label", "name", "criterion"],
+                    )?;
+                    if text.trim().is_empty() {
+                        return None;
+                    }
+                    let met = ["met", "checked", "done", "satisfied", "complete"]
+                        .iter()
+                        .find_map(|k| item.get(*k).and_then(Value::as_bool));
+                    Some((text, met))
+                }
+                _ => None,
+            })
+            .collect();
+        if !items.is_empty() {
+            return items;
+        }
+    }
+    Vec::new()
+}
+
+/// The per-criterion checklist glyph: a green check when the criterion is met,
+/// an empty checkbox otherwise (unknown met-state reads unchecked, never a bare
+/// bullet).
+fn criteria_glyph(met: Option<bool>) -> Element {
+    let (glyph, color) = match met {
+        Some(true) => ("\u{2611}", "var(--dr-status-ok)"), // ☑ met
+        _ => ("\u{2610}", "var(--dr-text-faint)"),         // ☐ unchecked
+    };
+    rsx! {
+        span {
+            style: format!(
+                "font-family:var(--dr-font-mono);font-size:13px;line-height:1.4;\
+                 color:{color};flex:0 0 auto;"
+            ),
+            "{glyph}"
+        }
+    }
+}
+
+/// The flex-row style for one criterion (glyph + text), replacing the bare list
+/// bullet with a checklist item.
+fn criteria_item_style() -> String {
+    "display:flex;align-items:flex-start;gap:7px;margin:0;".to_string()
 }
 
 /// The single, severity-driven checkpoint control set, rendered only at an
@@ -2425,10 +2828,11 @@ fn section_title() -> String {
         .to_string()
 }
 
-/// Shared completion-criteria list style.
+/// Shared completion-criteria list style — a bullet-free checklist column (the
+/// per-item glyph carries the checked/unchecked state).
 fn criteria_list() -> String {
-    "margin:0 0 0 28px;padding:0;font-family:var(--dr-font-sans);\
-     font-size:12px;color:var(--dr-text-muted);"
+    "margin:0 0 0 28px;padding:0;list-style:none;font-family:var(--dr-font-sans);\
+     font-size:12px;color:var(--dr-text-muted);display:flex;flex-direction:column;gap:3px;"
         .to_string()
 }
 
@@ -2765,6 +3169,37 @@ mod review_state_render_tests {
         }
         let _ = render(Failed);
     }
+
+    #[test]
+    fn unit_criteria_render_as_met_and_unchecked_checkboxes() {
+        // A unit's completion criteria render as a checklist: a met criterion
+        // shows a checked box (green), an unmet/unknown one an empty box — never
+        // a bare bullet.
+        fn App() -> Element {
+            let d = use_signal(|| Decision::Idle);
+            let review = ReviewSessionPayload {
+                session_id: "s".into(),
+                run_slug: Some("r".into()),
+                gate_type: Some(GateType::Ask),
+                station: Some("build".into()),
+                units: vec![serde_json::json!({
+                    "slug": "u1",
+                    "title": "Burst limiter",
+                    "status": "in_progress",
+                    "criteria": [
+                        {"text": "caps at N", "met": true},
+                        {"text": "emits a 429", "met": false},
+                    ],
+                })],
+                ..Default::default()
+            };
+            review_body(ConnConfig::from_env(), review, d)
+        }
+        let html = render(App);
+        assert!(html.contains('\u{2611}'), "met criterion shows a checked box: {html}");
+        assert!(html.contains('\u{2610}'), "unmet criterion shows an empty box: {html}");
+        assert!(html.contains("caps at N"), "criterion text rendered: {html}");
+    }
 }
 
 #[cfg(test)]
@@ -2824,6 +3259,48 @@ mod subcomponent_render_tests {
             }
         }
         let _ = render(App);
+    }
+
+    #[test]
+    fn annotate_surface_renders_markdown_body_with_frontmatter_and_marks() {
+        // A text artifact flagged markdown (a unit spec whose path is its title,
+        // no `.md`) renders formatted — heading/table/bold — with the frontmatter
+        // as a chip header and the annotations painted over the rendered body,
+        // never leaking raw `#`/`---`/`key: value`.
+        fn App() -> Element {
+            rsx! {
+                AnnotateSurface {
+                    cfg: ConnConfig::from_env(),
+                    label: "author-frame".to_string(),
+                    path: "author-frame".to_string(),
+                    work_id: "author-frame".to_string(),
+                    visual: false,
+                    markdown: true,
+                    text: Some(
+                        "---\nstatus: done\nstation: build\n---\n\n# Unit: author-frame\n\n\
+                         A **bold** spec.\n\n| a | b |\n|---|---|\n| 1 | 2 |".to_string(),
+                    ),
+                    persisted: vec![TextMark {
+                        selected_text: "bold".to_string(),
+                        paragraph: 1,
+                        tool: None,
+                        stale: true,
+                    }],
+                    on_close: move |_| {},
+                }
+            }
+        }
+        let html = render(App);
+        assert!(html.contains("<h1>Unit: author-frame</h1>"), "heading rendered: {html}");
+        assert!(html.contains("<table>"), "table rendered: {html}");
+        assert!(html.contains("<strong>bold</strong>"), "bold rendered: {html}");
+        assert!(html.contains("dr-md-meta"), "frontmatter chip header: {html}");
+        assert!(!html.contains("# Unit: author-frame"), "raw heading leaked: {html}");
+        assert!(!html.contains("status: done"), "raw frontmatter leaked: {html}");
+        // The mark is painted on the RENDERED branch (previously dropped), and a
+        // drifted anchor shows its stale chip.
+        assert!(html.contains("annotations"), "annotations rail present: {html}");
+        assert!(html.contains("changed since annotated"), "stale chip present: {html}");
     }
 
     #[test]
@@ -3114,6 +3591,7 @@ mod panel_render_tests {
             let active_tab = use_signal(|| "units".to_string());
             let annotate_target = use_signal(|| None::<AnnotateTarget>);
             let inbox_open = use_signal(|| true);
+            let reply_target = use_signal(|| None::<String>);
             feedback_inbox_panel(
                 ConnConfig::from_env(),
                 Some("run-1".into()),
@@ -3124,6 +3602,7 @@ mod panel_render_tests {
                 active_tab,
                 annotate_target,
                 inbox_open,
+                reply_target,
             )
         }
         fn Full() -> Element {
@@ -3133,6 +3612,7 @@ mod panel_render_tests {
             let active_tab = use_signal(|| "units".to_string());
             let annotate_target = use_signal(|| None::<AnnotateTarget>);
             let inbox_open = use_signal(|| true);
+            let reply_target = use_signal(|| None::<String>);
             let outputs = vec![out("home.png", OutputArtifactType::Image)];
             feedback_inbox_panel(
                 ConnConfig::from_env(),
@@ -3144,10 +3624,103 @@ mod panel_render_tests {
                 active_tab,
                 annotate_target,
                 inbox_open,
+                reply_target,
             )
         }
         assert!(render(Empty).contains("No feedback on this station yet."));
-        assert!(render(Full).contains("Feedback inbox"));
+        let full = render(Full);
+        assert!(full.contains("Feedback inbox"));
+        // An open row exposes the reply chip alongside jump/resolve/dismiss.
+        assert!(full.contains("reply"), "the reply chip renders: {full}");
+    }
+
+    #[test]
+    fn feedback_row_renders_its_reply_thread() {
+        fn App() -> Element {
+            let mut item = fb_item("FB-2", Some("spec.md"), "review: spec");
+            item.replies = vec![darkrun_api::FeedbackReply {
+                author: "agent".into(),
+                author_type: AuthorType::Agent,
+                body: "tightened the section".into(),
+                created_at: String::new(),
+            }];
+            let entries = map::feedback_entries(&[item]);
+            feedback_inbox(entries, None)
+        }
+        let html = render(App);
+        assert!(html.contains("dr-feedback-thread"), "{html}");
+        assert!(html.contains("tightened the section"), "{html}");
+    }
+
+    #[test]
+    fn reply_composer_renders_with_a_target() {
+        fn App() -> Element {
+            let feedback = use_signal(Vec::<FeedbackItem>::new);
+            let reply_target = use_signal(|| Some("FB-3".to_string()));
+            rsx! {
+                ReplyComposer {
+                    cfg: ConnConfig::from_env(),
+                    run: Some("run-1".to_string()),
+                    station: Some("build".to_string()),
+                    fb_id: "FB-3".to_string(),
+                    feedback,
+                    reply_target,
+                }
+            }
+        }
+        let html = render(App);
+        assert!(html.contains("FB-3"), "{html}");
+        assert!(html.contains("Send reply"), "{html}");
+    }
+
+    // ── Proof at the gate ───────────────────────────────────────────────────
+
+    #[test]
+    fn proof_at_gate_renders_the_panel_when_evidence_exists() {
+        fn App() -> Element {
+            let resp = darkrun_api::ProofGetResponse {
+                run: "r".into(),
+                station: Some("prove".into()),
+                proof: darkrun_api::Proof::bench(
+                    darkrun_api::Surface::Library,
+                    darkrun_api::proof::BenchProof {
+                        p50: Some(1.2),
+                        p95: Some(3.4),
+                        ..Default::default()
+                    },
+                ),
+            };
+            proof_at_gate(Some("prove"), Some(Some(resp)))
+        }
+        let html = render(App);
+        assert!(html.contains("dr-proof-panel"), "the ProofPanel renders: {html}");
+        assert!(html.contains("p95"), "the numbers render: {html}");
+    }
+
+    #[test]
+    fn proof_at_gate_absence_is_loud_only_at_a_prove_gate() {
+        fn AbsentAtProve() -> Element {
+            proof_at_gate(Some("prove"), Some(None))
+        }
+        fn AbsentAtBuild() -> Element {
+            proof_at_gate(Some("build"), Some(None))
+        }
+        fn Unanswered() -> Element {
+            proof_at_gate(Some("prove"), None)
+        }
+        // A confirmed absence at the prove gate is an explicit, prominent state.
+        assert!(render(AbsentAtProve).contains("no evidence attached"));
+        // Other gates (and an unanswered fetch) render nothing: no false claim.
+        assert!(!render(AbsentAtBuild).contains("no evidence attached"));
+        assert!(!render(Unanswered).contains("no evidence attached"));
+    }
+
+    #[test]
+    fn is_prove_station_matches_prove_names_only() {
+        assert!(is_prove_station(Some("prove")));
+        assert!(is_prove_station(Some("05-prove")));
+        assert!(!is_prove_station(Some("build")));
+        assert!(!is_prove_station(None));
     }
 
     #[test]
@@ -3160,6 +3733,7 @@ mod panel_render_tests {
                 path: "build/home.png".into(),
                 work_id: "home.png".into(),
                 visual: true,
+                markdown: false,
                 screenshot_url: Some("/api/output/home.png".into()),
             };
             let feedback_reload = use_signal(|| 0u32);

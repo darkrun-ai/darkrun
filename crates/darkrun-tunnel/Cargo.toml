@@ -15,7 +15,7 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Outbound WS to the relay + the local /ws/session subscription.
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
 # Local REST writes (advance / answer / feedback) — async client.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

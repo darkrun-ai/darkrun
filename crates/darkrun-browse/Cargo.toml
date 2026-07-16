@@ -1,0 +1,18 @@
+[package]
+name = "darkrun-browse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Engine-free reader that projects a repo's on-disk .darkrun/ state into darkrun-api browse payloads (shared by the HTTP server and the desktop's offline view)"
+
+[dependencies]
+darkrun-core.workspace = true
+darkrun-api.workspace = true
+darkrun-git.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

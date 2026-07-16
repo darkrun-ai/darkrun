@@ -30,15 +30,27 @@
 
 #![deny(missing_docs)]
 
+pub mod detect;
 pub mod error;
+pub mod native;
 pub mod oauth;
 pub mod provider;
 pub mod remote;
+pub mod repos;
 pub mod rest;
 pub mod store;
 pub mod transport;
 
 pub use error::{Result, VcsError};
+pub use native::{
+    app_base, app_login_url, broker_url, generate_nonce, login, logout, parse_provider,
+    poll_broker, poll_relay_claim, poll_relay_until_ready, poll_until_ready, refresh_url,
+    relay_claim_url, relay_login, start_url, status, status_lines, web_base, BrokerRefresher,
+    PollOutcome, RelayPoll, ReqwestTransport, Sleeper, APP_BASE_ENV, DEFAULT_APP_BASE,
+    DEFAULT_WEB_BASE, WEB_BASE_ENV,
+};
+pub use detect::remote_has_darkrun_artifacts;
+pub use repos::{list_repos, Repo};
 pub use oauth::{
     authorize_url, exchange_code, percent_encode, refresh_access_token, refresh_before_use,
     OauthClient, Refresher,

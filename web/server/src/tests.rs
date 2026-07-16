@@ -366,6 +366,67 @@ async fn callback_provider_error_renders_error_page() {
 }
 
 #[tokio::test]
+async fn callback_error_description_is_html_escaped() {
+    // WS-1: a crafted callback URL reflects `error` + `error_description` into
+    // the error page. Unescaped, the payload below would run script on
+    // darkrun.ai and exfiltrate the browse token; the response must carry only
+    // its escaped, inert form.
+    let state = github_exchange_state("tok", Broker::new());
+    let app = build_oauth_only(state);
+
+    // error=<script>…</script>, error_description=<img src=x onerror="steal()">
+    let uri = "/auth/github/callback?error=%3Cscript%3Ealert(document.domain)%3C%2Fscript%3E\
+               &error_description=%3Cimg%20src%3Dx%20onerror%3D%22steal()%22%3E";
+    let resp = app
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let html = body_string(resp).await;
+
+    // The raw markup never reaches the browser as HTML…
+    assert!(
+        !html.contains("<script>alert"),
+        "raw <script> was reflected unescaped: {html}"
+    );
+    assert!(
+        !html.contains("<img src=x onerror="),
+        "raw <img> attribute-breakout was reflected unescaped: {html}"
+    );
+    // …only its escaped, inert form does.
+    assert!(html.contains("&lt;script&gt;"), "escaped script tag missing");
+    assert!(html.contains("&lt;img"), "escaped img tag missing");
+    assert!(html.contains("&quot;"), "escaped quote missing");
+}
+
+#[tokio::test]
+async fn callback_unknown_provider_segment_is_html_escaped() {
+    // The `:provider` path segment is reflected too (via `parse_provider`).
+    // A `<script>` provider must render as inert text, not markup.
+    let state = github_exchange_state("tok", Broker::new());
+    let app = build_oauth_only(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/%3Cscript%3Ealert(1)%3C%2Fscript%3E/callback?code=c&state=s")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let html = body_string(resp).await;
+    assert!(
+        !html.contains("<script>alert"),
+        "raw provider segment reflected unescaped: {html}"
+    );
+    assert!(html.contains("&lt;script&gt;"));
+}
+
+#[tokio::test]
 async fn callback_exchange_failure_is_bad_gateway() {
     let broker = Broker::new();
     let state = state_with(Arc::new(FailingTransport), broker.clone());

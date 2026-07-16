@@ -233,3 +233,24 @@ resource "google_cloud_run_domain_mapping" "www" {
     route_name = google_cloud_run_v2_service.web.name
   }
 }
+
+# relay subdomain mapping (paired with the relay CNAME in the dns module).
+# relay.<web_domain> is the wss:// base the engine dials by default
+# (web/server DEFAULT_RELAY_PUBLIC_URL); the relay lives in this same darkrun-web
+# service, so the mapping just routes relay.<web_domain> here. A subdomain under
+# the verified apex needs no separate verification (same as www). Gated on
+# manage_domain_mapping: the DNS CNAME resolves regardless, but creating the
+# mapping needs a verified domain owner, so a verified human runs `gcloud run
+# domain-mappings create --service darkrun-web --domain relay.<web_domain>`
+# out-of-band when the flag is off.
+resource "google_cloud_run_domain_mapping" "relay" {
+  count    = var.web_domain != "" && var.manage_relay && var.manage_domain_mapping ? 1 : 0
+  name     = "${var.relay_subdomain}.${var.web_domain}"
+  location = var.region
+  metadata {
+    namespace = var.project
+  }
+  spec {
+    route_name = google_cloud_run_v2_service.web.name
+  }
+}

@@ -66,6 +66,31 @@ fn renders_output_review_and_view_artifacts() {
 }
 
 #[test]
+fn renders_markdown_artifact_as_formatted_document() {
+    // A focused markdown artifact renders through the markdown renderer: the
+    // frontmatter becomes a metadata chip header, the body becomes formatted
+    // HTML (headings/tables), NOT raw source in a <pre>.
+    fn App() -> Element {
+        let entry = ArtifactEntry::new("m1", "spec/unit.md", ArtifactKind::Markdown, "Unit spec")
+            .with_body(
+                "---\nstatus: done\nstation: build\n---\n\n# Author frame\n\n\
+                 A **bold** claim.\n\n| col | val |\n|---|---|\n| a | 1 |",
+            );
+        rsx! {
+            ViewArtifacts { artifacts: vec![entry], focused: "m1".to_string() }
+        }
+    }
+    let html = render(App);
+    assert!(html.contains("<h1>Author frame</h1>"), "heading rendered: {html}");
+    assert!(html.contains("<strong>bold</strong>"), "bold rendered: {html}");
+    assert!(html.contains("<table>"), "table rendered: {html}");
+    assert!(html.contains("dr-md-meta"), "frontmatter header rendered: {html}");
+    // The raw frontmatter fence + key/value never leak into the document.
+    assert!(!html.contains("status: done"), "frontmatter leaked: {html}");
+    assert!(!html.contains("# Author frame"), "raw markdown source leaked: {html}");
+}
+
+#[test]
 fn renders_factory_cards_and_tabs() {
     fn App() -> Element {
         rsx! {

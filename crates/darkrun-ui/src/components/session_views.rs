@@ -236,19 +236,11 @@ fn heading(text: &str) -> Element {
     rsx! { h2 { style: "{style}", "{text}" } }
 }
 
-/// Scoped CSS for the rendered-markdown blocks (prompt context + option
-/// descriptions): readable list/paragraph spacing and an inline-code chip. Kept
-/// local to the views so the markdown subset styles consistently wherever it
-/// renders.
-const MD_CSS: &str = "\
-.dr-md .dr-md-p{margin:0 0 8px;line-height:1.5;}\
-.dr-md .dr-md-p:last-child{margin-bottom:0;}\
-.dr-md .dr-md-ul{margin:6px 0;padding-left:18px;display:flex;flex-direction:column;gap:5px;}\
-.dr-md .dr-md-ul li{line-height:1.45;}\
-.dr-md .dr-md-code{font-family:var(--dr-font-mono);font-size:0.92em;\
-background:var(--dr-surface-base);border:1px solid var(--dr-border);\
-border-radius:4px;padding:0.5px 5px;}\
-.dr-md strong{font-weight:700;color:var(--dr-text);}";
+/// The scoped markdown CSS for the rendered-markdown blocks (prompt context +
+/// option descriptions) is the single shared [`crate::markdown::CSS`], so the
+/// session views, the review annotate stage, and the artifact browser all
+/// render headings, code, tables, and blockquotes identically.
+const MD_CSS: &str = crate::markdown::CSS;
 
 /// The prompt / context block shared by question and direction. The prompt is a
 /// single bold line; the context renders its markdown (bullets, bold, inline

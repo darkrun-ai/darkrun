@@ -464,6 +464,9 @@ fn feedback_preempts_at_later_station_too() {
 #[test]
 fn approve_completes_frame_and_advances_to_specify() {
     let (_d, store) = started();
+    // Approve resolves a genuine gate hold, so walk frame to its Checkpoint
+    // first (an off-gate approve is now refused, not a silent completion).
+    walk_to_checkpoint(&store, "r", "frame");
     let decided = checkpoint_decide(&store, "r", true, None).expect("approve");
     assert!(matches!(&decided.action, RunAction::Spec { station, .. } if station == "specify"));
     assert_eq!(station_status(&store, "r", "frame"), Status::Completed);
@@ -473,6 +476,7 @@ fn approve_completes_frame_and_advances_to_specify() {
 #[test]
 fn approve_stamps_advanced_outcome() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     checkpoint_decide(&store, "r", true, None).expect("approve");
     assert_eq!(
         checkpoint_outcome(&store, "r", "frame"),
@@ -483,6 +487,7 @@ fn approve_stamps_advanced_outcome() {
 #[test]
 fn approve_sets_completed_at_timestamp() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     checkpoint_decide(&store, "r", true, None).expect("approve");
     let s = store.read_state("r").unwrap().unwrap();
     assert!(s.stations["frame"].completed_at.is_some());
@@ -494,6 +499,7 @@ fn approve_emits_next_station_spec_action() {
     // action is the next station's Spec. (complete_station seeds the next
     // station Pending/Spec; the re-tick then stamps it InProgress/Review.)
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     let res = checkpoint_decide(&store, "r", true, None).expect("approve");
     assert!(matches!(&res.action, RunAction::Spec { station, .. } if station == "specify"));
     let s = store.read_state("r").unwrap().unwrap();
@@ -516,10 +522,15 @@ fn approve_through_every_station_to_sealed() {
 fn approve_advances_one_station_per_decision() {
     let (_d, store) = started();
     assert_eq!(active_station(&store, "r"), "frame");
+    // Each approve resolves a real gate hold, so walk each station to its
+    // Checkpoint before deciding it.
+    walk_to_checkpoint(&store, "r", "frame");
     checkpoint_decide(&store, "r", true, None).unwrap();
     assert_eq!(active_station(&store, "r"), "specify");
+    walk_to_checkpoint(&store, "r", "specify");
     checkpoint_decide(&store, "r", true, None).unwrap();
     assert_eq!(active_station(&store, "r"), "shape");
+    walk_to_checkpoint(&store, "r", "shape");
     checkpoint_decide(&store, "r", true, None).unwrap();
     assert_eq!(active_station(&store, "r"), "build");
 }
@@ -543,6 +554,7 @@ fn approve_ignores_feedback_param() {
     // Approving with a feedback body should NOT file feedback (feedback is only
     // filed on reject).
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     checkpoint_decide(&store, "r", true, Some("ignored note".into())).expect("approve");
     let all = feedback::list(&store, "r").unwrap();
     assert!(all.is_empty(), "approve must not file feedback");
@@ -841,6 +853,7 @@ fn derive_position_does_not_mutate_state() {
 #[test]
 fn approve_then_state_reloads_consistently() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     checkpoint_decide(&store, "r", true, None).expect("approve");
     // Reload from disk and verify the stamp survived serialization.
     let s = store.read_state("r").unwrap().unwrap();
@@ -1029,6 +1042,7 @@ fn noop_action_for_null_position() {
 fn checkpoint_decide_retick_surfaces_new_position() {
     // decide re-ticks so the returned action is the post-decision cursor.
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     let res = checkpoint_decide(&store, "r", true, None).expect("approve");
     // Approving frame advances to specify spec.
     assert_eq!(res.run, "r");
@@ -1662,6 +1676,9 @@ fn reject_then_address_then_reapprove_advances() {
     // Run track resumes; station still at checkpoint phase, now re-approve.
     let pos = derive_position(&store, "r").unwrap();
     assert!(matches!(pos.action, Some(RunAction::Checkpoint { .. })));
+    // Re-tick so the gate re-opens (the prior reject stamped it Blocked; a
+    // decided gate is not "awaiting a decision" until it re-enters).
+    run_tick(&store, "r").expect("re-enter gate");
     let decided = checkpoint_decide(&store, "r", true, None).expect("approve");
     assert!(matches!(&decided.action, RunAction::Spec { station, .. } if station == "specify"));
 }
@@ -1707,6 +1724,8 @@ fn approve_after_block_clears_blocked_to_completed() {
     assert_eq!(station_status(&store, "r", "frame"), Status::Blocked);
     let fb = &feedback::list(&store, "r").unwrap()[0];
     feedback::reject(&store, "r", &fb.id, "actually fine").unwrap();
+    // Re-tick so the gate re-opens after the prior reject stamped it Blocked.
+    run_tick(&store, "r").expect("re-enter gate");
     checkpoint_decide(&store, "r", true, None).expect("approve");
     assert_eq!(station_status(&store, "r", "frame"), Status::Completed);
 }
@@ -2002,6 +2021,7 @@ fn feedback_during_manufacture_does_not_consume_wave() {
 #[test]
 fn decide_approve_returns_run_track_for_next_spec() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     let res = checkpoint_decide(&store, "r", true, None).expect("approve");
     assert_eq!(res.position.track, Track::Run);
 }
@@ -2026,6 +2046,7 @@ fn decide_approve_at_harden_returns_sealed_run_track() {
 #[test]
 fn decide_run_field_is_slug() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     let res = checkpoint_decide(&store, "r", true, None).expect("approve");
     assert_eq!(res.run, "r");
 }
@@ -2057,6 +2078,7 @@ fn checkpoint_outcome_serializes_awaiting() {
 #[test]
 fn state_with_advanced_outcome_round_trips_json() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     checkpoint_decide(&store, "r", true, None).expect("approve");
     let s = store.read_state("r").unwrap().unwrap();
     let j = json_of(&s.stations["frame"].checkpoint.as_ref().unwrap());
@@ -2318,6 +2340,7 @@ fn two_open_settle_both_releases() {
 #[test]
 fn approve_is_stable_state_after_decide() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     checkpoint_decide(&store, "r", true, None).expect("approve");
     let snap1 = store.read_state("r").unwrap().unwrap();
     // A pure derive afterwards must not mutate.
@@ -2330,6 +2353,7 @@ fn approve_is_stable_state_after_decide() {
 #[test]
 fn approve_frame_then_specify_outcomes_independent() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     checkpoint_decide(&store, "r", true, None).expect("frame");
     // Walk specify to checkpoint and reject it.
     walk_to_checkpoint(&store, "r", "specify");
@@ -2341,6 +2365,7 @@ fn approve_frame_then_specify_outcomes_independent() {
 #[test]
 fn blocked_specify_does_not_affect_completed_frame() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     checkpoint_decide(&store, "r", true, None).expect("frame");
     walk_to_checkpoint(&store, "r", "specify");
     checkpoint_decide(&store, "r", false, Some("x".into())).expect("specify reject");
@@ -2433,6 +2458,8 @@ fn harden_reject_then_address_then_seal() {
     checkpoint_decide(&store, "r", false, Some("gap".into())).expect("reject");
     let fb = &feedback::list(&store, "r").unwrap()[0];
     feedback::set_status(&store, "r", &fb.id, FeedbackStatus::Addressed).unwrap();
+    // Re-tick so the gate re-opens after the prior reject stamped it Blocked.
+    run_tick(&store, "r").expect("re-enter gate");
     let res = checkpoint_decide(&store, "r", true, None).expect("seal");
     assert!(matches!(finish_run_review(&store, "r", res.action), RunAction::Sealed { .. }));
 }
@@ -2479,6 +2506,7 @@ fn reject_leaves_completed_at_unset() {
 #[test]
 fn next_station_seeded_only_on_completion() {
     let (_d, store) = started();
+    walk_to_checkpoint(&store, "r", "frame");
     // Before completing frame, specify is not yet in state.
     let s = store.read_state("r").unwrap().unwrap();
     assert!(!s.stations.contains_key("specify"));
@@ -2557,6 +2585,8 @@ fn whole_run_with_mid_rejects_still_seals() {
         let fb = feedback::list(&store, "r").unwrap();
         let open = fb.iter().find(|f| !feedback::is_terminal(f.status)).unwrap();
         feedback::set_status(&store, "r", &open.id, FeedbackStatus::Addressed).unwrap();
+        // Re-tick so the gate re-opens after the reject stamped it Blocked.
+        run_tick(&store, "r").expect("re-enter gate");
         checkpoint_decide(&store, "r", true, None).expect("approve");
     }
     let final_action = finish_run_review(&store, "r", derive_position(&store, "r").unwrap().action.unwrap());

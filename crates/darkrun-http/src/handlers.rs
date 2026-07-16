@@ -7,6 +7,7 @@
 //!   - `HEAD   /api/session/:id/heartbeat`           — client-presence ping.
 //!   - `POST   /review/:id/decide`                   — record a review decision.
 //!   - `POST   /visual-review/:id/annotate`          — annotate an output -> feedback.
+//!   - `POST   /api/annotation/:run/:id/resolve`     — close an annotation (unblock).
 //!   - `POST   /api/proof/:run`                       — attach a run's proof.
 //!   - `GET    /api/proof/:run`                       — read a run's proof.
 //!   - `POST   /api/advance/:id`                     — SPA wake signal past a gate.
@@ -25,17 +26,16 @@ use axum::{
 };
 use darkrun_api::{
     DirectionSelectRequest, DirectionSelectResponse, FeedbackCreateRequest, FeedbackCreateResponse,
-    FeedbackDeleteResponse, FeedbackItem, FeedbackListResponse, FeedbackReplyCreateRequest,
-    FeedbackReplyCreateResponse, FeedbackStatus, FeedbackUpdateRequest, FeedbackUpdateResponse,
-    OutputReviewRequest, OutputReviewResponse, PickerSelectRequest, PickerSelectResponse,
-    ProofAttachRequest, ProofAttachResponse, ProofGetResponse, PushAckRequest, PushAckResponse,
-    QuestionAnswerRequest,
+    FeedbackDeleteResponse, FeedbackReplyCreateRequest, FeedbackReplyCreateResponse, FeedbackStatus,
+    FeedbackUpdateRequest, FeedbackUpdateResponse, OutputReviewRequest, OutputReviewResponse,
+    PickerSelectRequest, PickerSelectResponse, ProofAttachRequest, ProofAttachResponse,
+    ProofGetResponse, PushAckRequest, PushAckResponse, QuestionAnswerRequest,
     QuestionAnswerResponse, ReviewDecision, ReviewDecisionRequest, ReviewDecisionResponse,
     SessionPayload, SessionStatus,
 };
 use serde_json::json;
 
-use crate::feedback_doc::{self, FeedbackDoc};
+use darkrun_browse::{next_id, FeedbackDoc};
 use crate::state::AppState;
 
 /// `GET /health` — liveness/readiness probe. Always `200 ok` once the router
@@ -59,6 +59,13 @@ pub async fn get_run_asset(
     Path((slug, rest)): Path<(String, String)>,
 ) -> Response {
     use std::path::{Component, PathBuf};
+
+    // The slug is a path component (`run_dir(slug)`); a traversal value here is
+    // an arbitrary-READ vector, so reject it before joining. The trailing asset
+    // path is separately lexically resolved below.
+    if let Some(resp) = reject_unsafe_segment("run slug", &slug) {
+        return resp;
+    }
 
     let assets_root = state.store.run_dir(&slug).join("assets");
     // Lexically resolve the requested sub-path; reject any escape.
@@ -117,15 +124,45 @@ pub async fn session_heartbeat(State(state): State<AppState>, Path(id): Path<Str
     }
 }
 
+/// Decode a decide body from either accepted shape.
+///
+/// The canonical shape is [`ReviewDecisionRequest`] (`{"decision": "approved"}`),
+/// but agents following the breadcrumb prompts keep sending the boolean alias
+/// `{"approved": true}`, which used to 422. Both now land: the alias maps
+/// `true` → `approved` and `false` → `changes_requested`, keeping the optional
+/// `feedback` string. `None` when the body matches neither shape.
+fn decision_from_body(body: &serde_json::Value) -> Option<ReviewDecisionRequest> {
+    if let Ok(req) = serde_json::from_value::<ReviewDecisionRequest>(body.clone()) {
+        return Some(req);
+    }
+    let approved = body.get("approved")?.as_bool()?;
+    Some(ReviewDecisionRequest {
+        decision: if approved { "approved" } else { "changes_requested" }.to_string(),
+        feedback: body
+            .get("feedback")
+            .and_then(|f| f.as_str())
+            .map(str::to_string),
+        annotations: None,
+    })
+}
+
 /// `POST /review/:id/decide` — record a review decision against a registered
 /// review session. The raw `decision` string is canonicalized server-side:
 /// only `approved` (case-insensitive) yields [`ReviewDecision::Approved`]. The
-/// session's payload is updated in place and pushed to any WebSocket subscriber.
+/// body is accepted in either shape [`decision_from_body`] recognizes (`422`
+/// otherwise). The session's payload is updated in place and pushed to any
+/// WebSocket subscriber.
 pub async fn review_decide(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<ReviewDecisionRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
+    let Some(req) = decision_from_body(&body) else {
+        return unprocessable(
+            "body must carry a 'decision' string or an 'approved' boolean",
+            &id,
+        );
+    };
     let Some(payload) = state.sessions.get(&id) else {
         return not_found("session", &id);
     };
@@ -174,8 +211,37 @@ pub async fn review_decide(
         }
     }
 
-    // Reflect the decision back onto the session payload and re-register it so
-    // subscribers see the resolved state.
+    // Durable land FIRST, then flip the session. The ENGINE reads the on-disk
+    // StateStore, and its `checkpoint_decide` is authoritative: it re-enforces the
+    // severity gate AND the Prove-evidence gate. If it REFUSES the decision (an
+    // approve with no measured evidence at Prove, say), surface that as a 409 and
+    // do NOT flip the in-memory session to Approved: otherwise the operator sees a
+    // false success while the gate stays held on disk and the run wedges. An
+    // ad-hoc review (no `run_slug`) has nothing to land, so it proceeds straight
+    // to the flip.
+    let run_slug = review.run_slug.clone();
+    if let Some(run) = run_slug.as_deref() {
+        if let Err(reason) =
+            state.decide_gate(run, decision == ReviewDecision::Approved, req.feedback.clone())
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": reason,
+                    "session_id": id,
+                    "decision": match decision {
+                        ReviewDecision::Approved => "approved",
+                        ReviewDecision::ChangesRequested => "changes_requested",
+                    },
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // The land succeeded (or this is an ad-hoc review): reflect the decision back
+    // onto the session payload and re-register it so subscribers see the resolved
+    // state.
     review.decision = Some(
         match decision {
             ReviewDecision::Approved => "approved",
@@ -258,6 +324,14 @@ pub async fn request_unit_reset(
     State(state): State<AppState>,
     Path((run, unit)): Path<(String, String)>,
 ) -> Response {
+    // Both segments are path components (`units_dir(run)/<unit>.md`); reject a
+    // traversal value before the store reads/writes the unit doc.
+    if let Some(resp) = reject_unsafe_segment("run", &run) {
+        return resp;
+    }
+    if let Some(resp) = reject_unsafe_segment("unit", &unit) {
+        return resp;
+    }
     let store = &state.store;
     let Ok(mut u) = store.read_unit(&run, &unit) else {
         return not_found("unit", &unit);
@@ -451,7 +525,7 @@ pub async fn visual_review_annotate(
     let station = review.station.clone().unwrap_or_default();
 
     let existing = state.store.read_feedback_raw(&run).unwrap_or_default();
-    let fb_id = feedback_doc::next_id(existing.keys());
+    let fb_id = next_id(existing.keys());
     let title = req.title.clone().unwrap_or_else(|| {
         match review.artifact_path.as_deref() {
             Some(path) => format!("Visual review: {path}"),
@@ -483,6 +557,52 @@ pub async fn visual_review_annotate(
         }),
     )
         .into_response()
+}
+
+/// `POST /api/annotation/:run/:id/resolve` — close ONE annotation so it stops
+/// blocking the checkpoint.
+///
+/// An OPEN `must`/`should` annotation blocks a clean Approve on both decide paths
+/// (`review_decide` here and the engine's `checkpoint_decide`). Without a route to
+/// transition an annotation out of `open`, a desktop reviewer who marked a blocker,
+/// then saw it addressed, had NO way to clear it — Approve stayed refused and the
+/// run wedged. This is the desktop's half of that missing verb (the MCP tool
+/// `darkrun_annotation_resolve` is the agent's half): the body's optional `status`
+/// selects `addressed` (a fix landed, the default) or `dismissed` (no code change).
+/// `400` on an unknown status or unsafe segment, `404` when the annotation is
+/// unknown.
+pub async fn resolve_annotation(
+    State(state): State<AppState>,
+    Path((run, id)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    use darkrun_api::annotation::AnnotationStatus;
+    // Path safety rides on the store's own containment: `annotation_path` funnels
+    // both `run` and `id` through the same `contained()` backstop every leaf uses,
+    // so a traversing segment can't escape `annotations/` (the same posture the
+    // other feedback/unit handlers here rely on).
+    // Only the two terminal, human-meaningful resolutions are settable: `addressed`
+    // (a fix landed) or `dismissed` (valid, no code change). Absent → `addressed`.
+    let raw = body
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("addressed")
+        .trim()
+        .to_ascii_lowercase();
+    let status = match raw.as_str() {
+        "addressed" | "resolve" | "resolved" => AnnotationStatus::Addressed,
+        "dismissed" | "dismiss" => AnnotationStatus::Dismissed,
+        other => {
+            return bad_request(&format!(
+                "invalid annotation resolution '{other}': use 'addressed' or 'dismissed'"
+            ))
+        }
+    };
+    match state.store.update_annotation_status(&run, &id, status) {
+        Ok(annotation) => (StatusCode::OK, Json(json!({ "ok": true, "annotation": annotation }))).into_response(),
+        // The only expected error is the not-found case; surface it as `404`.
+        Err(_) => not_found("annotation", &id),
+    }
 }
 
 /// `POST /api/proof/:run` — attach a run's objective-evidence [`Proof`].
@@ -517,7 +637,19 @@ pub async fn attach_proof(
 /// `GET /api/proof/:run` — return a run's attached objective-evidence proof.
 /// `404` when no proof has been attached for the run.
 pub async fn get_proof(State(state): State<AppState>, Path(run): Path<String>) -> Response {
-    match state.proofs.get(&run) {
+    // The in-memory registry is populated by the HTTP POST (`attach_proof`).
+    if let Some((proof, station)) = state.proofs.get(&run) {
+        return (
+            StatusCode::OK,
+            Json(ProofGetResponse { run, station, proof }),
+        )
+            .into_response();
+    }
+    // Fallback to the on-disk store: the AGENT attaches proof via the MCP
+    // `darkrun_proof_attach` tool, which writes `.darkrun/<run>/proof.json` and
+    // never touches this in-memory registry. Without this the desktop's
+    // proof-at-the-gate view 404s on the primary (agent-attached) evidence.
+    match darkrun_browse::read_disk_proof(&state.store, &run) {
         Some((proof, station)) => (
             StatusCode::OK,
             Json(ProofGetResponse { run, station, proof }),
@@ -531,28 +663,26 @@ pub async fn get_proof(State(state): State<AppState>, Path(run): Path<String>) -
 ///
 /// Reads the run's feedback sidecar files off `.darkrun/` and returns the
 /// parsed items filtered to the requested station. Items with no recorded
-/// station are treated as belonging to every station (legacy-tolerant).
+/// station are treated as belonging to every station (legacy-tolerant). Each
+/// item carries its reply thread so the desktop renders the conversation, not
+/// just the finding.
 pub async fn list_feedback(
     State(state): State<AppState>,
     Path((run, station)): Path<(String, String)>,
 ) -> Response {
-    let raw = state.store.read_feedback_raw(&run).unwrap_or_default();
-    let mut items: Vec<FeedbackItem> = raw
-        .into_iter()
-        .map(|(id, content)| FeedbackDoc::parse(&id, &content))
-        .filter(|doc| doc.matches_station(&station))
-        .map(|doc| doc.to_item())
-        .collect();
-    items.sort_by(|a, b| a.feedback_id.cmp(&b.feedback_id));
-
+    if let Some(resp) = reject_unsafe_segment("run", &run) {
+        return resp;
+    }
+    if let Some(resp) = reject_unsafe_segment("station", &station) {
+        return resp;
+    }
     (
         StatusCode::OK,
-        Json(FeedbackListResponse {
-            run,
-            station,
-            count: items.len(),
-            items,
-        }),
+        Json(darkrun_browse::feedback_for_station(
+            &state.store,
+            &run,
+            &station,
+        )),
     )
         .into_response()
 }
@@ -568,12 +698,21 @@ pub async fn create_feedback(
     Path((run, station)): Path<(String, String)>,
     Json(req): Json<FeedbackCreateRequest>,
 ) -> Response {
+    // `run` becomes `feedback_dir(run)`, a path component, so reject a traversal
+    // slug (the arbitrary-WRITE vector) before persisting. `station` is stored
+    // in the doc; validate it too so no hostile segment reaches the layout.
+    if let Some(resp) = reject_unsafe_segment("run", &run) {
+        return resp;
+    }
+    if let Some(resp) = reject_unsafe_segment("station", &station) {
+        return resp;
+    }
     if req.title.trim().is_empty() || req.body.trim().is_empty() {
         return bad_request("title and body are required");
     }
 
     let existing = state.store.read_feedback_raw(&run).unwrap_or_default();
-    let id = feedback_doc::next_id(existing.keys());
+    let id = next_id(existing.keys());
 
     // `FeedbackDoc::new_user` always stamps `user` as the author: any
     // client-supplied author crosses the trust boundary and is discarded.
@@ -610,9 +749,16 @@ pub async fn create_feedback(
 /// the item does not exist. Returns the list of fields actually changed.
 pub async fn update_feedback(
     State(state): State<AppState>,
-    Path((run, _station, id)): Path<(String, String, String)>,
+    Path((run, station, id)): Path<(String, String, String)>,
     Json(req): Json<FeedbackUpdateRequest>,
 ) -> Response {
+    // `run` + `id` become `feedback_dir(run)/<id>.md`; reject a traversal in
+    // either (and in the station segment) before touching the sidecar.
+    for (kind, value) in [("run", &run), ("station", &station), ("id", &id)] {
+        if let Some(resp) = reject_unsafe_segment(kind, value) {
+            return resp;
+        }
+    }
     if req.is_empty() {
         return bad_request("at least one of 'status' / 'closed_by' / 'resolution' must be provided");
     }
@@ -669,8 +815,13 @@ pub async fn update_feedback(
 /// item is unknown.
 pub async fn delete_feedback(
     State(state): State<AppState>,
-    Path((run, _station, id)): Path<(String, String, String)>,
+    Path((run, station, id)): Path<(String, String, String)>,
 ) -> Response {
+    for (kind, value) in [("run", &run), ("station", &station), ("id", &id)] {
+        if let Some(resp) = reject_unsafe_segment(kind, value) {
+            return resp;
+        }
+    }
     let Some(content) = state
         .store
         .read_feedback_raw(&run)
@@ -694,7 +845,10 @@ pub async fn delete_feedback(
             .into_response();
     }
 
-    let path = state.store.feedback_dir(&run).join(format!("{id}.md"));
+    // `feedback_path` contains both `run` and `id` to safe components, so the
+    // deletion target can never escape `feedback/` (belt-and-suspenders behind
+    // the route-layer guard above).
+    let path = state.store.feedback_path(&run, &id);
     if std::fs::remove_file(&path).is_err() {
         return internal_error("failed to delete feedback");
     }
@@ -716,9 +870,14 @@ pub async fn delete_feedback(
 /// set. `400` on an empty body, `404` when the parent is unknown.
 pub async fn create_feedback_reply(
     State(state): State<AppState>,
-    Path((run, _station, id)): Path<(String, String, String)>,
+    Path((run, station, id)): Path<(String, String, String)>,
     Json(req): Json<FeedbackReplyCreateRequest>,
 ) -> Response {
+    for (kind, value) in [("run", &run), ("station", &station), ("id", &id)] {
+        if let Some(resp) = reject_unsafe_segment(kind, value) {
+            return resp;
+        }
+    }
     if req.body.trim().is_empty() {
         return bad_request("reply body is required");
     }
@@ -780,6 +939,27 @@ fn bad_request(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
 }
 
+/// Reject a path segment that is not a safe `.darkrun/` path component.
+///
+/// A run / station / unit / feedback-id segment becomes a LITERAL filesystem
+/// path component when a handler reads or writes state (see `get_run_asset`,
+/// `create_feedback`, and the unit routes), so a value like `../../etc` would
+/// let a request escape the state sandbox and the repo root. Every fs-touching
+/// route runs each such segment through this guard FIRST, so a traversal value
+/// `400`s before the store ever joins it, the edge half of the defense, paired
+/// with the store's own containment (`darkrun_core::state::validate` /
+/// `StateStore::run_dir`). Returns `Some(400)` to short-circuit, `None` to
+/// proceed.
+fn reject_unsafe_segment(kind: &str, value: &str) -> Option<Response> {
+    if darkrun_core::state::validate::is_valid_slug(value) {
+        None
+    } else {
+        Some(bad_request(&format!(
+            "invalid {kind}: must be a safe path component"
+        )))
+    }
+}
+
 /// Build a uniform `409` JSON envelope for a session-type mismatch.
 fn conflict(msg: &str, id: &str) -> Response {
     (
@@ -806,4 +986,36 @@ fn internal_error(msg: &str) -> Response {
         Json(json!({ "error": msg })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decision_from_body_accepts_the_canonical_shape() {
+        let req = decision_from_body(&json!({ "decision": "approved", "feedback": "nice" }))
+            .expect("canonical shape parses");
+        assert_eq!(req.decision, "approved");
+        assert_eq!(req.feedback.as_deref(), Some("nice"));
+    }
+
+    #[test]
+    fn decision_from_body_accepts_the_boolean_alias() {
+        let yes = decision_from_body(&json!({ "approved": true })).expect("alias parses");
+        assert_eq!(yes.decision, "approved");
+        assert!(yes.feedback.is_none());
+        let no = decision_from_body(&json!({ "approved": false, "feedback": "redo it" }))
+            .expect("alias parses");
+        assert_eq!(no.decision, "changes_requested");
+        assert_eq!(no.feedback.as_deref(), Some("redo it"));
+    }
+
+    #[test]
+    fn decision_from_body_rejects_unrecognized_shapes() {
+        assert!(decision_from_body(&json!({})).is_none());
+        // A non-boolean `approved` is not the alias.
+        assert!(decision_from_body(&json!({ "approved": "yes" })).is_none());
+        assert!(decision_from_body(&json!("approved")).is_none());
+    }
 }

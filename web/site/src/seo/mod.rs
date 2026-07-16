@@ -4,7 +4,7 @@
 //! table, so they are unit-testable and compile to wasm. The native static-site
 //! generator ([`crate::bin`]-side) writes their output to disk.
 
-use crate::content::POSTS;
+use crate::content::{self, CONCEPTS, DOCS, GUIDES, POSTS};
 use crate::route::Route;
 
 /// Canonical site origin (no trailing slash).
@@ -251,9 +251,328 @@ pub fn json_ld_article(doc: &crate::content::Doc, path: &str) -> String {
     obj.to_string()
 }
 
+// ── Per-page <head> metadata ────────────────────────────────────────────────
+//
+// The site is a client-rendered SPA served from one `index.html` whose static
+// `<head>` names the HOMEPAGE (its canonical, title, description). Without a
+// per-route override, every one of the ~50 subpages would ship that same head,
+// so each would self-canonicalize to `/` and share the homepage title, which
+// erases their SEO (a crawler folds them all into the homepage). The Shell
+// drives [`head_sync_script`] on every navigation to give each route its OWN
+// canonical + title + description.
+
+/// The homepage `<title>` and description, re-asserted on `/` so the homepage
+/// owns its head too (rather than inheriting a stale one from a prior route).
+const HOME_TITLE: &str = "darkrun: the dark factory harness";
+const HOME_DESCRIPTION: &str =
+    "darkrun is a dark factory harness: it runs your agents lights-out as an ordered line of \
+     stations that take work from raw intent to a shipped, hardened outcome.";
+
+/// The `<head>` metadata a single route owns: its own canonical URL, `<title>`,
+/// and description. Emitting these PER ROUTE is what stops every subpage from
+/// self-canonicalizing to the homepage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageMeta {
+    /// The absolute canonical URL for this exact path.
+    pub canonical: String,
+    /// The full `<title>` text.
+    pub title: String,
+    /// The meta description.
+    pub description: String,
+}
+
+/// The canonical URL for a route path: the site origin plus the route's OWN
+/// path, so each page self-identifies. The homepage is `/`; every other page
+/// keeps its own path (trailing slash trimmed so canonicals stay stable).
+pub fn canonical_url(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        format!("{SITE_URL}/")
+    } else {
+        format!("{SITE_URL}{trimmed}")
+    }
+}
+
+/// Resolve the full `<head>` metadata for a route path. The subpage `<title>`
+/// carries a `... · darkrun` suffix; the homepage stands alone.
+pub fn page_meta(path: &str) -> PageMeta {
+    let is_home = path.trim_end_matches('/').is_empty();
+    let (page_title, description) = title_and_description(path);
+    let title = if is_home {
+        page_title
+    } else {
+        format!("{page_title} \u{00b7} darkrun")
+    };
+    PageMeta {
+        canonical: canonical_url(path),
+        title,
+        description,
+    }
+}
+
+/// The page-specific `(title, description)` for a route path, drawn from the
+/// content corpora for the dynamic routes and a small table for the fixed pages.
+/// Unknown paths (the catch-all NotFound) fall back to the site defaults.
+fn title_and_description(path: &str) -> (String, String) {
+    let raw = path.trim_end_matches('/');
+    let p = if raw.is_empty() { "/" } else { raw };
+
+    // Dynamic content routes (most specific first) resolve their own metadata
+    // straight from the embedded corpus.
+    if let Some(slug) = p.strip_prefix("/docs/") {
+        if let Some(d) = content::find(DOCS, slug) {
+            return (d.title.to_string(), d.summary.to_string());
+        }
+    }
+    if let Some(slug) = p.strip_prefix("/blog/") {
+        if let Some(d) = content::find(POSTS, slug) {
+            return (d.title.to_string(), d.summary.to_string());
+        }
+    }
+    if let Some(rest) = p.strip_prefix("/factories/") {
+        if let Some((factory, station)) = rest.split_once("/stations/") {
+            if let Ok(f) = darkrun_content::load_validated(factory) {
+                if let Some(st) = f.station(station) {
+                    return (
+                        format!("{} station", st.label()),
+                        format!("The {} station of the {} factory.", st.label(), f.name()),
+                    );
+                }
+            }
+            return (
+                format!("{} station", humanize(station)),
+                format!("A station of the {} factory.", humanize(factory)),
+            );
+        }
+        if let Ok(f) = darkrun_content::load_validated(rest) {
+            let desc = f.frontmatter.description.trim();
+            let desc = if desc.is_empty() {
+                format!("The {} factory and the stations it walks.", f.name())
+            } else {
+                desc.to_string()
+            };
+            return (format!("{} factory", f.name()), desc);
+        }
+        return (
+            format!("{} factory", humanize(rest)),
+            format!("The {} factory and the stations it walks.", humanize(rest)),
+        );
+    }
+    if let Some(phase) = p.strip_prefix("/methodology/") {
+        if let Some(d) = content::find(CONCEPTS, phase) {
+            return (d.title.to_string(), d.summary.to_string());
+        }
+        return (
+            format!("The {} phase", humanize(phase)),
+            format!(
+                "The {} phase of the six-phase machine every station walks.",
+                humanize(phase)
+            ),
+        );
+    }
+
+    // The prose guide pages carry their own title/summary from the GUIDES corpus.
+    let guide_slug = match p {
+        "/start-here" => Some("start-here"),
+        "/how-it-works" => Some("how-it-works"),
+        "/big-picture" => Some("big-picture"),
+        "/workflows" => Some("workflows"),
+        "/about" => Some("about"),
+        _ => None,
+    };
+    if let Some(slug) = guide_slug {
+        if let Some(d) = content::find(GUIDES, slug) {
+            return (d.title.to_string(), d.summary.to_string());
+        }
+    }
+
+    // Index + standalone pages: a fixed table of real, page-specific copy.
+    match p {
+        "/" => (HOME_TITLE.to_string(), HOME_DESCRIPTION.to_string()),
+        "/factories" => (
+            "Factories".to_string(),
+            "Every darkrun factory and the stations it walks: the methodologies that drive a run."
+                .to_string(),
+        ),
+        "/docs" => (
+            "Documentation".to_string(),
+            "Install darkrun, start a run, review at the gates, and ship. The darkrun reference."
+                .to_string(),
+        ),
+        "/methodology" => (
+            "Methodology".to_string(),
+            "The anti-rework thesis: one universal station slot, and the six-phase machine every \
+             station walks."
+                .to_string(),
+        ),
+        "/glossary" => (
+            "Glossary".to_string(),
+            "The darkrun vocabulary: factories, stations, units, passes, gates, and the rest of \
+             the factory model."
+                .to_string(),
+        ),
+        "/lifecycles" => (
+            "Lifecycles".to_string(),
+            "How a run moves through its stations, from raw intent to a sealed, shipped outcome."
+                .to_string(),
+        ),
+        "/blog" => (
+            "Blog".to_string(),
+            "Notes on darkrun: the dark factory model, agent orchestration, and shipping with \
+             checkpoints instead of babysitting."
+                .to_string(),
+        ),
+        "/changelog" => (
+            "Changelog".to_string(),
+            "What changed in each darkrun release.".to_string(),
+        ),
+        "/paper" => (
+            "The paper".to_string(),
+            "The darkrun thesis in long form: why an ordered assembly line beats an unstructured \
+             agent loop."
+                .to_string(),
+        ),
+        "/templates" => (
+            "Factory templates".to_string(),
+            "Starting-point factory templates you can scaffold and adapt to your own line."
+                .to_string(),
+        ),
+        "/browse" => (
+            "Browse a workspace".to_string(),
+            "Open a published darkrun workspace and read its runs, stations, and units."
+                .to_string(),
+        ),
+        "/review" => (
+            "Review".to_string(),
+            "Review runs in the darkrun desktop app: approve at the gates, or route rework as \
+             drift."
+                .to_string(),
+        ),
+        "/preview" => (
+            "Session preview".to_string(),
+            "A gallery of darkrun's review surfaces, rendered read-only from the real API types."
+                .to_string(),
+        ),
+        "/privacy" => (
+            "Privacy".to_string(),
+            "The darkrun privacy policy.".to_string(),
+        ),
+        "/terms" => (
+            "Terms".to_string(),
+            "The darkrun terms of service.".to_string(),
+        ),
+        _ => (SITE_NAME.to_string(), SITE_DESCRIPTION.to_string()),
+    }
+}
+
+/// Turn a slug into a display label (`pressure_tester` / `pressure-tester` →
+/// `Pressure Tester`), for the dynamic routes that have no corpus entry.
+fn humanize(slug: &str) -> String {
+    slug.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Build a small idempotent script that syncs the document `<head>` to this
+/// page's metadata: the `<title>`, the single `<link rel="canonical">`, and the
+/// description / Open Graph / Twitter tags. It SELECTS the existing element and
+/// updates it (creating one only when absent), so the SPA never leaves a second,
+/// stale canonical behind the one baked into `index.html`. Every interpolated
+/// value is a JSON string literal (via [`json_string`]), which is also a valid
+/// JS string, so titles/descriptions with quotes can't break out of the script.
+pub fn head_sync_script(meta: &PageMeta) -> String {
+    let title = json_string(&meta.title);
+    let canonical = json_string(&meta.canonical);
+    let description = json_string(&meta.description);
+    format!(
+        "(function(){{\
+           document.title={title};\
+           function m(sel,set){{var el=document.head.querySelector(sel);\
+             if(!el){{el=document.createElement('meta');set(el);document.head.appendChild(el);}}return el;}}\
+           var c=document.head.querySelector('link[rel=\"canonical\"]');\
+           if(!c){{c=document.createElement('link');c.setAttribute('rel','canonical');document.head.appendChild(c);}}\
+           c.setAttribute('href',{canonical});\
+           m('meta[name=\"description\"]',function(e){{e.setAttribute('name','description');}}).setAttribute('content',{description});\
+           m('meta[property=\"og:title\"]',function(e){{e.setAttribute('property','og:title');}}).setAttribute('content',{title});\
+           m('meta[property=\"og:description\"]',function(e){{e.setAttribute('property','og:description');}}).setAttribute('content',{description});\
+           m('meta[property=\"og:url\"]',function(e){{e.setAttribute('property','og:url');}}).setAttribute('content',{canonical});\
+           m('meta[name=\"twitter:title\"]',function(e){{e.setAttribute('name','twitter:title');}}).setAttribute('content',{title});\
+           m('meta[name=\"twitter:description\"]',function(e){{e.setAttribute('name','twitter:description');}}).setAttribute('content',{description});\
+         }})();"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_route_owns_a_distinct_canonical() {
+        // The core fix: each of the ~50 routes must carry its OWN canonical (and
+        // title + description), so no subpage self-canonicalizes to the homepage.
+        let paths = Route::all_paths();
+        let mut seen = std::collections::HashSet::new();
+        for path in &paths {
+            let meta = page_meta(path);
+            assert_eq!(meta.canonical, canonical_url(path), "canonical follows the path: {path}");
+            assert!(meta.canonical.starts_with(SITE_URL), "canonical rooted at the origin: {path}");
+            assert!(!meta.title.is_empty(), "a title for {path}");
+            assert!(!meta.description.is_empty(), "a description for {path}");
+            assert!(
+                seen.insert(meta.canonical.clone()),
+                "duplicate canonical for {path}: {}",
+                meta.canonical
+            );
+            if path != "/" {
+                assert_ne!(
+                    meta.canonical,
+                    format!("{SITE_URL}/"),
+                    "subpage {path} self-canonicalizes to the homepage"
+                );
+            }
+        }
+        assert_eq!(page_meta("/").canonical, format!("{SITE_URL}/"), "homepage canonical is the origin root");
+    }
+
+    #[test]
+    fn subpages_carry_their_own_title_and_description_not_the_homepage_one() {
+        let home = page_meta("/");
+        // A doc page pulls its OWN title/description straight from the corpus.
+        let doc = crate::content::DOCS.first().expect("a doc exists");
+        let meta = page_meta(&format!("/docs/{}", doc.slug));
+        assert!(meta.title.contains(doc.title), "doc title used: {}", meta.title);
+        assert!(meta.title.ends_with("\u{00b7} darkrun"), "subpage title suffix: {}", meta.title);
+        assert_ne!(meta.title, home.title, "doc title differs from home");
+        assert_eq!(meta.description, doc.summary, "doc description is the doc summary");
+        assert_ne!(meta.description, home.description, "doc description differs from home");
+    }
+
+    #[test]
+    fn head_sync_script_updates_one_canonical_and_the_title() {
+        let meta = page_meta("/docs/getting-started");
+        let js = head_sync_script(&meta);
+        // It SELECTS the existing canonical (idempotent), never blindly appends.
+        assert!(js.contains("link[rel=\"canonical\"]"), "targets the canonical link: {js}");
+        assert!(js.contains("querySelector"), "selects rather than appends: {js}");
+        assert!(js.contains("document.title="), "sets the title: {js}");
+        // The page's own canonical + title are embedded (JSON-escaped).
+        assert!(js.contains("https://darkrun.ai/docs/getting-started"), "carries the page canonical: {js}");
+    }
+
+    #[test]
+    fn humanize_titlecases_slugs() {
+        assert_eq!(humanize("pressure_tester"), "Pressure Tester");
+        assert_eq!(humanize("pressure-tester"), "Pressure Tester");
+        assert_eq!(humanize("build"), "Build");
+    }
 
     #[test]
     fn sitemap_lists_landing_and_factories_index() {

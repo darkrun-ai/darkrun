@@ -15,7 +15,7 @@ use darkrun_api::session::{
     StationStateInfo, ViewArtifact, ViewArtifactKind,
 };
 use darkrun_ui::components::factory::CheckpointKind;
-use darkrun_ui::components::feedback::{FeedbackEntry, Severity};
+use darkrun_ui::components::feedback::{FeedbackEntry, ReplyLine, Severity};
 use darkrun_ui::components::station_strip::{StationItem, StationStatus};
 use darkrun_ui::components::proof_panel::{
     AuditRow, BenchStat, ProofMetricKind, ProofView, VitalMetric,
@@ -174,6 +174,13 @@ pub fn feedback_entry(item: &FeedbackItem) -> FeedbackEntry {
         comment,
         author: item.author.clone(),
         resolved: !item.status.blocks_gate(),
+        // The reply thread rides the list payload; project it so the row
+        // renders the conversation, not just the finding.
+        replies: item
+            .replies
+            .iter()
+            .map(|r| ReplyLine { author: r.author.clone(), body: r.body.clone() })
+            .collect(),
     }
 }
 
@@ -685,6 +692,21 @@ mod tests {
     }
 
     #[test]
+    fn feedback_entry_projects_the_reply_thread() {
+        let mut item = feedback_item("FB-03", None, FeedbackStatus::Pending);
+        item.replies = vec![darkrun_api::FeedbackReply {
+            author: "agent".into(),
+            author_type: AuthorType::Agent,
+            body: "applied the fix".into(),
+            created_at: String::new(),
+        }];
+        let e = feedback_entry(&item);
+        assert_eq!(e.replies.len(), 1);
+        assert_eq!(e.replies[0].author, "agent");
+        assert_eq!(e.replies[0].body, "applied the fix");
+    }
+
+    #[test]
     fn feedback_blocks_checkpoint_only_open_high_or_blocker() {
         let blocker = feedback_item("a", Some(FeedbackSeverity::Blocker), FeedbackStatus::Pending);
         let nit = feedback_item("b", Some(FeedbackSeverity::Low), FeedbackStatus::Pending);
@@ -1086,6 +1108,7 @@ mod tests {
             started_at: None,
             authored_by_me: true,
             author: None,
+            open_drift: 0,
         };
         let card = run_card(&summary);
         assert_eq!(card.slug, "checkout");
