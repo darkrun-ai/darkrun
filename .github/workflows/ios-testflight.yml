@@ -116,6 +116,11 @@ jobs:
           # logs; if the secret is unset, telemetry compiles out (no-op).
           DARKRUN_SENTRY_DSN: ${{ secrets.DARKRUN_SENTRY_DSN }}
           DARKRUN_RELEASE: ${{ steps.ver.outputs.marketing }}
+          # Bake the version + build into the binary at COMPILE time so the app's
+          # About/footer can show them via option_env!. They only reach Info.plist
+          # post-compile (packaging step below), so they must be on this step too.
+          DARKRUN_MARKETING_VERSION: ${{ steps.ver.outputs.marketing }}
+          DARKRUN_BUILD_NUMBER: ${{ steps.ver.outputs.build }}
 
       - name: Sign + package the .ipa
         run: ./fastlane/package-ios-ipa.sh

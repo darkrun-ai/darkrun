@@ -856,6 +856,7 @@ fn Sidebar(
             div { style: "{foot}",
                 span { style: "{dot_live}" }
                 "engine \u{b7} {live_count} live"
+                span { style: "margin-left:auto;", "{app_version_label()}" }
             }
         }
     }
@@ -2191,6 +2192,14 @@ fn SettingsPage() -> Element {
         "font-size:12px;color:{muted};margin:0;",
         muted = tokens::var::TEXT_MUTED,
     );
+    // The About row shows the compiled version + build so a shipped build is
+    // identifiable at a glance (matches the sidebar footer).
+    let version = app_version_label();
+    let version_val = format!(
+        "font-size:12px;color:{muted};font-family:{mono};",
+        muted = tokens::var::TEXT_MUTED,
+        mono = tokens::FONT_MONO,
+    );
     rsx! {
         div { style: "{wrap}",
             div { style: "{label}", "Appearance" }
@@ -2201,6 +2210,13 @@ fn SettingsPage() -> Element {
                         p { style: "{hint}", "System follows your OS appearance; Light and Dark pin it." }
                     }
                     ThemeControl {}
+                }
+            }
+            div { style: "{label}", "About" }
+            div { style: "{card}",
+                div { style: "{row}",
+                    span { style: "{name}", "darkrun" }
+                    span { style: "{version_val}", "{version}" }
                 }
             }
         }
@@ -2372,14 +2388,16 @@ fn ProjectCard(proj: Project) -> Element {
 ///   1. **Registered projects** — every `~/.darkrun/<slug>/project.json` (via
 ///      [`registry::list_known_projects`]), each a CANONICAL repo (the main
 ///      checkout). Seeds the repo + its "main" worktree, live or idle.
-///   2. **Live engines** — every running engine ([`DiscoveredEngine`]). Each is
-///      canonicalized to its repo ([`registry::canonical_project`], so a worktree
-///      engine groups under the repo, NOT a worktree dir name) and contributes a
-///      worktree at its RAW checkout path, carrying its port + harness.
+///   2. **Live engines** — every running engine ([`DiscoveredEngine`]). Each
+///      carries the repo identity the engine STAMPED into its descriptor (slug +
+///      repo name/origin/path), so a worktree engine groups under the repo, NOT a
+///      worktree dir name — WITHOUT the desktop calling git (it is sandboxed and
+///      can't read an out-of-container repo path). Each contributes a worktree at
+///      its RAW checkout path, carrying its port + harness.
 ///
-/// **Blocking**: the registry read heals stale records and each engine is
-/// canonicalized by opening git — so call it OFF the render thread. Idempotent on
-/// (slug, checkout path).
+/// **Blocking**: the registry read heals stale records (git I/O on registered
+/// projects) — so call it OFF the render thread. The engine branch does NO git.
+/// Idempotent on (slug, checkout path).
 fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
     // slug -> the repo plus its checkouts keyed by raw path (dedups worktrees).
     struct Acc {
@@ -2422,19 +2440,35 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
         });
     }
 
-    // 2. Live engines: canonicalize each to its repo, then add/overlay a worktree
-    //    at its raw checkout path.
+    // 2. Live engines: read each engine's repo identity STRAIGHT from the
+    //    descriptor (the unsandboxed engine stamped it), then add/overlay a
+    //    worktree at its raw checkout path. This NEVER calls git/canonical_project:
+    //    the desktop is sandboxed (Mac App Store) and can't read a repo at an
+    //    out-of-container path, so any git call here silently fails and falls back
+    //    to the worktree dir name. The descriptor's slug is already canonical (the
+    //    engine computed it), and repo_name/repo_path carry the canonical identity
+    //    with sandbox-safe fallbacks for a pre-stamp (old) descriptor.
     for e in engines {
-        let canon = darkrun_mcp::registry::canonical_project(&e.project_path);
-        let acc = by_slug.entry(canon.slug.clone()).or_insert_with(|| Acc {
-            slug: canon.slug.clone(),
-            name: canon.name.clone(),
-            path: canon.path.clone(),
-            origin: canon.origin.clone(),
+        // slug: the descriptor's slug is already the canonical key.
+        let slug = e.slug.clone();
+        // name: the stamped repo name, else strip the hash suffix off the slug so
+        //   an old descriptor still shows the repo name, not the worktree dir.
+        let name = e
+            .repo_name
+            .clone()
+            .unwrap_or_else(|| strip_slug_hash(&e.slug));
+        // canonical path: the stamped main-checkout path, else the raw checkout.
+        let canonical_path = e.repo_path.clone().unwrap_or_else(|| e.project_path.clone());
+        let origin = e.repo_origin.clone();
+        let acc = by_slug.entry(slug.clone()).or_insert_with(|| Acc {
+            slug,
+            name,
+            path: canonical_path.clone(),
+            origin: origin.clone(),
             worktrees: BTreeMap::new(),
         });
         if acc.origin.is_none() {
-            acc.origin = canon.origin.clone();
+            acc.origin = origin;
         }
         let raw = e.project_path.clone();
         let label = worktree_label(&raw, &acc.path);
@@ -2458,6 +2492,25 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
             worktrees: acc.worktrees.into_values().collect(),
         })
         .collect()
+}
+
+/// Strip a registry slug's trailing `-<8 hex>` path-hash suffix to recover the
+/// repo NAME (`darkrun-22c6e158` -> `darkrun`). Registry slugs are `<name>-<8hex>`
+/// (see `registry::slug_for`); this is the sandbox-safe fallback the desktop uses
+/// when an OLD engine descriptor carries no stamped `repo_name`, so it still shows
+/// the repo name instead of a worktree dir. A slug that doesn't match that shape
+/// (no `-`, or a suffix that isn't 8 hex chars) is returned unchanged.
+fn strip_slug_hash(slug: &str) -> String {
+    match slug.rsplit_once('-') {
+        Some((name, hash))
+            if !name.is_empty()
+                && hash.len() == 8
+                && hash.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            name.to_string()
+        }
+        _ => slug.to_string(),
+    }
 }
 
 /// The display label for a checkout: "main" when its path is the repo's canonical
@@ -3095,6 +3148,30 @@ fn basename(path: &std::path::Path) -> Option<String> {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// The app's marketing version. Prefers `DARKRUN_MARKETING_VERSION` baked in at
+/// compile time (fastlane injects it into the CI build env), falling back to the
+/// crate version for a plain `cargo build`. `option_env!`/`env!` capture these at
+/// COMPILE time, so CI must set the env on the `dx build`/`dx bundle` step (the
+/// version/build only reach Info.plist post-compile otherwise).
+pub fn app_version() -> String {
+    option_env!("DARKRUN_MARKETING_VERSION")
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+        .to_string()
+}
+
+/// The App Store build number baked in at compile time, when present. `None` for
+/// a local `cargo build` (no `DARKRUN_BUILD_NUMBER` in the env).
+pub fn app_build() -> Option<&'static str> {
+    option_env!("DARKRUN_BUILD_NUMBER")
+}
+
+/// The version string the UI renders: `v<version> (<build>)` in a signed build,
+/// `v<version> (dev)` for a local build with no baked build number.
+pub fn app_version_label() -> String {
+    let build = app_build().unwrap_or("dev");
+    format!("v{} ({})", app_version(), build)
 }
 
 /// Single-quote a path for a POSIX shell so the copied `cd` survives spaces.
@@ -3821,16 +3898,115 @@ mod helper_tests {
             pid: 4242,
             harness: "claude-code".into(),
             started_at: "2026-06-05T00:00:00Z".into(),
+            repo_name: None,
+            repo_origin: None,
+            repo_path: None,
         };
         assert_eq!(engine_display_name(&e), "store");
         // Merges live engines over the registry (registry may be empty here); an
-        // engine with no registry record still surfaces as a repo, canonicalized
-        // from its checkout, with a worktree at that checkout path.
+        // engine with no registry record still surfaces as a repo, identified from
+        // its descriptor, with a worktree at that checkout path.
         let projects = load_projects(&[e]);
         assert!(projects.iter().any(|p| {
             (p.name == "store" || p.path == std::path::Path::new("/tmp/store"))
                 && p.worktrees.iter().any(|w| w.path == std::path::Path::new("/tmp/store") && w.is_live())
         }));
+    }
+
+    #[test]
+    fn app_version_label_formats_version_and_build() {
+        // In a plain `cargo test` build neither DARKRUN_MARKETING_VERSION nor
+        // DARKRUN_BUILD_NUMBER is set, so the version falls back to the crate
+        // version and the build reads "dev".
+        assert_eq!(app_version(), env!("CARGO_PKG_VERSION"));
+        let label = app_version_label();
+        assert!(label.starts_with('v'), "label is v-prefixed: {label}");
+        assert!(label.contains(env!("CARGO_PKG_VERSION")), "{label}");
+        // A local build carries no baked build number → "(dev)".
+        assert!(label.ends_with("(dev)"), "local build reads dev: {label}");
+        assert!(app_build().is_none(), "no build number baked into a cargo build");
+    }
+
+    #[test]
+    fn strip_slug_hash_recovers_repo_name_and_leaves_others() {
+        // A canonical registry slug (`<name>-<8hex>`) loses just the hash suffix.
+        assert_eq!(strip_slug_hash("darkrun-22c6e158"), "darkrun");
+        // A name that itself contains dashes keeps them (only the last segment,
+        // when it's an 8-hex hash, is stripped).
+        assert_eq!(strip_slug_hash("my-cool-app-deadbeef"), "my-cool-app");
+        // Non-matching shapes pass through unchanged.
+        assert_eq!(strip_slug_hash("darkrun"), "darkrun", "no hash suffix");
+        assert_eq!(strip_slug_hash("darkrun-123"), "darkrun-123", "suffix not 8 chars");
+        assert_eq!(strip_slug_hash("darkrun-zzzzzzzz"), "darkrun-zzzzzzzz", "suffix not hex");
+        assert_eq!(strip_slug_hash("-deadbeef"), "-deadbeef", "empty name");
+        assert_eq!(strip_slug_hash(""), "", "empty slug");
+    }
+
+    #[test]
+    fn load_projects_uses_stamped_repo_name_for_a_worktree_engine() {
+        // An engine serving a WORKTREE checkout, whose descriptor was stamped by
+        // the (unsandboxed) engine with the canonical repo identity. The sandboxed
+        // desktop must surface a top-level project named "darkrun" (NOT the
+        // worktree dir basename) with the worktree nested beneath it — WITHOUT
+        // touching git.
+        let wt = std::path::PathBuf::from("/repo/darkrun/.claude/worktrees/wiggly-gathering-spark");
+        let main = std::path::PathBuf::from("/repo/darkrun");
+        let e = crate::wire::DiscoveredEngine {
+            project_path: wt.clone(),
+            port: 61111,
+            slug: "darkrun-22c6e158".into(),
+            pid: 7,
+            harness: "claude-code".into(),
+            started_at: "2026-07-10T00:00:00Z".into(),
+            repo_name: Some("darkrun".into()),
+            repo_origin: Some("git@github.com:jwaldrip/darkrun.git".into()),
+            repo_path: Some(main.clone()),
+        };
+        let projects = load_projects(&[e]);
+        let proj = projects
+            .iter()
+            .find(|p| p.slug == "darkrun-22c6e158")
+            .expect("the engine surfaces a project");
+        assert_eq!(proj.name, "darkrun", "named by the stamped repo, not the worktree dir");
+        assert_ne!(proj.name, "wiggly-gathering-spark");
+        assert_eq!(proj.path, main, "keyed at the canonical main checkout");
+        assert_eq!(proj.origin.as_deref(), Some("git@github.com:jwaldrip/darkrun.git"));
+        // The worktree is nested under the repo at its RAW checkout path, live.
+        let w = proj
+            .worktrees
+            .iter()
+            .find(|w| w.path == wt)
+            .expect("the worktree checkout is nested under the repo");
+        assert!(w.is_live());
+        assert_eq!(w.label, "wiggly-gathering-spark", "the checkout dir basename labels it");
+    }
+
+    #[test]
+    fn load_projects_falls_back_to_slug_stripped_name_without_repo_name() {
+        // An OLD engine descriptor (no stamped repo_name/repo_path). The desktop
+        // must still show the repo name by stripping the slug's hash suffix, never
+        // the worktree dir name, and NEVER calling git.
+        let wt = std::path::PathBuf::from("/repo/darkrun/.claude/worktrees/wiggly-gathering-spark");
+        let e = crate::wire::DiscoveredEngine {
+            project_path: wt.clone(),
+            port: 61112,
+            slug: "darkrun-22c6e158".into(),
+            pid: 8,
+            harness: "claude-code".into(),
+            started_at: "2026-07-10T00:00:00Z".into(),
+            repo_name: None,
+            repo_origin: None,
+            repo_path: None,
+        };
+        let projects = load_projects(&[e]);
+        let proj = projects
+            .iter()
+            .find(|p| p.slug == "darkrun-22c6e158")
+            .expect("the engine surfaces a project");
+        assert_eq!(proj.name, "darkrun", "slug-stripped name, not the worktree dir");
+        // With no stamped canonical path, the raw checkout is the repo path.
+        assert_eq!(proj.path, wt);
+        assert!(proj.worktrees.iter().any(|w| w.path == wt && w.is_live()));
     }
 
     #[test]
