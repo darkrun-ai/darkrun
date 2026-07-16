@@ -315,6 +315,9 @@ pub struct CanonicalProject {
     pub name: String,
     /// The main checkout's absolute path.
     pub path: PathBuf,
+    /// The `origin` remote URL of the main checkout, when it has one. The desktop
+    /// parses this into `<provider icon> <owner>/<repo>` for the sidebar label.
+    pub origin: Option<String>,
 }
 
 /// Resolve `repo_root` (which may be a linked worktree) to its canonical repo
@@ -323,18 +326,25 @@ pub fn canonical_project(repo_root: &Path) -> CanonicalProject {
     let canonical = resolve_project_root(repo_root);
     let slug = slug_for(&canonical);
     let name = display_name_for(&canonical).unwrap_or_else(|| slug.clone());
+    let origin = origin_remote_url(&canonical);
     CanonicalProject {
         slug,
         name,
         path: canonical,
+        origin,
     }
+}
+
+/// The raw `origin` remote URL of the repo at `root`, when it has one.
+fn origin_remote_url(root: &Path) -> Option<String> {
+    use darkrun_git::GitBackend;
+    darkrun_git::Git::open(root).ok()?.remote_url("origin").ok()?
 }
 
 /// The repository name from the `origin` remote (`acme/store.git` → `store`),
 /// when the project has one.
 fn origin_repo_name(root: &Path) -> Option<String> {
-    use darkrun_git::GitBackend;
-    let url = darkrun_git::Git::open(root).ok()?.remote_url("origin").ok()??;
+    let url = origin_remote_url(root)?;
     let trimmed = url.trim().trim_end_matches('/');
     let stem = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     let name = stem.rsplit(['/', ':']).next()?.trim();

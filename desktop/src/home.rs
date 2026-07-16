@@ -65,6 +65,10 @@ struct Project {
     name: String,
     /// The canonical repo path (the main checkout's absolute path).
     path: PathBuf,
+    /// The `origin` remote URL, when the repo has one. Rendered as
+    /// `<provider icon> <owner>/<repo>` in the sidebar (falling back to [`name`]
+    /// when absent or unparseable).
+    origin: Option<String>,
     /// The repo's distinct checkouts, sorted by path. One entry (just "main") is
     /// the common case; a repo running agent worktrees has several.
     worktrees: Vec<Worktree>,
@@ -1046,6 +1050,46 @@ fn SidebarEmpty(mine_only: Signal<bool>, has_projects: bool) -> Element {
     }
 }
 
+/// The sidebar label for a repo: `<provider icon> <owner>/<repo>` parsed from the
+/// `origin` remote, falling back to the plain repo `name` when there is no origin
+/// or it does not parse (a local-only repo, or a host we don't recognize).
+#[component]
+fn RepoLabel(name: String, origin: Option<String>) -> Element {
+    let coords = origin
+        .as_deref()
+        .and_then(|url| darkrun_vcs::parse_remote_url(url).ok());
+    match coords {
+        Some(coords) => {
+            let owner_repo = coords.slug();
+            let icon = coords.provider().map(crate::signin::provider_icon);
+            rsx! {
+                span {
+                    style: "display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;",
+                    if let Some(icon) = icon {
+                        span {
+                            style: format!(
+                                "flex:0 0 auto;display:inline-flex;color:{};",
+                                tokens::var::TEXT_MUTED,
+                            ),
+                            {icon}
+                        }
+                    }
+                    span {
+                        style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                        "{owner_repo}"
+                    }
+                }
+            }
+        }
+        None => rsx! {
+            span {
+                style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                "{name}"
+            }
+        },
+    }
+}
+
 /// One repo section in the sidebar: a collapsible header (repo name + run count)
 /// with its CHECKOUTS nested under it. A repo with a single checkout (the common
 /// case) FLATTENS — its runs render directly under the repo, no worktree row; a
@@ -1136,10 +1180,7 @@ fn ProjectSection(
         div { style: "margin:2px 0;",
             div { style: "{ph}", onclick: on_header,
                 span { style: "{car}", if is_open { "\u{25be}" } else { "\u{25b8}" } }
-                span {
-                    style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                    "{proj.name}"
-                }
+                RepoLabel { name: proj.name.clone(), origin: proj.origin.clone() }
                 if expandable {
                     span { style: "{ct}", "{count_shown}" }
                 } else {
@@ -2345,6 +2386,7 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
         slug: String,
         name: String,
         path: PathBuf,
+        origin: Option<String>,
         worktrees: BTreeMap<PathBuf, Worktree>,
     }
 
@@ -2353,20 +2395,24 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
     // 1. Registered projects: each record is a CANONICAL repo. Seed the repo and
     //    its "main" worktree (idle unless a live engine overlays it below).
     for rec in darkrun_mcp::registry::list_known_projects().unwrap_or_default() {
+        // The record path is canonical; resolve its repo identity (name + origin
+        // remote) the same way engines below do, preferring a record's own name.
+        let canon_id = darkrun_mcp::registry::canonical_project(&rec.path);
         let canon = rec.path.clone();
-        // The display name is the repo's name — record name first, else the path
-        // basename; never the hash-suffixed slug.
-        let name = rec
-            .name
-            .clone()
-            .or_else(|| basename(&canon))
-            .unwrap_or_else(|| rec.slug.clone());
+        // The display name is the repo's name — record name first, else the
+        // origin/dir-derived name; never the hash-suffixed slug.
+        let name = rec.name.clone().unwrap_or_else(|| canon_id.name.clone());
+        let origin = canon_id.origin.clone();
         let acc = by_slug.entry(rec.slug.clone()).or_insert_with(|| Acc {
             slug: rec.slug.clone(),
             name,
             path: canon.clone(),
+            origin,
             worktrees: BTreeMap::new(),
         });
+        if acc.origin.is_none() {
+            acc.origin = canon_id.origin.clone();
+        }
         let label = worktree_label(&canon, &acc.path);
         acc.worktrees.entry(canon.clone()).or_insert_with(|| Worktree {
             path: canon,
@@ -2384,8 +2430,12 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
             slug: canon.slug.clone(),
             name: canon.name.clone(),
             path: canon.path.clone(),
+            origin: canon.origin.clone(),
             worktrees: BTreeMap::new(),
         });
+        if acc.origin.is_none() {
+            acc.origin = canon.origin.clone();
+        }
         let raw = e.project_path.clone();
         let label = worktree_label(&raw, &acc.path);
         let wt = acc.worktrees.entry(raw.clone()).or_insert_with(|| Worktree {
@@ -2404,6 +2454,7 @@ fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
             slug: acc.slug,
             name: acc.name,
             path: acc.path,
+            origin: acc.origin,
             worktrees: acc.worktrees.into_values().collect(),
         })
         .collect()
@@ -3184,6 +3235,7 @@ mod data_render_tests {
             slug: "store-ab12cd34".into(),
             name: "store".into(),
             path: "/tmp/store".into(),
+            origin: None,
             worktrees: vec![Worktree {
                 path: "/tmp/store".into(),
                 label: "main".into(),
@@ -3256,6 +3308,7 @@ mod data_render_tests {
                 slug: "store-ab12cd34".into(),
                 name: "store".into(),
                 path: "/tmp/store".into(),
+                origin: None,
                 worktrees: vec![Worktree {
                     path: "/tmp/store".into(),
                     label: "main".into(),
@@ -3294,6 +3347,7 @@ mod data_render_tests {
                 slug: "darkrun-22c6e158".into(),
                 name: "darkrun".into(),
                 path: "/dev/darkrun".into(),
+                origin: None,
                 worktrees: vec![
                     Worktree {
                         path: "/dev/darkrun".into(),
@@ -3373,6 +3427,7 @@ mod main_pane_render_tests {
             slug: "store-ab12cd34".into(),
             name: "store".into(),
             path: "/tmp/store".into(),
+            origin: None,
             worktrees: vec![Worktree {
                 path: "/tmp/store".into(),
                 label: "main".into(),
@@ -3563,6 +3618,7 @@ mod component_render_tests {
             slug: format!("{name}-ab12cd34"),
             name: name.into(),
             path: path.clone(),
+            origin: None,
             worktrees: vec![Worktree {
                 path,
                 label: "main".into(),
@@ -3672,6 +3728,7 @@ mod helper_tests {
             slug: format!("{name}-ab12cd34"),
             name: name.into(),
             path: path.clone(),
+            origin: None,
             worktrees: vec![Worktree { path, label: "main".into(), port: None, harness: None }],
         }
     }
@@ -3858,6 +3915,7 @@ mod helper_tests {
             slug: "widget".into(),
             name: "widget".into(),
             path: path.clone(),
+            origin: None,
             worktrees: vec![Worktree { path, label: "main".into(), port: None, harness: None }],
         }
     }
