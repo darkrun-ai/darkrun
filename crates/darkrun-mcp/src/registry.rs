@@ -299,11 +299,52 @@ fn resolve_project_root(repo_root: &Path) -> PathBuf {
     darkrun_git::project_root_of(repo_root)
 }
 
+/// The canonical identity of the git REPO a checkout dir belongs to.
+///
+/// A project IS its git repository, never the directory an engine happened to
+/// boot in: a linked worktree (`…/.claude/worktrees/<name>`) resolves to the main
+/// checkout, so every worktree of a repo shares ONE `slug`, `name`, and `path`.
+/// The desktop calls this to key + label a top-level project by its repo (so two
+/// worktrees of `darkrun` collapse to one `darkrun` entry, with the worktrees
+/// listed underneath) rather than by a worktree dir name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalProject {
+    /// The shared slug (`slug_for` of the main checkout).
+    pub slug: String,
+    /// Display name: the `origin` repo name, else the main checkout's dir name.
+    pub name: String,
+    /// The main checkout's absolute path.
+    pub path: PathBuf,
+    /// The `origin` remote URL of the main checkout, when it has one. The desktop
+    /// parses this into `<provider icon> <owner>/<repo>` for the sidebar label.
+    pub origin: Option<String>,
+}
+
+/// Resolve `repo_root` (which may be a linked worktree) to its canonical repo
+/// [`CanonicalProject`]. Pure; safe to call off any checkout dir.
+pub fn canonical_project(repo_root: &Path) -> CanonicalProject {
+    let canonical = resolve_project_root(repo_root);
+    let slug = slug_for(&canonical);
+    let name = display_name_for(&canonical).unwrap_or_else(|| slug.clone());
+    let origin = origin_remote_url(&canonical);
+    CanonicalProject {
+        slug,
+        name,
+        path: canonical,
+        origin,
+    }
+}
+
+/// The raw `origin` remote URL of the repo at `root`, when it has one.
+fn origin_remote_url(root: &Path) -> Option<String> {
+    use darkrun_git::GitBackend;
+    darkrun_git::Git::open(root).ok()?.remote_url("origin").ok()?
+}
+
 /// The repository name from the `origin` remote (`acme/store.git` → `store`),
 /// when the project has one.
 fn origin_repo_name(root: &Path) -> Option<String> {
-    use darkrun_git::GitBackend;
-    let url = darkrun_git::Git::open(root).ok()?.remote_url("origin").ok()??;
+    let url = origin_remote_url(root)?;
     let trimmed = url.trim().trim_end_matches('/');
     let stem = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     let name = stem.rsplit(['/', ':']).next()?.trim();
@@ -1178,6 +1219,47 @@ mod tests {
         let again = list_projects_in(reg.path()).unwrap();
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].slug, healed.slug);
+    }
+
+    #[test]
+    fn canonical_project_resolves_a_worktree_and_a_plain_path() {
+        use std::process::Command;
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(repo.path()).args(args)
+                .status().unwrap().success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@darkrun.ai"]);
+        git(&["config", "user.name", "t"]);
+        git(&["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+        std::fs::write(repo.path().join("a"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let wt = repo.path().join(".claude/worktrees/scratch");
+        git(&["worktree", "add", "-q", wt.to_str().unwrap()]);
+
+        // A linked worktree resolves to the MAIN checkout: the repo's shared slug,
+        // its origin repo name, and the canonical path — never the worktree dir.
+        let main_root = resolve_project_root(&wt);
+        let from_wt = canonical_project(&wt);
+        assert_eq!(from_wt.path, main_root, "resolves to the main checkout");
+        assert_eq!(from_wt.name, "widgets", "named by the origin repo, not the worktree dir");
+        assert_eq!(from_wt.slug, slug_for(&main_root));
+        assert!(from_wt.slug.starts_with("widgets-"), "{}", from_wt.slug);
+
+        // Opening the main checkout directly yields that SAME identity — every
+        // worktree of the repo collapses to one canonical project. (Resolve via the
+        // worktree's own main root so a tempdir symlink can't split the two paths.)
+        let from_main = canonical_project(&main_root);
+        assert_eq!(from_main, from_wt, "worktree and main share one canonical project");
+
+        // A plain non-git path passes through: slug + name from its basename,
+        // path as-is.
+        let plain = canonical_project(Path::new("/tmp/plain-checkout"));
+        assert_eq!(plain.path, PathBuf::from("/tmp/plain-checkout"));
+        assert_eq!(plain.name, "plain-checkout");
+        assert!(plain.slug.starts_with("plain-checkout-"), "{}", plain.slug);
     }
 
     #[test]

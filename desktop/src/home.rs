@@ -46,42 +46,72 @@ use crate::review::ReviewApp;
 use crate::signin::{provider_icon, RemoteArtifactRepo, RepoPicker, SignInPanel};
 use crate::wire::{self, ConnConfig, DiscoveredEngine};
 
-/// A project the shell lists in the sidebar: a working dir keyed by its
-/// `~/.darkrun` slug, optionally backed by a live engine (its discovered port).
+/// A project the shell lists in the sidebar: the git REPO, keyed by its canonical
+/// `~/.darkrun` slug, with its distinct CHECKOUTS ([`Worktree`]) nested under it.
 ///
-/// Sourced two ways and merged by [`load_projects`]: the durable project registry
-/// (`~/.darkrun/<slug>/project.json`, every registered project — live or idle)
-/// overlaid with [`wire::discover_live_engines`] (the running engines, which
-/// contribute the `port`/`harness` and flip a project to "live").
+/// A project IS its git repository, never a directory an engine happened to boot
+/// in: every worktree of a repo (main checkout or a `.claude/worktrees/<name>`)
+/// collapses to ONE project keyed by the canonical slug, labeled by the repo's
+/// name (origin repo name else the main-checkout dir name). Its worktrees are the
+/// distinct raw `repo_root`s seen for that repo across live engines and offline
+/// discovery. Built by [`load_projects`].
 #[derive(Clone, PartialEq)]
 struct Project {
-    /// Registry slug — the project's stable identity (repo-name + path-hash).
-    /// The run fetcher keys per-project run lists by THIS, never the display
-    /// name: every engine of a repo (main checkout or worktree) shares it.
+    /// Canonical registry slug — the repo's stable identity (repo-name +
+    /// path-hash of the MAIN checkout). Every worktree of the repo shares it.
     slug: String,
-    /// Display name — the repo's name (record name or path basename).
+    /// Display name — the repo's name (origin repo name else the main-checkout
+    /// dir name); never a worktree dir name.
     name: String,
-    /// Absolute repo root the project lives in.
+    /// The canonical repo path (the main checkout's absolute path).
     path: PathBuf,
-    /// The live engine's loopback port, when one is serving this project.
+    /// The `origin` remote URL, when the repo has one. Rendered as
+    /// `<provider icon> <owner>/<repo>` in the sidebar (falling back to [`name`]
+    /// when absent or unparseable).
+    origin: Option<String>,
+    /// The repo's distinct checkouts, sorted by path. One entry (just "main") is
+    /// the common case; a repo running agent worktrees has several.
+    worktrees: Vec<Worktree>,
+}
+
+impl Project {
+    /// Whether any of the repo's checkouts is served by a live engine.
+    fn is_live(&self) -> bool {
+        self.worktrees.iter().any(Worktree::is_live)
+    }
+
+    /// The repo's ONLY checkout, when it has exactly one — the common case, which
+    /// the sidebar FLATTENS (its runs render directly under the repo, no worktree
+    /// row). `None` when the repo has 2+ checkouts (then the worktree level shows).
+    fn sole_worktree(&self) -> Option<&Worktree> {
+        match self.worktrees.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        }
+    }
+}
+
+/// One checkout of a repo: a distinct raw `repo_root` (the main checkout or a
+/// linked `.claude/worktrees/<name>`), optionally backed by a live engine.
+///
+/// Its runs are keyed by [`Worktree::path`] in the run maps: live runs from the
+/// engine serving this checkout, offline runs read off this checkout's `.darkrun/`.
+#[derive(Clone, PartialEq)]
+struct Worktree {
+    /// Absolute raw checkout path — the run maps' key and, offline, the
+    /// `StateStore` root.
+    path: PathBuf,
+    /// Display label: "main" when `path` is the repo's canonical path, else the
+    /// checkout dir basename (e.g. "wiggly-gathering-spark").
+    label: String,
+    /// The live engine's loopback port, when one is serving THIS checkout.
     port: Option<u16>,
     /// The harness the live engine adapted to, for display.
     harness: Option<String>,
 }
 
-impl Project {
-    /// Project a discovered live engine into a [`Project`].
-    fn from_engine(e: &DiscoveredEngine) -> Self {
-        Project {
-            slug: e.slug.clone(),
-            name: basename(&e.project_path).unwrap_or_else(|| e.slug.clone()),
-            path: e.project_path.clone(),
-            port: Some(e.port),
-            harness: Some(e.harness.clone()),
-        }
-    }
-
-    /// Whether a live engine is serving this project right now.
+impl Worktree {
+    /// Whether a live engine is serving this checkout right now.
     fn is_live(&self) -> bool {
         self.port.is_some()
     }
@@ -136,18 +166,24 @@ pub fn HomeApp(
     // re-polled. The sidebar projects render from this merged with the registry.
     let mut engines = use_signal(Vec::<DiscoveredEngine>::new);
 
-    // The per-project run lists — project SLUG -> run slug -> (engine port,
-    // run) — refreshed by the run fetcher. Keyed by the registry slug (the
-    // identity every engine of a repo shares), so a worktree engine's runs
-    // nest under the repo's project; each run keeps ITS engine's port so
-    // opening it talks to the engine that serves it.
-    let runs_by_project =
+    // The sidebar's repo -> worktree tree: the registry (canonical repos) merged
+    // with the live engines (each contributes a worktree at its raw checkout).
+    // Recomputed OFF the render thread whenever engines change or a clone/register
+    // bumps `refresh`, since the merge canonicalizes each checkout (opens git).
+    let projects = use_signal(Vec::<Project>::new);
+
+    // The per-WORKTREE live run lists — raw checkout path -> run slug -> (engine
+    // port, run) — refreshed by the run fetcher. Keyed by the checkout path (the
+    // engine's `project_path`) so each checkout's runs nest under its own
+    // worktree; each run keeps ITS engine's port so opening it talks to the
+    // engine that serves it.
+    let runs_by_worktree =
         use_signal(BTreeMap::<String, BTreeMap<String, (u16, RunSummary)>>::new);
 
-    // The per-project OFFLINE run lists (project SLUG -> the runs read straight
-    // off that project's on-disk `.darkrun/` state), populated ONLY for projects
-    // with no live engine. Lets the sidebar list an idle project's runs and the
-    // main pane open them read-only ([`OfflineRunDetail`]), with no engine up.
+    // The per-WORKTREE OFFLINE run lists (raw checkout path -> the runs read
+    // straight off that checkout's on-disk `.darkrun/` state), populated ONLY for
+    // checkouts with no live engine. Lets the sidebar list an idle checkout's runs
+    // and the main pane open them read-only ([`OfflineRunDetail`]), no engine up.
     let offline_runs = use_signal(BTreeMap::<String, Vec<RunSummary>>::new);
 
     // What the main pane shows. A pinned launch opens straight to that run (the
@@ -231,6 +267,28 @@ pub fn HomeApp(
         });
     }
 
+    // Rebuild the repo -> worktree tree OFF the render thread whenever the live
+    // engines change (the poller sets `engines`) or a clone/register bumps
+    // `refresh`. The merge reads the registry AND canonicalizes each live
+    // checkout (opens git to resolve a worktree to its main repo), so it must not
+    // run in render; the signal it writes is what the sidebar renders from.
+    {
+        let mut projects = projects;
+        use_effect(move || {
+            let found = engines.read().clone();
+            // A clone/register recomputes so the fresh project shows at once.
+            let _ = refresh.read();
+            spawn(async move {
+                let computed = tokio::task::spawn_blocking(move || load_projects(&found))
+                    .await
+                    .unwrap_or_default();
+                if computed != *projects.peek() {
+                    projects.set(computed);
+                }
+            });
+        });
+    }
+
     // The shell's single poller, driving three things every tick so the sidebar
     // stays live without a relaunch:
     //   1. **Discovery / auto-connect** — re-read `~/.darkrun` so a freshly-booted
@@ -250,7 +308,7 @@ pub fn HomeApp(
     {
         let base = cfg.clone();
         let mut selection = selection;
-        let mut runs_by_project = runs_by_project;
+        let mut runs_by_worktree = runs_by_worktree;
         let mut offline_runs = offline_runs;
         let mut offline_key = offline_key;
         use_future(move || {
@@ -263,20 +321,21 @@ pub fn HomeApp(
                         engines.set(found.clone());
                     }
 
-                    // 2. Per-project run lists, merged across every engine
-                    //    serving the project (main checkout + worktrees) and
-                    //    deduped by run slug. Held by reference below to resolve a
-                    //    run to the engine CURRENTLY serving it; the signal is
-                    //    committed at the end of the tick, after those reads.
+                    // 2. Per-WORKTREE run lists, one per live engine, keyed by the
+                    //    engine's raw checkout path (`project_path`) so each
+                    //    checkout's runs nest under its own worktree. Held by
+                    //    reference below to resolve a run to the engine CURRENTLY
+                    //    serving it; the signal is committed at the end of the
+                    //    tick, after those reads.
                     let mut map =
                         BTreeMap::<String, BTreeMap<String, (u16, RunSummary)>>::new();
                     for e in &found {
                         let mut c = base.clone();
                         c.port = e.port;
                         if let Ok(payload) = wire::fetch_runs(&c).await {
-                            let proj = map.entry(e.slug.clone()).or_default();
+                            let wt = map.entry(e.project_path.display().to_string()).or_default();
                             for r in payload.runs {
-                                proj.entry(r.slug.clone()).or_insert((e.port, r));
+                                wt.entry(r.slug.clone()).or_insert((e.port, r));
                             }
                         }
                     }
@@ -346,20 +405,21 @@ pub fn HomeApp(
 
                     // 5. Commit the run lists (moving `map`) once every read above
                     //    is done.
-                    if map != *runs_by_project.peek() {
-                        runs_by_project.set(map);
+                    if map != *runs_by_worktree.peek() {
+                        runs_by_worktree.set(map);
                     }
 
-                    // 6. Offline run lists. Every registered project with NO live
-                    //    engine but an on-disk `.darkrun/` reads its runs straight
-                    //    off disk (the SAME projection the browse API serves), so
-                    //    the sidebar lists them and the main pane opens them
-                    //    read-only with no engine up. The registry read, the
-                    //    `.darkrun` probes, and the per-run git revwalks are
-                    //    blocking, so the whole projection runs on `spawn_blocking`;
-                    //    it recomputes only when the idle-project set CHANGES (an
-                    //    engine started/stopped, a project was added/dropped) rather
-                    //    than every tick, since nothing writes an idle run.
+                    // 6. Offline run lists. Every idle CHECKOUT (no live engine)
+                    //    with an on-disk `.darkrun/` reads its runs straight off
+                    //    disk (the SAME projection the browse API serves), keyed by
+                    //    worktree path, so the sidebar lists them and the main pane
+                    //    opens them read-only with no engine up. The registry read
+                    //    (which also canonicalizes each checkout), the `.darkrun`
+                    //    probes, and the per-run git revwalks are blocking, so the
+                    //    whole projection runs on `spawn_blocking`; it recomputes
+                    //    only when the idle-checkout set CHANGES (an engine
+                    //    started/stopped, a project was added/dropped) rather than
+                    //    every tick, since nothing writes an idle run.
                     let found_for_offline = found.clone();
                     let prev_key = offline_key.peek().clone();
                     let projected = tokio::task::spawn_blocking(move || {
@@ -410,13 +470,13 @@ pub fn HomeApp(
         });
     });
 
-    // Reading `refresh` ties a re-render to a clone/register so a freshly-written
-    // `project.json` shows without waiting for the poller.
-    let _ = refresh.read();
-    let projects = load_projects(&engines.read());
-    let runs_map = runs_by_project.read().clone();
-    // The offline (no-engine) run lists, keyed by project slug: the sidebar
-    // nests them under an idle project the same way it nests live runs.
+    // The repo -> worktree tree, rebuilt off the render thread by the effect above
+    // (a clone/register bumps `refresh`, which recomputes it there).
+    let projects = projects.read().clone();
+    // The live run lists, keyed by raw checkout path.
+    let runs_map = runs_by_worktree.read().clone();
+    // The offline (no-engine) run lists, keyed by raw checkout path: the sidebar
+    // nests them under an idle worktree the same way it nests live runs.
     let offline_map = offline_runs.read().clone();
     let live_count = engines.read().len();
 
@@ -456,8 +516,10 @@ pub fn HomeApp(
     }
 }
 
-/// The display name the sidebar keys a project's runs under — the engine slug,
-/// which matches [`Project::name`].
+/// The breadcrumb label an auto-navigated run (focus / deep link) shows — the
+/// engine's canonical slug. A run opened from the sidebar carries the repo NAME
+/// instead ([`RunRow`] passes `proj.name`); this is only the fallback for the
+/// off-thread poller, which avoids the extra git canonicalization a name needs.
 fn engine_display_name(e: &DiscoveredEngine) -> String {
     e.slug.clone()
 }
@@ -707,8 +769,9 @@ fn ThemeControl() -> Element {
 #[component]
 fn Sidebar(
     projects: Vec<Project>,
+    /// Live run lists keyed by raw checkout path (`project_path`).
     runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
-    /// Per-project (slug-keyed) run lists read off disk for no-engine projects.
+    /// Per-checkout (path-keyed) run lists read off disk for no-engine checkouts.
     offline_runs: BTreeMap<String, Vec<RunSummary>>,
     /// Repos on the operator's providers that already carry darkrun artifacts but
     /// aren't cloned locally yet: the CLONE-ON-OPEN section below the projects.
@@ -771,11 +834,11 @@ fn Sidebar(
                     for proj in visible.iter() {
                         ProjectSection {
                             proj: proj.clone(),
-                            runs: runs_map
-                                .get(&proj.slug)
-                                .map(|m| m.values().cloned().collect())
-                                .unwrap_or_default(),
-                            offline: offline_runs.get(&proj.slug).cloned().unwrap_or_default(),
+                            // This repo's LIVE + OFFLINE runs, scoped to its own
+                            // checkouts and keyed by worktree path so the section
+                            // can nest each checkout's runs under it.
+                            live: scope_live(proj, &runs_map),
+                            offline: scope_offline(proj, &offline_runs),
                             selection,
                             mine_only,
                             search,
@@ -798,10 +861,43 @@ fn Sidebar(
     }
 }
 
+/// This repo's LIVE runs, scoped to its own checkouts and keyed by worktree path.
+/// Pulls each worktree's list out of the path-keyed `runs_map` so a
+/// [`ProjectSection`] can nest each checkout's runs under it.
+fn scope_live(
+    proj: &Project,
+    runs_map: &BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
+) -> BTreeMap<String, Vec<(u16, RunSummary)>> {
+    proj.worktrees
+        .iter()
+        .filter_map(|w| {
+            let key = w.path.display().to_string();
+            runs_map
+                .get(&key)
+                .map(|m| (key, m.values().cloned().collect()))
+        })
+        .collect()
+}
+
+/// This repo's OFFLINE runs, scoped to its own checkouts and keyed by worktree
+/// path — the disk-read counterpart to [`scope_live`].
+fn scope_offline(
+    proj: &Project,
+    offline_runs: &BTreeMap<String, Vec<RunSummary>>,
+) -> BTreeMap<String, Vec<RunSummary>> {
+    proj.worktrees
+        .iter()
+        .filter_map(|w| {
+            let key = w.path.display().to_string();
+            offline_runs.get(&key).map(|v| (key, v.clone()))
+        })
+        .collect()
+}
+
 /// The projects that survive the current Mine/All filter + search query. A
-/// project is kept when it has at least one matching run, OR (so idle/no-engine
-/// projects aren't hidden) when its own name matches the search and the Mine
-/// filter isn't excluding it for lack of authored runs.
+/// project is kept when at least one LIVE run across its checkouts matches, OR
+/// (so idle/no-engine projects aren't hidden) when its own name matches the
+/// search and the Mine filter isn't excluding it for lack of authored runs.
 fn visible_projects(
     projects: &[Project],
     runs_map: &BTreeMap<String, BTreeMap<String, (u16, RunSummary)>>,
@@ -812,17 +908,27 @@ fn visible_projects(
     projects
         .iter()
         .filter(|p| {
-            let empty = BTreeMap::new();
-            let runs = runs_map.get(&p.slug).unwrap_or(&empty);
-            let any_run = runs.values().any(|(_, r)| run_matches(r, mine_only, &q));
-            // Keep a project with matching runs; also keep an engine-less /
-            // run-less project whose name matches the search (or no search), so
-            // the add/idle projects stay reachable. Under Mine with a non-empty
-            // run list that has no authored matches, hide it.
-            if any_run {
+            // The repo's live runs, gathered across every checkout.
+            let mut has_runs = false;
+            let mut any_match = false;
+            for w in &p.worktrees {
+                if let Some(runs) = runs_map.get(&w.path.display().to_string()) {
+                    for (_, r) in runs.values() {
+                        has_runs = true;
+                        if run_matches(r, mine_only, &q) {
+                            any_match = true;
+                        }
+                    }
+                }
+            }
+            // Keep a repo with matching runs; also keep an engine-less / run-less
+            // repo whose name matches the search (or no search), so the add/idle
+            // projects stay reachable. Under Mine with a non-empty run list that
+            // has no authored matches, hide it.
+            if any_match {
                 return true;
             }
-            if runs.is_empty() {
+            if !has_runs {
                 return q.is_empty() || p.name.to_ascii_lowercase().contains(&q);
             }
             false
@@ -944,18 +1050,60 @@ fn SidebarEmpty(mine_only: Signal<bool>, has_projects: bool) -> Element {
     }
 }
 
-/// One project section in the sidebar: a collapsible header (name + run count)
-/// with its RUNS nested under it. Live projects list their runs (each with a
-/// status dot + a `me` tag when authored); a no-engine project's header selects
-/// the no-engine one-step view.
+/// The sidebar label for a repo: `<provider icon> <owner>/<repo>` parsed from the
+/// `origin` remote, falling back to the plain repo `name` when there is no origin
+/// or it does not parse (a local-only repo, or a host we don't recognize).
+#[component]
+fn RepoLabel(name: String, origin: Option<String>) -> Element {
+    let coords = origin
+        .as_deref()
+        .and_then(|url| darkrun_vcs::parse_remote_url(url).ok());
+    match coords {
+        Some(coords) => {
+            let owner_repo = coords.slug();
+            let icon = coords.provider().map(crate::signin::provider_icon);
+            rsx! {
+                span {
+                    style: "display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;",
+                    if let Some(icon) = icon {
+                        span {
+                            style: format!(
+                                "flex:0 0 auto;display:inline-flex;color:{};",
+                                tokens::var::TEXT_MUTED,
+                            ),
+                            {icon}
+                        }
+                    }
+                    span {
+                        style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                        "{owner_repo}"
+                    }
+                }
+            }
+        }
+        None => rsx! {
+            span {
+                style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                "{name}"
+            }
+        },
+    }
+}
+
+/// One repo section in the sidebar: a collapsible header (repo name + run count)
+/// with its CHECKOUTS nested under it. A repo with a single checkout (the common
+/// case) FLATTENS — its runs render directly under the repo, no worktree row; a
+/// repo with 2+ checkouts shows a [`WorktreeSection`] per checkout. A repo that is
+/// idle everywhere with no on-disk runs routes its header to the no-engine view.
 #[component]
 fn ProjectSection(
     proj: Project,
-    runs: Vec<(u16, RunSummary)>,
-    /// This project's runs read off disk (populated only when it has no live
-    /// engine). A non-empty list makes an idle project EXPAND to its runs (opened
-    /// read-only) rather than routing its header to the no-engine one-step view.
-    offline: Vec<RunSummary>,
+    /// This repo's LIVE runs, keyed by worktree path (from [`scope_live`]).
+    live: BTreeMap<String, Vec<(u16, RunSummary)>>,
+    /// This repo's OFFLINE runs, keyed by worktree path (from [`scope_offline`]).
+    /// A checkout with a non-empty list EXPANDS to its runs (opened read-only)
+    /// rather than routing the repo header to the no-engine one-step view.
+    offline: BTreeMap<String, Vec<RunSummary>>,
     selection: Signal<Selection>,
     mine_only: Signal<bool>,
     search: Signal<String>,
@@ -967,16 +1115,29 @@ fn ProjectSection(
 
     let q = search.read().trim().to_ascii_lowercase();
     let mine = *mine_only.read();
-    let shown: Vec<(u16, RunSummary)> = runs
-        .iter()
-        .filter(|(_, r)| run_matches(r, mine, &q))
-        .cloned()
-        .collect();
-    let shown_offline: Vec<RunSummary> = offline
-        .iter()
-        .filter(|r| run_matches(r, mine, &q))
-        .cloned()
-        .collect();
+
+    // Tally the repo's matching runs across every checkout (live where a checkout
+    // has an engine, else its offline runs), and learn whether the repo has
+    // anything to expand into.
+    let mut count_shown = 0usize;
+    let mut offline_anywhere = false;
+    for w in &proj.worktrees {
+        let key = w.path.display().to_string();
+        if w.is_live() {
+            if let Some(runs) = live.get(&key) {
+                count_shown += runs.iter().filter(|(_, r)| run_matches(r, mine, &q)).count();
+            }
+        } else if let Some(runs) = offline.get(&key) {
+            count_shown += runs.iter().filter(|r| run_matches(r, mine, &q)).count();
+            if !runs.is_empty() {
+                offline_anywhere = true;
+            }
+        }
+    }
+    // A repo the sidebar drills into: a live checkout, OR an idle checkout whose
+    // runs we can still read off disk. Both EXPAND; only a repo that is idle
+    // everywhere with no on-disk runs routes its header to the no-engine view.
+    let expandable = proj.is_live() || offline_anywhere;
 
     let ph = format!(
         "display:flex;align-items:center;gap:7px;padding:6px 8px;border-radius:7px;\
@@ -992,21 +1153,10 @@ fn ProjectSection(
         mono = tokens::FONT_MONO,
         faint = tokens::var::TEXT_FAINT,
     );
-    let runs_wrap = format!(
-        "margin:1px 0 4px 14px;border-left:1px solid {border};padding-left:6px;",
-        border = tokens::var::BORDER,
-    );
 
-    // A project the sidebar drills into: a live engine, OR an idle project whose
-    // runs we can still read off disk. Both EXPAND to a run list; only a truly
-    // empty idle project routes its header to the no-engine one-step view.
-    let live = proj.is_live();
-    let has_offline = !offline.is_empty();
-    let expandable = live || has_offline;
-    let count_shown = if live { shown.len() } else { shown_offline.len() };
-
-    // Clicking the header toggles collapse for an expandable project; a truly
-    // idle project (no engine, no on-disk runs) opens its one-step view instead.
+    // Clicking the header toggles collapse for an expandable repo; a repo idle
+    // everywhere with no on-disk runs opens its one-step view (rooted at the
+    // canonical repo path) instead.
     let proj_for_header = proj.clone();
     let mut selection_hdr = selection;
     let path_label = proj.path.display().to_string();
@@ -1022,14 +1172,15 @@ fn ProjectSection(
         }
     };
 
+    // FLATTEN the common single-checkout repo: its runs render directly under the
+    // repo, with no worktree row.
+    let sole = proj.sole_worktree().cloned();
+
     rsx! {
         div { style: "margin:2px 0;",
             div { style: "{ph}", onclick: on_header,
                 span { style: "{car}", if is_open { "\u{25be}" } else { "\u{25b8}" } }
-                span {
-                    style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                    "{proj.name}"
-                }
+                RepoLabel { name: proj.name.clone(), origin: proj.origin.clone() }
                 if expandable {
                     span { style: "{ct}", "{count_shown}" }
                 } else {
@@ -1044,42 +1195,209 @@ fn ProjectSection(
                 }
             }
             if expandable && is_open {
-                div { style: "{runs_wrap}",
-                    if live {
-                        for (port, run) in shown.iter() {
-                            RunRow {
-                                run: run.clone(),
-                                project: proj.name.clone(),
-                                // The port of the ENGINE this run came from — a
-                                // worktree run opens against the worktree engine.
-                                port: *port,
+                match sole {
+                    // Single checkout: flatten — runs directly under the repo.
+                    Some(w) => {
+                        let key = w.path.display().to_string();
+                        rsx! {
+                            WorktreeRuns {
+                                worktree_path: key.clone(),
+                                project_name: proj.name.clone(),
+                                live_engine: w.is_live(),
+                                live: live.get(&key).cloned().unwrap_or_default(),
+                                offline: offline.get(&key).cloned().unwrap_or_default(),
                                 selection,
-                                drawer_open,
-                            }
-                        }
-                    } else {
-                        // No engine: each row opens the read-only OfflineRunDetail
-                        // rooted at the project path (port is unused offline).
-                        for run in shown_offline.iter() {
-                            RunRow {
-                                run: run.clone(),
-                                project: proj.name.clone(),
-                                port: 0,
-                                offline_path: Some(proj.path.display().to_string()),
-                                selection,
+                                mine_only,
+                                search,
                                 drawer_open,
                             }
                         }
                     }
-                    // The one-step affordance: start a new worktree run on a live
-                    // project, or bring an engine up on an idle one (both open the
-                    // per-harness command scoped to this project).
-                    NewRunRow {
-                        name: proj.name.clone(),
-                        path: proj.path.display().to_string(),
+                    // 2+ checkouts: one worktree sub-level per checkout.
+                    None => rsx! {
+                        for w in proj.worktrees.iter() {
+                            {
+                                let key = w.path.display().to_string();
+                                rsx! {
+                                    WorktreeSection {
+                                        key: "{key}",
+                                        worktree: w.clone(),
+                                        project_name: proj.name.clone(),
+                                        live: live.get(&key).cloned().unwrap_or_default(),
+                                        offline: offline.get(&key).cloned().unwrap_or_default(),
+                                        selection,
+                                        mine_only,
+                                        search,
+                                        drawer_open,
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// One checkout sub-level under a repo (shown only when the repo has 2+
+/// checkouts): a collapsible sub-header (its label + a live/idle dot + run count)
+/// with the checkout's runs nested under it.
+#[component]
+fn WorktreeSection(
+    worktree: Worktree,
+    /// The repo display name — the breadcrumb a selected run shows.
+    project_name: String,
+    /// This checkout's live runs (engine port + summary), pre-scoped.
+    live: Vec<(u16, RunSummary)>,
+    /// This checkout's offline runs, pre-scoped.
+    offline: Vec<RunSummary>,
+    selection: Signal<Selection>,
+    mine_only: Signal<bool>,
+    search: Signal<String>,
+    drawer_open: Signal<bool>,
+) -> Element {
+    let mut expanded = use_signal(|| true);
+    let is_open = *expanded.read();
+
+    let q = search.read().trim().to_ascii_lowercase();
+    let mine = *mine_only.read();
+    let live_engine = worktree.is_live();
+    let count = if live_engine {
+        live.iter().filter(|(_, r)| run_matches(r, mine, &q)).count()
+    } else {
+        offline.iter().filter(|r| run_matches(r, mine, &q)).count()
+    };
+
+    let wrap = "margin:1px 0 2px 14px;";
+    let sh = format!(
+        "display:flex;align-items:center;gap:7px;padding:4px 8px;border-radius:6px;\
+         font-size:12px;font-weight:600;color:{muted};cursor:pointer;",
+        muted = tokens::var::TEXT_MUTED,
+    );
+    let car = format!(
+        "color:{faint};font-size:9px;width:9px;",
+        faint = tokens::var::TEXT_FAINT,
+    );
+    let dot = format!(
+        "width:6px;height:6px;border-radius:50%;flex:none;background:{};",
+        if live_engine { tokens::var::STATUS_OK } else { tokens::var::TEXT_FAINT },
+    );
+    let ct = format!(
+        "margin-left:auto;font-family:{mono};font-size:10px;color:{faint};",
+        mono = tokens::FONT_MONO,
+        faint = tokens::var::TEXT_FAINT,
+    );
+
+    let worktree_path = worktree.path.display().to_string();
+    rsx! {
+        div { style: "{wrap}",
+            div {
+                style: "{sh}",
+                onclick: move |_| {
+                    let now = *expanded.peek();
+                    expanded.set(!now);
+                },
+                span { style: "{car}", if is_open { "\u{25be}" } else { "\u{25b8}" } }
+                span { style: "{dot}" }
+                span {
+                    style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                    "{worktree.label}"
+                }
+                span { style: "{ct}", "{count}" }
+            }
+            if is_open {
+                WorktreeRuns {
+                    worktree_path,
+                    project_name,
+                    live_engine,
+                    live,
+                    offline,
+                    selection,
+                    mine_only,
+                    search,
+                    drawer_open,
+                }
+            }
+        }
+    }
+}
+
+/// The run rows for ONE checkout, plus its "new run…" affordance. Shared by the
+/// flattened single-checkout repo (rendered straight under the repo) and each
+/// [`WorktreeSection`]. A live checkout lists its engine's runs (opening the live
+/// Review); an idle one lists its on-disk runs (opening the read-only detail).
+#[component]
+fn WorktreeRuns(
+    /// The checkout path — offline rows root their `StateStore` here, and the
+    /// "new run" affordance scopes its command to it.
+    worktree_path: String,
+    /// The repo display name — the breadcrumb a selected run shows.
+    project_name: String,
+    /// Whether a live engine serves this checkout (live vs offline rows).
+    live_engine: bool,
+    /// This checkout's live runs (engine port + summary), pre-scoped.
+    live: Vec<(u16, RunSummary)>,
+    /// This checkout's offline runs, pre-scoped.
+    offline: Vec<RunSummary>,
+    selection: Signal<Selection>,
+    mine_only: Signal<bool>,
+    search: Signal<String>,
+    drawer_open: Signal<bool>,
+) -> Element {
+    let q = search.read().trim().to_ascii_lowercase();
+    let mine = *mine_only.read();
+    let shown_live: Vec<(u16, RunSummary)> = live
+        .iter()
+        .filter(|(_, r)| run_matches(r, mine, &q))
+        .cloned()
+        .collect();
+    let shown_offline: Vec<RunSummary> = offline
+        .iter()
+        .filter(|r| run_matches(r, mine, &q))
+        .cloned()
+        .collect();
+
+    let runs_wrap = format!(
+        "margin:1px 0 4px 14px;border-left:1px solid {border};padding-left:6px;",
+        border = tokens::var::BORDER,
+    );
+
+    rsx! {
+        div { style: "{runs_wrap}",
+            if live_engine {
+                for (port, run) in shown_live.iter() {
+                    RunRow {
+                        run: run.clone(),
+                        project: project_name.clone(),
+                        // The port of the ENGINE this run came from — a worktree
+                        // run opens against the worktree engine.
+                        port: *port,
                         selection,
+                        drawer_open,
                     }
                 }
+            } else {
+                // No engine: each row opens the read-only OfflineRunDetail rooted
+                // at the checkout path (port is unused offline).
+                for run in shown_offline.iter() {
+                    RunRow {
+                        run: run.clone(),
+                        project: project_name.clone(),
+                        port: 0,
+                        offline_path: Some(worktree_path.clone()),
+                        selection,
+                        drawer_open,
+                    }
+                }
+            }
+            // The one-step affordance: start a new worktree run on a live checkout,
+            // or bring an engine up on an idle one (both open the per-harness
+            // command scoped to this checkout).
+            NewRunRow {
+                name: project_name.clone(),
+                path: worktree_path.clone(),
+                selection,
             }
         }
     }
@@ -2027,7 +2345,8 @@ fn ProjectCard(proj: Project) -> Element {
     );
 
     let path_label = proj.path.display().to_string();
-    let harness_label = proj.harness.clone();
+    // The harness of any live checkout, for the engine line.
+    let harness_label = proj.worktrees.iter().find_map(|w| w.harness.clone());
     rsx! {
         Card {
             div { style: "{header}",
@@ -2045,89 +2364,150 @@ fn ProjectCard(proj: Project) -> Element {
     }
 }
 
-/// Merge the on-disk project registry with the live engines into the projects the
-/// sidebar + welcome surface render.
+/// Merge the on-disk project registry with the live engines into the repo ->
+/// worktree tree the sidebar + welcome surface render.
 ///
-/// Two sources, keyed by registry slug:
+/// A project IS its git REPO, keyed by the canonical slug; its worktrees are the
+/// distinct raw checkouts seen for it. Two sources:
 ///   1. **Registered projects** — every `~/.darkrun/<slug>/project.json` (via
-///      [`registry::list_projects`]), live or idle, carrying the durable
-///      name/path even when no engine is running.
-///   2. **Live engines** — every running engine ([`DiscoveredEngine`]). A
-///      matching registered project gets its port + harness OVERLAID (flipping it
-///      live); a live engine with NO registered record still surfaces.
+///      [`registry::list_known_projects`]), each a CANONICAL repo (the main
+///      checkout). Seeds the repo + its "main" worktree, live or idle.
+///   2. **Live engines** — every running engine ([`DiscoveredEngine`]). Each is
+///      canonicalized to its repo ([`registry::canonical_project`], so a worktree
+///      engine groups under the repo, NOT a worktree dir name) and contributes a
+///      worktree at its RAW checkout path, carrying its port + harness.
 ///
-/// Idempotent on slug; returns projects sorted by name for a stable order.
+/// **Blocking**: the registry read heals stale records and each engine is
+/// canonicalized by opening git — so call it OFF the render thread. Idempotent on
+/// (slug, checkout path).
 fn load_projects(engines: &[DiscoveredEngine]) -> Vec<Project> {
-    // Every project known locally: the durable registry UNIONED with projects
-    // inferred from engine descriptors (a session that ran but was never added by
-    // hand still surfaces, keyed by the repo it ran against).
-    let mut by_slug: BTreeMap<String, Project> = darkrun_mcp::registry::list_known_projects()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|rec| {
-            let project = Project {
-                slug: rec.slug.clone(),
-                // The display name is the repo's name — record name first,
-                // else the path basename; never the hash-suffixed slug.
-                name: rec
-                    .name
-                    .clone()
-                    .or_else(|| basename(&rec.path))
-                    .unwrap_or_else(|| rec.slug.clone()),
-                path: rec.path,
-                port: None,
-                harness: None,
-            };
-            (rec.slug, project)
-        })
-        .collect();
-
-    for e in engines {
-        by_slug
-            .entry(e.slug.clone())
-            .and_modify(|p| {
-                p.port = Some(e.port);
-                p.harness = Some(e.harness.clone());
-            })
-            .or_insert_with(|| Project::from_engine(e));
+    // slug -> the repo plus its checkouts keyed by raw path (dedups worktrees).
+    struct Acc {
+        slug: String,
+        name: String,
+        path: PathBuf,
+        origin: Option<String>,
+        worktrees: BTreeMap<PathBuf, Worktree>,
     }
 
-    by_slug.into_values().collect()
+    let mut by_slug: BTreeMap<String, Acc> = BTreeMap::new();
+
+    // 1. Registered projects: each record is a CANONICAL repo. Seed the repo and
+    //    its "main" worktree (idle unless a live engine overlays it below).
+    for rec in darkrun_mcp::registry::list_known_projects().unwrap_or_default() {
+        // The record path is canonical; resolve its repo identity (name + origin
+        // remote) the same way engines below do, preferring a record's own name.
+        let canon_id = darkrun_mcp::registry::canonical_project(&rec.path);
+        let canon = rec.path.clone();
+        // The display name is the repo's name — record name first, else the
+        // origin/dir-derived name; never the hash-suffixed slug.
+        let name = rec.name.clone().unwrap_or_else(|| canon_id.name.clone());
+        let origin = canon_id.origin.clone();
+        let acc = by_slug.entry(rec.slug.clone()).or_insert_with(|| Acc {
+            slug: rec.slug.clone(),
+            name,
+            path: canon.clone(),
+            origin,
+            worktrees: BTreeMap::new(),
+        });
+        if acc.origin.is_none() {
+            acc.origin = canon_id.origin.clone();
+        }
+        let label = worktree_label(&canon, &acc.path);
+        acc.worktrees.entry(canon.clone()).or_insert_with(|| Worktree {
+            path: canon,
+            label,
+            port: None,
+            harness: None,
+        });
+    }
+
+    // 2. Live engines: canonicalize each to its repo, then add/overlay a worktree
+    //    at its raw checkout path.
+    for e in engines {
+        let canon = darkrun_mcp::registry::canonical_project(&e.project_path);
+        let acc = by_slug.entry(canon.slug.clone()).or_insert_with(|| Acc {
+            slug: canon.slug.clone(),
+            name: canon.name.clone(),
+            path: canon.path.clone(),
+            origin: canon.origin.clone(),
+            worktrees: BTreeMap::new(),
+        });
+        if acc.origin.is_none() {
+            acc.origin = canon.origin.clone();
+        }
+        let raw = e.project_path.clone();
+        let label = worktree_label(&raw, &acc.path);
+        let wt = acc.worktrees.entry(raw.clone()).or_insert_with(|| Worktree {
+            path: raw,
+            label,
+            port: None,
+            harness: None,
+        });
+        wt.port = Some(e.port);
+        wt.harness = Some(e.harness.clone());
+    }
+
+    by_slug
+        .into_values()
+        .map(|acc| Project {
+            slug: acc.slug,
+            name: acc.name,
+            path: acc.path,
+            origin: acc.origin,
+            worktrees: acc.worktrees.into_values().collect(),
+        })
+        .collect()
 }
 
-/// A stable signature of the IDLE projects the offline reader scans: each project
-/// with no live engine and an on-disk `.darkrun/`, as `slug@path`, sorted. The
-/// poller recomputes the offline run lists only when THIS changes (an engine
-/// started/stopped, a project was added or dropped), not every tick, since
-/// nothing writes an idle project's runs while it sits idle.
+/// The display label for a checkout: "main" when its path is the repo's canonical
+/// path, else the checkout dir basename (e.g. "wiggly-gathering-spark").
+fn worktree_label(path: &std::path::Path, canonical: &std::path::Path) -> String {
+    if path == canonical {
+        "main".to_string()
+    } else {
+        basename(path).unwrap_or_else(|| "worktree".to_string())
+    }
+}
+
+/// A stable signature of the IDLE checkouts the offline reader scans: each
+/// worktree with no live engine and an on-disk `.darkrun/`, as `slug@path`,
+/// sorted. The poller recomputes the offline run lists only when THIS changes (an
+/// engine started/stopped, a project was added or dropped), not every tick, since
+/// nothing writes an idle checkout's runs while it sits idle.
 fn offline_projects_key(projects: &[Project]) -> Vec<String> {
-    let mut key: Vec<String> = projects
-        .iter()
-        .filter(|p| p.port.is_none() && p.path.join(".darkrun").is_dir())
-        .map(|p| format!("{}@{}", p.slug, p.path.display()))
-        .collect();
+    let mut key: Vec<String> = Vec::new();
+    for proj in projects {
+        for w in &proj.worktrees {
+            if w.port.is_none() && w.path.join(".darkrun").is_dir() {
+                key.push(format!("{}@{}", proj.slug, w.path.display()));
+            }
+        }
+    }
     key.sort();
     key
 }
 
-/// Read every idle (no live engine) project's runs straight off its on-disk
-/// `.darkrun/` state, keyed by project SLUG. A project contributes only when it
-/// has no live port AND a `.darkrun/` directory; the projection is the SAME one
-/// the engine's browse API serves ([`darkrun_browse::list_runs`]), so an offline
-/// run reads identically to a live one. **Blocking** (local file reads plus
-/// per-run git revwalks), so call it off the render thread. Projects with no
-/// readable runs are omitted, so the sidebar can tell "idle with runs" from a
-/// truly empty idle project.
+/// Read every idle (no live engine) checkout's runs straight off its on-disk
+/// `.darkrun/` state, keyed by the WORKTREE path. A checkout contributes only
+/// when it has no live port AND a `.darkrun/` directory; the projection is the
+/// SAME one the engine's browse API serves ([`darkrun_browse::list_runs`]), so an
+/// offline run reads identically to a live one. **Blocking** (local file reads
+/// plus per-run git revwalks), so call it off the render thread. Checkouts with
+/// no readable runs are omitted, so the sidebar can tell "idle with runs" from a
+/// truly empty idle checkout.
 fn read_offline_runs(projects: &[Project]) -> BTreeMap<String, Vec<RunSummary>> {
     let mut out = BTreeMap::new();
     for proj in projects {
-        if proj.port.is_some() || !proj.path.join(".darkrun").is_dir() {
-            continue;
-        }
-        let store = darkrun_core::StateStore::new(&proj.path);
-        let runs = darkrun_browse::list_runs(&store).runs;
-        if !runs.is_empty() {
-            out.insert(proj.slug.clone(), runs);
+        for w in &proj.worktrees {
+            if w.is_live() || !w.path.join(".darkrun").is_dir() {
+                continue;
+            }
+            let store = darkrun_core::StateStore::new(&w.path);
+            let runs = darkrun_browse::list_runs(&store).runs;
+            if !runs.is_empty() {
+                out.insert(w.path.display().to_string(), runs);
+            }
         }
     }
     out
@@ -2849,13 +3229,19 @@ mod data_render_tests {
         dioxus_ssr::render(&dom)
     }
 
+    /// A live single-checkout repo (its "main" checkout served by an engine).
     fn proj() -> Project {
         Project {
             slug: "store-ab12cd34".into(),
             name: "store".into(),
             path: "/tmp/store".into(),
-            port: Some(58616),
-            harness: Some("claude-code".into()),
+            origin: None,
+            worktrees: vec![Worktree {
+                path: "/tmp/store".into(),
+                label: "main".into(),
+                port: Some(58616),
+                harness: Some("claude-code".into()),
+            }],
         }
     }
     fn run() -> RunSummary {
@@ -2881,12 +3267,14 @@ mod data_render_tests {
             let mine = use_signal(|| false);
             let search = use_signal(String::new);
             let drawer = use_signal(|| true);
-            // Keyed by the project SLUG (not the display name) — the join
-            // the run fetcher uses; each run carries its engine's port.
+            // Keyed by the WORKTREE path — the join the run fetcher uses; each run
+            // carries its engine's port.
             let mut by_run = BTreeMap::new();
             by_run.insert("r".to_string(), (58616u16, run()));
             let mut runs_map = BTreeMap::new();
-            runs_map.insert("store-ab12cd34".to_string(), by_run);
+            runs_map.insert("/tmp/store".to_string(), by_run);
+            let live: BTreeMap<String, Vec<(u16, RunSummary)>> =
+                BTreeMap::from([("/tmp/store".to_string(), vec![(58616u16, run())])]);
             let refresh = use_signal(|| 0u32);
             let signin_bump = use_signal(|| 0u32);
             rsx! {
@@ -2896,7 +3284,7 @@ mod data_render_tests {
                     mine_only: mine, search, drawer_open: drawer, refresh, signin_bump, live_count: 1,
                 }
                 ProjectSection {
-                    proj: proj(), runs: vec![(58616u16, run())], offline: vec![], selection,
+                    proj: proj(), live, offline: BTreeMap::new(), selection,
                     mine_only: mine, search, drawer_open: drawer,
                 }
                 RunRow { run: run(), project: "store".to_string(), port: 58616, selection, drawer_open: drawer }
@@ -2908,8 +3296,9 @@ mod data_render_tests {
 
     #[test]
     fn offline_project_section_expands_and_run_row_selects_offline() {
-        // An IDLE project (port None) carrying an offline run list expands to its
-        // runs (no engine); selecting one routes to Selection::OfflineRun.
+        // An IDLE single-checkout repo (its main checkout has no engine) carrying
+        // an offline run list expands to its runs (no engine); selecting one routes
+        // to Selection::OfflineRun.
         fn App() -> Element {
             let selection = use_signal(|| Selection::None);
             let mine = use_signal(|| false);
@@ -2919,12 +3308,19 @@ mod data_render_tests {
                 slug: "store-ab12cd34".into(),
                 name: "store".into(),
                 path: "/tmp/store".into(),
-                port: None,
-                harness: None,
+                origin: None,
+                worktrees: vec![Worktree {
+                    path: "/tmp/store".into(),
+                    label: "main".into(),
+                    port: None,
+                    harness: None,
+                }],
             };
+            let offline: BTreeMap<String, Vec<RunSummary>> =
+                BTreeMap::from([("/tmp/store".to_string(), vec![run()])]);
             rsx! {
                 ProjectSection {
-                    proj: idle, runs: vec![], offline: vec![run()], selection,
+                    proj: idle, live: BTreeMap::new(), offline, selection,
                     mine_only: mine, search, drawer_open: drawer,
                 }
                 RunRow {
@@ -2935,6 +3331,61 @@ mod data_render_tests {
         }
         let html = render(App);
         assert!(!html.is_empty());
+    }
+
+    #[test]
+    fn multi_worktree_repo_shows_worktree_sublevel() {
+        // A repo with TWO checkouts (main + an agent worktree) renders the worktree
+        // sub-level: both checkout LABELS show. Selecting a run under a live
+        // worktree routes to Selection::Run against THAT worktree's engine port.
+        fn App() -> Element {
+            let selection = use_signal(|| Selection::None);
+            let mine = use_signal(|| false);
+            let search = use_signal(String::new);
+            let drawer = use_signal(|| true);
+            let repo = Project {
+                slug: "darkrun-22c6e158".into(),
+                name: "darkrun".into(),
+                path: "/dev/darkrun".into(),
+                origin: None,
+                worktrees: vec![
+                    Worktree {
+                        path: "/dev/darkrun".into(),
+                        label: "main".into(),
+                        port: Some(58616),
+                        harness: Some("claude-code".into()),
+                    },
+                    Worktree {
+                        path: "/dev/darkrun/.claude/worktrees/wiggly-gathering-spark".into(),
+                        label: "wiggly-gathering-spark".into(),
+                        port: Some(58617),
+                        harness: Some("claude-code".into()),
+                    },
+                ],
+            };
+            let live: BTreeMap<String, Vec<(u16, RunSummary)>> = BTreeMap::from([
+                ("/dev/darkrun".to_string(), vec![(58616u16, run())]),
+                (
+                    "/dev/darkrun/.claude/worktrees/wiggly-gathering-spark".to_string(),
+                    vec![(58617u16, run())],
+                ),
+            ]);
+            rsx! {
+                ProjectSection {
+                    proj: repo, live, offline: BTreeMap::new(), selection,
+                    mine_only: mine, search, drawer_open: drawer,
+                }
+            }
+        }
+        let html = render(App);
+        // The repo groups both checkouts under one "darkrun", with the worktree
+        // labels showing as sub-levels (never a worktree dir as a top-level repo).
+        assert!(html.contains("darkrun"), "{html}");
+        assert!(html.contains("main"), "the main checkout labels: {html}");
+        assert!(
+            html.contains("wiggly-gathering-spark"),
+            "the agent worktree labels as a sub-level: {html}"
+        );
     }
 
     #[test]
@@ -2972,11 +3423,23 @@ mod main_pane_render_tests {
     }
 
     fn proj() -> Project {
-        Project { slug: "store-ab12cd34".into(), name: "store".into(), path: "/tmp/store".into(), port: Some(58616), harness: Some("claude-code".into()) }
+        Project {
+            slug: "store-ab12cd34".into(),
+            name: "store".into(),
+            path: "/tmp/store".into(),
+            origin: None,
+            worktrees: vec![Worktree {
+                path: "/tmp/store".into(),
+                label: "main".into(),
+                port: Some(58616),
+                harness: Some("claude-code".into()),
+            }],
+        }
     }
 
     /// A runs map whose single run carries open drift, so the Run selection
-    /// exercises the header's drift-chip lookup.
+    /// exercises the header's drift-chip lookup. Keyed by worktree path (the
+    /// MainPane drift lookup scans values by (slug, port), so the key is free).
     fn drifted_runs_map() -> BTreeMap<String, BTreeMap<String, (u16, RunSummary)>> {
         let run = RunSummary {
             slug: "r".into(),
@@ -3150,12 +3613,18 @@ mod component_render_tests {
     }
 
     fn proj(name: &str, live: bool) -> Project {
+        let path: PathBuf = format!("/tmp/{name}").into();
         Project {
             slug: format!("{name}-ab12cd34"),
             name: name.into(),
-            path: format!("/tmp/{name}").into(),
-            port: if live { Some(58616) } else { None },
-            harness: if live { Some("claude-code".into()) } else { None },
+            path: path.clone(),
+            origin: None,
+            worktrees: vec![Worktree {
+                path,
+                label: "main".into(),
+                port: if live { Some(58616) } else { None },
+                harness: if live { Some("claude-code".into()) } else { None },
+            }],
         }
     }
 
@@ -3254,12 +3723,13 @@ mod helper_tests {
         }
     }
     fn proj(name: &str) -> Project {
+        let path: PathBuf = format!("/tmp/{name}").into();
         Project {
             slug: format!("{name}-ab12cd34"),
             name: name.into(),
-            path: format!("/tmp/{name}").into(),
-            port: None,
-            harness: None,
+            path: path.clone(),
+            origin: None,
+            worktrees: vec![Worktree { path, label: "main".into(), port: None, harness: None }],
         }
     }
 
@@ -3281,8 +3751,8 @@ mod helper_tests {
         let by_run = |r: RunSummary| BTreeMap::from([(r.slug.clone(), (58616u16, r))]);
         let mut runs_map: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>> =
             BTreeMap::new();
-        // Keyed by the project SLUG — the display name never joins run lists.
-        runs_map.insert("store-ab12cd34".into(), by_run(run_with("active", true, "me")));
+        // Keyed by the WORKTREE path — the run fetcher's join key.
+        runs_map.insert("/tmp/store".into(), by_run(run_with("active", true, "me")));
         // No query, all: a project with a matching run + a run-less project both show.
         let all = visible_projects(&projects, &runs_map, false, "");
         assert_eq!(all.len(), 2);
@@ -3296,7 +3766,7 @@ mod helper_tests {
         // Mine-only with a non-authored run and no name match hides the project.
         let mut others: BTreeMap<String, BTreeMap<String, (u16, RunSummary)>> =
             BTreeMap::new();
-        others.insert("store-ab12cd34".into(), by_run(run_with("active", false, "x")));
+        others.insert("/tmp/store".into(), by_run(run_with("active", false, "x")));
         let hidden = visible_projects(&[proj("store")], &others, true, "");
         assert!(hidden.is_empty());
     }
@@ -3353,10 +3823,14 @@ mod helper_tests {
             started_at: "2026-06-05T00:00:00Z".into(),
         };
         assert_eq!(engine_display_name(&e), "store");
-        // Merges live engines over the registry (registry may be empty here);
-        // the engine-only slug is inserted via Project::from_engine.
+        // Merges live engines over the registry (registry may be empty here); an
+        // engine with no registry record still surfaces as a repo, canonicalized
+        // from its checkout, with a worktree at that checkout path.
         let projects = load_projects(&[e]);
-        assert!(projects.iter().any(|p| p.name == "store" || p.path == std::path::Path::new("/tmp/store")));
+        assert!(projects.iter().any(|p| {
+            (p.name == "store" || p.path == std::path::Path::new("/tmp/store"))
+                && p.worktrees.iter().any(|w| w.path == std::path::Path::new("/tmp/store") && w.is_live())
+        }));
     }
 
     #[test]
@@ -3435,8 +3909,23 @@ mod helper_tests {
         assert!(gui.starts_with("open "));
     }
 
+    /// An idle single-checkout repo whose "main" checkout is at `path`.
     fn idle_project(path: std::path::PathBuf) -> Project {
-        Project { slug: "widget".into(), name: "widget".into(), path, port: None, harness: None }
+        Project {
+            slug: "widget".into(),
+            name: "widget".into(),
+            path: path.clone(),
+            origin: None,
+            worktrees: vec![Worktree { path, label: "main".into(), port: None, harness: None }],
+        }
+    }
+
+    /// The same repo with a live engine on its checkout(s).
+    fn make_live(mut proj: Project) -> Project {
+        for w in &mut proj.worktrees {
+            w.port = Some(9);
+        }
+        proj
     }
 
     #[test]
@@ -3446,8 +3935,8 @@ mod helper_tests {
         let idle = idle_project(repo.path().to_path_buf());
         // Idle + on-disk `.darkrun/` → one signature entry.
         assert_eq!(offline_projects_key(std::slice::from_ref(&idle)).len(), 1);
-        // A LIVE project (has a port) is excluded even with disk state.
-        let live = Project { port: Some(9), ..idle.clone() };
+        // A LIVE checkout (has a port) is excluded even with disk state.
+        let live = make_live(idle.clone());
         assert!(offline_projects_key(std::slice::from_ref(&live)).is_empty());
         // Idle but no `.darkrun/` is excluded.
         let bare = tempfile::tempdir().unwrap();
@@ -3474,13 +3963,15 @@ mod helper_tests {
         };
         store.write_run(&run).unwrap();
 
-        // An idle project with disk state contributes its runs, keyed by slug.
+        // An idle checkout with disk state contributes its runs, keyed by the
+        // WORKTREE path.
         let idle = idle_project(repo.path().to_path_buf());
+        let key = repo.path().display().to_string();
         let map = read_offline_runs(std::slice::from_ref(&idle));
-        assert_eq!(map.get("widget").map(Vec::len), Some(1));
-        assert_eq!(map["widget"][0].slug, "widget-1");
-        // A live project (has a port) is skipped even with disk state.
-        let live = Project { port: Some(1), ..idle.clone() };
+        assert_eq!(map.get(&key).map(Vec::len), Some(1));
+        assert_eq!(map[&key][0].slug, "widget-1");
+        // A live checkout (has a port) is skipped even with disk state.
+        let live = make_live(idle.clone());
         assert!(read_offline_runs(std::slice::from_ref(&live)).is_empty());
     }
 }
