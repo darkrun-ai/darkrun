@@ -54,6 +54,22 @@ pub struct EngineDescriptor {
     /// dialed the relay). A local-only engine carries just the local candidate.
     #[serde(default)]
     pub reachability: darkrun_api::tunnel::Reachability,
+    /// The canonical repo's display name (origin repo name else the main-checkout
+    /// dir name), STAMPED by the unsandboxed engine so a sandboxed discoverer (the
+    /// Mac App Store app, which can't call git on an out-of-container path) reads
+    /// the identity straight from the descriptor. `#[serde(default)]` for
+    /// back-compat with descriptors written before this field existed.
+    #[serde(default)]
+    pub repo_name: Option<String>,
+    /// The canonical repo's `origin` remote URL, stamped by the engine. Same
+    /// sandbox-safe rationale as [`repo_name`]. `None` for a local-only repo.
+    #[serde(default)]
+    pub repo_origin: Option<String>,
+    /// The canonical main-checkout absolute path, stamped by the engine (a linked
+    /// worktree resolves to the main checkout). Same sandbox-safe rationale as
+    /// [`repo_name`].
+    #[serde(default)]
+    pub repo_path: Option<PathBuf>,
 }
 
 /// The registry rooted at `~/.darkrun`, owning the descriptor lifecycle for ONE
@@ -136,6 +152,11 @@ impl EngineRegistry {
             }),
             relay: self.relay.clone(),
         };
+        // The engine is UNSANDBOXED, so resolving the canonical repo identity via
+        // git works here. Stamp it into the descriptor so a SANDBOXED discoverer
+        // (the Mac App Store app) reads the repo name/origin/path straight from the
+        // group container, never calling git on an out-of-container path.
+        let canon = canonical_project(&self.repo_root);
         let descriptor = EngineDescriptor {
             pid: self.pid,
             addr,
@@ -144,6 +165,9 @@ impl EngineRegistry {
             harness: harness.to_string(),
             started_at: now_rfc3339(),
             reachability,
+            repo_name: Some(canon.name),
+            repo_origin: canon.origin,
+            repo_path: Some(canon.path),
         };
         let json = serde_json::to_vec_pretty(&descriptor)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -871,6 +895,9 @@ mod tests {
                 }),
                 relay: None,
             },
+            repo_name: Some("darkrun".to_string()),
+            repo_origin: Some("git@github.com:jwaldrip/darkrun.git".to_string()),
+            repo_path: Some(PathBuf::from("/Users/dev/darkrun")),
         };
         let json = serde_json::to_vec(&descriptor).unwrap();
         let back: EngineDescriptor = serde_json::from_slice(&json).unwrap();
@@ -878,6 +905,24 @@ mod tests {
         // A local-only engine advertises just the loopback candidate.
         assert!(back.reachability.local.is_some());
         assert!(back.reachability.relay.is_none());
+        // The engine-stamped repo identity round-trips.
+        assert_eq!(back.repo_name.as_deref(), Some("darkrun"));
+        assert_eq!(back.repo_path.as_deref(), Some(Path::new("/Users/dev/darkrun")));
+
+        // An OLD descriptor (written before repo identity was stamped) still
+        // deserializes: the new fields default to None (serde back-compat).
+        let legacy = r#"{
+            "pid": 7,
+            "addr": "127.0.0.1:4317",
+            "repo_root": "/Users/dev/darkrun",
+            "slug": "darkrun-deadbeef",
+            "harness": "claude",
+            "started_at": "2026-05-31T00:00:00+00:00"
+        }"#;
+        let old: EngineDescriptor = serde_json::from_str(legacy).unwrap();
+        assert!(old.repo_name.is_none());
+        assert!(old.repo_origin.is_none());
+        assert!(old.repo_path.is_none());
     }
 
     #[test]
@@ -896,6 +941,36 @@ mod tests {
         let relay = d.reachability.relay.expect("relay candidate");
         assert_eq!(relay.url, "wss://relay.darkrun.ai");
         assert_eq!(relay.session, "some-repo");
+    }
+
+    #[test]
+    fn announce_stamps_the_canonical_repo_identity() {
+        use std::process::Command;
+        // A real repo with an origin remote and a linked worktree: announcing from
+        // the WORKTREE must stamp the canonical repo's name/origin/path (resolved
+        // via git in the unsandboxed engine), not the worktree dir.
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(repo.path()).args(args)
+                .status().unwrap().success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@darkrun.ai"]);
+        git(&["config", "user.name", "t"]);
+        git(&["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+        std::fs::write(repo.path().join("a"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let wt = repo.path().join(".claude/worktrees/scratch");
+        git(&["worktree", "add", "-q", wt.to_str().unwrap()]);
+
+        let reg = tempfile::tempdir().unwrap();
+        let registry = EngineRegistry::with_root(reg.path(), &wt);
+        let d = registry.announce(sample_addr(), "claude").unwrap();
+        let main_root = resolve_project_root(&wt);
+        assert_eq!(d.repo_name.as_deref(), Some("widgets"), "stamped from the origin repo");
+        assert_eq!(d.repo_origin.as_deref(), Some("git@github.com:acme/widgets.git"));
+        assert_eq!(d.repo_path.as_deref(), Some(main_root.as_path()), "the MAIN checkout");
     }
 
     #[test]

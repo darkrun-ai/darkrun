@@ -594,11 +594,22 @@ pub struct DiscoveredEngine {
     pub harness: String,
     /// RFC3339 timestamp the engine announced itself at.
     pub started_at: String,
+    /// The canonical repo's display name, STAMPED into the descriptor by the
+    /// unsandboxed engine. The SANDBOXED desktop reads it straight from here
+    /// instead of calling git on `project_path` (an out-of-container path git
+    /// can't reach). `None` for a pre-stamp (old) descriptor.
+    pub repo_name: Option<String>,
+    /// The canonical repo's `origin` remote URL, stamped by the engine.
+    pub repo_origin: Option<String>,
+    /// The canonical main-checkout absolute path, stamped by the engine.
+    pub repo_path: Option<PathBuf>,
 }
 
 impl DiscoveredEngine {
     /// Project a registry descriptor into the desktop-facing shape, dropping the
-    /// host (always loopback) and keeping only the port.
+    /// host (always loopback) and keeping only the port. The repo identity is
+    /// read from the descriptor's stamped fields (never re-derived via git — the
+    /// sandboxed desktop can't reach an out-of-container repo path).
     fn from_descriptor(d: darkrun_mcp::registry::EngineDescriptor) -> Self {
         DiscoveredEngine {
             project_path: d.repo_root,
@@ -607,6 +618,9 @@ impl DiscoveredEngine {
             pid: d.pid,
             harness: d.harness,
             started_at: d.started_at,
+            repo_name: d.repo_name,
+            repo_origin: d.repo_origin,
+            repo_path: d.repo_path,
         }
     }
 }
@@ -977,6 +991,9 @@ mod tests {
             pid: 1234,
             harness: "claude".into(),
             started_at: "2026-05-31T00:00:00+00:00".into(),
+            repo_name: None,
+            repo_origin: None,
+            repo_path: None,
         }
     }
 
@@ -990,12 +1007,19 @@ mod tests {
             harness: "claude".into(),
             started_at: "2026-05-31T00:00:00+00:00".into(),
             reachability: Default::default(),
+            repo_name: Some("proj".into()),
+            repo_origin: Some("git@github.com:acme/proj.git".into()),
+            repo_path: Some(PathBuf::from("/Users/dev/proj")),
         };
         let eng = DiscoveredEngine::from_descriptor(desc);
         assert_eq!(eng.port, 5151);
         assert_eq!(eng.project_path, PathBuf::from("/Users/dev/proj"));
         assert_eq!(eng.pid, 4242);
         assert_eq!(eng.slug, "proj-deadbeef");
+        // The stamped repo identity carries through to the desktop shape.
+        assert_eq!(eng.repo_name.as_deref(), Some("proj"));
+        assert_eq!(eng.repo_origin.as_deref(), Some("git@github.com:acme/proj.git"));
+        assert_eq!(eng.repo_path.as_deref(), Some(Path::new("/Users/dev/proj")));
     }
 
     #[test]
@@ -1272,6 +1296,7 @@ mod async_client_tests {
             project_path: std::path::PathBuf::from("/repo"),
             port: 7, slug: "s".into(), pid: 1, harness: "claude-code".into(),
             started_at: "t".into(),
+            repo_name: None, repo_origin: None, repo_path: None,
         }];
         assert_eq!(find_engine_for_project(&engines, std::path::Path::new("/repo")), Some(7));
         assert_eq!(find_engine_for_project(&engines, std::path::Path::new("/other")), None);
