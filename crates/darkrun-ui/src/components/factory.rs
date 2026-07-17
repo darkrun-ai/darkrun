@@ -150,9 +150,9 @@ impl CheckpointKind {
     }
 }
 
-/// A sticky bar surfaced at a Checkpoint gate. Shows the gate kind in the
-/// checkpoint (magenta) hue and offers advance / hold actions for `ask`/`await`
-/// gates.
+/// A status header surfaced at a Checkpoint gate. Shows the gate kind in the
+/// checkpoint (magenta) hue plus the prompt. It carries no actions: the decision
+/// itself lives in the labeled approve / request-changes row beneath it.
 #[component]
 pub fn CheckpointBar(
     /// The gate kind.
@@ -160,12 +160,6 @@ pub fn CheckpointBar(
     /// Free-text prompt shown to the operator.
     #[props(default = "Checkpoint reached.".to_string())]
     prompt: String,
-    /// Advance handler. Rendered for `ask`/`await` gates when set.
-    #[props(default)]
-    on_advance: Option<EventHandler<MouseEvent>>,
-    /// Hold / block handler.
-    #[props(default)]
-    on_hold: Option<EventHandler<MouseEvent>>,
 ) -> Element {
     let hue = Phase::Checkpoint.hue_var();
     let bar = format!(
@@ -181,30 +175,10 @@ pub fn CheckpointBar(
         sans = tokens::FONT_SANS,
         text = tokens::var::TEXT,
     );
-    // Auto/external gates are informational; ask/await invite a decision.
-    let interactive = matches!(kind, CheckpointKind::Ask | CheckpointKind::Await);
     rsx! {
         div { class: "dr-checkpoint-bar", style: "{bar}", "data-kind": kind.name(),
             Badge { tone: Tone::Neutral, "checkpoint:{kind.name()}" }
             span { style: "{prompt_style}", "{prompt}" }
-            if interactive {
-                if let Some(hold) = on_hold {
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        tone: Tone::Warn,
-                        on_click: move |evt| hold.call(evt),
-                        "hold"
-                    }
-                }
-                if let Some(advance) = on_advance {
-                    Button {
-                        variant: ButtonVariant::Primary,
-                        tone: Tone::Accent,
-                        on_click: move |evt| advance.call(evt),
-                        "advance"
-                    }
-                }
-            }
         }
     }
 }

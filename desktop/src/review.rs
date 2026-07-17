@@ -13,9 +13,10 @@
 //!     reachable from a persistent header button,
 //!   - the annotate surface ([`AnnotateToolbar`] + overlay + [`CommentPanel`])
 //!     opened on an artifact, submitting via the wire, and
-//!   - a single severity-driven [`CheckpointBar`] rendered ONLY at an active
-//!     review/final gate, whose primary action darkens to Request-changes when
-//!     open `should`/`must` annotations exist.
+//!   - a single decision surface rendered ONLY at an active review/final gate:
+//!     a [`CheckpointBar`] status header over one labeled approve /
+//!     request-changes row, whose primary darkens to Request-changes when open
+//!     `should`/`must` annotations exist.
 //!
 //! Every session variant is rendered by its own surface — `Review` in full, and
 //! question / direction / picker / view / visual-review / proof each with a
@@ -1548,7 +1549,10 @@ fn AnnotateSurface(
                     },
                 }
             }
-            div { style: "display:flex;gap:16px;align-items:flex-start;",
+            // A visual artifact sits beside its comments (image + notes reads
+            // fine); a text artifact stacks — full-width doc on top, comments
+            // below — so markdown/code never crams into a narrow column.
+            div { style: if visual { "display:flex;gap:16px;align-items:flex-start;" } else { "display:flex;flex-direction:column;gap:12px;" },
                 // The artifact stage — the active tool's gesture lands the
                 // matching shape (pin/box/arrow/pen/highlight).
                 {
@@ -1568,7 +1572,7 @@ fn AnnotateSurface(
                         place,
                     )
                 }
-                div { style: if visual { "flex:1;min-width:0;" } else { "flex:0 0 320px;min-width:0;" },
+                div { style: if visual { "flex:1;min-width:0;" } else { "width:100%;min-width:0;" },
                     CommentPanel {
                         comments: thread,
                         placeholder: "comment on this artifact…".to_string(),
@@ -1642,8 +1646,10 @@ fn annotate_stage(
     let mut stroke = use_signal(Vec::<(f64, f64)>::new);
 
     // Visual surfaces are a fixed 360px box (the gesture math normalizes against
-    // it). A text artifact is the PRIMARY content: let it grow wide and scroll,
-    // so a rendered doc reads like a document, not a cramped column.
+    // it). A text artifact is the PRIMARY content and now stacks full-width above
+    // its comments, so it takes the whole row width (box-sizing keeps the border
+    // from spilling past 100% into a horizontal scroll) and scrolls its own body,
+    // reading like a document rather than a cramped column.
     let stage = if visual {
         format!(
             "position:relative;flex:0 0 360px;min-height:220px;border-radius:8px;\
@@ -1653,8 +1659,9 @@ fn annotate_stage(
         )
     } else {
         format!(
-            "position:relative;flex:1;min-width:0;min-height:220px;max-height:72vh;\
-             overflow:auto;border-radius:8px;border:1px solid {border};background:{base};",
+            "position:relative;width:100%;box-sizing:border-box;min-width:0;\
+             min-height:220px;max-height:72vh;overflow:auto;border-radius:8px;\
+             border:1px solid {border};background:{base};",
             border = tokens::var::BORDER,
             base = tokens::var::SURFACE_BASE,
         )
@@ -2157,7 +2164,7 @@ fn checkpoint_section(
         .gate_context
         .clone()
         .or_else(|| review.target.clone())
-        .unwrap_or_else(|| "Checkpoint reached — approve or request changes.".to_string());
+        .unwrap_or_else(|| "Checkpoint reached.".to_string());
 
     // A global station note shipped with Request-changes.
     let note = use_signal(String::new);
@@ -2199,21 +2206,15 @@ fn checkpoint_section(
     };
 
     let approve_click = post.clone();
-    let changes_click = post.clone();
-    let bar_advance = post.clone();
-    let bar_hold = post;
-    let changes_payload_bar = changes_payload.clone();
+    let changes_click = post;
 
     let mut note_sig = note;
 
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:10px;",
-            CheckpointBar {
-                kind,
-                prompt,
-                on_advance: move |_| if !blocked { bar_advance("approved", None) },
-                on_hold: move |_| bar_hold("changes_requested", changes_payload_bar.clone()),
-            }
+            // A pure status header: the gate kind + prompt. The decision lives in
+            // the labeled approve / request-changes row below.
+            CheckpointBar { kind, prompt }
             // One global station note ships with Request-changes.
             textarea {
                 style: format!(
