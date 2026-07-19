@@ -34,3 +34,4 @@
 {"action":"audit","at":"2026-07-11T18:43:49.712401+00:00","station":"specify","track":"run"}
 {"action":"audit","at":"2026-07-11T18:47:25.719804+00:00","station":"specify","track":"run"}
 {"action":"spec","at":"2026-07-12T02:20:48.400417+00:00","station":"shape","track":"run"}
+{"action":"spec","at":"2026-07-12T05:14:52.356712+00:00","station":"build","track":"run"}
