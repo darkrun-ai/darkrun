@@ -231,8 +231,20 @@ pub enum WireError {
     Io(std::io::Error),
     /// The request body could not be serialized.
     Encode(serde_json::Error),
-    /// The server returned a non-2xx status.
-    Status(u16),
+    /// The server returned a non-2xx status, with the engine's own explanation
+    /// when it sent one.
+    ///
+    /// The engine REFUSES a decision it cannot honor and says why in the body
+    /// (`{"error": "..."}`) — e.g. approving a station whose cursor is not
+    /// holding at a gate returns a 409 explaining the run has already moved past
+    /// it. Rendering only the bare code turned every refusal into an opaque
+    /// "engine returned HTTP 409", so the reason rides along here.
+    Status {
+        /// The HTTP status code.
+        code: u16,
+        /// The engine's `error` message from the response body, when present.
+        reason: Option<String>,
+    },
 }
 
 impl fmt::Display for WireError {
@@ -241,9 +253,27 @@ impl fmt::Display for WireError {
             WireError::Connect(e) => write!(f, "connect failed: {e}"),
             WireError::Io(e) => write!(f, "io error: {e}"),
             WireError::Encode(e) => write!(f, "encode failed: {e}"),
-            WireError::Status(code) => write!(f, "engine returned HTTP {code}"),
+            // Lead with the engine's own words; the code is the footnote.
+            WireError::Status { code, reason: Some(r) } if !r.trim().is_empty() => {
+                write!(f, "{r} (HTTP {code})")
+            }
+            WireError::Status { code, .. } => write!(f, "engine returned HTTP {code}"),
         }
     }
+}
+
+/// Pull the engine's `error` string out of a JSON response body, when it sent
+/// one. A non-JSON or `error`-less body reads as `None` so the caller falls back
+/// to the bare status code.
+pub fn engine_error_reason(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let msg = value.get("error")?;
+    // `error` is normally a string, but tolerate a nested/structured value.
+    let text = match msg {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    (!text.trim().is_empty()).then_some(text)
 }
 
 impl std::error::Error for WireError {}
@@ -420,7 +450,7 @@ pub async fn submit_feedback_reply(
 
 /// GET a run's attached objective-evidence proof (`/api/proof/:run`): the
 /// numbers the ProofPanel renders at a prove gate. A `404` (no proof attached
-/// yet) surfaces as `WireError::Status(404)`, which the review surface renders
+/// yet) surfaces as a `WireError::Status` with code 404, which the review surface renders
 /// as an explicit "no evidence attached" state rather than nothing.
 pub async fn fetch_proof(cfg: &ConnConfig, run: &str) -> Result<ProofGetResponse, WireError> {
     get_json(&cfg.authority(), &cfg.proof_path(run)).await
@@ -490,7 +520,10 @@ async fn get_json<T: DeserializeOwned>(authority: &str, path: &str) -> Result<T,
 
     let status = parse_status_code(&buf)?;
     if !(200..300).contains(&status) {
-        return Err(WireError::Status(status));
+        return Err(WireError::Status {
+            code: status,
+            reason: engine_error_reason(split_body(&buf)),
+        });
     }
     let body = split_body(&buf);
     serde_json::from_slice::<T>(body).map_err(WireError::Encode)
@@ -557,7 +590,10 @@ async fn send_json<T: Serialize>(
     if (200..300).contains(&status) {
         Ok(())
     } else {
-        Err(WireError::Status(status))
+        Err(WireError::Status {
+            code: status,
+            reason: engine_error_reason(split_body(&buf)),
+        })
     }
 }
 
@@ -967,6 +1003,25 @@ mod tests {
     }
 
     #[test]
+    fn engine_refusal_reason_surfaces_instead_of_a_bare_status() {
+        // The engine explains a refused decision in the body; the operator must
+        // see THAT, not an opaque "engine returned HTTP 409".
+        let body = br#"{"error":"no checkpoint is awaiting a decision on station 'build': the cursor is not holding at a gate (it is at phase Manufacture)","session_id":"s"}"#;
+        let reason = engine_error_reason(body).expect("reason parsed");
+        assert!(reason.contains("no checkpoint is awaiting a decision"));
+        let shown = WireError::Status { code: 409, reason: Some(reason) }.to_string();
+        assert!(shown.contains("not holding at a gate"), "{shown}");
+        assert!(shown.contains("409"), "the code rides along as a footnote: {shown}");
+        // A body with no `error`, or a non-JSON body, falls back to the code.
+        assert!(engine_error_reason(br#"{"ok":true}"#).is_none());
+        assert!(engine_error_reason(b"not json").is_none());
+        assert_eq!(
+            WireError::Status { code: 500, reason: None }.to_string(),
+            "engine returned HTTP 500",
+        );
+    }
+
+    #[test]
     fn status_code_parsing() {
         assert_eq!(
             parse_status_code(b"HTTP/1.1 200 OK\r\n\r\n{}").unwrap(),
@@ -1264,7 +1319,7 @@ mod async_client_tests {
         // A non-review focus session yields None.
         assert!(fetch_current_focus(&cfg).await.is_none());
         // A 404 GET surfaces a Status error (the non-2xx arm).
-        assert!(matches!(fetch_runs(&cfg).await, Err(WireError::Status(404))));
+        assert!(matches!(fetch_runs(&cfg).await, Err(WireError::Status { code: 404, .. })));
     }
 
     #[tokio::test]
@@ -1285,7 +1340,8 @@ mod async_client_tests {
             WireError::Connect(std::io::Error::other("x")),
             WireError::Io(std::io::Error::other("y")),
             WireError::Encode(serde_json::from_str::<i32>("bad").unwrap_err()),
-            WireError::Status(503),
+            WireError::Status { code: 503, reason: None },
+            WireError::Status { code: 409, reason: Some("no checkpoint is awaiting a decision".into()) },
         ] {
             assert!(!e.to_string().is_empty());
         }
