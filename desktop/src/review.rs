@@ -331,7 +331,7 @@ fn review_body(
                 };
                 match wire::fetch_proof(&cfg, &run).await {
                     Ok(resp) => proof.set(Some(Some(resp))),
-                    Err(wire::WireError::Status(404)) => proof.set(Some(None)),
+                    Err(wire::WireError::Status { code: 404, .. }) => proof.set(Some(None)),
                     // A transport failure leaves the slot unanswered rather
                     // than claiming "no evidence" about a run we couldn't ask.
                     Err(_) => {}
