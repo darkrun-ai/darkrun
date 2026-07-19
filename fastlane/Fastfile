@@ -32,6 +32,29 @@ end
 
 APP_ID = "ai.darkrun.app"
 
+# The changelog every main-push (release-candidate) TestFlight build carries:
+# the in-dev version, the monotonic build number, and the commit, so a tester can
+# tell RCs apart at a glance. Shared by the iOS and macOS beta lanes so both
+# platforms label builds identically.
+def rc_changelog
+  sha = (ENV["GITHUB_SHA"] || "")[0, 7]
+  ver = ENV["DARKRUN_MARKETING_VERSION"]
+  build = ENV["DARKRUN_BUILD_NUMBER"]
+  tag = [ver && "v#{ver}", build && "build #{build}"].compact.join(" \u{b7} ")
+  ["Release candidate", tag.empty? ? nil : "(#{tag})",
+   sha.empty? ? nil : "\u{b7} #{sha}", "off main."].compact.join(" ")
+end
+
+# A re-run on the SAME commit re-uploads the same CFBundleVersion, which App
+# Store Connect rejects as a duplicate. That means the lane's goal (the build is
+# in TestFlight) is already met, not a failure. Only a DIFFERENT error is real.
+def tolerate_duplicate_build
+  yield
+rescue => e
+  raise unless e.message =~ /bundle version must be higher|already been used|DUPLICATE/i
+  UI.important("TestFlight build already in App Store Connect (this commit was uploaded before); nothing to re-upload.")
+end
+
 platform :ios do
   # Sign + package the dx-generated Xcode project into an App Store .ipa. Assumes
   # `dx build --platform ios --release` already ran (CI does this first). `match`
@@ -57,21 +80,7 @@ platform :ios do
 
   desc "TestFlight upload. CI builds + signs the .ipa first (path in DARKRUN_IPA)."
   lane :beta do
-    sha = (ENV["GITHUB_SHA"] || "")[0, 7]
-    ver = ENV["DARKRUN_MARKETING_VERSION"]
-    build = ENV["DARKRUN_BUILD_NUMBER"]
-    # Every main build is a release candidate: label it with the in-dev version +
-    # the monotonic build number so testers can tell RCs apart at a glance.
-    tag = [ver && "v#{ver}", build && "build #{build}"].compact.join(" · ")
-    changelog = ["Release candidate", tag.empty? ? nil : "(#{tag})",
-                 sha.empty? ? nil : "· #{sha}", "off main."].compact.join(" ")
-    # A re-run on the same commit (a retried job, a re-dispatched workflow)
-    # re-uploads the SAME CFBundleVersion, and App Store Connect rejects the
-    # duplicate with a 409-style "already been used" error. That means this
-    # lane's goal (the build is in TestFlight) is already met, not a failure
-    # (the same tolerance the `release` lane carries). Only a DIFFERENT error
-    # is real and re-raised.
-    begin
+    tolerate_duplicate_build do
       upload_to_testflight(
         api_key: asc_api_key,
         app_identifier: APP_ID,
@@ -79,11 +88,8 @@ platform :ios do
         ipa: ENV.fetch("DARKRUN_IPA"),
         skip_waiting_for_build_processing: true,
         distribute_external: false,
-        changelog: changelog,
+        changelog: rc_changelog,
       )
-    rescue => e
-      raise unless e.message =~ /bundle version must be higher|already been used|DUPLICATE/i
-      UI.important("TestFlight build already in App Store Connect (this commit was uploaded before); nothing to re-upload.")
     end
   end
 
@@ -217,6 +223,29 @@ platform :mac do
       api_key: asc_api_key,
       readonly: true,
     )
+  end
+
+  desc "TestFlight upload (macOS). CI builds + signs the .pkg first (path in"
+  desc "DARKRUN_PKG). This is the RC path every main push takes."
+  #
+  # macOS needs its OWN pilot lane, exactly like iOS `beta`. Pushing a main build
+  # through `mac_release` (deliver) uploads it as an App Store SUBMISSION
+  # candidate, which only INCIDENTALLY shows up in TestFlight: builds 864 and 866
+  # surfaced that way, 868 processed and never became "available to test" on
+  # macOS (Apple sent no failure either), so the Mac testers stayed a build
+  # behind with no signal. pilot puts the build in TestFlight explicitly.
+  lane :mac_beta do
+    tolerate_duplicate_build do
+      upload_to_testflight(
+        api_key: asc_api_key,
+        app_identifier: APP_ID,
+        app_platform: "osx", # pilot's macOS platform; else it prompts + dies in CI
+        pkg: ENV.fetch("DARKRUN_PKG"),
+        skip_waiting_for_build_processing: true,
+        distribute_external: false,
+        changelog: rc_changelog,
+      )
+    end
   end
 
   desc "Mac App Store upload (no auto-submit). CI builds + signs the .pkg first"
