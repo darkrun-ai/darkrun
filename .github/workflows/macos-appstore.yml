@@ -1,15 +1,23 @@
 name: macos-appstore
 
-# Build the darkrun macOS app (Dioxus → .app → signed .pkg) and upload it to the
-# Mac App Store. The .pkg + metadata are uploaded but NOT submitted for review; a
-# human hits "Submit" in App Store Connect. Auth is an App Store Connect API key;
-# signing is fastlane `match` (the macOS MAS cert types). Mirrors ios-release.yml.
+# Build the darkrun macOS app (Dioxus → .app → signed .pkg) and ship it to
+# testers. Auth is an App Store Connect API key; signing is fastlane `match` (the
+# macOS MAS cert types).
 #
-# Builds AUTOMATICALLY on every push to main that touches the app, uploading the
-# .pkg to App Store Connect (visible in TestFlight; a human still hits "Submit"
-# for the store). Same secrets iOS uses (all present; manual runs pass). Build
-# number = commit count, so each build is monotonically newer. Web/server-only
-# pushes don't rebuild. workflow_dispatch stays for on-demand rebuilds.
+# Builds AUTOMATICALLY on every push to main that touches the app. A push is a
+# release CANDIDATE, so it goes to TESTFLIGHT via pilot (`mac_beta`), mirroring
+# ios-testflight.yml. It used to go through `mac_release` (deliver, the App Store
+# submission path), which only INCIDENTALLY surfaced builds in TestFlight: builds
+# 864/866 appeared that way but 868 completed processing and NEVER became
+# "available to test" on macOS, with no failure from Apple, so Mac testers
+# silently stayed a build behind. pilot puts the build in TestFlight explicitly.
+#
+# The deliberate App Store push is workflow_dispatch (`mac_release`, uploaded but
+# NOT submitted; a human hits "Submit" in App Store Connect). Nothing is lost by
+# routing automatic builds to TestFlight: a pilot-uploaded build still lands in
+# App Store Connect and stays selectable for a release. Build number = commit
+# count, so each build is monotonically newer. Web/server-only pushes don't
+# rebuild.
 
 on:
   push:
@@ -131,7 +139,30 @@ jobs:
           DARKRUN_MARKETING_VERSION: ${{ steps.v.outputs.version }}
           DARKRUN_BUILD_NUMBER: ${{ steps.v.outputs.build }}
 
-      - name: Upload to the Mac App Store (no auto-submit)
+      # A main push is a release CANDIDATE, so it goes to TestFlight via pilot
+      # (`mac_beta`) exactly like ios-testflight.yml does. Routing RCs through
+      # `mac_release` (deliver) uploaded them as App Store submission candidates,
+      # which only INCIDENTALLY appear in TestFlight: build 868 processed and
+      # never became "available to test" on macOS, with no failure from Apple, so
+      # Mac testers silently stayed on 866. A TAG (vX.Y.Z) still takes the App
+      # Store path.
+      - name: Upload to TestFlight (main push = release candidate)
+        if: github.event_name == 'push'
+        run: bundle exec fastlane mac mac_beta
+        env:
+          BUNDLE_GEMFILE: fastlane/Gemfile
+          DARKRUN_PKG: ${{ env.DARKRUN_PKG }}
+          DARKRUN_MARKETING_VERSION: ${{ steps.v.outputs.version }}
+          DARKRUN_BUILD_NUMBER: ${{ steps.v.outputs.build }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+
+      # The deliberate App Store push stays on manual dispatch. A pilot-uploaded
+      # build still lands in App Store Connect and stays selectable for a release,
+      # so nothing is lost by routing every automatic build to TestFlight.
+      - name: Upload to the Mac App Store (manual dispatch, no auto-submit)
+        if: github.event_name == 'workflow_dispatch'
         run: bundle exec fastlane mac mac_release
         env:
           BUNDLE_GEMFILE: fastlane/Gemfile
