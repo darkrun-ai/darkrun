@@ -2,6 +2,18 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.12.1](https://github.com/darkrun-ai/darkrun/compare/v0.12.0...v0.12.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* **desktop:** one checkpoint decision surface; stack cramped text artifacts ([81816bc](https://github.com/darkrun-ai/darkrun/commit/81816bcbb5907d79b597b9c4ad298e38a19f2f24))
+* **desktop:** one checkpoint decision surface; stack cramped text artifacts ([#245](https://github.com/darkrun-ai/darkrun/issues/245)) ([f25c812](https://github.com/darkrun-ai/darkrun/commit/f25c812aaa5d53db55ceb514838baf4d5481caf5))
+* **desktop:** resolve repo identity in the sandbox; show version + build ([1c265dd](https://github.com/darkrun-ai/darkrun/commit/1c265dd17b4ed9c17f22344f7afe804112a25522))
+* **desktop:** resolve repo identity in the sandbox; show version + build ([#244](https://github.com/darkrun-ai/darkrun/issues/244)) ([a9a4fb0](https://github.com/darkrun-ai/darkrun/commit/a9a4fb06aa7bd31327b78809a68f4fcdab851de3))
+* **desktop:** show the git repo at the top level, worktrees as subnavs ([d669618](https://github.com/darkrun-ai/darkrun/commit/d6696188ca39f98f471ba31caab4ffa24abd9063))
+* **desktop:** show the git repo at the top level, worktrees as subnavs ([#243](https://github.com/darkrun-ai/darkrun/issues/243)) ([ac9d6e2](https://github.com/darkrun-ai/darkrun/commit/ac9d6e226042b2d02ffd87db2d6af85ee66f91af))
+
 ## [0.12.0](https://github.com/darkrun-ai/darkrun/compare/v0.11.0...v0.12.0) (2026-07-15)
 
 
