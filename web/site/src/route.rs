@@ -73,6 +73,8 @@ pub enum Route {
         Review {},
         #[route("/preview")]
         Preview {},
+        #[route("/replay")]
+        Replay {},
 
         #[route("/privacy")]
         Privacy {},
@@ -95,6 +97,7 @@ pub use pages::landing::Landing;
 pub use pages::legal::{Privacy, Terms};
 pub use pages::misc::{NotFound, Paper, Templates};
 pub use pages::preview::Preview;
+pub use pages::replay::Replay;
 pub use pages::review::Review;
 
 impl Route {
@@ -122,6 +125,7 @@ impl Route {
             "/browse".to_string(),
             "/review".to_string(),
             "/preview".to_string(),
+            "/replay".to_string(),
             "/privacy".to_string(),
             "/terms".to_string(),
         ];
@@ -158,8 +162,8 @@ mod tests {
         for expected in [
             "/", "/start-here", "/how-it-works", "/big-picture", "/workflows", "/about",
             "/factories", "/docs", "/methodology", "/glossary", "/lifecycles", "/blog",
-            "/changelog", "/paper", "/templates", "/browse", "/review", "/preview", "/privacy",
-            "/terms",
+            "/changelog", "/paper", "/templates", "/browse", "/review", "/preview", "/replay",
+            "/privacy", "/terms",
         ] {
             assert!(paths.iter().any(|p| p == expected), "missing route {expected}");
         }

@@ -114,7 +114,7 @@ fn phase_count_is_six() {
 #[test]
 fn total_is_static_sections_plus_dynamic() {
     let paths = Route::all_paths();
-    let static_count = 20; // "/" + 5 guides + 14 sections (includes the /preview fixture)
+    let static_count = 21; // "/" + 5 guides + 15 sections (includes /preview and /replay)
     let stations: usize = darkrun_content::list_factories()
         .iter()
         .map(|slug| darkrun_content::load_validated(slug).map(|f| f.stations.len()).unwrap_or(0))
