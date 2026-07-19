@@ -1205,7 +1205,8 @@ fn create_at_existing_nonempty_path_errors() {
         String::from_utf8_lossy(&oracle.stderr)
     );
 
-    // The gix backend SHOULD match (currently does not — hence #[ignore]).
+    // The gix backend matches real git: `materialize_worktree` refuses a
+    // pre-existing non-empty target before it checks out over it.
     for (label, open) in backends() {
         let g = open(&root).unwrap();
         let path = sibling(&root, &format!("occupied-{label}"));

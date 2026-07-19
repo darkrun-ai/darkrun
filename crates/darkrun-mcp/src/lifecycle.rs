@@ -971,13 +971,25 @@ pub fn sync_branch_downstream(store: &StateStore, slug: &str, station: &str) -> 
 }
 
 /// Whether the worktree checked out at `path` has uncommitted or untracked
-/// changes. Opens the worktree in-process (pure-Rust gix); any error is treated
-/// as dirty so the engine never merges into a tree it couldn't inspect.
+/// changes THE OPERATOR would care about — i.e. anything except the engine's own
+/// `.darkrun/` bookkeeping.
+///
+/// The exclusion is load-bearing, not cosmetic. The engine writes the run's
+/// `.darkrun/<run>/state.json` (and witnesses/stamps, all TRACKED content) BEFORE
+/// running a station's land side-effects, and commits that state only later in
+/// the tick. So at land time the primary checkout sitting on run-main is always
+/// dirty by `.darkrun` alone. A land site that treated that as dirty refused the
+/// in-place station->run-main merge unconditionally, silently, and the run sealed
+/// with NONE of its manufactured work on the base branch. Mirror the exact
+/// exclusion the pre-tick gate already uses
+/// (`dirty_paths_excluding([".darkrun", ".gitignore"])`) so real source changes
+/// still block a merge while engine bookkeeping never does. Any inspection error
+/// is treated as dirty so the engine never merges into a tree it couldn't read.
 fn worktree_is_dirty(path: &Path) -> bool {
-    Git::open(path)
-        .and_then(|g| g.is_clean())
-        .map(|clean| !clean)
-        .unwrap_or(true)
+    match Git::open(path).and_then(|g| g.dirty_paths_excluding(path, &[".darkrun", ".gitignore"])) {
+        Ok(paths) => !paths.is_empty(),
+        Err(_) => true,
+    }
 }
 
 /// The worktree admin name for a path — its final component, matching how
@@ -1032,6 +1044,56 @@ mod tests {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    #[test]
+    fn worktree_is_dirty_ignores_darkrun_bookkeeping_but_not_source() {
+        // The land-time reality: the primary checkout on run-main carries an
+        // uncommitted, TRACKED `.darkrun/<run>/state.json` (the engine writes
+        // state before it commits it later in the tick). That must NOT count as
+        // dirty, or the in-place station->run-main land is refused and the run's
+        // manufactured work never reaches the base branch (the confirmed A1 bug).
+        let dir = TempDir::new().expect("tmp");
+        let root = dir.path().to_path_buf();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(args)
+                    .status()
+                    .expect("git")
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@darkrun.ai"]);
+        git(&["config", "user.name", "t"]);
+        // Only `.darkrun/worktrees/` is gitignored in production; the run's
+        // state.json is TRACKED bookkeeping.
+        std::fs::write(root.join(".gitignore"), ".darkrun/worktrees/\n").unwrap();
+        std::fs::create_dir_all(root.join(".darkrun").join("run")).unwrap();
+        std::fs::write(root.join(".darkrun").join("run").join("state.json"), "{\"phase\":\"a\"}")
+            .unwrap();
+        std::fs::write(root.join("code.rs"), "fn a() {}\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        // Modify ONLY the engine's tracked state — the exact land-time condition.
+        std::fs::write(root.join(".darkrun").join("run").join("state.json"), "{\"phase\":\"b\"}")
+            .unwrap();
+        assert!(
+            !worktree_is_dirty(&root),
+            "engine .darkrun bookkeeping must not block a land"
+        );
+
+        // A real source change DOES block a land.
+        std::fs::write(root.join("code.rs"), "fn a() { b(); }\n").unwrap();
+        assert!(
+            worktree_is_dirty(&root),
+            "an uncommitted source change is genuinely dirty"
+        );
     }
 
     #[test]

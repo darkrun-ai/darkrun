@@ -31,9 +31,17 @@ async fn load_harness_produces_percentiles_against_a_live_stub() {
         requests: 50,
         concurrency: 8,
         timeout: Duration::from_secs(5),
+        ..Default::default()
     };
-    let proof = load_http(&url, &opts).await.expect("load run");
+    let report = load_http(&url, &opts).await.expect("load run");
 
+    // Every request succeeded, so the report accounts for all 50 and the
+    // percentiles are computed over them.
+    assert_eq!(report.requests, 50);
+    assert_eq!(report.ok, 50);
+    assert_eq!(report.failed, 0);
+    assert_eq!(report.failure_rate(), 0.0);
+    let proof = &report.proof;
     assert_eq!(proof.samples, Some(50));
     let p50 = proof.p50.expect("p50");
     let p95 = proof.p95.expect("p95");
@@ -51,7 +59,7 @@ async fn prove_load_tags_the_bench_surface() {
     let proof = prove_load(
         &url,
         Surface::Api,
-        &LoadOpts { requests: 20, concurrency: 4, timeout: Duration::from_secs(5) },
+        &LoadOpts { requests: 20, concurrency: 4, timeout: Duration::from_secs(5), ..Default::default() },
     )
     .await
     .expect("load run");
@@ -70,6 +78,7 @@ async fn load_harness_errors_when_every_request_fails() {
         requests: 5,
         concurrency: 2,
         timeout: Duration::from_millis(300),
+        ..Default::default()
     };
     let err = load_http("http://127.0.0.1:1/", &opts).await.unwrap_err();
     assert!(
@@ -79,10 +88,12 @@ async fn load_harness_errors_when_every_request_fails() {
 }
 
 #[tokio::test]
-async fn non_2xx_is_recorded_as_a_failure_but_not_fatal_when_mixed() {
-    // A 500-only stub: requests connect but never succeed -> all-failed error.
+async fn error_page_target_is_refused_not_certified_healthy() {
+    // A 500-only stub: requests connect but never succeed. This is the dishonest
+    // case the fix targets: the harness must REFUSE it (no proof), not hand back
+    // percentiles that make a broken target look healthy.
     let (url, server) = spawn_stub(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom").await;
-    let opts = LoadOpts { requests: 10, concurrency: 4, timeout: Duration::from_secs(5) };
+    let opts = LoadOpts { requests: 10, concurrency: 4, timeout: Duration::from_secs(5), ..Default::default() };
     let err = load_http(&url, &opts).await.unwrap_err();
     assert!(err.to_string().contains("failed"), "got {err}");
     server.abort();

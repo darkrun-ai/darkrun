@@ -14,11 +14,13 @@
     "build": {
       "station": "build",
       "status": "in_progress",
-      "phase": "spec",
+      "phase": "manufacture",
+      "elaborated": true,
       "checkpoint": {
         "kind": "ask"
       },
       "branch": "darkrun/darkrun-sim/build",
+      "verifier_nonce": "affa8c653e282c3d71173554591ff479c8e28a574a322901d86efb62a18c486d",
       "started_at": "2026-07-12T05:14:50.498209+00:00"
     },
     "frame": {

@@ -62,6 +62,36 @@ struct PresenceTracker {
     last_lost_ms: AtomicU64,
 }
 
+/// Per-session presence state, mirroring [`PresenceTracker`] but scoped to one
+/// session id (the run slug, for run sessions). Existence in the map IS the
+/// "ever connected" bit: an entry is created on the first subscriber and never
+/// removed, so a session that lost its last subscriber can still report the
+/// grace window.
+#[derive(Default)]
+struct SessionPresence {
+    /// Live subscriber count for this session.
+    count: u64,
+    /// Epoch-ms when `count` last fell to zero. `0` = never lost.
+    last_lost_ms: u64,
+}
+
+/// The run a session payload belongs to, across every variant. `darkrun-api`
+/// exposes no single accessor (each payload carries its own `run_slug` field),
+/// so this projects them uniformly for the run-scoped [`SessionRegistry::retire_run`]
+/// sweep. The `View` variant's `run_slug` is a bare `String`; the rest are
+/// `Option<String>`.
+fn payload_run_slug(payload: &SessionPayload) -> Option<&str> {
+    match payload {
+        SessionPayload::Review(p) => p.run_slug.as_deref(),
+        SessionPayload::Question(p) => p.run_slug.as_deref(),
+        SessionPayload::Direction(p) => p.run_slug.as_deref(),
+        SessionPayload::Picker(p) => p.run_slug.as_deref(),
+        SessionPayload::View(p) => Some(p.run_slug.as_str()),
+        SessionPayload::VisualReview(p) => p.run_slug.as_deref(),
+        SessionPayload::Proof(p) => p.run_slug.as_deref(),
+    }
+}
+
 /// Current epoch milliseconds.
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -131,6 +161,12 @@ pub struct SessionRegistry {
     inner: Arc<Mutex<HashMap<String, SessionEntry>>>,
     ws_session_count: Arc<AtomicU64>,
     presence: Arc<PresenceTracker>,
+    /// Per-session subscriber presence, keyed by the WS subscription's session
+    /// id (the run slug, for run sessions). The GLOBAL count above answers "is
+    /// anything connected"; this answers "is anyone watching THIS run", which
+    /// is what gate surfacing needs: a desktop viewing run A must not make a
+    /// gate on run B hold for a viewer that isn't there.
+    presence_by_session: Arc<Mutex<HashMap<String, SessionPresence>>>,
     /// Per-session set of device tokens that have ACKed a gate push for it. A
     /// device woken by a push POSTs `/api/push/ack` to confirm receipt, which
     /// lands here. The gate logic reads it as the "high-confidence live surface"
@@ -145,6 +181,13 @@ pub struct SessionRegistry {
     /// disk without the HTTP answer handlers needing to know how. Shared across
     /// clones (the engine installs it once, after construction).
     persist: Arc<Mutex<Option<PersistHook>>>,
+    /// Whether a DURABLE gate-decision path exists for this registry: flipped by
+    /// the engine when it installs the HTTP layer's gate-decider hook (see
+    /// `AppState::with_gate_decider`). The MCP advance only HOLDS at an operator
+    /// gate when this is set — a context where no decision can ever land (a bare
+    /// registry in tests, an engine-less embedding) keeps the immediate-return
+    /// contract instead of blocking on an answer that cannot arrive.
+    durable_decisions: Arc<AtomicBool>,
 }
 
 /// A durability callback: persist a session payload (e.g. to the run's
@@ -161,6 +204,19 @@ impl SessionRegistry {
     /// clone of this registry, so handlers that hold a clone persist too.
     pub fn on_persist(&self, hook: PersistHook) {
         *self.persist.lock().expect("session registry poisoned") = Some(hook);
+    }
+
+    /// Mark that a DURABLE gate-decision path exists (see `durable_decisions`).
+    /// The engine calls this when it installs the gate-decider hook; shared
+    /// across every clone of this registry.
+    pub fn enable_durable_decisions(&self) {
+        self.durable_decisions.store(true, Ordering::Release);
+    }
+
+    /// Whether a durable gate-decision path exists — the precondition for the
+    /// MCP advance to HOLD at an operator gate (see `durable_decisions`).
+    pub fn durable_decisions_enabled(&self) -> bool {
+        self.durable_decisions.load(Ordering::Acquire)
     }
 
     /// Run the persist hook for `payload`, if one is installed.
@@ -294,10 +350,70 @@ impl SessionRegistry {
         }
     }
 
+    /// Presence scoped to ONE session id (the run slug, for run sessions), with
+    /// the same grace-window semantics as the global [`presence`](Self::presence).
+    /// This is what gate surfacing consults: a desktop watching run A is
+    /// `NeverAttached` from run B's point of view, so B's gate still LAUNCHES.
+    pub fn presence_for(&self, session: &str) -> Presence {
+        self.presence_for_at(session, now_ms())
+    }
+
+    /// [`presence_for`](Self::presence_for) at an explicit `now` (epoch ms),
+    /// the clock seam so the per-session grace window is testable too.
+    fn presence_for_at(&self, session: &str, now: u64) -> Presence {
+        let guard = self
+            .presence_by_session
+            .lock()
+            .expect("session registry poisoned");
+        // No entry: no subscriber has ever attached to this session.
+        let Some(entry) = guard.get(session) else {
+            return Presence::NeverAttached;
+        };
+        if entry.count > 0 {
+            return Presence::Live;
+        }
+        if entry.last_lost_ms != 0 && now.saturating_sub(entry.last_lost_ms) < PRESENCE_GRACE_MS {
+            Presence::Lost
+        } else {
+            Presence::Closed
+        }
+    }
+
     /// Remove a session and drop its broadcast channel (closing subscribers).
     pub fn remove(&self, id: &str) -> Option<SessionPayload> {
         let mut guard = self.inner.lock().expect("session registry poisoned");
         guard.remove(id).map(|e| e.payload)
+    }
+
+    /// Retire every in-memory session belonging to a run — its review session
+    /// (keyed by the run slug), every interactive/derived session that names the
+    /// run (question / direction / picker / view / visual-review / proof), and the
+    /// `current` focus pointer when it points at this run.
+    ///
+    /// Called when a run is RESET or ARCHIVED: the on-disk run is gone, but its
+    /// sessions would otherwise linger in the registry and a subscribed desktop
+    /// would sit on a PENDING GATE for a run that no longer exists — an
+    /// unresolvable zombie the operator can neither approve nor dismiss. Removal
+    /// drops each session's broadcast channel, so a subscriber's stream closes
+    /// (and any in-flight `await_decision` returns `Gone`) — the signal for the
+    /// client to re-render "run was reset" rather than the stale gate, and for a
+    /// subsequent `GET /api/session/:id` to `404`. Returns how many were retired.
+    ///
+    /// Idempotent: a run with no live sessions retires zero.
+    pub fn retire_run(&self, slug: &str) -> usize {
+        // Collect the ids to drop while holding the lock, then remove them
+        // afterwards (remove() re-locks, so it can't run inside this guard).
+        let ids: Vec<String> = {
+            let guard = self.inner.lock().expect("session registry poisoned");
+            guard
+                .iter()
+                .filter(|(id, entry)| {
+                    id.as_str() == slug || payload_run_slug(&entry.payload) == Some(slug)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        ids.iter().filter(|id| self.remove(id).is_some()).count()
     }
 
     /// Subscribe to live-update frames for a session, creating the entry's
@@ -384,6 +500,21 @@ impl SessionRegistry {
     /// Try to reserve a WebSocket slot, honouring `max_ws_sessions`. Returns a
     /// guard that releases the slot on drop, or `None` if the cap is hit.
     pub fn try_acquire_ws_slot(&self, max: usize) -> Option<WsSlot> {
+        self.acquire_ws_slot(None, max)
+    }
+
+    /// Like [`try_acquire_ws_slot`](Self::try_acquire_ws_slot) but attributed
+    /// to a session id, so the subscriber also counts toward that session's
+    /// [`presence_for`](Self::presence_for) as well as the global count. The
+    /// WS upgrade path uses this (it knows which session it subscribes to).
+    pub fn try_acquire_ws_slot_for(&self, session: &str, max: usize) -> Option<WsSlot> {
+        self.acquire_ws_slot(Some(session), max)
+    }
+
+    /// The shared slot-acquire: bump the global count (cap-checked), and when
+    /// `session` is known, the per-session count too. The returned guard
+    /// releases both on drop.
+    fn acquire_ws_slot(&self, session: Option<&str>, max: usize) -> Option<WsSlot> {
         loop {
             let current = self.ws_session_count.load(Ordering::Acquire);
             if current as usize >= max {
@@ -397,9 +528,18 @@ impl SessionRegistry {
                 // The app is (re)attached — mark it ever-connected so a later
                 // drop is a *loss*, not "never opened" (F5).
                 self.presence.ever_connected.store(true, Ordering::Release);
+                if let Some(id) = session {
+                    let mut guard = self
+                        .presence_by_session
+                        .lock()
+                        .expect("session registry poisoned");
+                    guard.entry(id.to_string()).or_default().count += 1;
+                }
                 return Some(WsSlot {
                     counter: Arc::clone(&self.ws_session_count),
                     presence: Arc::clone(&self.presence),
+                    session: session.map(str::to_string),
+                    presence_by_session: Arc::clone(&self.presence_by_session),
                 });
             }
         }
@@ -410,10 +550,30 @@ impl SessionRegistry {
 pub struct WsSlot {
     counter: Arc<AtomicU64>,
     presence: Arc<PresenceTracker>,
+    /// The session this slot was attributed to (see `try_acquire_ws_slot_for`);
+    /// `None` for a slot acquired without session attribution.
+    session: Option<String>,
+    presence_by_session: Arc<Mutex<HashMap<String, SessionPresence>>>,
 }
 
 impl Drop for WsSlot {
     fn drop(&mut self) {
+        // Per-session release first: when this was the session's last
+        // subscriber, stamp its loss time so its grace window starts. Tolerate
+        // a poisoned lock (never panic in Drop); the entry is retained so the
+        // session keeps reporting Lost/Closed rather than NeverAttached.
+        if let Some(id) = self.session.take() {
+            let mut guard = match self.presence_by_session.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(entry) = guard.get_mut(&id) {
+                entry.count = entry.count.saturating_sub(1);
+                if entry.count == 0 {
+                    entry.last_lost_ms = now_ms();
+                }
+            }
+        }
         // `fetch_sub` returns the PRIOR value; if it was 1 the count just fell to
         // zero — stamp the loss time so the grace window starts (F5).
         if self.counter.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -477,7 +637,11 @@ pub type SurfaceResolver = Arc<dyn Fn(&str) + Send + Sync>;
 /// (that would be circular), so the engine (darkrun-mcp) installs a closure
 /// wrapping its `checkpoint_decide` — the same posture as [`SurfaceResolver`]
 /// and [`SessionMaterializer`]. The signature is `(run, approved, feedback)`.
-pub type GateDecider = Arc<dyn Fn(&str, bool, Option<String>) -> bool + Send + Sync>;
+/// The durable gate-decision hook the engine installs. Returns `Ok(())` when the
+/// decision landed on disk, or `Err(reason)` when a gate guard REFUSED it (an
+/// approve over open must/should, or a Prove approve with no measured evidence) so
+/// the HTTP layer can surface the refusal instead of reporting a false success.
+pub type GateDecider = Arc<dyn Fn(&str, bool, Option<String>) -> Result<(), String> + Send + Sync>;
 
 /// The shared application state threaded through every handler.
 #[derive(Clone)]
@@ -545,7 +709,7 @@ impl AppState {
     /// wraps its `checkpoint_decide` here so a review decision lands on disk.
     pub fn with_gate_decider(
         mut self,
-        f: impl Fn(&str, bool, Option<String>) -> bool + Send + Sync + 'static,
+        f: impl Fn(&str, bool, Option<String>) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
         self.gate_decider = Some(Arc::new(f));
         self
@@ -572,14 +736,20 @@ impl AppState {
     }
 
     /// Land an operator's gate decision durably via the installed gate-decider
-    /// hook (see `gate_decider`). Returns whether the land succeeded; `false`
-    /// when no hook is installed (the standalone HTTP server case) or the land
-    /// failed — the caller treats this as best-effort, never blocking the
-    /// in-memory session flip on it.
-    pub fn decide_gate(&self, run: &str, approved: bool, feedback: Option<String>) -> bool {
+    /// hook (see `gate_decider`). `Ok(())` when the decision landed (or when no
+    /// hook is installed, the standalone HTTP server case, where the in-memory
+    /// flip is authoritative and there is nothing to land). `Err(reason)` when a
+    /// gate guard REFUSED it, so the caller surfaces the refusal rather than
+    /// reporting a false success.
+    pub fn decide_gate(
+        &self,
+        run: &str,
+        approved: bool,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
         match &self.gate_decider {
             Some(hook) => hook(run, approved, feedback),
-            None => false,
+            None => Ok(()),
         }
     }
 }
@@ -594,6 +764,52 @@ mod tests {
             "session_type": "question", "session_id": id, "status": status
         }))
         .expect("minimal question payload")
+    }
+
+    fn review(id: &str, run: &str) -> SessionPayload {
+        serde_json::from_value(serde_json::json!({
+            "session_type": "review", "session_id": id, "status": "pending", "run_slug": run
+        }))
+        .expect("minimal review payload")
+    }
+
+    fn question_on(id: &str, run: &str) -> SessionPayload {
+        serde_json::from_value(serde_json::json!({
+            "session_type": "question", "session_id": id, "status": "pending", "run_slug": run
+        }))
+        .expect("minimal question payload")
+    }
+
+    /// INT-3 regression: retiring a RESET run drops its review session, every
+    /// interactive session that names it, AND the `current` focus pointer aimed at
+    /// it — while leaving a sibling run's sessions completely intact. Without this,
+    /// a subscribed desktop sat on a pending gate for a run that no longer existed.
+    #[test]
+    fn retire_run_drops_only_the_named_runs_sessions() {
+        let reg = SessionRegistry::new();
+        // Run "one": its review session (keyed by slug), a question, and the shared
+        // `current` focus pointing at it.
+        reg.upsert_under("one", review("one", "one"));
+        reg.upsert(question_on("q-01", "one"));
+        reg.upsert_under("current", review("current", "one"));
+        // Run "two": a review + a question that must SURVIVE the retire.
+        reg.upsert_under("two", review("two", "two"));
+        reg.upsert(question_on("q-02", "two"));
+
+        let retired = reg.retire_run("one");
+        assert_eq!(retired, 3, "one + q-01 + current retire");
+
+        // The zombie session is gone (a subsequent GET would 404).
+        assert!(reg.get("one").is_none());
+        assert!(reg.get("q-01").is_none());
+        assert!(reg.get("current").is_none());
+        // The survivor run is untouched.
+        assert!(reg.get("two").is_some());
+        assert!(reg.get("q-02").is_some());
+
+        // Idempotent: a second retire (or a run with no sessions) removes nothing.
+        assert_eq!(reg.retire_run("one"), 0);
+        assert_eq!(reg.retire_run("nope"), 0);
     }
 
     #[tokio::test]
@@ -711,6 +927,62 @@ mod tests {
     }
 
     #[test]
+    fn presence_for_is_per_session_not_global() {
+        // The F12 scenario: a desktop watching run A must not make run B read
+        // as attended. Two sessions, a subscriber on A only.
+        let reg = SessionRegistry::new();
+        let _a = reg.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        assert_eq!(reg.presence_for("run-a"), Presence::Live);
+        assert!(reg.presence_for("run-a").is_present());
+        // Run B has never had a viewer: absent, so its gate LAUNCHES.
+        assert_eq!(reg.presence_for("run-b"), Presence::NeverAttached);
+        assert!(!reg.presence_for("run-b").is_present());
+        // The global count still sees the one connection (unchanged consumers).
+        assert_eq!(reg.presence(), Presence::Live);
+        assert_eq!(reg.live_connections(), 1);
+    }
+
+    #[test]
+    fn presence_for_mirrors_the_grace_window_per_session() {
+        let reg = SessionRegistry::new();
+        // Attach to A, then drop: A's loss is stamped and its grace window runs.
+        let slot = reg.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        drop(slot);
+        let lost_at = {
+            let guard = reg.presence_by_session.lock().unwrap();
+            guard.get("run-a").expect("entry retained").last_lost_ms
+        };
+        assert!(lost_at > 0, "drop stamps the per-session loss time");
+
+        // Within grace: LOST (still present); past it: CLOSED. Exactly the
+        // global tracker's semantics, scoped to the session.
+        assert_eq!(reg.presence_for_at("run-a", lost_at + 1), Presence::Lost);
+        assert!(reg.presence_for_at("run-a", lost_at + 1).is_present());
+        let past = lost_at + PRESENCE_GRACE_MS + 1;
+        assert_eq!(reg.presence_for_at("run-a", past), Presence::Closed);
+        // A session that never attached stays NeverAttached throughout.
+        assert_eq!(reg.presence_for_at("run-b", past), Presence::NeverAttached);
+    }
+
+    #[test]
+    fn session_slots_release_independently_and_share_clones() {
+        let reg = SessionRegistry::new();
+        let a1 = reg.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        let a2 = reg.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        // Clones observe the same per-session presence (Arc-shared map).
+        assert_eq!(reg.clone().presence_for("run-a"), Presence::Live);
+        // Dropping ONE of two subscribers keeps the session live.
+        drop(a1);
+        assert_eq!(reg.presence_for("run-a"), Presence::Live);
+        // Dropping the last flips it out of Live (into the grace window).
+        drop(a2);
+        assert_eq!(reg.presence_for("run-a"), Presence::Lost);
+        // An unattributed (global-only) slot never bleeds into a session.
+        let _g = reg.try_acquire_ws_slot(8).expect("slot");
+        assert_eq!(reg.presence_for("run-b"), Presence::NeverAttached);
+    }
+
+    #[test]
     fn decide_gate_invokes_the_installed_hook_with_its_args() {
         // The hook captures exactly what it was called with; decide_gate returns
         // whatever the hook returns.
@@ -720,10 +992,10 @@ mod tests {
         let state = AppState::new(StateStore::new("."), Limits::default()).with_gate_decider(
             move |run, approved, fb| {
                 *sink.lock().unwrap() = Some((run.to_string(), approved, fb));
-                true
+                Ok(())
             },
         );
-        assert!(state.decide_gate("run-x", true, Some("looks good".into())));
+        assert!(state.decide_gate("run-x", true, Some("looks good".into())).is_ok());
         assert_eq!(
             captured.lock().unwrap().clone(),
             Some(("run-x".to_string(), true, Some("looks good".to_string())))
@@ -731,10 +1003,20 @@ mod tests {
     }
 
     #[test]
-    fn decide_gate_is_a_noop_false_when_no_hook_is_installed() {
-        // The standalone HTTP server (no engine) installs no hook — decide_gate
-        // must not panic and reports the no-op with `false`.
+    fn decide_gate_surfaces_a_hook_refusal() {
+        // A gate guard that refuses (a Prove approve with no evidence) is carried
+        // out as an Err so the HTTP layer can 409 instead of reporting success.
+        let state = AppState::new(StateStore::new("."), Limits::default())
+            .with_gate_decider(|_, _, _| Err("Prove needs measured evidence".to_string()));
+        let err = state.decide_gate("run-x", true, None).unwrap_err();
+        assert!(err.contains("evidence"), "{err}");
+    }
+
+    #[test]
+    fn decide_gate_is_ok_noop_when_no_hook_is_installed() {
+        // The standalone HTTP server (no engine) installs no hook — decide_gate is
+        // a no-op Ok (the in-memory flip is authoritative, nothing to land).
         let state = AppState::new(StateStore::new("."), Limits::default());
-        assert!(!state.decide_gate("run-x", true, None));
+        assert!(state.decide_gate("run-x", true, None).is_ok());
     }
 }

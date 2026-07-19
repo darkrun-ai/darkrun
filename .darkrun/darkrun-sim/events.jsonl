@@ -39,3 +39,16 @@
 {"action":"spec","at":"2026-07-12T02:20:48.400564+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"shape"}
 {"at":"2026-07-12T05:14:27.616598+00:00","event":"darkrun.station.dropped","next":"build","run":"darkrun-sim","station":"shape"}
 {"action":"spec","at":"2026-07-12T05:14:52.357039+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"action":"fix_feedback","at":"2026-07-12T05:42:35.097192+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"action":"spec","at":"2026-07-12T05:44:50.966676+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"action":"spec","at":"2026-07-12T05:49:05.955109+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"action":"review","at":"2026-07-12T05:49:19.657836+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"at":"2026-07-12T06:13:11.398978+00:00","event":"darkrun.save_wip.blocked","files":1,"run":"darkrun-sim"}
+{"action":"user_gate","at":"2026-07-12T06:13:30.734559+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"at":"2026-07-19T21:16:08.217815+00:00","event":"darkrun.save_wip.blocked","files":13,"run":"darkrun-sim"}
+{"at":"2026-07-19T21:16:17.243138+00:00","event":"darkrun.save_wip.blocked","files":8,"run":"darkrun-sim"}
+{"at":"2026-07-19T21:17:04.082386+00:00","event":"darkrun.save_wip.blocked","files":8,"run":"darkrun-sim"}
+{"action":"manufacture","at":"2026-07-19T21:17:37.371726+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"at":"2026-07-19T21:27:02.023784+00:00","event":"darkrun.unit.completed","run":"darkrun-sim","station":"build","unit":"fixture-schema"}
+{"action":"manufacture","at":"2026-07-19T21:27:24.169368+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"at":"2026-07-19T22:22:36.002769+00:00","event":"darkrun.unit.completed","run":"darkrun-sim","station":"build","unit":"sim-spine"}

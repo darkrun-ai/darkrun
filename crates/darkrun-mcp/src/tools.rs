@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::schemars::JsonSchema;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use serde::{Deserialize, Serialize};
@@ -268,12 +268,14 @@ impl DarkrunServer {
             .unwrap_or_default();
         crate::notify::on_gate(run, &station);
         // Gate-surfacing decision (notify-and-await): only open a window when we
-        // have no confident live human surface. A connected client (or one within
-        // the presence grace window), or a device that ACKed the gate push, means
-        // hold via the await loop — the live mirror / push carries the raised
-        // session there, so a second window would be redundant.
+        // have no confident live human surface FOR THIS RUN. A client connected
+        // to the run's session (or one within its presence grace window), or a
+        // device that ACKed the gate push, means hold via the await loop (the
+        // live mirror / push carries the raised session there, so a second
+        // window would be redundant). Presence is per-run (F12): a desktop
+        // watching run A must not make run B's gate wait on a viewer it lacks.
         match crate::desktop::surface_mode(
-            self.sessions.presence(),
+            self.sessions.presence_for(run),
             self.sessions.has_ack(run),
         ) {
             crate::desktop::SurfaceMode::Await => {
@@ -292,14 +294,26 @@ impl DarkrunServer {
 
     /// Whether `darkrun_advance` should BLOCK on this action instead of returning
     /// it: it is a live OPERATOR gate (the pre-execution `UserGate` or a non-auto
-    /// post-execution `Checkpoint`), the run is NOT autonomous, AND a human
-    /// surface is live (a present client or a push-acked device →
-    /// [`SurfaceMode::Await`]).
+    /// post-execution `Checkpoint`), the run is NOT autonomous, and a DURABLE
+    /// decision path exists (the engine installed the HTTP gate-decider —
+    /// [`SessionRegistry::durable_decisions_enabled`]).
     ///
-    /// A dark / autonomous / headless run is NEVER held — it returns `false`
-    /// here so the agent gets the gate action immediately (today's behavior).
-    /// That keeps a lights-out run from wedging on an operator who will never
-    /// answer, and preserves the standalone/relay surfacing path (web_url).
+    /// The surface decision ([`surface_mode`](crate::desktop::surface_mode) —
+    /// hold via the live mirror / push vs LAUNCH the app) picks HOW the gate
+    /// reaches the operator; it must never decide WHETHER the agent waits.
+    /// Holding only on `Await` meant that with no desktop connected the advance
+    /// RETURNED the gate to the agent while the app was still launching — so the
+    /// agent asked the operator to progress in chat, which is exactly the
+    /// babysitting the gates exist to remove. The freshly-launched app finds the
+    /// session (it is registered before the launch), the operator decides there,
+    /// and the held advance resolves; if nobody ever answers, the hold degrades
+    /// to the bounded `pending_gate` keepalive, never a wedge.
+    ///
+    /// The durable-decider requirement keeps two contexts on the immediate-return
+    /// contract: a dark / autonomous / headless run (an operator who will never
+    /// answer must not wedge a lights-out run), and an embedding with no landing
+    /// path for a decision (a bare registry in tests, an engine-less host) where
+    /// blocking would wait on an answer that cannot arrive.
     fn gate_should_hold(&self, action: &crate::position::RunAction, slug: &str) -> bool {
         use crate::position::RunAction;
         let is_operator_gate = match action {
@@ -309,13 +323,9 @@ impl DarkrunServer {
             }
             _ => false,
         };
-        if !is_operator_gate || self.run_is_autonomous(slug) {
-            return false;
-        }
-        matches!(
-            crate::desktop::surface_mode(self.sessions.presence(), self.sessions.has_ack(slug)),
-            crate::desktop::SurfaceMode::Await
-        )
+        is_operator_gate
+            && !self.run_is_autonomous(slug)
+            && self.sessions.durable_decisions_enabled()
     }
 
     /// The blocking half of `darkrun_advance`: when `action` sits on a live
@@ -398,7 +408,7 @@ fn pending_gate_keepalive(slug: &str) -> serde_json::Value {
 fn ok_json<T: Serialize>(value: &T) -> std::result::Result<CallToolResult, ErrorData> {
     match serde_json::to_value(value) {
         Ok(v) => Ok(CallToolResult::structured(ensure_object(v))),
-        Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+        Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
             "serialization error: {e}"
         ))])),
     }
@@ -419,7 +429,7 @@ fn ensure_object(v: serde_json::Value) -> serde_json::Value {
 }
 
 fn err_text(message: impl std::fmt::Display) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(message.to_string())])
+    CallToolResult::error(vec![ContentBlock::text(message.to_string())])
 }
 
 /// Map an artifact write error into an agent-actionable tool result. A guarded
@@ -429,7 +439,7 @@ fn err_text(message: impl std::fmt::Display) -> CallToolResult {
 /// retry that would re-clobber. Any other error stringifies as usual.
 fn artifact_write_error(e: crate::error::McpError) -> CallToolResult {
     if let crate::error::McpError::Core(darkrun_core::CoreError::Conflict(c)) = &e {
-        return CallToolResult::error(vec![Content::text(format!(
+        return CallToolResult::error(vec![ContentBlock::text(format!(
             "WRITE CONFLICT — {} changed since you read it. Do NOT retry blindly: \
              re-read, reconcile your change into the current content below, then \
              retry with expected_sha={}.\n\n--- current content ---\n{}",
@@ -603,9 +613,10 @@ pub struct UnitCreateInput {
     /// Run-relative output paths this unit produces.
     #[serde(default)]
     pub outputs: Vec<String>,
-    /// Executable quality gates ({name, command}) proving the completion
-    /// criteria. REQUIRED when outputs are declared — pass an explicit empty
-    /// list to defer deliberately. Circular gates (zero-match `! grep`, prose
+    /// Executable quality gates proving the completion criteria: {name,
+    /// command} objects, or bare command strings (the name is derived).
+    /// REQUIRED when outputs are declared; pass an explicit empty list to
+    /// defer deliberately. Circular gates (zero-match `! grep`, prose
     /// substrings against the unit's own output) are rejected.
     #[serde(default)]
     pub quality_gates: Option<Vec<QualityGateInput>>,
@@ -619,15 +630,63 @@ pub struct UnitCreateInput {
     pub unit_type: Option<String>,
 }
 
-/// One declared quality gate on the create/update input.
+/// One declared quality gate on the create/update input. Accepts BOTH shapes
+/// (untagged): the full `{name, command}` object, or a bare command string
+/// (`"cargo test"`), the shorthand agents reach for first. Rejecting the
+/// string with a -32602 forced a retry loop for a payload whose intent was
+/// unambiguous; instead it derives its gate name from the command.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
-pub struct QualityGateInput {
-    /// Short gate name (e.g. `tests`, `lint`, `types`).
-    pub name: String,
-    /// The literal command that runs the check (the project's real stack, not
-    /// a placeholder).
-    pub command: String,
+#[serde(untagged)]
+pub enum QualityGateInput {
+    /// The explicit form: a named gate plus its literal command.
+    Named {
+        /// Short gate name (e.g. `tests`, `lint`, `types`).
+        name: String,
+        /// The literal command that runs the check (the project's real stack,
+        /// not a placeholder).
+        command: String,
+    },
+    /// The shorthand form: just the literal command; the name is derived from
+    /// it (`"cargo test"` names `cargo-test`).
+    Command(String),
+}
+
+impl QualityGateInput {
+    /// Normalize either input shape into the domain gate: the explicit form
+    /// passes through; the string shorthand pairs the command with a name
+    /// derived from it.
+    fn to_domain(&self) -> darkrun_core::domain::QualityGate {
+        match self {
+            Self::Named { name, command } => darkrun_core::domain::QualityGate {
+                name: name.clone(),
+                command: command.clone(),
+            },
+            Self::Command(command) => darkrun_core::domain::QualityGate {
+                name: derived_gate_name(command),
+                command: command.clone(),
+            },
+        }
+    }
+}
+
+/// A short gate name derived from a bare command string: the leading program
+/// name (basename, so `./scripts/check.sh` names `check.sh`) plus its first
+/// non-flag subcommand, kebab-joined (`"cargo test -p x"` names `cargo-test`).
+/// Falls back to the whole string when it has no tokens.
+fn derived_gate_name(command: &str) -> String {
+    let mut tokens = command.split_whitespace();
+    let Some(program) = tokens.next() else {
+        return command.to_string();
+    };
+    let program = std::path::Path::new(program)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| program.to_string());
+    match tokens.next().filter(|t| !t.starts_with('-')) {
+        Some(sub) => format!("{program}-{sub}"),
+        None => program,
+    }
 }
 
 /// Input for `darkrun_unit_update` — corrective, field-scoped edits.
@@ -843,6 +902,21 @@ pub struct AnnotationListInput {
     /// reflect open asks regardless). Defaults to false (full history).
     #[serde(default)]
     pub open_only: bool,
+}
+
+/// Input for `darkrun_annotation_resolve` — close ONE annotation by id so it
+/// stops blocking the checkpoint.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AnnotationResolveInput {
+    /// The run slug.
+    pub slug: String,
+    /// The annotation id (the `anno_…` handle from a submit / payload).
+    pub annotation_id: String,
+    /// The terminal status to set: `addressed` (a fix landed) or `dismissed` (no
+    /// code change). Defaults to `addressed`.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// Input for `darkrun_reflection_record` — capture a Reflect-phase retrospective.
@@ -1832,12 +1906,14 @@ impl DarkrunServer {
         // Any surfacing counts toward the once-per-process tick launch.
         self.desktop_surfaced
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        // Gate-surfacing decision (notify-and-await): hold when a human surface is
-        // already live — a connected desktop (or one within the grace window) gets
-        // the raised session from the live mirror, and a push-acked device proved
-        // it received the gate notification. Only launch when neither holds.
+        // Gate-surfacing decision (notify-and-await): hold when a human surface
+        // is already live FOR THIS RUN. A desktop subscribed to the run's
+        // session (or one within its grace window) gets the raised session from
+        // the live mirror, and a push-acked device proved it received the gate
+        // notification. Only launch when neither holds. Presence is per-run
+        // (F12): a viewer on another run does not count.
         if let crate::desktop::SurfaceMode::Await =
-            crate::desktop::surface_mode(self.sessions.presence(), self.sessions.has_ack(slug))
+            crate::desktop::surface_mode(self.sessions.presence_for(slug), self.sessions.has_ack(slug))
         {
             eprintln!(
                 "darkrun: surface_desktop '{slug}': human surface live (present or push-acked) — holding, not relaunching"
@@ -2026,14 +2102,10 @@ impl DarkrunServer {
             depends_on: input.depends_on.clone(),
             inputs: input.inputs.clone(),
             outputs: input.outputs.clone(),
-            quality_gates: input.quality_gates.as_ref().map(|gs| {
-                gs.iter()
-                    .map(|g| darkrun_core::domain::QualityGate {
-                        name: g.name.clone(),
-                        command: g.command.clone(),
-                    })
-                    .collect()
-            }),
+            quality_gates: input
+                .quality_gates
+                .as_ref()
+                .map(|gs| gs.iter().map(QualityGateInput::to_domain).collect()),
             model: input.model.clone(),
             unit_type: input.unit_type.clone(),
         };
@@ -2067,14 +2139,10 @@ impl DarkrunServer {
             inputs: input.inputs.clone(),
             outputs: input.outputs.clone(),
             body: input.body.clone(),
-            quality_gates: input.quality_gates.as_ref().map(|gs| {
-                gs.iter()
-                    .map(|g| darkrun_core::domain::QualityGate {
-                        name: g.name.clone(),
-                        command: g.command.clone(),
-                    })
-                    .collect()
-            }),
+            quality_gates: input
+                .quality_gates
+                .as_ref()
+                .map(|gs| gs.iter().map(QualityGateInput::to_domain).collect()),
             model: input.model.clone(),
             expected_sha: input.expected_sha.clone(),
         };
@@ -2383,6 +2451,46 @@ impl DarkrunServer {
         }
     }
 
+    /// Close ONE annotation so it stops blocking the checkpoint.
+    ///
+    /// An OPEN `must`/`should` annotation blocks a clean Approve on every decide
+    /// path (`checkpoint_decide` here and `POST /review/:id/decide` on the desktop).
+    /// Without a way to transition an annotation OUT of `open`, a run could be
+    /// wedged: the operator marked a blocker, the agent addressed it, but nothing
+    /// could flip the annotation, so Approve stayed refused forever. This is that
+    /// missing verb: the fix loop (or the operator via the desktop's HTTP route)
+    /// resolves an addressed annotation, re-opening the path to Approve.
+    #[tool(
+        name = "darkrun_annotation_resolve",
+        description = "Close one annotation by id (status: addressed = a fix landed, or dismissed = no code change) so it no longer blocks the checkpoint's clean Approve."
+    )]
+    pub fn darkrun_annotation_resolve(
+        &self,
+        Parameters(input): Parameters<AnnotationResolveInput>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        use darkrun_api::annotation::AnnotationStatus;
+        // Only the two TERMINAL, human-meaningful outcomes are settable here:
+        // `addressed` (a fix landed) or `dismissed` (valid but no code change).
+        // `open`/`shifted` are lifecycle states the engine owns, not resolutions.
+        let status = match input.status.as_deref().unwrap_or("addressed").trim().to_ascii_lowercase().as_str() {
+            "addressed" | "resolve" | "resolved" => AnnotationStatus::Addressed,
+            "dismissed" | "dismiss" => AnnotationStatus::Dismissed,
+            other => {
+                return Ok(err_text(format!(
+                    "invalid annotation resolution '{other}': use 'addressed' or 'dismissed'"
+                )))
+            }
+        };
+        let store = self.store();
+        match store.update_annotation_status(&input.slug, &input.annotation_id, status) {
+            Ok(annotation) => {
+                let _ = crate::commit::commit_state(&store, "darkrun: annotation resolve");
+                ok_json(&annotation)
+            }
+            Err(e) => Ok(err_text(e)),
+        }
+    }
+
     // ── Reflections ──────────────────────────────────────────────────────
 
     /// Record a Reflect-phase retrospective so it survives the run.
@@ -2667,7 +2775,18 @@ impl DarkrunServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let store = self.store();
         match crate::reset::reset(&store, &input.slug, input.station.as_deref(), input.confirm) {
-            Ok(plan) => ok_json(&plan),
+            Ok(plan) => {
+                // INT-3: a confirmed WHOLE-RUN reset deletes the run's on-disk state,
+                // but its in-memory sessions would linger — a subscribed desktop would
+                // sit on a pending gate for a run that no longer exists (an
+                // unresolvable zombie). Retire them so subscribers' streams close and a
+                // re-fetch 404s. Only on a confirmed run-scope reset: a station reset
+                // keeps the run (and its review session) alive.
+                if input.confirm && input.station.is_none() {
+                    self.sessions.retire_run(&input.slug);
+                }
+                ok_json(&plan)
+            }
             Err(e) => Ok(err_text(e)),
         }
     }
@@ -3523,7 +3642,7 @@ impl ServerHandler for DarkrunServer {
             Some(p) => {
                 let mut result = rmcp::model::GetPromptResult::new(vec![
                     rmcp::model::PromptMessage::new_text(
-                        rmcp::model::PromptMessageRole::User,
+                        rmcp::model::Role::User,
                         p.body,
                     ),
                 ]);
@@ -3593,6 +3712,25 @@ mod tests {
         let surface = server.surface_desktop("my-run");
         assert_eq!(surface["status"], "no_engine_port");
         assert_eq!(surface["web_url"], "https://app.darkrun.ai/runs/my-run");
+    }
+
+    #[test]
+    fn surface_desktop_holds_per_run_not_engine_wide() {
+        // F12: a desktop watching run A used to make EVERY run's gate read
+        // "connected" and choose Await, so run B's gate never launched a
+        // surface anyone could see. Presence is per-run now.
+        let dir = tempdir().unwrap();
+        let sessions = SessionRegistry::new();
+        let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
+        // A viewer subscribed to run A's session only.
+        let _slot = sessions.try_acquire_ws_slot_for("run-a", 8).expect("slot");
+        // Run A is attended → hold (Await), no relaunch.
+        assert_eq!(server.surface_desktop("run-a")["status"], "connected");
+        // Run B has no viewer → the LAUNCH path runs even while A is watched
+        // (no announced addr here, so it reports the port gap + web fallback).
+        let b = server.surface_desktop("run-b");
+        assert_eq!(b["status"], "no_engine_port");
+        assert_eq!(b["web_url"], "https://app.darkrun.ai/runs/run-b");
     }
 
     #[test]
@@ -3732,7 +3870,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_should_hold_needs_a_live_surface_and_an_interactive_run() {
+    async fn gate_should_hold_on_operator_gates_regardless_of_surface() {
         let dir = tempdir().unwrap();
         let sessions = SessionRegistry::new();
         let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
@@ -3741,10 +3879,18 @@ mod tests {
             run: "s".into(),
             station: "frame".into(),
         };
-        // No client attached → SurfaceMode::Launch → do NOT hold (surface the
-        // gate elsewhere instead of blocking on an operator who isn't watching).
+        // With NO durable decision path (no gate-decider installed), advance
+        // must not hold: nothing could ever resolve it.
         assert!(!server.gate_should_hold(&gate, "s"));
-        // A live desktop → hold at the gate.
+        // The engine installs the decider and flips the registry flag.
+        sessions.enable_durable_decisions();
+        // No client attached (SurfaceMode::Launch): the advance still HOLDS —
+        // the launch fires the app open, and returning the gate to the agent
+        // instead would make it ask the operator to progress in chat (the
+        // reported bug). The surface decision picks HOW the gate reaches the
+        // operator, never WHETHER the agent waits.
+        assert!(server.gate_should_hold(&gate, "s"));
+        // A live desktop (SurfaceMode::Await) holds too.
         let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
         assert!(server.gate_should_hold(&gate, "s"));
         // A non-gate action never holds, even with a live surface.
@@ -3761,6 +3907,8 @@ mod tests {
         use darkrun_api::{ReviewSessionPayload, SessionPayload, SessionStatus};
         let dir = tempdir().unwrap();
         let sessions = SessionRegistry::new();
+        // A durable decision path exists (the engine's hook) → gates HOLD.
+        sessions.enable_durable_decisions();
         // A live desktop → presence Live, so the gate HOLDS (Await mode).
         let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
         let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
@@ -3796,6 +3944,7 @@ mod tests {
     async fn advance_gate_hold_returns_pending_gate_on_timeout() {
         let dir = tempdir().unwrap();
         let sessions = SessionRegistry::new();
+        sessions.enable_durable_decisions(); // a decision path exists → holds apply
         let _slot = sessions.try_acquire_ws_slot(8).expect("slot"); // presence Live
         let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
         drive_to_user_gate(&server.store(), "r");
@@ -3832,6 +3981,7 @@ mod tests {
         use darkrun_api::{ReviewSessionPayload, SessionPayload, SessionStatus};
         let dir = tempdir().unwrap();
         let sessions = SessionRegistry::new();
+        sessions.enable_durable_decisions(); // a decision path exists → holds apply
         // A live desktop → presence Live, so the gate WOULD hold (Await mode).
         let _slot = sessions.try_acquire_ws_slot(8).expect("slot");
         let server = DarkrunServer::with_sessions(dir.path(), sessions.clone());
@@ -4060,6 +4210,65 @@ mod tests {
             .unwrap();
         let v = updated.structured_content.unwrap();
         assert_eq!(v["frontmatter"]["status"], "completed");
+    }
+
+    #[test]
+    fn quality_gate_input_accepts_object_and_string_shapes() {
+        // The wire shapes: a full {name, command} object AND a bare command
+        // string must BOTH deserialize (untagged); the string form used to
+        // bounce with -32602 and force a retry for an unambiguous payload.
+        let gates: Vec<QualityGateInput> = serde_json::from_value(serde_json::json!([
+            { "name": "lint", "command": "cargo clippy" },
+            "cargo test -p darkrun-core",
+        ]))
+        .expect("both shapes decode");
+        let domain: Vec<darkrun_core::domain::QualityGate> =
+            gates.iter().map(QualityGateInput::to_domain).collect();
+        assert_eq!(domain[0].name, "lint");
+        assert_eq!(domain[0].command, "cargo clippy");
+        // The shorthand derives its name from the command.
+        assert_eq!(domain[1].name, "cargo-test");
+        assert_eq!(domain[1].command, "cargo test -p darkrun-core");
+    }
+
+    #[test]
+    fn derived_gate_name_covers_paths_flags_and_bare_programs() {
+        assert_eq!(derived_gate_name("cargo test -p x"), "cargo-test");
+        // A pathy program names by basename; a flag is not a subcommand.
+        assert_eq!(derived_gate_name("./scripts/check.sh --fast"), "check.sh");
+        assert_eq!(derived_gate_name("eslint --max-warnings 0"), "eslint");
+        assert_eq!(derived_gate_name("make"), "make");
+        // Degenerate input falls back to the string itself.
+        assert_eq!(derived_gate_name(""), "");
+    }
+
+    #[test]
+    fn unit_create_accepts_string_quality_gates() {
+        let (_d, server) = started_server();
+        let created = server
+            .darkrun_unit_create(Parameters(UnitCreateInput {
+                slug: "r".into(),
+                unit: "u1".into(),
+                station: "frame".into(),
+                title: None,
+                depends_on: vec![],
+                quality_gates: Some(vec![
+                    QualityGateInput::Command("cargo test".into()),
+                    QualityGateInput::Named {
+                        name: "lint".into(),
+                        command: "cargo clippy".into(),
+                    },
+                ]),
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(created.is_error, Some(false));
+        let v = created.structured_content.unwrap();
+        let gates = &v["frontmatter"]["quality_gates"];
+        assert_eq!(gates[0]["name"], "cargo-test");
+        assert_eq!(gates[0]["command"], "cargo test");
+        assert_eq!(gates[1]["name"], "lint");
+        assert_eq!(gates[1]["command"], "cargo clippy");
     }
 
     #[test]
@@ -4321,6 +4530,118 @@ mod tests {
         assert_eq!(v["items"][0]["source"]["kind"], "text");
         assert_eq!(v["items"][0]["source"]["path"], "src/payment.rs");
         assert_eq!(v["items"][0]["source"]["start_line"], 42);
+    }
+
+    /// IP-1/INT-2 regression: an OPEN `must` annotation blocks a clean Approve, and
+    /// before this fix there was NO wired path to close it — the run could wedge.
+    /// `darkrun_annotation_resolve` is that path: resolving the annotation clears
+    /// the block.
+    #[test]
+    fn annotation_resolve_unblocks_the_checkpoint() {
+        let (_d, server) = started_server();
+        let station_query = || WorkItemInput {
+            kind: "station".into(),
+            id: String::new(),
+            station: "build".into(),
+        };
+        let blocks = |server: &DarkrunServer| -> bool {
+            server
+                .darkrun_annotation_list(Parameters(AnnotationListInput {
+                    slug: "r".into(),
+                    work_item: station_query(),
+                    open_only: false,
+                }))
+                .unwrap()
+                .structured_content
+                .unwrap()["blocks_clean_approve"]
+                .as_bool()
+                .unwrap()
+        };
+
+        // Submit an OPEN `must` station note — it blocks a clean Approve.
+        let submitted = server
+            .darkrun_annotation_submit(Parameters(AnnotationSubmitInput {
+                slug: "r".into(),
+                author: Some("human".into()),
+                work_item: station_query(),
+                artifact: None,
+                anchor: None,
+                expression: None,
+                comment: "overall: tighten the error handling".into(),
+                ask: serde_json::json!({ "kind": "change", "severity": "must" }),
+                suggestion: None,
+            }))
+            .unwrap();
+        let id = submitted.structured_content.unwrap()["annotation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(blocks(&server), "an open must annotation blocks Approve");
+
+        // Resolve it (a fix landed) — the previously-missing verb.
+        let resolved = server
+            .darkrun_annotation_resolve(Parameters(AnnotationResolveInput {
+                slug: "r".into(),
+                annotation_id: id.clone(),
+                status: Some("addressed".into()),
+            }))
+            .unwrap();
+        assert_eq!(resolved.is_error, Some(false));
+        assert_eq!(resolved.structured_content.unwrap()["status"], "addressed");
+
+        // With it resolved, nothing blocks a clean Approve any more.
+        assert!(!blocks(&server), "a resolved annotation no longer blocks Approve");
+
+        // An unknown id is a clean error, not a panic.
+        let missing = server
+            .darkrun_annotation_resolve(Parameters(AnnotationResolveInput {
+                slug: "r".into(),
+                annotation_id: "anno_nope".into(),
+                status: None,
+            }))
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
+
+        // An invalid resolution token is refused.
+        let bad = server
+            .darkrun_annotation_resolve(Parameters(AnnotationResolveInput {
+                slug: "r".into(),
+                annotation_id: id,
+                status: Some("banana".into()),
+            }))
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true));
+    }
+
+    /// INT-3 regression: a confirmed WHOLE-RUN reset must RETIRE that run's live
+    /// sessions from the registry (else a subscribed desktop sits on a zombie gate
+    /// for a deleted run) while leaving a sibling run's session intact.
+    #[test]
+    fn run_reset_retires_the_runs_sessions_but_not_a_siblings() {
+        use darkrun_api::SessionPayload;
+        let (_d, server) = started_server();
+        // A live review session for run "r" (the reset target) and a sibling "s".
+        let review = |slug: &str| -> SessionPayload {
+            serde_json::from_value(serde_json::json!({
+                "session_type": "review", "session_id": slug, "status": "pending", "run_slug": slug
+            }))
+            .unwrap()
+        };
+        server.sessions().upsert_under("r", review("r"));
+        server.sessions().upsert_under("s", review("s"));
+        assert!(server.sessions().get("r").is_some());
+
+        // Confirmed whole-run reset retires r's sessions.
+        let out = server
+            .darkrun_run_reset(Parameters(RunResetInput {
+                slug: "r".into(),
+                station: None,
+                confirm: true,
+            }))
+            .unwrap();
+        assert_eq!(out.is_error, Some(false));
+        assert!(server.sessions().get("r").is_none(), "the reset run's session is retired");
+        assert!(server.sessions().get("s").is_some(), "a sibling run's session survives");
     }
 
     #[test]
@@ -5076,10 +5397,12 @@ mod handler_smoke {
         let s = DarkrunServer::new(dir.path());
         let store = s.store();
         run_start(&store, "r", "software", None, Mode::Solo, "full").unwrap();
-        // Hold a live WS slot → presence reads as Live, so run_show reports the
-        // desktop as already connected rather than trying to launch one.
-        let _slot = s.sessions().try_acquire_ws_slot(8).expect("ws slot");
-        assert!(s.sessions().presence().is_present());
+        // Hold a live WS slot ON THIS RUN's session → its presence reads as
+        // Live, so run_show reports the desktop as already connected rather
+        // than trying to launch one. (Presence is per-run, F12: a slot on some
+        // other session would not count for "r".)
+        let _slot = s.sessions().try_acquire_ws_slot_for("r", 8).expect("ws slot");
+        assert!(s.sessions().presence_for("r").is_present());
         let out = s.darkrun_run_inspect(Parameters(RunShowRef { slug: Some("r".into()) })).unwrap();
         assert!(out.is_error != Some(true));
         let body = out.structured_content.expect("structured");

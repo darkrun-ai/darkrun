@@ -155,9 +155,19 @@ pub async fn serve_stdio_on(
     let state = {
         let ds = state.store.clone();
         state.with_gate_decider(move |run, approved, fb| {
-            crate::position::checkpoint_decide(&ds, run, approved, fb).is_ok()
+            // Carry the refusal reason (not just a bool): checkpoint_decide
+            // rejects a Prove approve with no measured evidence, or an approve
+            // over open must/should, so the HTTP layer can surface it instead of
+            // reporting a false success.
+            crate::position::checkpoint_decide(&ds, run, approved, fb)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
     };
+    // With the durable decider in place, tell the shared session registry so the
+    // MCP advance HOLDS at operator gates (a registry with no decision path
+    // keeps the immediate-return contract instead of waiting forever).
+    state.sessions.enable_durable_decisions();
     // Durability: every interactive session (question / direction / picker) the
     // registry upserts — on raise AND on answer — is written to the run's
     // `interactive/` dir, so an open question and its eventual answer survive an
@@ -395,7 +405,13 @@ fn resolve_relay_token(
 /// access to work, so `darkrun login` (which stores the dial token) is
 /// sufficient to make a run reachable — the URL no longer has to be exported by
 /// hand, which nothing did.
-pub const DEFAULT_RELAY_URL: &str = "wss://relay.darkrun.ai";
+///
+/// The relay is served by the web service on the APEX host (`darkrun.ai/relay/…`);
+/// `relay.darkrun.ai` has no DNS record today, so defaulting to it made every
+/// default-config engine fail its dial at DNS resolution. If a dedicated relay
+/// host is stood up later (Terraform has the mapping prepped), flipping this
+/// constant (or setting `DARKRUN_RELAY_URL`) is the whole migration.
+pub const DEFAULT_RELAY_URL: &str = "wss://darkrun.ai";
 
 /// The relay candidate to advertise + dial. The base URL defaults to the
 /// production relay ([`DEFAULT_RELAY_URL`]) and is overridable via
@@ -439,6 +455,14 @@ fn announce_engine(
                 "darkrun: discovery descriptor written to {}",
                 registry.descriptor_path().display()
             );
+            // NOTE: we deliberately do NOT backfill a durable project record here.
+            // The catalog's source of truth is the provider (the GitHub/GitLab repos
+            // you signed in to and picked) plus explicit local adds — never "any repo
+            // that happened to boot an engine." Auto-registering on boot flooded the
+            // desktop with every scratch/worktree repo an agent ever ran against. The
+            // LIVE engine descriptor above is enough for a running session to surface
+            // (see registry::list_live_engines + the desktop's engine overlay); it
+            // self-retires when the pid dies, so it never lingers as a ghost project.
             Some(registry)
         }
         Err(e) => {

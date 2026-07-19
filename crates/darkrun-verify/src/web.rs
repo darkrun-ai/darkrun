@@ -55,11 +55,48 @@ impl Default for WebOpts {
     }
 }
 
-/// The raw `{dom, vitals}` payload the collector script returns.
+/// The raw `{dom, vitals, reach}` payload the collector script returns.
 #[derive(Debug, Deserialize)]
 struct Collected {
     dom: DomSnapshot,
     vitals: PageVitals,
+    /// Reachability signals, absent on older collector payloads, so defaulted
+    /// (a missing block reads as "reachable", the pre-existing behavior).
+    #[serde(default)]
+    reach: Reach,
+}
+
+/// Whether the browser actually reached the target, or landed on an error page.
+/// Collected by `collector.js`; the verdict is decided by the pure
+/// [`unreachable_reason`] so it is testable without a browser.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct Reach {
+    /// Chrome rendered its own network-error interstitial (`#main-frame-error`),
+    /// meaning the server was never reached (DNS failure, connection refused).
+    #[serde(default)]
+    pub chrome_error_page: bool,
+    /// The main document's HTTP status. `0` for `file://` / `data:` / a failed
+    /// net request; `>= 400` is an error page the target served.
+    #[serde(default)]
+    pub http_status: u16,
+}
+
+/// Decide whether a capture landed on an error page rather than the real target.
+/// Returns `Some(reason)` when the proof must be REFUSED (the target was
+/// unreachable or served an HTTP error), or `None` when the page is real. Pure,
+/// so the honesty rule is unit-tested without a browser.
+///
+/// A `file://` / `data:` load reports status `0` and no interstitial, so it
+/// passes; a `2xx`/`3xx` page passes; a Chrome net-error interstitial or a
+/// `>= 400` response fails.
+pub fn unreachable_reason(reach: &Reach) -> Option<String> {
+    if reach.chrome_error_page {
+        Some("chrome network-error page (target unreachable)".to_string())
+    } else if reach.http_status >= 400 {
+        Some(format!("target returned HTTP {}", reach.http_status))
+    } else {
+        None
+    }
 }
 
 /// Shape a collected snapshot + vitals + optional screenshot URL into a
@@ -186,6 +223,13 @@ async fn capture_on_browser(
         .map_err(|e| VerifyError::Metrics(format!("collector returned non-string: {e}")))?;
     let collected: Collected = serde_json::from_str(&json)?;
 
+    // HONESTY GUARD: if the browser landed on Chrome's own error page or an HTTP
+    // error response, there is no real page to prove, so fail loudly (no proof,
+    // no screenshot) instead of certifying the error page's DOM as the target.
+    if let Some(reason) = unreachable_reason(&collected.reach) {
+        return Err(VerifyError::Unreachable(format!("{url}: {reason}")));
+    }
+
     // Capture a screenshot if requested.
     let screenshot_url = match &opts.screenshot_path {
         Some(path) => {
@@ -303,6 +347,60 @@ mod tests {
         assert_eq!(c.vitals.lcp, Some(700.0));
         let proof = shape_web_proof(&c.dom, &c.vitals, None);
         assert_eq!(proof.vitals.get("transfer_size"), Some(&12000.0));
+    }
+
+    #[test]
+    fn unreachable_reason_flags_error_pages() {
+        // Chrome's own network-error interstitial → unreachable.
+        let r = unreachable_reason(&Reach { chrome_error_page: true, http_status: 0 });
+        assert!(r.as_deref().unwrap().contains("unreachable"), "got {r:?}");
+        // A 4xx/5xx the target served → refused, with the status surfaced.
+        assert_eq!(
+            unreachable_reason(&Reach { chrome_error_page: false, http_status: 404 }).as_deref(),
+            Some("target returned HTTP 404")
+        );
+        assert!(unreachable_reason(&Reach { chrome_error_page: false, http_status: 503 }).is_some());
+    }
+
+    #[test]
+    fn unreachable_reason_passes_real_pages_and_local_schemes() {
+        // A healthy 200 page is reachable.
+        assert!(unreachable_reason(&Reach { chrome_error_page: false, http_status: 200 }).is_none());
+        // A redirect that resolved is reachable.
+        assert!(unreachable_reason(&Reach { chrome_error_page: false, http_status: 302 }).is_none());
+        // file:// / data: report status 0 with no interstitial, so must not fail.
+        assert!(unreachable_reason(&Reach::default()).is_none());
+    }
+
+    #[test]
+    fn collected_defaults_reach_when_the_payload_omits_it() {
+        // Older collector payloads carried no `reach` block; it must default to a
+        // reachable verdict so their proofs still shape.
+        let json = r#"{
+            "dom": {"text_contrasts":[],"touch_targets":[],"images":[],
+                    "honors_reduced_motion":false,"landmark_count":0,
+                    "has_main_landmark":true,"keyboard_focusable":0,"interactive_total":0,
+                    "has_document_title":true,"has_lang":true},
+            "vitals": {}
+        }"#;
+        let c: Collected = serde_json::from_str(json).unwrap();
+        assert_eq!(c.reach, Reach::default());
+        assert!(unreachable_reason(&c.reach).is_none());
+    }
+
+    #[test]
+    fn collected_reads_the_reach_block_when_present() {
+        let json = r#"{
+            "dom": {"text_contrasts":[],"touch_targets":[],"images":[],
+                    "honors_reduced_motion":false,"landmark_count":0,
+                    "has_main_landmark":false,"keyboard_focusable":0,"interactive_total":0,
+                    "has_document_title":false,"has_lang":false},
+            "vitals": {},
+            "reach": {"chrome_error_page": true, "http_status": 0}
+        }"#;
+        let c: Collected = serde_json::from_str(json).unwrap();
+        assert!(c.reach.chrome_error_page);
+        assert!(unreachable_reason(&c.reach).is_some(), "an error page is refused");
     }
 
     #[test]

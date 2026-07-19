@@ -21,10 +21,14 @@ The engine commits its own `.darkrun/` bookkeeping on every tick — but it neve
 
 ## Uncommitted paths
 
-- `infra/modules/auth/main.tf`
-- `infra/modules/auth/outputs.tf`
-- `infra/modules/auth/variables.tf`
-- `infra/modules/auth/versions.tf`
+- `fastlane/Fastfile`
+- `npm/darwin-arm64/package.json`
+- `npm/darwin-x64/package.json`
+- `npm/linux-arm64/package.json`
+- `npm/linux-x64/package.json`
+- `npm/win32-x64/package.json`
+- `plugin/.claude-plugin/plugin.json`
+- `plugin/package.json`
 
 
 ## What to do

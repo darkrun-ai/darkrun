@@ -30,8 +30,20 @@ variable "manage_www" {
   default     = true
 }
 
+variable "manage_relay" {
+  description = "Also map relay.<web_domain> to the service (paired with the relay CNAME in the dns module). relay.<web_domain> is the wss:// base the engine dials by default; the relay runs in this same service."
+  type        = bool
+  default     = true
+}
+
+variable "relay_subdomain" {
+  description = "Subdomain label for the relay Cloud Run domain mapping (default \"relay\" => relay.<web_domain>)."
+  type        = string
+  default     = "relay"
+}
+
 variable "manage_domain_mapping" {
-  description = "Let Terraform create the Cloud Run domain mappings. Default false: a domain mapping requires the CALLER to be a verified owner of the domain, and the TFC/CI service account can't be added as a Search Console owner — so the apex/www mappings are created out-of-band by a verified human (`gcloud run domain-mappings create`) and Terraform leaves them alone. DNS records + everything else stay in Terraform."
+  description = "Let Terraform create the Cloud Run domain mappings. Default false: a domain mapping requires the CALLER to be a verified owner of the domain, and the TFC/CI service account can't be added as a Search Console owner — so the apex/www/relay mappings are created out-of-band by a verified human (`gcloud run domain-mappings create`) and Terraform leaves them alone. DNS records + everything else stay in Terraform."
   type        = bool
   default     = false
 }

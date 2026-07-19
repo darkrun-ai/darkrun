@@ -670,6 +670,19 @@ pub fn record_iteration(
         return Err(McpError::InvalidInput("iteration worker must not be empty".into()));
     }
     let mut unit = get(store, run, slug)?;
+    // Iteration cap — the write-time backstop for the manager's runaway-loop
+    // escalation (derive_position surfaces an Escalate once `pass() > MAX_PASSES`).
+    // A unit that has already burned its Pass budget is wedged; recording another
+    // beat is exactly how a stuck unit retries forever, so refuse it here and
+    // point at the recovery (a reset re-opens the spec and resets the budget).
+    if unit.pass() > crate::position::MAX_PASSES {
+        return Err(McpError::InvalidInput(format!(
+            "unit '{slug}' has exhausted its Pass budget ({budget} passes) and is wedged — \
+             a further beat would loop forever. Reset it with darkrun_unit_reset (its spec \
+             unlocks and the Pass budget resets), fix the spec, then re-dispatch from Pass 1.",
+            budget = crate::position::MAX_PASSES,
+        )));
+    }
     let now = Utc::now().to_rfc3339();
     unit.frontmatter.iterations.push(UnitIteration {
         worker: worker.to_string(),
@@ -1073,6 +1086,29 @@ mod tests {
         assert_eq!(u2.pass(), 2);
         assert_eq!(u2.active_worker(), "make");
         assert_eq!(u2.last_note(), Some("burst overflows the bucket — bounce to make"));
+    }
+
+    #[test]
+    fn record_iteration_caps_a_wedged_unit_at_the_pass_budget() {
+        let (_d, store) = store1();
+        create(&store, "r", "u1", "build", UnitSpec::default()).unwrap();
+        let budget = crate::position::MAX_PASSES;
+        // Beats up to the escalation point (pass climbs to MAX_PASSES + 1) still
+        // record — the manager escalates on the next derive.
+        for i in 0..=budget {
+            record_iteration(
+                &store, "r", "u1", "make", IterationResult::Reject, None, Some("make".into()),
+            )
+            .unwrap_or_else(|e| panic!("beat {i} should record: {e}"));
+        }
+        assert_eq!(store.read_unit("r", "u1").unwrap().pass(), budget + 1);
+        // One more beat past the budget is refused: a wedged unit can't loop forever.
+        let err = record_iteration(
+            &store, "r", "u1", "make", IterationResult::Reject, None, None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, McpError::InvalidInput(_)));
+        assert!(format!("{err}").contains("Pass budget"), "{err}");
     }
 
     #[test]

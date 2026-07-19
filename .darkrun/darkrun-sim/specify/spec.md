@@ -106,7 +106,7 @@ Phase: 2.
 
 ### AC-13: The replay page composes the darkrun-ui prelude components, bans no-live-feed, bans network
 
-The new page module renders `StationStrip` (`crates/darkrun-ui/src/components/station_strip.rs`), `StationPipeline` (`crates/darkrun-ui/src/components/pipeline.rs`), and `UnitGraph` (`crates/darkrun-ui/src/graph/view.rs`) — all three re-exported by `darkrun_ui::prelude` (`crates/darkrun-ui/src/lib.rs`) — against data derived from the embedded fixture, displays an explicit no-live-feed banner, and performs zero network fetches. Wording precedent for the banner: `web/site/src/pages/preview.rs` lines 88-93, the `lead` prop of its `SectionHead` component — "...Preview only — no live feed is attached." — NOT `ScaffoldNote`, whose own text begins "Fixture: representative..." and describes fixture provenance, not live-feed status. The replay page's banner MAY separately reuse `ScaffoldNote`'s dashed-border visual container (`crate::pages::review::ScaffoldNote`, `web/site/src/pages/review.rs` line 199) for its box styling — that is an independent, optional choice about the container, not the source of the no-live-feed sentence.
+The new page module renders `StationStrip` (`crates/darkrun-ui/src/components/station_strip.rs`), `StationPipeline` (`crates/darkrun-ui/src/components/pipeline.rs`), and `UnitGraph` (`crates/darkrun-ui/src/graph/view.rs`) — all three re-exported by `darkrun_ui::prelude` (`crates/darkrun-ui/src/lib.rs`) — against data derived from the embedded fixture (`UnitGraph`'s nodes and edges come from the fixture's `units` field — each `FixtureUnit.slug` is a node, each `depends_on` entry an edge, per the fb-08 amendment), displays an explicit no-live-feed banner, and performs zero network fetches. Wording precedent for the banner: `web/site/src/pages/preview.rs` lines 88-93, the `lead` prop of its `SectionHead` component — "...Preview only — no live feed is attached." — NOT `ScaffoldNote`, whose own text begins "Fixture: representative..." and describes fixture provenance, not live-feed status. The replay page's banner MAY separately reuse `ScaffoldNote`'s dashed-border visual container (`crate::pages::review::ScaffoldNote`, `web/site/src/pages/review.rs` line 199) for its box styling — that is an independent, optional choice about the container, not the source of the no-live-feed sentence.
 
 Check: `grep -n 'StationStrip\|StationPipeline\|UnitGraph' <replay page module>` (the new page module under `web/site/src/pages/`, once it exists) shows all three names used inside an `rsx!` block; `grep -in 'no live feed\|no-live-feed' <replay page module>` returns at least one match; `grep -nE 'gloo|remote::|\.fetch\(' <replay page module>` returns nothing (contrast with `web/site/src/pages/browse.rs`, which does use `crate::remote::fetch_run_list`/`fetch_run_detail` for its live-repo pattern — the replay page must not).
 
@@ -210,6 +210,7 @@ pub struct SimFixture {
     pub outcome: FixtureOutcome,
     pub ticks: Vec<FixtureTick>,
     pub events: Vec<FixtureEvent>,
+    pub units: Vec<FixtureUnit>,
 }
 
 pub enum FixtureOutcome {
@@ -230,7 +231,16 @@ pub struct FixtureEvent {
     pub event: String,
     pub fields: serde_json::Value, // normalized
 }
+
+pub struct FixtureUnit {
+    pub slug: String,
+    pub station: String,
+    pub depends_on: Vec<String>,
+    pub status: String,            // terminal Status label, e.g. "completed"
+}
 ```
+
+The `units` field is captured exactly once, after the terminal tick (`Sealed` or `Escalated`), by reading `StateStore::read_units` for the run and mapping each unit's `slug`, `station`, declared `depends_on`, and terminal `status` label — no timestamps, iterations, or body content are carried, so normalization rule 1 has nothing to strip from it (fb-08 amendment, operator decision 2026-07-11: the replay page's `UnitGraph` renders real unit nodes and dependency edges from this field).
 
 Normalization rules, applied before serialization (per this station's "determinism by normalization at projection" operator decision, recorded 2026-07-11 alongside the crate-partition and fixture-schema-placement decisions — a station-level decision, not one of the frame's four):
 

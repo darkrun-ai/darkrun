@@ -53,6 +53,19 @@ impl FeedbackStatus {
     pub fn blocks_gate(self) -> bool {
         matches!(self, FeedbackStatus::Pending | FeedbackStatus::Fixing)
     }
+
+    /// Whether this item still needs the operator's attention (it is not
+    /// terminally resolved). Broader than [`blocks_gate`]: it ALSO counts
+    /// `escalated`, the explicit human-intervention state, so a surface like the
+    /// drift chip shows an escalated item instead of dropping it. Terminal
+    /// resolutions (`addressed` / `answered` / `non_actionable` / `closed` /
+    /// `rejected`) are not open.
+    pub fn is_open(self) -> bool {
+        matches!(
+            self,
+            FeedbackStatus::Pending | FeedbackStatus::Fixing | FeedbackStatus::Escalated
+        )
+    }
 }
 
 /// Inline text-anchor metadata for inline-comment feedback.

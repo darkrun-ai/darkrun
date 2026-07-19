@@ -27,11 +27,15 @@ pub enum RemoteState {
     Unconfigured,
     /// Opening the socket / awaiting the first snapshot.
     Connecting,
-    /// A live session payload is in hand — a checkpoint Review, or an interactive
-    /// Question / Direction / Picker the engine mirrored onto the run feed.
+    /// A live session payload is in hand: a checkpoint Review, an interactive
+    /// Question / Direction / Picker, or a View / VisualReview / Proof the engine
+    /// mirrored onto the run feed.
     Live(Box<SessionPayload>),
     /// The socket dropped; retrying.
     Reconnecting,
+    /// The retry budget is spent, so the run is unreachable. A TERMINAL state (no
+    /// silent reconnect loop behind it); the UI offers an explicit retry.
+    Offline,
 }
 
 /// The outcome of the operator's most recent remote command (approve a gate,
@@ -161,6 +165,12 @@ struct PendingCmd {
     expiring: bool,
 }
 
+/// How many consecutive failed (re)connect attempts, with no live snapshot in
+/// between, [`run_connection`] tolerates before it stops retrying and surfaces a
+/// terminal [`RemoteState::Offline`]. A healthy snapshot resets the count, so this
+/// bounds only a genuinely-unreachable run, not a long-lived one that blips once.
+const MAX_RECONNECTS: u32 = 5;
+
 /// Wall-clock milliseconds (`Date.now()`) — the retry clock. `Instant` panics on
 /// wasm, so the browser clock is the monotonic-enough source for the backoff.
 fn now_ms() -> f64 {
@@ -219,7 +229,12 @@ fn next_wait_ms(pending: &[PendingCmd], now: f64) -> u64 {
 /// Run the connection loop forever: push live session payloads into `state`,
 /// forward any [`ClientCommand`] arriving on `cmd_rx` to the host as an acked
 /// `Cmd` frame, and reflect each command's ack (or rejection) into `outcome` so
-/// the UI can surface it. Reconnects with a fixed backoff after any drop.
+/// the UI can surface it. Reconnects with a fixed backoff after a drop, but only
+/// a BOUNDED number of times: after [`MAX_RECONNECTS`] consecutive failed dials
+/// with no live snapshot in between it stops and sets a terminal
+/// [`RemoteState::Offline`], rather than spinning a silent reconnect loop
+/// forever. A live snapshot resets the budget, so a single drop deep into a long
+/// session doesn't count against it.
 ///
 /// **Exactly-once writes.** An unacked command is RESENT with its original id on
 /// a bounded exponential backoff ([`RetryPolicy`]), capped at a few attempts, and
@@ -244,6 +259,10 @@ pub async fn run_connection(
     // Unacked commands, kept ACROSS reconnects (declared outside the loop) so a
     // send lost to a drop is resent — same id ⇒ the host de-dupes.
     let mut pending: Vec<PendingCmd> = Vec::new();
+    // Consecutive failed dials with no live snapshot in between. Reset to 0 on
+    // any live snapshot; once it reaches MAX_RECONNECTS the loop gives up and the
+    // UI shows a terminal Offline state instead of retrying silently forever.
+    let mut reconnects: u32 = 0;
     loop {
         state.set(RemoteState::Connecting);
         if let Ok(ws) = WebSocket::open(&url) {
@@ -298,6 +317,10 @@ pub async fn run_connection(
                     msg = rx.next().fuse() => match msg {
                         Some(Ok(Message::Text(t))) => {
                             if let Some(payload) = session_payload(&t) {
+                                // A live snapshot proves the connection is healthy:
+                                // clear the give-up budget so a later single drop
+                                // starts fresh rather than tipping us into Offline.
+                                reconnects = 0;
                                 state.set(RemoteState::Live(Box::new(payload)));
                             } else if let Some((id, ok, error)) = command_ack(&t) {
                                 // The host acked THIS id — stop retrying it and
@@ -341,30 +364,34 @@ pub async fn run_connection(
                 }
             }
         }
+        // The socket failed to open, or dropped. Count it; once the budget is
+        // spent (with no live snapshot having reset it) stop the loop and land on
+        // a clear terminal Offline state instead of reconnecting silently forever.
+        reconnects += 1;
+        if reconnects >= MAX_RECONNECTS {
+            state.set(RemoteState::Offline);
+            return;
+        }
         state.set(RemoteState::Reconnecting);
         gloo_timers::future::sleep(Duration::from_secs(3)).await;
     }
 }
 
-/// Decode a relay text frame to the session payload it carries, keeping only the
-/// surfaces the web app renders: the checkpoint `Review` and the interactive
-/// `Question` / `Direction` / `Picker` prompts the engine mirrors onto the run
-/// feed. Other variants (view/visual_review/proof) return `None`, so the UI
-/// keeps the last state it knew how to render.
+/// Decode a relay text frame to the session payload it carries. EVERY session
+/// variant is kept: the checkpoint `Review`, the interactive
+/// `Question` / `Direction` / `Picker`, and the `View` / `VisualReview` / `Proof`
+/// surfaces the engine mirrors onto the run feed. The web app renders a basic
+/// view for the latter three (see [`crate::live_view`]) rather than silently
+/// dropping them and leaving the operator staring at a stale pane. Non-session
+/// frames (acks, pongs, garbage) return `None`, so the UI holds the last state it
+/// knew how to draw.
 fn session_payload(text: &str) -> Option<SessionPayload> {
     let frame = serde_json::from_str::<ServerFrame>(text).ok()?;
     let payload = match frame {
         ServerFrame::Snapshot { payload, .. } | ServerFrame::Update { payload, .. } => payload,
         _ => return None,
     };
-    let session = serde_json::from_value::<SessionPayload>(payload).ok()?;
-    match session {
-        SessionPayload::Review(_)
-        | SessionPayload::Question(_)
-        | SessionPayload::Direction(_)
-        | SessionPayload::Picker(_) => Some(session),
-        _ => None,
-    }
+    serde_json::from_value::<SessionPayload>(payload).ok()
 }
 
 /// Decode a relay text frame to a command ack `(id, ok, error)`, if it is one.
@@ -476,9 +503,11 @@ mod tests {
     }
 
     #[test]
-    fn session_payload_keeps_the_four_rendered_surfaces() {
-        // Review / Question / Direction / Picker are the surfaces the web app
-        // renders — each must survive the Snapshot round-trip.
+    fn session_payload_keeps_every_rendered_surface() {
+        // The web app now renders a surface for EVERY session variant (the
+        // interactive prompts plus a basic view/visual-review/proof panel), so
+        // none may be dropped on the way off the wire. Each must survive the
+        // Snapshot round-trip.
         for payload in [
             review(Some(GateType::Ask)),
             SessionPayload::Question(QuestionSessionPayload {
@@ -499,6 +528,23 @@ mod tests {
                 options: vec![],
                 selection: None,
             }),
+            SessionPayload::View(ViewSessionPayload {
+                session_id: "v".into(),
+                status: ViewStatus::Open,
+                run_slug: "r".into(),
+                scope: Default::default(),
+                artifacts: vec![],
+                factory: None,
+                station: None,
+                artifact: None,
+                mode: ViewMode::Viewer,
+                boot_port: None,
+                boot_command: None,
+            }),
+            SessionPayload::VisualReview(VisualReviewSessionPayload {
+                session_id: "vr".into(),
+                ..Default::default()
+            }),
         ] {
             let got = session_payload(&snapshot_json(&payload))
                 .unwrap_or_else(|| panic!("{} should be kept", payload.session_type()));
@@ -517,9 +563,9 @@ mod tests {
     }
 
     #[test]
-    fn session_payload_drops_non_rendered_variants() {
-        // View / Proof / VisualReview are never rendered here → None, so the UI
-        // holds the last state it knew how to draw.
+    fn session_payload_keeps_view_and_visual_review() {
+        // Regression: View / VisualReview used to be dropped, blanking the pane.
+        // They now survive the round-trip so the web app can render a basic view.
         let view = SessionPayload::View(ViewSessionPayload {
             session_id: "v".into(),
             status: ViewStatus::Open,
@@ -533,13 +579,19 @@ mod tests {
             boot_port: None,
             boot_command: None,
         });
-        assert!(session_payload(&snapshot_json(&view)).is_none());
+        assert_eq!(
+            session_payload(&snapshot_json(&view)).map(|s| s.session_type()),
+            Some("view")
+        );
 
         let visual = SessionPayload::VisualReview(VisualReviewSessionPayload {
             session_id: "vr".into(),
             ..Default::default()
         });
-        assert!(session_payload(&snapshot_json(&visual)).is_none());
+        assert_eq!(
+            session_payload(&snapshot_json(&visual)).map(|s| s.session_type()),
+            Some("visual_review")
+        );
     }
 
     #[test]

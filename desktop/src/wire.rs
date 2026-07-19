@@ -14,8 +14,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use darkrun_api::{
-    DirectionSelectRequest, FeedbackCreateRequest, FeedbackListResponse, FeedbackUpdateRequest,
-    OutputReviewRequest, PickerSelectRequest, QuestionAnswerRequest, ReviewDecisionRequest,
+    DirectionSelectRequest, FeedbackCreateRequest, FeedbackListResponse,
+    FeedbackReplyCreateRequest, FeedbackUpdateRequest, OutputReviewRequest, PickerSelectRequest,
+    ProofGetResponse, QuestionAnswerRequest, ReviewDecisionRequest, RunArchiveRequest,
     RunDetailPayload, RunListPayload, SessionPayload,
 };
 use serde::de::DeserializeOwned;
@@ -171,6 +172,12 @@ impl ConnConfig {
         format!("/api/feedback/{run}/{station}/{id}")
     }
 
+    /// The feedback-reply POST path (`/api/feedback/:run/:station/:id/replies`);
+    /// the inbox's reply composer appends to an item's thread here.
+    pub fn feedback_replies_path(&self, run: &str, station: &str, id: &str) -> String {
+        format!("/api/feedback/{run}/{station}/{id}/replies")
+    }
+
     /// The run-list GET path (`/api/runs`) — every non-archived run summary.
     pub fn runs_path(&self) -> String {
         "/api/runs".to_string()
@@ -179,6 +186,12 @@ impl ConnConfig {
     /// The run-detail GET path (`/api/runs/:slug`).
     pub fn run_detail_path(&self, slug: &str) -> String {
         format!("/api/runs/{slug}")
+    }
+
+    /// The run-archive POST path (`/api/runs/:slug/archive`): the reversible
+    /// archive toggle (body flag decides archive vs restore).
+    pub fn run_archive_path(&self, slug: &str) -> String {
+        format!("/api/runs/{slug}/archive")
     }
 
     /// The unit-reset POST path (`/api/unit/:run/:unit/reset`) — the review UI's
@@ -391,6 +404,40 @@ pub async fn update_feedback(
     send_json("PUT", &cfg.authority(), &cfg.feedback_item_path(run, station, id), req).await
 }
 
+/// POST a reply onto a feedback item's thread
+/// (`/api/feedback/:run/:station/:id/replies`), the inbox's reply composer.
+/// The server appends the line to the on-disk thread; the caller refetches the
+/// list so the new reply renders.
+pub async fn submit_feedback_reply(
+    cfg: &ConnConfig,
+    run: &str,
+    station: &str,
+    id: &str,
+    req: &FeedbackReplyCreateRequest,
+) -> Result<(), WireError> {
+    post_json(&cfg.authority(), &cfg.feedback_replies_path(run, station, id), req).await
+}
+
+/// GET a run's attached objective-evidence proof (`/api/proof/:run`): the
+/// numbers the ProofPanel renders at a prove gate. A `404` (no proof attached
+/// yet) surfaces as `WireError::Status(404)`, which the review surface renders
+/// as an explicit "no evidence attached" state rather than nothing.
+pub async fn fetch_proof(cfg: &ConnConfig, run: &str) -> Result<ProofGetResponse, WireError> {
+    get_json(&cfg.authority(), &cfg.proof_path(run)).await
+}
+
+/// POST a run-archive toggle (`/api/runs/:slug/archive`). Mirrors the engine's
+/// `run_archive` semantics: reversible, no confirm; an archived run drops out
+/// of the default run list on the next poll.
+pub async fn submit_run_archive(
+    cfg: &ConnConfig,
+    slug: &str,
+    archived: bool,
+) -> Result<(), WireError> {
+    let req = RunArchiveRequest { archived };
+    post_json(&cfg.authority(), &cfg.run_archive_path(slug), &req).await
+}
+
 /// GET the `current` focus session and return the run slug it names, if any.
 ///
 /// `darkrun_show` upserts a Review payload under the `current` session id whose
@@ -547,11 +594,22 @@ pub struct DiscoveredEngine {
     pub harness: String,
     /// RFC3339 timestamp the engine announced itself at.
     pub started_at: String,
+    /// The canonical repo's display name, STAMPED into the descriptor by the
+    /// unsandboxed engine. The SANDBOXED desktop reads it straight from here
+    /// instead of calling git on `project_path` (an out-of-container path git
+    /// can't reach). `None` for a pre-stamp (old) descriptor.
+    pub repo_name: Option<String>,
+    /// The canonical repo's `origin` remote URL, stamped by the engine.
+    pub repo_origin: Option<String>,
+    /// The canonical main-checkout absolute path, stamped by the engine.
+    pub repo_path: Option<PathBuf>,
 }
 
 impl DiscoveredEngine {
     /// Project a registry descriptor into the desktop-facing shape, dropping the
-    /// host (always loopback) and keeping only the port.
+    /// host (always loopback) and keeping only the port. The repo identity is
+    /// read from the descriptor's stamped fields (never re-derived via git — the
+    /// sandboxed desktop can't reach an out-of-container repo path).
     fn from_descriptor(d: darkrun_mcp::registry::EngineDescriptor) -> Self {
         DiscoveredEngine {
             project_path: d.repo_root,
@@ -560,6 +618,9 @@ impl DiscoveredEngine {
             pid: d.pid,
             harness: d.harness,
             started_at: d.started_at,
+            repo_name: d.repo_name,
+            repo_origin: d.repo_origin,
+            repo_path: d.repo_path,
         }
     }
 }
@@ -745,6 +806,11 @@ mod tests {
             cfg.feedback_list_path("my-run", "build"),
             "/api/feedback/my-run/build"
         );
+        assert_eq!(
+            cfg.feedback_replies_path("my-run", "build", "FB-2"),
+            "/api/feedback/my-run/build/FB-2/replies"
+        );
+        assert_eq!(cfg.run_archive_path("my-run"), "/api/runs/my-run/archive");
     }
 
     #[test]
@@ -925,6 +991,9 @@ mod tests {
             pid: 1234,
             harness: "claude".into(),
             started_at: "2026-05-31T00:00:00+00:00".into(),
+            repo_name: None,
+            repo_origin: None,
+            repo_path: None,
         }
     }
 
@@ -938,12 +1007,19 @@ mod tests {
             harness: "claude".into(),
             started_at: "2026-05-31T00:00:00+00:00".into(),
             reachability: Default::default(),
+            repo_name: Some("proj".into()),
+            repo_origin: Some("git@github.com:acme/proj.git".into()),
+            repo_path: Some(PathBuf::from("/Users/dev/proj")),
         };
         let eng = DiscoveredEngine::from_descriptor(desc);
         assert_eq!(eng.port, 5151);
         assert_eq!(eng.project_path, PathBuf::from("/Users/dev/proj"));
         assert_eq!(eng.pid, 4242);
         assert_eq!(eng.slug, "proj-deadbeef");
+        // The stamped repo identity carries through to the desktop shape.
+        assert_eq!(eng.repo_name.as_deref(), Some("proj"));
+        assert_eq!(eng.repo_origin.as_deref(), Some("git@github.com:acme/proj.git"));
+        assert_eq!(eng.repo_path.as_deref(), Some(Path::new("/Users/dev/proj")));
     }
 
     #[test]
@@ -1015,6 +1091,12 @@ mod async_client_tests {
         assert!(fetch_current_focus(&cfg).await.is_none());
         assert!(fetch_feedback(&cfg, "r", "frame").await.is_err());
         assert!(submit_unit_reset(&cfg, "r", "u1").await.is_err());
+        assert!(fetch_proof(&cfg, "r").await.is_err());
+        assert!(submit_run_archive(&cfg, "r", true).await.is_err());
+        let reply = FeedbackReplyCreateRequest {
+            body: "b".into(), author: None, close_as_answered: None,
+        };
+        assert!(submit_feedback_reply(&cfg, "r", "frame", "FB-1", &reply).await.is_err());
 
         // The WS feed reports a disconnect and returns (no live socket).
         let mut saw_disconnect = false;
@@ -1037,6 +1119,11 @@ mod async_client_tests {
     fn body_for(path: &str) -> String {
         if path == "/api/runs" {
             r#"{"runs":[],"count":0}"#.to_string()
+        } else if path.starts_with("/api/proof/") {
+            r#"{"run":"r","station":"prove","proof":{"surface":"library","bench":{"p50":1.5}}}"#
+                .to_string()
+        } else if path.starts_with("/api/runs/") && path.ends_with("/archive") {
+            r#"{"ok":true,"slug":"r","archived":true}"#.to_string()
         } else if path.starts_with("/api/runs/") {
             r#"{"slug":"r","title":"T","factory":"software","active_station":"build",
                 "status":"active","progress":{"completed":1,"total":3},
@@ -1108,8 +1195,8 @@ mod async_client_tests {
 
     #[tokio::test]
     async fn client_success_paths_against_a_fixture_server() {
-        // 11 client calls below → the server handles 11 connections.
-        let port = serve_canned(11).await;
+        // 14 client calls below → the server handles 14 connections.
+        let port = serve_canned(14).await;
         let cfg = ConnConfig { host: "127.0.0.1".into(), port, session_id: "s".into() };
 
         // GETs decode their typed payloads off a real socket.
@@ -1120,6 +1207,9 @@ mod async_client_tests {
         let fb = fetch_feedback(&cfg, "r", "build").await.expect("feedback decode");
         assert_eq!(fb.station, "build");
         assert_eq!(fetch_current_focus(&cfg).await.as_deref(), Some("r1"));
+        let proof = fetch_proof(&cfg, "r").await.expect("proof decode");
+        assert_eq!(proof.station.as_deref(), Some("prove"));
+        assert_eq!(proof.proof.surface, darkrun_api::Surface::Library);
 
         // POST / PUT success paths just check the 2xx status.
         submit_decision(&cfg, &ReviewDecisionRequest {
@@ -1141,6 +1231,10 @@ mod async_client_tests {
         }).await.expect("direction ok");
         submit_picker_select(&cfg, &PickerSelectRequest { id: "yes".into() })
             .await.expect("picker ok");
+        submit_feedback_reply(&cfg, "r", "build", "FB-1", &FeedbackReplyCreateRequest {
+            body: "on it".into(), author: None, close_as_answered: None,
+        }).await.expect("reply ok");
+        submit_run_archive(&cfg, "r", true).await.expect("archive ok");
     }
 
     #[tokio::test]
@@ -1202,6 +1296,7 @@ mod async_client_tests {
             project_path: std::path::PathBuf::from("/repo"),
             port: 7, slug: "s".into(), pid: 1, harness: "claude-code".into(),
             started_at: "t".into(),
+            repo_name: None, repo_origin: None, repo_path: None,
         }];
         assert_eq!(find_engine_for_project(&engines, std::path::Path::new("/repo")), Some(7));
         assert_eq!(find_engine_for_project(&engines, std::path::Path::new("/other")), None);

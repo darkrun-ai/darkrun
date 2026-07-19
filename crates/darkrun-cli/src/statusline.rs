@@ -84,9 +84,10 @@ fn phase_chrome(phase: StationPhase) -> (&'static str, &'static str) {
 //   - Open feedback: one chip per item, the BOX tinted by severity (light red /
 //     orange / gold / near-white, lavender unclassified) with a NO_COLOR-legible
 //     mark (`!^~.?`).
-//   - Review/Audit awaits: AGENT chips — solid pastel status boxes per
+//   - Review/UserGate/Audit awaits: AGENT chips — solid pastel status boxes per
 //     reviewer role: pastel-green ✓ stamped, near-white ▸ being awaited,
-//     grey queued.
+//     grey queued. The UserGate hold keeps the review chips live: agents are
+//     still stamping while the operator gate is up.
 // Mutually exclusive, first match wins; none → single line.
 
 /// Filled / empty progress pips.
@@ -269,14 +270,21 @@ fn pool_line(
             }
             Some(chips.join(" "))
         }
-        Some(StationPhase::Review) | Some(StationPhase::Audit) => {
+        // UserGate rides with Review: the pre-execution operator hold IS the
+        // review stage's gate (phase_chrome renders both as `review`), and the
+        // reviewer agents are still stamping while the hold is up — so their
+        // status chips must stay on the pool line, not vanish at the gate.
+        Some(StationPhase::Review) | Some(StationPhase::UserGate) | Some(StationPhase::Audit) => {
             let reviewers: Vec<String> = station_def
                 .map(|s| s.reviewers.iter().map(|r| r.name().to_string()).collect())
                 .unwrap_or_default();
             if reviewers.is_empty() || units.is_empty() {
                 return None;
             }
-            let is_review = matches!(phase, Some(StationPhase::Review));
+            let is_review = matches!(
+                phase,
+                Some(StationPhase::Review) | Some(StationPhase::UserGate)
+            );
             // A role is DONE when every unit carries its stamp; the first
             // unstamped role is the one being awaited.
             let mut chips = Vec::new();
@@ -402,7 +410,7 @@ fn parse_git_url(url: &str) -> Option<(String, String, String)> {
 /// the active phase's pip in its hue (magenta when parked at a gate), `▱` dim
 /// for phases not yet reached. `UserGate` (the pre-execution hold) sits on the
 /// Manufacture slot it guards.
-fn phase_track(active: Option<StationPhase>, phase_code: &str, gated: bool) -> String {
+fn phase_track(active: Option<StationPhase>, phase_code: &str, gated: bool, sealed: bool) -> String {
     let idx = match active {
         Some(StationPhase::Spec) => 0,
         Some(StationPhase::Review) => 1,
@@ -414,7 +422,8 @@ fn phase_track(active: Option<StationPhase>, phase_code: &str, gated: bool) -> S
     };
     let mut track = String::new();
     for i in 0..6 {
-        if i < idx {
+        // A sealed run has walked every phase, so light the whole track.
+        if sealed || i < idx {
             track.push_str(&paint(C_TRACK_DONE, PIP_DONE));
         } else if i == idx {
             let hue = if gated { C_CHECKPOINT } else { phase_code };
@@ -437,6 +446,13 @@ pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
     let factory = darkrun_content::load_factory(&run.frontmatter.factory).ok()?;
     let state = store.read_state(&slug).ok().flatten();
 
+    // A SEALED (completed) run is done: its last station is locked, often at a
+    // non-auto Checkpoint. Without this signal the gate logic below would read
+    // that locked Checkpoint as a live operator hold and render the whole line
+    // as gated (magenta `Π`) forever, so detect completion up front and let the
+    // render points paint a done/sealed line instead.
+    let sealed = darkrun_core::state::run_is_complete(&run);
+
     let active_station = state
         .as_ref()
         .map(|s| s.active_station.clone())
@@ -453,18 +469,26 @@ pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
         match state.as_ref().and_then(|s| s.stations.get(&active_station)) {
             Some(st) => {
                 let (label, code) = phase_chrome(st.phase);
-                // The pre-execution USER gate is always an operator hold; the
-                // post-execution Checkpoint is gated only for non-auto kinds.
-                let gated = matches!(st.phase, StationPhase::UserGate)
-                    || (matches!(st.phase, StationPhase::Checkpoint)
-                        && st
-                            .checkpoint
-                            .as_ref()
-                            .is_some_and(|c| c.kind != CheckpointKind::Auto));
+                // A gate is only "up" while the station is still HOLDING at it.
+                // A Completed station has already passed its Checkpoint, so it is
+                // not gated: this is what stops a station locked at a non-auto
+                // Checkpoint (the last station of a sealed run) from rendering as
+                // a live hold. The pre-execution USER gate is an operator hold;
+                // the post-execution Checkpoint is gated only for non-auto kinds.
+                let holding = !matches!(st.status, Status::Completed);
+                let gated = holding
+                    && (matches!(st.phase, StationPhase::UserGate)
+                        || (matches!(st.phase, StationPhase::Checkpoint)
+                            && st
+                                .checkpoint
+                                .as_ref()
+                                .is_some_and(|c| c.kind != CheckpointKind::Auto)));
                 (label, code, gated)
             }
             None => ("spec", C_SPEC, false),
         };
+    // A sealed run never shows a gate: the whole line reads as done.
+    let gated = gated && !sealed;
 
     // Station pipeline, in factory order: complete (green `●`) · active
     // (phase-hued `◉`) · pending (dim `○`).
@@ -476,7 +500,10 @@ pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
             .as_ref()
             .and_then(|s| s.stations.get(*name))
             .is_some_and(|st| matches!(st.status, Status::Completed));
-        if Some(i) == active_idx {
+        if sealed {
+            // Every station of a sealed run is locked, so the whole pipeline is done.
+            pipeline.push_str(&paint(C_DONE, "●"));
+        } else if Some(i) == active_idx {
             pipeline.push_str(&paint(phase_code, "◉"));
         } else if completed || active_idx.is_some_and(|a| i < a) {
             pipeline.push_str(&paint(C_DONE, "●"));
@@ -516,22 +543,29 @@ pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
         &format!("{base}/factories/{}/", run.frontmatter.factory),
         &paint(C_FACTORY, &run.frontmatter.factory),
     );
+    // The station name goes green once the run is sealed, matching the done pips.
+    let name_code = if sealed { C_DONE } else { phase_code };
     let station_disp = osc8(
         &format!(
             "{base}/factories/{}/stations/{}/",
             run.frontmatter.factory, active_station
         ),
-        &paint(phase_code, &active_station),
+        &paint(name_code, &active_station),
     );
-    // The flow mark: `❯` running, `Π` (a doorway) gated — magenta, the
-    // "your turn" hue. The predecessor abandoned `⊘` because it reads as a
-    // failure; a gate is a doorway you pass through, not an error.
-    let flow = if gated {
+    // The flow mark: `✓` sealed (green, the run is done), `❯` running, `Π` (a
+    // doorway) gated in magenta, the "your turn" hue. The predecessor abandoned
+    // `⊘` because it reads as a failure; a gate is a doorway you pass through,
+    // not an error.
+    let flow = if sealed {
+        paint(C_DONE, "✓")
+    } else if gated {
         paint(C_CHECKPOINT, "Π")
     } else {
         paint(C_DIM, "❯")
     };
-    let phase_disp = if gated {
+    let phase_disp = if sealed {
+        paint(C_DONE, "sealed")
+    } else if gated {
         paint(C_CHECKPOINT, phase_label)
     } else {
         paint(phase_code, phase_label)
@@ -539,7 +573,7 @@ pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
     let sep = paint(C_DIM, "·");
 
     // The in-station phase track rides just right of the station name.
-    let track = phase_track(active_phase, phase_code, gated);
+    let track = phase_track(active_phase, phase_code, gated, sealed);
     let track_disp = if track.is_empty() {
         String::new()
     } else {
@@ -1025,6 +1059,49 @@ mod tests {
         assert!(!line.contains('⊘'), "the failure-reading glyph is gone: {line}");
     }
 
+    #[test]
+    fn render_shows_a_sealed_run_as_done_not_gated() {
+        // Regression: a SEALED (completed) run's last station is locked at a
+        // non-auto Checkpoint. The old render read that locked Checkpoint as a
+        // live operator hold and drew the gate mark (`Π`) forever. A sealed run
+        // must render as done: no gate, a `✓`, and the phase reads `sealed`.
+        use darkrun_core::domain::{
+            Checkpoint, CheckpointKind, Run, RunFrontmatter, Station, StationPhase, Status,
+        };
+        use darkrun_core::state::RunState;
+        use darkrun_core::StateStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        store.write_run(&Run {
+            slug: "r".into(), title: "T".into(), body: String::new(),
+            // The run itself is Completed: the seal signal the render keys on.
+            frontmatter: RunFrontmatter {
+                factory: "software".into(),
+                active_station: "build".into(),
+                status: Status::Completed,
+                ..Default::default()
+            },
+        }).unwrap();
+        store.set_active_run("r").unwrap();
+        // The last station is Completed, still sitting on its non-auto Checkpoint
+        // (the exact state that used to render as a permanent gate).
+        let mut state = RunState { factory: "software".into(), active_station: "build".into(), ..Default::default() };
+        state.stations.insert("build".into(), Station {
+            station: "build".into(), status: Status::Completed, phase: StationPhase::Checkpoint,
+            elaborated: true,
+            checkpoint: Some(Checkpoint { kind: CheckpointKind::Ask, entered_at: None, outcome: None }),
+            branch: None, pr_ref: None, pr_status: None,
+            pr_ready_at: None, pr_merged_at: None, verifier_nonce: None,
+            started_at: None, completed_at: None,
+        });
+        store.write_state("r", &state).unwrap();
+        let line = render(Some(dir.path().to_path_buf())).expect("renders a sealed run");
+        assert!(!line.contains('Π'), "a sealed run is not gated (no doorway mark): {line}");
+        assert!(line.contains('✓'), "a sealed run shows the done mark: {line}");
+        assert!(line.contains("sealed"), "the phase reads `sealed`: {line}");
+        assert!(!line.contains('◉'), "no active-station pip on a sealed run: {line}");
+    }
+
     /// Build a one-station run sitting at `phase` and render its status line.
     fn render_at_phase(station: &str, phase: StationPhase) -> String {
         use darkrun_core::domain::{Run, RunFrontmatter, Station, Status};
@@ -1175,6 +1252,42 @@ mod tests {
         let (_, second) = line.split_once('\n').expect("two lines");
         assert!(second.contains('\u{2713}'), "a stamped role shows ✓: {second}");
         assert!(second.contains('\u{25b8}'), "the awaited role shows ▸: {second}");
+    }
+
+    #[test]
+    fn user_gate_hold_keeps_review_agent_chips_on_the_pool_line() {
+        use darkrun_core::domain::{Stamp, Status, Unit, UnitFrontmatter};
+        use darkrun_core::StateStore;
+        // The reported bug: at the pre-execution UserGate (which renders as
+        // `Π review`) the reviewer agents are still stamping, but the pool line
+        // vanished because pool_line had no UserGate arm. The hold must show
+        // the same chips as Review.
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        seed_run_at_phase(&store, "build", StationPhase::UserGate);
+        let mut reviews = std::collections::BTreeMap::new();
+        reviews.insert(
+            "correctness".to_string(),
+            Some(Stamp { at: "2026-06-01T00:00:00Z".into() }),
+        );
+        store
+            .write_unit("r", &Unit {
+                slug: "u1".into(),
+                frontmatter: UnitFrontmatter {
+                    status: Status::InProgress,
+                    station: Some("build".into()),
+                    reviews,
+                    ..Default::default()
+                },
+                title: "u1".into(),
+                body: String::new(),
+            })
+            .unwrap();
+        let line = render(Some(dir.path().to_path_buf())).expect("renders");
+        let (first, second) = line.split_once('\n').expect("two lines at the gate");
+        assert!(first.contains("review"), "gate renders as review: {first}");
+        assert!(second.contains('\u{2713}'), "stamped role shows ✓: {second}");
+        assert!(second.contains('\u{25b8}'), "running role shows ▸: {second}");
     }
 
     /// Seed a run whose active station sits at `phase` (no units/feedback).

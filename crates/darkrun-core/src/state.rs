@@ -23,6 +23,7 @@
 //! [`StateStore`] reads and writes this layout. It does not interpret the
 //! manager's walk — it only persists and resolves the durable shapes.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,135 @@ use crate::domain::{
 };
 use crate::error::{CoreError, Result};
 use crate::frontmatter;
+
+/// Path-component validation for the `.darkrun/` state layout.
+///
+/// A run slug, station name, unit slug, or session id is used as a LITERAL path
+/// component when the store reads or writes state. Left unchecked, a value like
+/// `../secrets` or an absolute path lets a request escape `.darkrun/` (and the
+/// repo root) to read or overwrite an arbitrary file. This is the choke point:
+/// the HTTP routes reject a hostile component with `400` via [`is_valid_slug`]
+/// before touching disk, and [`StateStore`]'s path construction contains it
+/// again (see the private `contained` helper) so no caller can slip past the
+/// edge check.
+pub mod validate {
+    /// The longest path component we accept. Generous for a real slug/id, yet
+    /// well under every common filesystem's per-name limit, so a pathological
+    /// input can't blow that out.
+    pub const MAX_SLUG_LEN: usize = 128;
+
+    /// Whether `s` is a safe single path component.
+    ///
+    /// A valid component is a non-empty, at-most-[`MAX_SLUG_LEN`] run of ASCII
+    /// `A-Za-z0-9`, `.`, `_`, or `-` that does NOT start with `.`. The
+    /// leading-dot rejection rules out the `.`/`..` parent selectors and hidden
+    /// dotfiles in one stroke; the character allow-list rules out every path
+    /// separator (`/` and `\`), so no accepted value can name a parent or an
+    /// absolute location.
+    ///
+    /// Accepts the real identifiers the engine mints (`quiet-canyon-1a2b`,
+    /// `FB-03`, `frame`, `q-01`); rejects `../x`, `a/b`, `` (empty), `.hidden`,
+    /// and an absolute path like `/etc/passwd`.
+    pub fn is_valid_slug(s: &str) -> bool {
+        if s.is_empty() || s.len() > MAX_SLUG_LEN {
+            return false;
+        }
+        // A leading `.` is rejected wholesale: this is what stops `.` and `..`
+        // (the parent selectors that enable traversal) as well as dotfiles.
+        if s.starts_with('.') {
+            return false;
+        }
+        s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn accepts_the_real_slugs_the_engine_mints() {
+            for ok in [
+                "quiet-canyon-1a2b",
+                "frame",
+                "FB-03",
+                "q-01",
+                "build",
+                "my-run",
+                "a",
+                "under_score",
+                "with.dot",
+                "9leading-digit",
+            ] {
+                assert!(is_valid_slug(ok), "expected {ok:?} to be accepted");
+            }
+        }
+
+        #[test]
+        fn rejects_traversal_separators_and_empties() {
+            for bad in [
+                "",              // empty
+                "..",            // parent selector
+                ".",             // current-dir selector
+                "../x",          // relative traversal
+                "..\\x",         // windows-style traversal
+                "a/b",           // embedded forward slash
+                "a\\b",          // embedded backslash
+                "/etc/passwd",   // absolute path
+                ".hidden",       // leading-dot dotfile
+                "../../etc/x",   // deeper traversal
+                "sp ace",        // space is outside the allow-list
+                "tab\there",     // control char
+                "emoji😀",       // non-ASCII
+                "café-ünits",    // non-ASCII letters
+            ] {
+                assert!(!is_valid_slug(bad), "expected {bad:?} to be rejected");
+            }
+        }
+
+        #[test]
+        fn rejects_absurdly_long_components() {
+            let long = "a".repeat(MAX_SLUG_LEN + 1);
+            assert!(!is_valid_slug(&long));
+            // Exactly at the cap is still fine.
+            assert!(is_valid_slug(&"a".repeat(MAX_SLUG_LEN)));
+        }
+    }
+}
+
+/// Neutralize an untrusted string into a single path component that CANNOT
+/// escape its parent directory. A value with no path separator that is not a
+/// `.`/`..` selector passes through verbatim (so a real slug, even a non-ASCII
+/// one, still maps to exactly `root/<slug>` and the path helpers stay pure);
+/// anything that could climb out (`..`, an embedded `/` or `\`, an absolute
+/// path) collapses to its final component, falling back to a fixed sentinel when
+/// even that is empty.
+///
+/// This is the store-side half of the path-traversal defense: the HTTP edge
+/// already rejects a hostile component with `400`
+/// ([`validate::is_valid_slug`]), and this makes the store safe even against a
+/// caller that bypasses that edge, so no join can walk out of `.darkrun/`.
+pub(crate) fn contained(s: &str) -> Cow<'_, str> {
+    // Fast path: a plain component (no separators, not a `.`/`..` selector) is
+    // safe to use verbatim. This is every legitimate slug/id the engine mints,
+    // so containment is identity for real state and only rewrites hostile input.
+    let plain = !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s.contains('\\');
+    if plain {
+        return Cow::Borrowed(s);
+    }
+    // Hostile input: keep only the final path component, which by construction
+    // can never be a parent selector (`Path::file_name` returns `None` for a
+    // path ending in `..`, `.`, or a root). A sentinel covers the empty tail so
+    // the join still lands inside the run root rather than on it.
+    match std::path::Path::new(s).file_name().and_then(|n| n.to_str()) {
+        Some(name) => Cow::Owned(name.to_string()),
+        None => Cow::Owned("_invalid".to_string()),
+    }
+}
 
 /// The derived state snapshot persisted to `state.json`.
 ///
@@ -348,8 +478,15 @@ impl StateStore {
     }
 
     /// The directory for a given run slug.
+    ///
+    /// The slug is [`contained`] to a single safe path component before it is
+    /// joined, so a hostile value (`../../etc`, an absolute path) can never walk
+    /// out of `.darkrun/`, the belt-and-suspenders behind the route-layer
+    /// [`validate::is_valid_slug`] check. A real slug passes through verbatim, so
+    /// EVERY run-scoped path (units, feedback, briefs, prompts, interactive, …)
+    /// that nests under this dir is contained by this one guard.
     pub fn run_dir(&self, slug: &str) -> PathBuf {
-        self.root.join(slug)
+        self.root.join(contained(slug).as_ref())
     }
 
     /// The `units/` directory for a run.
@@ -503,7 +640,8 @@ impl StateStore {
     /// raised under, even if the run has since advanced.
     fn interactive_station_of(&self, slug: &str, session_id: &str) -> Option<String> {
         let root = self.interactive_dir(slug);
-        let file = format!("{session_id}.json");
+        // `contained` keeps the session id a single safe filename component.
+        let file = format!("{}.json", contained(session_id));
         let entries = fs::read_dir(&root).ok()?;
         for entry in entries.flatten() {
             let p = entry.path();
@@ -540,7 +678,8 @@ impl StateStore {
             .unwrap_or_else(|| "_run".to_string());
         let dir = self.interactive_station_dir(run, &station);
         io(&dir, fs::create_dir_all(&dir))?;
-        let path = dir.join(format!("{}.json", payload.session_id()));
+        // `contained` keeps the session id a single safe filename component.
+        let path = dir.join(format!("{}.json", contained(payload.session_id())));
         let json = serde_json::to_vec_pretty(payload)?;
         write_atomic(&path, &json)?;
         Ok(())
@@ -744,7 +883,7 @@ impl StateStore {
 
     /// Read and parse a single unit document.
     pub fn read_unit(&self, run: &str, unit_slug: &str) -> Result<Unit> {
-        let path = self.units_dir(run).join(format!("{unit_slug}.md"));
+        let path = self.unit_path(run, unit_slug);
         if !path.exists() {
             return Err(CoreError::UnitNotFound(unit_slug.to_string()));
         }
@@ -783,9 +922,10 @@ impl StateStore {
         slugs.iter().map(|s| self.read_unit(run, s)).collect()
     }
 
-    /// The file path of a unit document.
+    /// The file path of a unit document. The unit slug is [`contained`] to a
+    /// single safe component so a traversing id can't climb out of `units/`.
     pub fn unit_path(&self, run: &str, slug: &str) -> PathBuf {
-        self.units_dir(run).join(format!("{slug}.md"))
+        self.units_dir(run).join(format!("{}.md", contained(slug)))
     }
 
     /// Write a single unit document.
@@ -795,7 +935,9 @@ impl StateStore {
     pub fn write_unit(&self, run: &str, unit: &Unit) -> Result<()> {
         let dir = self.units_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
-        let path = dir.join(format!("{}.md", unit.slug));
+        // Route through `unit_path` so the slug is contained to a single safe
+        // component (no traversing id can escape `units/`).
+        let path = self.unit_path(run, &unit.slug);
         let content = frontmatter::serialize(&unit.frontmatter, &unit.body)?;
         write_atomic(&path, content)
     }
@@ -870,9 +1012,10 @@ impl StateStore {
         Ok(out)
     }
 
-    /// The file path of a feedback document.
+    /// The file path of a feedback document. The id is [`contained`] to a single
+    /// safe component so a traversing id can't climb out of `feedback/`.
     pub fn feedback_path(&self, run: &str, id: &str) -> PathBuf {
-        self.feedback_dir(run).join(format!("{id}.md"))
+        self.feedback_dir(run).join(format!("{}.md", contained(id)))
     }
 
     /// Write a raw feedback document. UNGUARDED — used by creation (a fresh
@@ -881,7 +1024,8 @@ impl StateStore {
     pub fn write_feedback_raw(&self, run: &str, id: &str, content: &str) -> Result<()> {
         let dir = self.feedback_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
-        let path = dir.join(format!("{id}.md"));
+        // `contained` keeps the id a single safe component (no `feedback/../…`).
+        let path = dir.join(format!("{}.md", contained(id)));
         write_atomic(&path, content)
     }
 
@@ -928,7 +1072,8 @@ impl StateStore {
     pub fn write_reflection_raw(&self, run: &str, id: &str, content: &str) -> Result<()> {
         let dir = self.reflections_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
-        let path = dir.join(format!("{id}.md"));
+        // `contained` keeps the id a single safe component (no `reflections/../…`).
+        let path = dir.join(format!("{}.md", contained(id)));
         write_atomic(&path, content)
     }
 
@@ -959,9 +1104,10 @@ impl StateStore {
         Ok(out)
     }
 
-    /// The file path of a project knowledge document.
+    /// The file path of a project knowledge document. The topic is [`contained`]
+    /// to a single safe component so it can't climb out of `knowledge/`.
     pub fn knowledge_path(&self, topic: &str) -> PathBuf {
-        self.knowledge_dir().join(format!("{topic}.md"))
+        self.knowledge_dir().join(format!("{}.md", contained(topic)))
     }
 
     /// Read one project knowledge document by topic id, or `None` when absent.
@@ -994,7 +1140,8 @@ impl StateStore {
     pub fn write_knowledge_raw(&self, topic: &str, content: &str) -> Result<()> {
         let dir = self.knowledge_dir();
         io(&dir, fs::create_dir_all(&dir))?;
-        let path = dir.join(format!("{topic}.md"));
+        // `contained` keeps the topic a single safe component (no `knowledge/../…`).
+        let path = dir.join(format!("{}.md", contained(topic)));
         write_atomic(&path, content)
     }
 
@@ -1039,16 +1186,18 @@ impl StateStore {
         Ok(out)
     }
 
-    /// The file path of a brief/outcome document.
+    /// The file path of a brief/outcome document. The id is [`contained`] to a
+    /// single safe component so it can't climb out of `briefs/`.
     pub fn brief_path(&self, run: &str, id: &str) -> PathBuf {
-        self.briefs_dir(run).join(format!("{id}.md"))
+        self.briefs_dir(run).join(format!("{}.md", contained(id)))
     }
 
     /// Write a raw brief/outcome document (`<id>.md`). UNGUARDED.
     pub fn write_brief_raw(&self, run: &str, id: &str, content: &str) -> Result<()> {
         let dir = self.briefs_dir(run);
         io(&dir, fs::create_dir_all(&dir))?;
-        let path = dir.join(format!("{id}.md"));
+        // `contained` keeps the id a single safe component (no `briefs/../…`).
+        let path = dir.join(format!("{}.md", contained(id)));
         write_atomic(&path, content)
     }
 
@@ -1173,6 +1322,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path());
         assert!(store.artifact_sha(&store.root().join("nope.md")).is_none());
+    }
+
+    /// CS-2: a path-traversal slug/id cannot escape the `.darkrun/` root, even
+    /// when a caller reaches the store directly (bypassing the HTTP guard). Every
+    /// path the store constructs from an untrusted component stays contained.
+    #[test]
+    fn path_construction_contains_traversal_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        let root = store.root();
+
+        // A traversal RUN slug: run_dir + everything nested under it stays inside
+        // root. `..` is neutralized, so the dir cannot point at root's parent.
+        for evil in ["../../etc", "../escape", "a/b", "/abs/path", "..", ""] {
+            let rd = store.run_dir(evil);
+            assert!(
+                rd.starts_with(root),
+                "run_dir({evil:?}) escaped the root: {}",
+                rd.display()
+            );
+            assert!(store.units_dir(evil).starts_with(root));
+            assert!(store.feedback_dir(evil).starts_with(root));
+        }
+
+        // A traversal LEAF id (unit slug, feedback id, knowledge topic, brief id)
+        // cannot climb out of its nested dir either.
+        assert!(store.unit_path("r", "../../etc/passwd").starts_with(root));
+        assert!(store.feedback_path("r", "../../../secret").starts_with(root));
+        assert!(store.knowledge_path("../../escape").starts_with(root));
+        assert!(store.brief_path("r", "../../../etc/x").starts_with(root));
+
+        // And a real write through the store lands under root, not beside it.
+        store
+            .write_feedback_raw("../../pwned", "../../FB-01", "body")
+            .unwrap();
+        let escaped = root.parent().unwrap().parent().unwrap().join("pwned");
+        assert!(
+            !escaped.exists(),
+            "a traversal slug wrote outside the root: {}",
+            escaped.display()
+        );
     }
 
     fn station(name: &str, status: Status, phase: StationPhase) -> Station {
