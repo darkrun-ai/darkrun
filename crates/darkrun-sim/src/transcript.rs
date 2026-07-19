@@ -262,8 +262,10 @@ fn contains_rfc3339(text: &str) -> bool {
 #[cfg(test)]
 mod fixture {
     use super::*;
-    use crate::provider::ScriptedProvider;
-    use crate::world::{dark_core_script, World};
+    use crate::provider::{Provider, ProviderMove, ScriptedProvider};
+    use crate::world::{dark_core_script, DriveResult, NoopHosting, World, WorldOutcome};
+    use darkrun_core::domain::{StationPhase, Unit, UnitFrontmatter};
+    use darkrun_mcp::position::run_tick_with_hosting;
 
     /// Regenerate the default dark scenario and its fixture in a fresh tempdir.
     fn regenerate(slug: &str) -> (World, SimFixture) {
@@ -421,6 +423,177 @@ mod fixture {
         assert_eq!(replace_rfc3339("no timestamp here"), "no timestamp here");
         // A partial / malformed date is left alone.
         assert_eq!(replace_rfc3339("2026-07-19 plain"), "2026-07-19 plain");
+    }
+
+    /// Edge (an empty `prompts/` directory for an unreached station): an
+    /// escalated run reaches only its first station, so later stations never get
+    /// a `prompts/<station>/` directory at all. The projector must not panic and
+    /// must bound `ticks` EXACTLY by the run's `action-log.jsonl` line count —
+    /// never padding a placeholder tick for a station the run did not reach — and
+    /// the outcome is `Escalated`.
+    #[test]
+    fn escalate_run_projects_without_padding_unreached_stations() {
+        struct AlwaysAdvance;
+        impl Provider for AlwaysAdvance {
+            fn next_move(&mut self, _prompt: Option<&str>) -> ProviderMove {
+                ProviderMove::AdvanceStation
+            }
+        }
+        let world = World::new("dark-escalate-proj", "software");
+        let drive = world.drive(&mut AlwaysAdvance);
+        // (a) no panic:
+        let fixture = project(&world.store, &world.slug, &drive);
+        // (c) the outcome is Escalated.
+        assert!(
+            matches!(fixture.outcome, FixtureOutcome::Escalated { .. }),
+            "an induced no-progress loop projects as Escalated"
+        );
+        // (b) ticks are bounded exactly by the action-log — no padding.
+        let action_log = world.store.read_journal(&world.slug, "action-log.jsonl");
+        assert_eq!(
+            fixture.ticks.len(),
+            action_log.len(),
+            "ticks must equal the action-log line count, never padded for unreached stations"
+        );
+        // The run only reached `frame`; a later station has no prompts dir at all,
+        // and the fixture carries no tick for it.
+        let prompts_root = world.store.run_dir(&world.slug).join("prompts");
+        assert!(
+            !prompts_root.join("specify").exists(),
+            "an unreached station never gets a prompts/ directory"
+        );
+        assert!(
+            !fixture.ticks.iter().any(|t| t.station.as_deref() == Some("specify")),
+            "no tick is projected for the unreached `specify` station"
+        );
+    }
+
+    /// Edge (a stale-content fixture): the committed fixture is fully
+    /// self-contained — every display string the replay page needs is embedded
+    /// as literal text, so a later edit to the live factory corpus can never
+    /// break `/replay`. A real yes/no check: parse it standalone, and assert
+    /// every prompt is either absent or FULLY RENDERED literal text carrying no
+    /// unresolved template delimiter that would require the live corpus to
+    /// resolve at render time.
+    #[test]
+    fn committed_fixture_is_self_contained() {
+        let fixture: SimFixture =
+            serde_json::from_str(include_str!("../fixtures/dark-core.json"))
+                .expect("committed fixture parses standalone");
+        assert!(!fixture.factory.is_empty(), "factory title is embedded literally");
+        assert!(!fixture.run_slug.is_empty(), "run slug is embedded literally");
+        assert!(!fixture.units.is_empty(), "unit labels are embedded");
+        for u in &fixture.units {
+            assert!(
+                !u.slug.is_empty() && !u.station.is_empty(),
+                "every unit carries literal slug + station labels"
+            );
+        }
+        for t in &fixture.ticks {
+            assert!(!t.action_tag.is_empty(), "every tick carries a literal action tag");
+            if let Some(prompt) = &t.prompt {
+                assert!(!prompt.is_empty(), "a present prompt is non-empty literal text");
+                for marker in ["{{", "}}", "{%", "%}"] {
+                    assert!(
+                        !prompt.contains(marker),
+                        "tick `{}` carries an unrendered template marker `{marker}` — not self-contained",
+                        t.action_tag
+                    );
+                }
+            }
+        }
+    }
+
+    /// AC-6 (second test): the same `(action_tag, station)` pair on two different
+    /// ticks with DIFFERENT prompt text — both survive at their own tick index.
+    /// The engine writes each tick's prompt to `prompts/<station>/<tag>.md`, so a
+    /// recurring tag clobbers the on-disk file; both distinct prompts survive
+    /// ONLY because the projector reads the in-memory capture, never that file.
+    #[test]
+    fn distinct_prompts_for_a_recurring_tag_station_survive() {
+        let world = World::new("dark-recurring-spec", "software");
+        let mut prompts: Vec<Option<String>> = Vec::new();
+
+        // Tick 1: spec@frame with ZERO units.
+        let t1 = run_tick_with_hosting(&world.store, &world.slug, &NoopHosting).expect("tick 1");
+        prompts.push(t1.prompt.clone());
+
+        // Honest state manipulation: re-open frame's Spec phase and give it a
+        // unit, so the SAME spec@frame renders again with DIFFERENT content.
+        {
+            let mut state = world.store.read_state(&world.slug).unwrap().unwrap();
+            if let Some(st) = state.stations.get_mut("frame") {
+                st.phase = StationPhase::Spec;
+            }
+            world.store.write_state(&world.slug, &state).unwrap();
+            let unit = Unit {
+                slug: "frame-extra".into(),
+                frontmatter: UnitFrontmatter {
+                    status: darkrun_core::domain::Status::Pending,
+                    station: Some("frame".into()),
+                    ..Default::default()
+                },
+                title: "frame-extra".into(),
+                body: String::new(),
+            };
+            world.store.write_unit(&world.slug, &unit).unwrap();
+        }
+
+        // Tick 2: spec@frame again, now with a unit on record.
+        let t2 = run_tick_with_hosting(&world.store, &world.slug, &NoopHosting).expect("tick 2");
+        prompts.push(t2.prompt.clone());
+
+        let drive = DriveResult {
+            prompts,
+            moves: Vec::new(),
+            outcome: WorldOutcome::Sealed,
+            nonces: BTreeSet::new(),
+        };
+        let fixture = project(&world.store, &world.slug, &drive);
+
+        assert!(fixture.ticks.len() >= 2, "at least the two spec@frame ticks");
+        for i in 0..2 {
+            assert_eq!(fixture.ticks[i].action_tag, "spec", "tick {i} is spec");
+            assert_eq!(
+                fixture.ticks[i].station.as_deref(),
+                Some("frame"),
+                "tick {i} targets frame"
+            );
+        }
+        let p0 = fixture.ticks[0].prompt.as_deref().expect("prompt 0");
+        let p1 = fixture.ticks[1].prompt.as_deref().expect("prompt 1");
+        assert_ne!(
+            p0, p1,
+            "the two spec@frame ticks must carry distinct prompt text"
+        );
+
+        // The on-disk prompts/frame/spec.md holds only the LAST-written (tick 2)
+        // prompt — tick 1's distinct prompt survived only from the in-memory
+        // capture, never from this clobbered file.
+        let on_disk = std::fs::read_to_string(
+            world
+                .store
+                .run_dir(&world.slug)
+                .join("prompts")
+                .join("frame")
+                .join("spec.md"),
+        )
+        .expect("on-disk spec prompt exists");
+        let repo_root = world
+            .store
+            .root()
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let on_disk_normalized = normalize_text(&on_disk, &BTreeSet::new(), &repo_root);
+        assert_eq!(
+            p1, on_disk_normalized,
+            "tick 1 matches the last-written on-disk file"
+        );
+        assert_ne!(
+            p0, on_disk_normalized,
+            "tick 0's distinct prompt could not have come from the clobbered on-disk file"
+        );
     }
 
     /// Regenerate and write the committed `fixtures/dark-core.json`. Ignored by
