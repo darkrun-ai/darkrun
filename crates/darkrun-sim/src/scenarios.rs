@@ -6,8 +6,11 @@
 //! test in `tests/followability.rs` loops these, so adding a scenario needs no
 //! new test — see the crate-level docs for the recipe.
 
-use crate::harness::Harness;
-use darkrun_mcp::position::RunAction;
+use std::collections::BTreeMap;
+
+use crate::harness::{action_tag, Harness};
+use darkrun_core::domain::CheckpointKind;
+use darkrun_mcp::position::{run_review_stamp, RunAction};
 
 /// What a follower should recover from a scenario's prompt, reading the wording
 /// alone.
@@ -51,7 +54,7 @@ pub struct Scenario {
 /// files one.
 pub fn core_scenarios() -> Vec<Scenario> {
     let solo = Harness::start("sim-core", "software", "solo");
-    let prompts = solo.capture_to_seal();
+    let prompts = capture_to_seal(&solo);
     let get = |tag: &str| -> String {
         prompts.get(tag).cloned().unwrap_or_else(|| {
             panic!("no prompt was captured for action `{tag}` — the walk never surfaced it")
@@ -167,4 +170,71 @@ pub fn core_scenarios() -> Vec<Scenario> {
             },
         },
     ]
+}
+
+/// Walk the Run to a sealed state, capturing the **first** rendered prompt seen
+/// for each distinct action tag (`spec`, `review`, `manufacture`, `audit`,
+/// `reflect`, `user_gate`, `checkpoint`, …). The map is what the followability
+/// suite reads.
+///
+/// This is the walk-until-`Sealed` loop, relocated verbatim from the pre-rebuild
+/// `harness.rs`: same match arms, same `guard < 2000` convergence check. It
+/// lives here (not in the narrowed `harness.rs`) so `harness.rs` makes no
+/// decision keyed on the structured action; the `.action` reads below are the
+/// loop's own post-hoc prompt-capture bookkeeping, off the sim world's
+/// grade-confined tick loop entirely.
+pub(crate) fn capture_to_seal(harness: &Harness) -> BTreeMap<String, String> {
+    let mut prompts: BTreeMap<String, String> = BTreeMap::new();
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        assert!(guard < 2000, "capture_to_seal failed to converge");
+        let tick = harness.tick();
+        let action = tick.action.clone();
+        if let Some(p) = &tick.prompt {
+            prompts
+                .entry(action_tag(&action))
+                .or_insert_with(|| p.clone());
+        }
+
+        // The pre-execution operator gate is an internal hold — approve and
+        // keep walking.
+        if matches!(action, RunAction::UserGate { .. }) {
+            harness.decide(true, None);
+            continue;
+        }
+        // The whole-run review holds until every reviewer signs — stamp them.
+        if let RunAction::RunReview { reviewers, .. } = &action {
+            for r in reviewers {
+                run_review_stamp(&harness.store, &harness.slug, r).expect("run review stamp");
+            }
+            continue;
+        }
+
+        match &action {
+            RunAction::Sealed { .. } => break,
+            RunAction::Spec { station, .. } => harness.seed_spec(station),
+            RunAction::Manufacture { units, .. } => {
+                let owned: Vec<&str> = units.iter().map(|s| s.as_str()).collect();
+                harness.complete_units(&owned);
+            }
+            // A held gate (non-auto checkpoint, or an external review gate)
+            // needs an operator decision; the decide re-tick advances the
+            // next station, so re-seed its spec to stay in sync.
+            RunAction::Checkpoint { kind, .. } if !matches!(kind, CheckpointKind::Auto) => {
+                let decided = harness.decide(true, None);
+                if let RunAction::Spec { station, .. } = &decided.action {
+                    harness.seed_spec(station);
+                }
+            }
+            RunAction::ExternalReviewRequested { .. } => {
+                let decided = harness.decide(true, None);
+                if let RunAction::Spec { station, .. } = &decided.action {
+                    harness.seed_spec(station);
+                }
+            }
+            _ => {}
+        }
+    }
+    prompts
 }

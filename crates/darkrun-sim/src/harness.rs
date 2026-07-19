@@ -1,25 +1,23 @@
 //! Drives a **real** engine Run and captures the rendered prompt text for each
-//! tick.
+//! tick — the narrowed primitives the prompt-wording linter (`scenarios.rs` +
+//! `tests/followability.rs`) is built on.
 //!
-//! This is the fidelity boundary: nothing here mocks the engine. It owns a real
-//! [`StateStore`] in a `tempfile::TempDir` and walks it through the same
-//! `run_start → run_tick → checkpoint_decide` path the production MCP server
-//! uses, then hands the [`TickResult::prompt`] — the exact instruction text an
-//! agent would read — to the [`SimAgent`](crate::agent::SimAgent). A
-//! prompt-wording regression therefore surfaces as a failing followability
-//! assertion, not a silent unfollowable instruction.
+//! This is the fidelity boundary for the linter partition: nothing here mocks
+//! the engine. It owns a real [`StateStore`] in a `tempfile::TempDir` and offers
+//! the mechanical building blocks — start a Run, tick it, seal a station's
+//! elaboration, decide a checkpoint, render an action's prompt, decompose a
+//! wave unit, complete units — that the walk-until-`Sealed` loop in
+//! `scenarios.rs` composes. The loop itself lives in `scenarios.rs`, not here:
+//! `harness.rs` makes no decision keyed on the structured action.
 //!
-//! The walk logic mirrors the darkrun-e2e driver: it reads the manager's next
-//! action and reacts to it (decompose a unit when a station owes a spec, complete
-//! the wave, approve a held gate), looping until the Run seals.
+//! The one tick entry point is [`run_tick_with_hosting`] against the sim's
+//! [`crate::world::NoopHosting`] — never the network-reaching `run_tick`.
 
-use std::collections::BTreeMap;
-
-use darkrun_core::domain::{CheckpointKind, Mode, Status, Unit, UnitFrontmatter};
+use darkrun_core::domain::{Mode, Status, Unit, UnitFrontmatter};
 use darkrun_core::StateStore;
 use darkrun_mcp::position::{
-    checkpoint_decide, elaborate_seal, render_prompt, run_review_stamp, run_start, run_tick,
-    RunAction, TickResult,
+    checkpoint_decide, elaborate_seal, render_prompt, run_start, run_tick_with_hosting, RunAction,
+    TickResult,
 };
 
 /// A self-contained Run fixture: a temp dir + the store rooted in it + the run
@@ -64,9 +62,10 @@ impl Harness {
             .map(|s| s.active_station)
     }
 
-    /// Tick once.
+    /// Tick once, against the sim's no-op hosting client (never the
+    /// network-reaching `run_tick`).
     pub fn tick(&self) -> TickResult {
-        run_tick(&self.store, &self.slug).expect("tick")
+        run_tick_with_hosting(&self.store, &self.slug, &crate::world::NoopHosting).expect("tick")
     }
 
     /// Clear a station's Spec-elaboration hold.
@@ -76,13 +75,8 @@ impl Harness {
 
     /// Decide the active checkpoint.
     pub fn decide(&self, approved: bool, feedback: Option<&str>) -> TickResult {
-        checkpoint_decide(
-            &self.store,
-            &self.slug,
-            approved,
-            feedback.map(String::from),
-        )
-        .expect("decide")
+        checkpoint_decide(&self.store, &self.slug, approved, feedback.map(String::from))
+            .expect("decide")
     }
 
     /// Render an arbitrary action's prompt against this Run's real state — the
@@ -94,7 +88,7 @@ impl Harness {
 
     /// Decompose one wave unit on `station`, consuming the station's declared
     /// inputs so the runtime input-coverage gate is satisfied.
-    fn decompose_one(&self, station: &str, unit_slug: &str) {
+    pub(crate) fn decompose_one(&self, station: &str, unit_slug: &str) {
         let inputs = self
             .store
             .read_run(&self.slug)
@@ -119,7 +113,7 @@ impl Harness {
     }
 
     /// Mark every named unit completed.
-    fn complete_units(&self, slugs: &[&str]) {
+    pub(crate) fn complete_units(&self, slugs: &[&str]) {
         for s in slugs {
             let mut u = self.store.read_unit(&self.slug, s).expect("read_unit");
             u.frontmatter.status = Status::Completed;
@@ -129,72 +123,12 @@ impl Harness {
 
     /// Ensure a station owes a wave: decompose one unit if it has none yet, then
     /// clear its Spec hold.
-    fn seed_spec(&self, station: &str) {
+    pub(crate) fn seed_spec(&self, station: &str) {
         let unit = format!("{station}-unit");
         if self.store.read_unit(&self.slug, &unit).is_err() {
             self.decompose_one(station, &unit);
         }
         self.seal(station);
-    }
-
-    /// Walk the Run to a sealed state, capturing the **first** rendered prompt
-    /// seen for each distinct action tag (`spec`, `review`, `manufacture`,
-    /// `audit`, `reflect`, `user_gate`, `checkpoint`, …). The map is what the
-    /// followability suite reads.
-    pub fn capture_to_seal(&self) -> BTreeMap<String, String> {
-        let mut prompts: BTreeMap<String, String> = BTreeMap::new();
-        let mut guard = 0;
-        loop {
-            guard += 1;
-            assert!(guard < 2000, "capture_to_seal failed to converge");
-            let tick = self.tick();
-            let action = tick.action.clone();
-            if let Some(p) = &tick.prompt {
-                prompts
-                    .entry(action_tag(&action))
-                    .or_insert_with(|| p.clone());
-            }
-
-            // The pre-execution operator gate is an internal hold — approve and
-            // keep walking.
-            if matches!(action, RunAction::UserGate { .. }) {
-                self.decide(true, None);
-                continue;
-            }
-            // The whole-run review holds until every reviewer signs — stamp them.
-            if let RunAction::RunReview { reviewers, .. } = &action {
-                for r in reviewers {
-                    run_review_stamp(&self.store, &self.slug, r).expect("run review stamp");
-                }
-                continue;
-            }
-
-            match &action {
-                RunAction::Sealed { .. } => break,
-                RunAction::Spec { station, .. } => self.seed_spec(station),
-                RunAction::Manufacture { units, .. } => {
-                    let owned: Vec<&str> = units.iter().map(|s| s.as_str()).collect();
-                    self.complete_units(&owned);
-                }
-                // A held gate (non-auto checkpoint, or an external review gate)
-                // needs an operator decision; the decide re-tick advances the
-                // next station, so re-seed its spec to stay in sync.
-                RunAction::Checkpoint { kind, .. } if !matches!(kind, CheckpointKind::Auto) => {
-                    let decided = self.decide(true, None);
-                    if let RunAction::Spec { station, .. } = &decided.action {
-                        self.seed_spec(station);
-                    }
-                }
-                RunAction::ExternalReviewRequested { .. } => {
-                    let decided = self.decide(true, None);
-                    if let RunAction::Spec { station, .. } = &decided.action {
-                        self.seed_spec(station);
-                    }
-                }
-                _ => {}
-            }
-        }
-        prompts
     }
 }
 

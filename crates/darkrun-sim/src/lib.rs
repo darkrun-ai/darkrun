@@ -55,8 +55,11 @@
 
 pub mod agent;
 pub mod harness;
+pub mod provider;
 pub mod scenarios;
 pub mod tool_registry;
+pub mod transcript;
+pub mod world;
 
 pub use agent::{Plan, SimAgent, ToolMention, ToolRole};
 pub use tool_registry::known_tool_names;
