@@ -33,7 +33,7 @@ This is the build floor. You run the **Pass loop** — _Plan → Make → Challe
 
 Dispatch the **test_author** beat in parallel across these wave-ready Units:
 
-- `replay-route`
+- `ci-gates`
 
 
 
@@ -42,49 +42,54 @@ Dispatch the **test_author** beat in parallel across these wave-ready Units:
 
 The subagent you dispatch for a Unit gets **no context beyond what you hand it**. Pass the Unit's spec below into its dispatch verbatim — the completion criteria with their verify commands, the declared paths, and the scope boundary are the contract the beat is judged against.
 
-### `replay-route` — /replay route in web/site — static fixture player from darkrun-ui components
+### `ci-gates` — sim-fidelity CI job — fixture regenerate-diff, red-on-Escalate, darkrun-site wasm clippy
 
-- **inputs:** `crates/darkrun-core/src/sim_fixture.rs`, `crates/darkrun-sim/fixtures/dark-core.json`
-
-
-- **outputs:** `web/site/src/pages/replay.rs`
+- **inputs:** `crates/darkrun-sim/fixtures/dark-core.json`
 
 
-- **quality gates:** site-tests — `cargo test -p darkrun-site` · site-wasm-clippy — `cargo clippy -p darkrun-site --target wasm32-unknown-unknown -- -D warnings` · route-greps — `sh -c 'grep -q "/replay" web/site/src/route.rs && grep -qE "StationStrip|StationPipeline|UnitGraph" web/site/src/pages/replay.rs && grep -qiE "no.live.feed|no live feed" web/site/src/pages/replay.rs && ! grep -nE "gloo|remote::|\.fetch\(" web/site/src/pages/replay.rs'`
+- **outputs:** `.github/workflows/ci.yml`
 
 
-# Unit: replay-route
+- **quality gates:** workflow-parses — `python3 -c "import yaml;d=yaml.safe_load(open('.github/workflows/ci.yml'));assert 'sim-fidelity' in d['jobs']"` · job-steps-present — `sh -c 'grep -q "committed_fixture_matches_regeneration" .github/workflows/ci.yml && grep -q "escalate_scenario_is_detected_red" .github/workflows/ci.yml && grep -q "clippy -p darkrun-site --target wasm32-unknown-unknown" .github/workflows/ci.yml'` · local-dry-run — `sh -c 'a=$(cargo test -p darkrun-sim committed_fixture_matches_regeneration 2>&1) && echo "$a" | grep -qE "[1-9][0-9]* passed" && b=$(cargo test -p darkrun-sim escalate_scenario_is_detected_red 2>&1) && echo "$b" | grep -qE "[1-9][0-9]* passed"'`
+
+
+# Unit: ci-gates
 
 ## Goal
 
-Add the `/replay` route to `web/site` — a static, no-live-feed player that renders the committed fixture `crates/darkrun-sim/fixtures/dark-core.json` using darkrun-ui components. THE CONTRACT IS THE LOCKED SPEC: read `.darkrun/darkrun-sim/specify/spec.md` in full first — ACs 12-14 and Contract 6 are yours, including the fb-08 amendment (UnitGraph's nodes and edges come from the fixture's `units` field: each `FixtureUnit.slug` is a node, each `depends_on` entry an edge). Model the page on `/preview` (`web/site/src/pages/preview.rs`: hardcoded payload, zero fetch, explicit banner), NEVER on `/browse` (its `remote::fetch_*` live pattern is the banned shape).
+Add the **`sim-fidelity`** job to `.github/workflows/ci.yml` — the operator chose a new dedicated job over extending `wasm-app` (decision 2026-07-11). It wires AC-16's three gates into CI: the fixture regenerate-and-diff (via the `committed_fixture_matches_regeneration` test the sim-spine unit ships), the inverted red-on-Escalate negative scenario (`escalate_scenario_is_detected_red`), and the `darkrun-site` wasm32 clippy step that closes the pre-existing CI blind spot (today `wasm-app` scopes `-p darkrun-app` only; nothing gates `darkrun-site`'s wasm buildability). THE CONTRACT IS THE LOCKED SPEC: read `.darkrun/darkrun-sim/specify/spec.md` AC-15/AC-16 first.
 
 ## What to build
 
-1. **`web/site/src/pages/replay.rs` (new).** A `#[component] pub fn Replay() -> Element` that: parses the fixture ONCE via `include_str!("../../../../crates/darkrun-sim/fixtures/dark-core.json")` + `serde_json::from_str::<darkrun_core::sim_fixture::SimFixture>` (path verified: four `..` from `web/site/src/pages/`); renders the no-live-feed banner whose wording follows `preview.rs` lines 88-93's `SectionHead` `lead` precedent ("…no live feed is attached." — the `ScaffoldNote` dashed-border container from `web/site/src/pages/review.rs` line 199 is an optional separate styling choice); composes all three prelude components against fixture-derived data: `StationStrip { stations: Vec<StationItem> }` from the distinct stations across `ticks` (status Done for stations before the last, Current for the last — derive from tick order), `StationPipeline { dots }` via `strip_for` from the final tick's phase-bearing action_tag mapped into `darkrun_ui::kinds::Phase` (the translation lives HERE; darkrun-ui is darkrun-core-free by design), and `UnitGraph { units, edges }` from the fixture's `units` field (`UnitGraphNode::new(slug, slug)` per unit; a `GraphEdge` per `depends_on` entry). Render the tick list itself (seq, action_tag, station, and the normalized prompt in a collapsed/pre block) so the transcript is inspectable. Handle the malformed-fixture edge per the spec's Edge cases section (a parse failure renders an error state, no wasm panic — `from_str` result matched, never unwrapped).
-2. **`web/site/src/route.rs`**: add `#[route("/replay")] Replay {}` adjacent to the `/preview` variant inside the `#[layout(Shell)]` block; add `pub use pages::replay::Replay;` beside the existing page re-exports; add `"/replay".to_string()` to the STATIC vec in `Route::all_paths()` (next to `"/preview"` at line 124); extend the expected-paths array inside the `all_paths_covers_the_static_sections` test to include `/replay`.
-3. **`web/site/src/pages/mod.rs`**: add `pub mod replay;` to the flat module list.
+One new job in `.github/workflows/ci.yml`, mirroring the existing `wasm-app` job's structure (runner, checkout, toolchain via the same `dtolnay/rust-toolchain` action + `targets: wasm32-unknown-unknown`, the same Swatinem/rust-cache pattern the other jobs use — copy the repo's established step idioms, do not invent new action versions):
+
+```yaml
+sim-fidelity:
+  # protocol-fidelity gates: the committed fixture must match regeneration,
+  # the stranding scenario must go red, and the replay page must stay wasm-clean
+```
+
+Steps, in order: (1) checkout; (2) toolchain with wasm32 target; (3) cache; (4) `cargo test -p darkrun-sim committed_fixture_matches_regeneration` — fails when regeneration diverges from `crates/darkrun-sim/fixtures/dark-core.json`; (5) `cargo test -p darkrun-sim escalate_scenario_is_detected_red` — the negative scenario: a sim DESIGNED to strand must report `FixtureOutcome::Escalated`, so this test passing IS the red-detection proof (the inversion lives inside the test's assertion, the job just runs it); (6) `cargo clippy -p darkrun-site --target wasm32-unknown-unknown -- -D warnings`. The job triggers with the same `on:` conditions the `rust` job uses (no new trigger surface).
 
 ## Success / failure / edge paths
 
-Success: the page compiles for wasm32, renders all three components plus the banner from the embedded fixture. Failure: malformed embedded JSON renders the error state (add a unit test parsing a truncated copy and asserting the error path value, not a panic). Edge: a fixture whose `units` is empty renders an empty-graph state without panicking (test it); a station name in the fixture that the site's embedded factory content no longer knows is rendered as plain text, never resolved against the content corpus (the spec's stale-content edge).
+Success: the workflow parses, the job's three commands pass locally in the unit worktree (the sim-spine and replay-route units landed before this one — depends_on ordering guarantees their code is on the station branch this worktree forked from). Failure: any of the three commands failing locally means the SIBLING work is broken — bounce with a reject note rather than papering over. Edge: the job must not use `continue-on-error` anywhere (a soft-fail gate is not a gate — the rust-quality workflow's SARIF job is non-blocking by design; this one is blocking by design).
 
 ## Completion criteria (verify each from the unit worktree root)
 
-1. `cargo test -p darkrun-site` exits 0 (includes the four route tests — `all_paths_are_unique_and_rooted` catches a malformed insertion — plus your new tests).
-2. `cargo build -p darkrun-site --target wasm32-unknown-unknown` exits 0 (AC-15's check).
-3. `cargo clippy -p darkrun-site --target wasm32-unknown-unknown -- -D warnings` exits 0.
-4. Route registered in BOTH places → `grep -c '"/replay"' web/site/src/route.rs` reports >= 2 (the `#[route]` attribute and the `all_paths()` literal).
-5. Components + banner + no-fetch → `grep -E 'StationStrip|StationPipeline|UnitGraph' web/site/src/pages/replay.rs` shows all three inside rsx; `grep -iE 'no.live.feed|no live feed' web/site/src/pages/replay.rs` matches; `grep -nE 'gloo|remote::|\.fetch\(' web/site/src/pages/replay.rs` returns nothing (AC-13's exact checks).
-6. No new dependency edge → `cargo tree -p darkrun-site -e normal | grep -c darkrun-mcp` reports 0 (AC-14), and `git diff --name-only` for your commits does not include `web/site/Cargo.toml`.
+1. Workflow parses and carries the job → `python3 -c "import yaml;d=yaml.safe_load(open('.github/workflows/ci.yml'));assert 'sim-fidelity' in d['jobs'] and len(d['jobs']['sim-fidelity']['steps'])>=6"` exits 0.
+2. All three gate commands present verbatim → `grep -c 'committed_fixture_matches_regeneration\|escalate_scenario_is_detected_red\|clippy -p darkrun-site --target wasm32-unknown-unknown' .github/workflows/ci.yml` reports 3.
+3. No soft-fail → `grep -A30 'sim-fidelity:' .github/workflows/ci.yml | grep -c 'continue-on-error'` reports 0.
+4. The three commands pass locally: `cargo test -p darkrun-sim committed_fixture_matches_regeneration` exits 0; `cargo test -p darkrun-sim escalate_scenario_is_detected_red` exits 0; `cargo clippy -p darkrun-site --target wasm32-unknown-unknown -- -D warnings` exits 0.
+5. Existing jobs untouched → `git diff HEAD~1 -- .github/workflows/ci.yml` (your commit) shows only additions under the new job key, zero modified lines in the `rust`, `cross-check`, or `wasm-app` jobs.
 
 ## Files touched
 
-`web/site/src/pages/replay.rs` (new), `web/site/src/route.rs`, `web/site/src/pages/mod.rs`. Nothing else.
+`.github/workflows/ci.yml` only.
 
 ## Out of scope
 
-No CI changes (sibling unit), no fixture regeneration (the committed fixture is the sim-spine unit's output — consume it read-only), no darkrun-ui component changes, no web/app work, no fetch/live-feed capability of any kind.
+No edits to other workflows (deploy-web.yml already triggers on crates/** and web/** paths), no changes to any crate, no new GitHub Actions beyond the versions the file already pins, no trigger changes.
 
 
 
@@ -93,7 +98,7 @@ No CI changes (sibling unit), no fixture regeneration (the committed fixture is 
 
 Every wave Unit is isolated on its own branch + worktree, forked off the station branch. Run that Unit's beat **inside its worktree** so its diff never tangles with another Unit's in-flight work; the manager lands each Unit back onto the station branch when it locks. Do **not** commit a Unit's work to the station branch yourself.
 
-- `replay-route` → `/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/.claude/worktrees/wiggly-gathering-spark/.darkrun/worktrees/darkrun-sim/units/build/replay-route` (branch `darkrun/darkrun-sim/units/build/replay-route`)
+- `ci-gates` → `/Users/jwaldrip/dev/src/github.com/jwaldrip/darkrun/.claude/worktrees/wiggly-gathering-spark/.darkrun/worktrees/darkrun-sim/units/build/ci-gates` (branch `darkrun/darkrun-sim/units/build/ci-gates`)
 
 
 

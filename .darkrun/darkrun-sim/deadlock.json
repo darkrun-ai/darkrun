@@ -1,10 +1,11 @@
 {
-  "signature": "manufacture@build|st=build;units=6;done=4;pass=16;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed,fb-08:Addressed,fb-09:Addressed,fb-10:Addressed,fb-11:Addressed,fb-12:Addressed]",
+  "signature": "manufacture@build|st=build;units=6;done=5;pass=20;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed,fb-08:Addressed,fb-09:Addressed,fb-10:Addressed,fb-11:Addressed,fb-12:Addressed]",
   "count": 1,
-  "updated_at": 1784499786,
+  "updated_at": 1784501063,
   "recent": [
     "manufacture@build|st=build;units=6;done=2;pass=6;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed,fb-08:Addressed,fb-09:Addressed,fb-10:Addressed,fb-11:Addressed,fb-12:Addressed]",
     "manufacture@build|st=build;units=6;done=3;pass=10;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed,fb-08:Addressed,fb-09:Addressed,fb-10:Addressed,fb-11:Addressed,fb-12:Addressed]",
-    "manufacture@build|st=build;units=6;done=4;pass=16;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed,fb-08:Addressed,fb-09:Addressed,fb-10:Addressed,fb-11:Addressed,fb-12:Addressed]"
+    "manufacture@build|st=build;units=6;done=4;pass=16;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed,fb-08:Addressed,fb-09:Addressed,fb-10:Addressed,fb-11:Addressed,fb-12:Addressed]",
+    "manufacture@build|st=build;units=6;done=5;pass=20;status=Active;drift=0;fb=[fb-01:Addressed,fb-02:Addressed,fb-03:Addressed,fb-04:Addressed,fb-05:Addressed,fb-06:Addressed,fb-07:Addressed,fb-08:Addressed,fb-09:Addressed,fb-10:Addressed,fb-11:Addressed,fb-12:Addressed]"
   ]
 }

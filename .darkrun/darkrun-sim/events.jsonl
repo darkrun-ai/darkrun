@@ -55,3 +55,5 @@
 {"at":"2026-07-19T22:22:49.474599+00:00","event":"darkrun.save_wip.blocked","files":3,"run":"darkrun-sim"}
 {"action":"manufacture","at":"2026-07-19T22:23:06.919462+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
 {"at":"2026-07-19T22:44:11.410858+00:00","event":"darkrun.unit.completed","run":"darkrun-sim","station":"build","unit":"replay-route"}
+{"action":"manufacture","at":"2026-07-19T22:44:23.863757+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"at":"2026-07-19T23:01:33.805054+00:00","event":"darkrun.unit.completed","run":"darkrun-sim","station":"build","unit":"ci-gates"}
