@@ -42,7 +42,7 @@
 //!
 //! 1. Make the harness reach the tick. If a linear walk surfaces the action
 //!    (most station phases do), it is already captured by
-//!    [`harness::Harness::capture_to_seal`] under its action tag — just pull it.
+//!    [`scenarios::capture_to_seal`] under its action tag — just pull it.
 //!    If the action needs specific state (a feedback item, an escalation), either
 //!    set that state up on the [`harness::Harness`] before capturing, or render
 //!    the action directly with [`harness::Harness::render`].
@@ -55,8 +55,11 @@
 
 pub mod agent;
 pub mod harness;
+pub mod provider;
 pub mod scenarios;
 pub mod tool_registry;
+pub mod transcript;
+pub mod world;
 
 pub use agent::{Plan, SimAgent, ToolMention, ToolRole};
 pub use tool_registry::known_tool_names;
