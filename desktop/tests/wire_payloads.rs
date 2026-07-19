@@ -324,7 +324,7 @@ async fn submit_decision_status_err_on_404() {
     let (cfg, handle) = one_shot_server(b"HTTP/1.1 404 Not Found\r\n\r\n").await;
     let res = submit_decision(&cfg, &approved()).await;
     match res {
-        Err(WireError::Status(404)) => {}
+        Err(WireError::Status { code: 404, .. }) => {}
         other => panic!("expected Status(404), got {other:?}"),
     }
     handle.await.unwrap();
@@ -334,7 +334,7 @@ async fn submit_decision_status_err_on_404() {
 async fn submit_decision_status_err_on_500() {
     let (cfg, handle) = one_shot_server(b"HTTP/1.1 500 Internal Server Error\r\n\r\n").await;
     match submit_decision(&cfg, &approved()).await {
-        Err(WireError::Status(500)) => {}
+        Err(WireError::Status { code: 500, .. }) => {}
         other => panic!("expected Status(500), got {other:?}"),
     }
     handle.await.unwrap();
@@ -344,7 +344,7 @@ async fn submit_decision_status_err_on_500() {
 async fn submit_decision_status_err_on_409() {
     let (cfg, handle) = one_shot_server(b"HTTP/1.1 409 Conflict\r\n\r\n").await;
     match submit_decision(&cfg, &approved()).await {
-        Err(WireError::Status(409)) => {}
+        Err(WireError::Status { code: 409, .. }) => {}
         other => panic!("expected Status(409), got {other:?}"),
     }
     handle.await.unwrap();
@@ -396,7 +396,7 @@ async fn submit_decision_sends_changes_requested_body() {
 
 #[test]
 fn wire_error_display_status() {
-    let e = WireError::Status(503);
+    let e = WireError::Status { code: 503, reason: None };
     assert_eq!(e.to_string(), "engine returned HTTP 503");
 }
 
@@ -419,5 +419,5 @@ fn wire_error_display_io_and_connect() {
 #[test]
 fn wire_error_is_std_error() {
     fn assert_err<E: std::error::Error>(_: &E) {}
-    assert_err(&WireError::Status(500));
+    assert_err(&WireError::Status { code: 500, reason: None });
 }

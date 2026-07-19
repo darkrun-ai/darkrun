@@ -52,3 +52,6 @@
 {"at":"2026-07-19T21:27:02.023784+00:00","event":"darkrun.unit.completed","run":"darkrun-sim","station":"build","unit":"fixture-schema"}
 {"action":"manufacture","at":"2026-07-19T21:27:24.169368+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
 {"at":"2026-07-19T22:22:36.002769+00:00","event":"darkrun.unit.completed","run":"darkrun-sim","station":"build","unit":"sim-spine"}
+{"at":"2026-07-19T22:22:49.474599+00:00","event":"darkrun.save_wip.blocked","files":3,"run":"darkrun-sim"}
+{"action":"manufacture","at":"2026-07-19T22:23:06.919462+00:00","event":"darkrun.manager.action","run":"darkrun-sim","station":"build"}
+{"at":"2026-07-19T22:44:11.410858+00:00","event":"darkrun.unit.completed","run":"darkrun-sim","station":"build","unit":"replay-route"}

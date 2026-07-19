@@ -21,14 +21,9 @@ The engine commits its own `.darkrun/` bookkeeping on every tick — but it neve
 
 ## Uncommitted paths
 
-- `fastlane/Fastfile`
-- `npm/darwin-arm64/package.json`
-- `npm/darwin-x64/package.json`
-- `npm/linux-arm64/package.json`
-- `npm/linux-x64/package.json`
-- `npm/win32-x64/package.json`
-- `plugin/.claude-plugin/plugin.json`
-- `plugin/package.json`
+- `desktop/src/review.rs`
+- `desktop/src/wire.rs`
+- `desktop/tests/wire_payloads.rs`
 
 
 ## What to do
