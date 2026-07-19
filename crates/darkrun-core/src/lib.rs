@@ -28,6 +28,7 @@ pub mod error;
 pub mod frontmatter;
 pub mod gate_env;
 pub mod locks;
+pub mod sim_fixture;
 pub mod state;
 pub mod witness;
 
