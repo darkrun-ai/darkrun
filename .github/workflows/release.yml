@@ -198,7 +198,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.ref }}
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           # Node 24 ships npm 11.x. OIDC trusted publishing needs npm >= 11.5.1,
           # so we still top-up to the latest below. That upgrade only SUCCEEDS on
