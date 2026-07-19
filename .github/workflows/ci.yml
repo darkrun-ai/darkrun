@@ -147,3 +147,40 @@ jobs:
       # Lint the crate for the deploy target — the wasm build's blocking gate.
       - name: Clippy (wasm32, -D warnings)
         run: cargo clippy -p darkrun-app --target wasm32-unknown-unknown -- -D warnings
+
+  # Protocol-fidelity gates for darkrun-sim (AC-16): the committed fixture must
+  # match a fresh regeneration, the stranding (Escalate) scenario must actually
+  # go red, and darkrun-site's wasm build stays clean. This closes a pre-existing
+  # CI blind spot: `wasm-app` above only scopes `-p darkrun-app`, so nothing
+  # gated darkrun-site's wasm32 buildability before this job existed.
+  sim-fidelity:
+    name: sim-fidelity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (+ wasm target)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: sim-fidelity
+
+      # Regenerates the fixture in-process and diffs it against the committed
+      # copy at crates/darkrun-sim/fixtures/dark-core.json. Fails the build the
+      # moment regeneration and the committed fixture diverge.
+      - name: Test (darkrun-sim, fixture regeneration matches committed)
+        run: cargo test -p darkrun-sim committed_fixture_matches_regeneration
+
+      # Negative scenario: a sim DESIGNED to strand must report
+      # `FixtureOutcome::Escalated`. This test passing IS the red-detection
+      # proof for the gate above — it exercises the same detection path.
+      - name: Test (darkrun-sim, escalate scenario is detected red)
+        run: cargo test -p darkrun-sim escalate_scenario_is_detected_red
+
+      # Lint darkrun-site for the deploy target — keeps the replay page wasm-clean.
+      - name: Clippy (darkrun-site, wasm32, -D warnings)
+        run: cargo clippy -p darkrun-site --target wasm32-unknown-unknown -- -D warnings
