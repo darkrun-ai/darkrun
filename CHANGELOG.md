@@ -2,6 +2,16 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.12.2](https://github.com/darkrun-ai/darkrun/compare/v0.12.1...v0.12.2) (2026-07-19)
+
+
+### Bug Fixes
+
+* **ci:** ship macOS release candidates to TestFlight via pilot ([e9545dd](https://github.com/darkrun-ai/darkrun/commit/e9545dd55b756d6c46658975ed6bc633680fe7be))
+* **ci:** ship macOS release candidates to TestFlight via pilot ([#252](https://github.com/darkrun-ai/darkrun/issues/252)) ([eebdd38](https://github.com/darkrun-ai/darkrun/commit/eebdd3824d7fd9242e5150b164dfcf956e0a903d))
+* **desktop:** surface the engine's refusal reason instead of a bare HTTP code ([9527a92](https://github.com/darkrun-ai/darkrun/commit/9527a92ccec26e975d6f4f91d396be203bf1f159))
+* **desktop:** surface the engine's refusal reason instead of a bare HTTP code ([#253](https://github.com/darkrun-ai/darkrun/issues/253)) ([897a025](https://github.com/darkrun-ai/darkrun/commit/897a025cd0dd1114cee3d9e533070c6d858b962c))
+
 ## [0.12.1](https://github.com/darkrun-ai/darkrun/compare/v0.12.0...v0.12.1) (2026-07-17)
 
 
