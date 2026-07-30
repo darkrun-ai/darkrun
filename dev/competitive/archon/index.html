@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Night Shift: darkrun vs Archon</title>
+<meta name="description" content="Competitive analysis of darkrun against coleam00/Archon, the open-source harness builder for AI coding.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Spline+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* darkrun's own palette, pulled from the product source */
+  --void:#07090c; --hall:#0e1217; --steel:#141a21; --plate:#1b232c;
+  --line:#232e39; --line-soft:#1a222b;
+  --signal:#5fd7ff;      /* darkrun cyan, text + accent (WCAG-judged) */
+  --signal-mark:#0e9fd6; /* validated identity swatch */
+  --sodium:#f0b429;      /* the other plant */
+  --sodium-mark:#b9791a; /* validated identity swatch */
+  --oxide:#a8201a; --alarm:#f85149;
+  --paper:#e7edf3; --paper-2:#dce3ea; --ink:#1f2328;
+  --body:#c2ccd6; --muted:#8b949e; --faint:#5d6b78;
+  --display:"Archivo Black","Haettenschweiler","Arial Black",sans-serif;
+  --sans:"Spline Sans",system-ui,-apple-system,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",monospace;
+  --rail:88px;
+  --hazard:repeating-linear-gradient(135deg,var(--sodium) 0 14px,#0b0e12 14px 28px);
+}
+*{box-sizing:border-box}
+img{max-width:100%}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{
+  margin:0;background:var(--void);color:var(--body);
+  font-family:var(--sans);font-size:17px;line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+  background-image:radial-gradient(120% 60% at 50% -10%,#101720 0%,transparent 60%);
+}
+
+/* ---------- chrome ---------- */
+#progress{position:fixed;top:0;left:0;height:2px;width:0;background:var(--signal);z-index:99;box-shadow:0 0 12px rgba(95,215,255,.6)}
+nav#toc{
+  position:fixed;top:0;left:0;bottom:0;width:var(--rail);z-index:50;
+  border-right:1px solid var(--line-soft);background:rgba(7,9,12,.86);
+  backdrop-filter:blur(6px);display:flex;flex-direction:column;
+  align-items:center;padding:22px 0;gap:2px;
+}
+nav#toc a{
+  font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--faint);
+  text-decoration:none;padding:9px 0;width:100%;text-align:center;border-left:2px solid transparent;
+}
+nav#toc a:hover{color:var(--signal)}
+nav#toc a.on{color:var(--signal);border-left-color:var(--signal);background:linear-gradient(90deg,rgba(95,215,255,.10),transparent)}
+nav#toc .mark{margin-bottom:18px;font-family:var(--display);font-size:13px;letter-spacing:-.02em;color:var(--paper);writing-mode:vertical-rl;transform:rotate(180deg);line-height:1}
+nav#toc .mark i{font-style:normal;color:var(--signal)}
+nav#toc .stripe{margin-top:auto;width:22px;height:60px;background:var(--hazard);opacity:.5}
+main{margin-left:var(--rail)}
+@media (max-width:820px){
+  nav#toc{flex-direction:row;width:100%;height:46px;bottom:auto;padding:0 10px;gap:0;overflow-x:auto;align-items:center}
+  nav#toc .mark{writing-mode:horizontal-tb;transform:none;margin:0 14px 0 0;font-size:15px}
+  nav#toc a{padding:0 10px;width:auto;border-left:0;border-bottom:2px solid transparent;line-height:44px}
+  nav#toc a.on{border-bottom-color:var(--signal);background:none}
+  nav#toc .stripe{display:none}
+  main{margin-left:0;padding-top:46px}
+  :root{--rail:0px}
+}
+
+/* ---------- type ---------- */
+h1,h2,h3{font-family:var(--display);font-weight:400;letter-spacing:-.025em;line-height:.96;color:var(--paper);text-transform:uppercase;margin:0}
+h1{font-size:clamp(2.7rem,7.6vw,6.6rem)}
+h2{font-size:clamp(1.9rem,4.2vw,3.5rem)}
+h3{font-size:clamp(1.05rem,1.7vw,1.4rem);letter-spacing:-.01em}
+p{margin:0 0 1.05em;max-width:68ch}
+a{color:var(--signal)}
+strong{color:var(--paper);font-weight:600}
+.kicker{font-family:var(--mono);font-size:11.5px;letter-spacing:.26em;text-transform:uppercase;color:var(--sodium)}
+.kicker.cy{color:var(--signal)}
+.lede{font-size:clamp(1.06rem,1.5vw,1.32rem);color:#d6dee6;max-width:60ch}
+.small{font-size:14.5px;color:var(--muted)}
+.mono{font-family:var(--mono)}
+.num{font-variant-numeric:tabular-nums}
+
+/* ---------- layout ---------- */
+section{padding:clamp(64px,8vw,124px) clamp(20px,5vw,72px);position:relative;border-top:1px solid var(--line-soft)}
+section:first-of-type{border-top:0}
+.wrap{max-width:1180px}
+.stationno{position:absolute;top:clamp(30px,4vw,54px);right:clamp(20px,5vw,72px);font-family:var(--display);font-size:clamp(3rem,7vw,6rem);line-height:1;color:transparent;-webkit-text-stroke:1px #1e2731;pointer-events:none;user-select:none}
+.split{display:grid;grid-template-columns:1.28fr 1fr;gap:clamp(28px,4vw,64px);align-items:start}
+.split.even{grid-template-columns:1fr 1fr}
+.split>*{min-width:0}
+@media (max-width:900px){.split,.split.even{grid-template-columns:1fr}}
+.stripe-rule{height:8px;background:var(--hazard);opacity:.55;margin:0 0 clamp(26px,3vw,42px);max-width:220px}
+
+/* ---------- masthead ---------- */
+header.mast{position:relative;padding:0;border:0}
+.hero-img{position:relative;height:min(74vh,720px);overflow:hidden}
+.hero-img img{width:100%;height:100%;object-fit:cover;object-position:center 42%;filter:saturate(.94)}
+.hero-img::after{content:"";position:absolute;inset:0;background:linear-gradient(to top,var(--void) 2%,rgba(7,9,12,.35) 46%,rgba(7,9,12,.55) 100%)}
+.mast-copy{position:relative;margin-top:-16vh;padding:0 clamp(20px,5vw,72px) clamp(48px,6vw,86px);z-index:2}
+.wordmark{font-family:var(--display);font-size:19px;letter-spacing:-.02em;color:var(--paper);text-transform:lowercase}
+.wordmark i{font-style:normal;color:var(--signal);font-family:var(--sans);font-weight:400}
+.mast-meta{display:flex;flex-wrap:wrap;gap:10px 26px;align-items:baseline;margin-bottom:26px}
+h1 em{font-style:normal;color:var(--signal);display:block}
+h1 .vs{display:block;font-size:.3em;letter-spacing:.3em;color:var(--sodium);-webkit-text-stroke:0;margin:.28em 0}
+
+/* ---------- verdict ---------- */
+.verdict{border-left:3px solid var(--signal);padding:4px 0 4px 26px;margin:0 0 8px}
+.verdict p{font-family:var(--display);text-transform:uppercase;font-size:clamp(1.2rem,2.5vw,2.05rem);line-height:1.08;color:var(--paper);letter-spacing:-.02em;max-width:30ch}
+.verdict .who{font-family:var(--mono);font-size:11.5px;letter-spacing:.22em;color:var(--faint);text-transform:uppercase;margin-top:14px}
+
+/* ---------- stat tiles ---------- */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line-soft);border:1px solid var(--line-soft);margin:clamp(24px,3vw,40px) 0}
+.tile{background:var(--hall);padding:20px 18px 18px}
+.tile .n{font-family:var(--display);font-size:clamp(1.7rem,3.4vw,2.7rem);line-height:1;color:var(--paper);font-variant-numeric:tabular-nums}
+.tile .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-top:10px}
+.tile.a .n{color:var(--sodium)}
+.tile.d .n{color:var(--signal)}
+.tile .sub{font-size:13px;color:var(--muted);margin-top:6px;line-height:1.4}
+
+/* ---------- figures ---------- */
+figure{margin:0;min-width:0}
+figure img{width:100%;height:auto;display:block;cursor:zoom-in}
+.fig-full{margin:clamp(34px,5vw,70px) 0 0;padding:0}
+figcaption{font-family:var(--mono);font-size:11.5px;line-height:1.55;letter-spacing:.03em;color:var(--faint);padding:12px 0 0;max-width:74ch}
+figcaption b{color:var(--sodium);font-weight:500;letter-spacing:.14em;text-transform:uppercase;font-size:10.5px;display:block;margin-bottom:5px}
+.bleed{padding-left:0;padding-right:0}
+
+/* ---------- panels ---------- */
+.panel{background:var(--hall);border:1px solid var(--line);padding:clamp(20px,2.4vw,30px)}
+.panel.raised{background:var(--steel)}
+.panel h3{margin-bottom:12px}
+.panel .tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;margin-bottom:14px;display:block}
+.panel.arc{border-top:3px solid var(--sodium-mark)}
+.panel.arc .tag{color:var(--sodium)}
+.panel.dr{border-top:3px solid var(--signal-mark)}
+.panel.dr .tag{color:var(--signal)}
+.panel p:last-child{margin-bottom:0}
+.panel ul{margin:0;padding-left:1.1em}
+.panel li{margin-bottom:.5em}
+
+/* ---------- spec sheet (the light material) ---------- */
+.spec{background:var(--paper);color:var(--ink);border:1px solid #c3ccd6;padding:0;margin:clamp(26px,3vw,44px) 0 0;overflow-x:auto}
+.spec-head{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;padding:16px 20px;border-bottom:1px solid #c3ccd6;background:var(--paper-2)}
+.spec-head .t{font-family:var(--display);text-transform:uppercase;font-size:15px;letter-spacing:-.01em;color:var(--ink)}
+.spec-head .s{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:#5b6672}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:720px}
+th,td{text-align:left;padding:13px 20px;vertical-align:top;border-bottom:1px solid #d3dae2}
+th{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:#5b6672;background:#eff3f7;font-weight:500}
+td.axis{font-weight:600;color:var(--ink);width:19%}
+td.cell{color:#3a444f;width:29%}
+tr:last-child td{border-bottom:0}
+.lead{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;white-space:nowrap;font-weight:700}
+.sw{width:9px;height:9px;flex:0 0 9px;border-radius:1px;display:inline-block}
+.lead.d{color:#0a5f80}.lead.d .sw{background:var(--signal-mark)}
+.lead.a{color:#7d5210}.lead.a .sw{background:var(--sodium-mark)}
+.lead.e{color:#55606c}.lead.e .sw{background:#9aa7b4}
+.tally{display:flex;gap:26px;flex-wrap:wrap;padding:14px 20px;background:#eff3f7;border-top:1px solid #c3ccd6;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#5b6672}
+.tally b{color:var(--ink)}
+
+/* ---------- lists ---------- */
+ol.moves{counter-reset:m;list-style:none;padding:0;margin:clamp(20px,2.5vw,34px) 0 0;display:grid;gap:1px;background:var(--line-soft);border:1px solid var(--line-soft)}
+ol.moves li{counter-increment:m;background:var(--hall);padding:20px 22px 20px 74px;position:relative}
+ol.moves li::before{content:counter(m,decimal-leading-zero);position:absolute;left:22px;top:19px;font-family:var(--mono);font-size:12px;letter-spacing:.1em;color:var(--signal)}
+ol.moves h3{margin-bottom:7px}
+ol.moves p{margin:0;font-size:15.5px;color:var(--body)}
+ul.plain{list-style:none;padding:0;margin:0}
+ul.plain li{border-top:1px solid var(--line-soft);padding:17px 0}
+ul.plain li:first-child{border-top:0}
+ul.plain h3{margin-bottom:6px}
+ul.plain p{margin:0;font-size:15.5px}
+.watch{font-family:var(--mono);font-size:11.5px;letter-spacing:.03em;color:var(--sodium);margin-top:9px;display:block}
+.watch b{color:var(--sodium);letter-spacing:.16em;text-transform:uppercase;font-size:10px;font-weight:500}
+.dont{border-left:3px solid var(--oxide);padding-left:22px;margin-top:clamp(26px,3vw,40px)}
+.dont .kicker{color:var(--alarm)}
+
+/* ---------- svg diagrams ---------- */
+.diagram{margin:clamp(26px,3vw,44px) 0 0;background:var(--hall);border:1px solid var(--line);padding:clamp(18px,2.5vw,30px)}
+.diagram svg{width:100%;height:auto;display:block}
+.dg-t{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);margin-bottom:16px}
+svg text{font-family:"JetBrains Mono",monospace}
+
+/* ---------- reveal ---------- */
+html.js .rv{opacity:0;transform:translateY(16px);transition:opacity .7s ease,transform .7s cubic-bezier(.2,.7,.2,1)}
+html.js .rv.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){.rv{opacity:1;transform:none;transition:none}}
+
+/* ---------- lightbox ---------- */
+#lb{position:fixed;inset:0;background:rgba(4,6,9,.96);display:none;align-items:center;justify-content:center;z-index:200;padding:24px;cursor:zoom-out}
+#lb.on{display:flex}
+#lb img{max-width:100%;max-height:100%;object-fit:contain}
+#lb .hint{position:absolute;bottom:16px;left:0;right:0;text-align:center;font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--faint);text-transform:uppercase}
+
+/* ---------- footer ---------- */
+footer{padding:clamp(46px,5vw,74px) clamp(20px,5vw,72px) 90px;border-top:1px solid var(--line-soft);background:#05070a}
+footer .wrap{max-width:1180px}
+footer h3{margin-bottom:16px}
+footer .src{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:22px;margin-bottom:30px}
+footer p,footer li{font-size:13.5px;color:var(--muted);line-height:1.6}
+footer ul{padding-left:1.1em;margin:.4em 0 0}
+
+@media print{
+  nav#toc,#progress,#lb{display:none}
+  main{margin:0}
+  body{background:#fff;color:#111;font-size:11pt}
+  h1,h2,h3,.tile .n{color:#000}
+  section{page-break-inside:avoid;border-top:1px solid #ccc;padding:18pt 0}
+  .hero-img{height:220pt}
+  .spec{border-color:#999}
+  .panel{border-color:#bbb;background:#fafafa}
+  figcaption,.small,.tile .l{color:#444}
+}
+</style>
+</head>
+<body data-palette="#0e9fd6,#b9791a">
+<script>document.documentElement.className+=' js';</script>
+<div id="progress"></div>
+
+<nav id="toc" aria-label="Sections">
+  <span class="mark">dark<i>run</i></span>
+  <a href="#standing">01</a>
+  <a href="#what">02</a>
+  <a href="#fork">03</a>
+  <a href="#determinism">04</a>
+  <a href="#scorecard">05</a>
+  <a href="#wins">06</a>
+  <a href="#theirs">07</a>
+  <a href="#threats">08</a>
+  <a href="#moves">09</a>
+  <span class="stripe" aria-hidden="true"></span>
+</nav>
+
+<main>
+
+<header class="mast">
+  <div class="hero-img">
+    <img src="images/01-hero.jpg" alt="Two industrial halls facing each other across a wet concrete yard at night: the left one dark with a single cyan-lit window, the right one blazing with light and full of conveyors.">
+  </div>
+  <div class="mast-copy">
+    <div class="mast-meta">
+      <span class="wordmark">dark<i>run</i></span>
+      <span class="kicker">Competitive analysis</span>
+      <span class="mono small num">2026-07-29</span>
+    </div>
+    <h1>Night<br>Shift<span class="vs">darkrun vs Archon</span></h1>
+    <p class="lede" style="margin-top:22px">Two projects claim the same job: make agentic coding repeatable instead of improvised. One has 23,030 stars and a plant running every bay. The other has a better machine and an empty yard.</p>
+  </div>
+</header>
+
+<section id="standing">
+  <span class="stationno" aria-hidden="true">01</span>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <span class="kicker">01 / The standing</span>
+    <h2 style="margin:14px 0 26px">Start with the<br>number that hurts</h2>
+
+    <div class="verdict rv">
+      <p>They are fifteen months ahead on distribution. You are ahead on architecture. Distribution compounds and architecture does not.</p>
+      <div class="who">The whole analysis in one sentence</div>
+    </div>
+
+    <div class="split" style="margin-top:clamp(30px,4vw,54px)">
+      <div>
+        <p><strong>Archon</strong> (<span class="mono">coleam00/Archon</span>) opened in February 2025 as a Python task-management and RAG tool, then pivoted the whole repo into a TypeScript workflow engine and kept the audience. That is the important part of its history: the stars were earned by a product it no longer is, and they transferred.</p>
+        <p><strong>darkrun</strong> opened at the end of May 2026 and has been building the engine, not the audience. Seventeen crates, roughly 155,000 lines of Rust, 5,850 test cases across 177 files, a desktop app, an iOS build, a web app, a relay tunnel, two factories. Three stars.</p>
+        <p class="small">Figures read from the GitHub API on 2026-07-29, and from the working tree at commit <span class="mono">1de885f</span>.</p>
+      </div>
+      <div class="panel raised rv">
+        <span class="tag" style="color:var(--faint)">Head count</span>
+        <div class="tiles" style="margin:0;grid-template-columns:1fr 1fr">
+          <div class="tile a"><div class="n num">23,030</div><div class="l">Archon stars</div></div>
+          <div class="tile d"><div class="n num">3</div><div class="l">darkrun stars</div></div>
+          <div class="tile a"><div class="n num">3,447</div><div class="l">Archon forks</div></div>
+          <div class="tile d"><div class="n num">0</div><div class="l">darkrun forks</div></div>
+          <div class="tile a"><div class="n num">56</div><div class="l">Archon contributors</div></div>
+          <div class="tile d"><div class="n num">1</div><div class="l">darkrun contributors</div></div>
+          <div class="tile a"><div class="n num">2025-02</div><div class="l">Archon opened</div><div class="sub">As a Python RAG tool, since rewritten</div></div>
+          <div class="tile d"><div class="n num">2026-05</div><div class="l">darkrun opened</div><div class="sub">Fifteen months of head start to close</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <figure class="fig-full rv">
+    <img src="images/05-gate-crowd.jpg" alt="Seen from a dark, empty factory yard: a crowd of night-shift workers streams through a brightly lit gate under sodium floodlights, long shadows thrown toward the camera.">
+    <figcaption><b>Figure 01</b>Their gate at shift change, seen from your yard. No feature on the list below closes this gap; only shipping and being found does. Illustrative image, generated.</figcaption>
+  </figure>
+</section>
+
+<section id="what">
+  <span class="stationno" aria-hidden="true">02</span>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <span class="kicker">02 / What each one is</span>
+    <h2 style="margin:14px 0 26px">A builder and<br>a line</h2>
+    <p class="lede">Both call themselves a harness. They mean different products. Archon sells you the means to build any line you want. darkrun sells you one line with an argument behind the order of its stations.</p>
+
+    <div class="split even" style="margin-top:clamp(30px,4vw,50px)">
+      <div class="panel arc rv">
+        <span class="tag">Archon / the builder</span>
+        <h3>Nineteen workflows and a YAML DAG</h3>
+        <p>"The first open-source harness builder for AI coding. Make AI coding deterministic and repeatable." You write processes as YAML graphs: <span class="mono">ai</span> nodes for judgment, <span class="mono">bash</span> nodes for determinism, <span class="mono">loop</span> nodes with an <span class="mono">until</span> condition and optional <span class="mono">fresh_context</span>, <span class="mono">approval</span> nodes that pause for a human, <span class="mono">depends_on</span> for sequencing.</p>
+        <ul>
+          <li>19 bundled workflows, including a five-reviewer PR review and a workflow that builds workflows</li>
+          <li>A git worktree per run, so five fixes run at once without collision</li>
+          <li>SQLite or Postgres behind it, 14 tables</li>
+          <li>Drives Claude Code, Codex, or Pi as the intelligence</li>
+          <li>Reachable from a web dashboard, a CLI, Telegram, Slack, Discord, and GitHub webhooks</li>
+          <li>MIT, Bun and TypeScript, installed by curl, Homebrew, or Docker</li>
+        </ul>
+      </div>
+      <div class="panel dr rv">
+        <span class="tag">darkrun / the line</span>
+        <h3>Six stations in cost order</h3>
+        <p>"An agentic assembly line for your business." The line is not something you assemble from nodes. It is Frame, Specify, Shape, Build, Prove, Harden, ordered by the cost of finding the problem late, and every station walks the same six-phase machine whether the work is code or a contract.</p>
+        <ul>
+          <li>Factory &gt; Station &gt; Unit &gt; Pass, with 64 MCP tools and 19 slash commands</li>
+          <li>Gates in four flavors: auto, ask, external, await</li>
+          <li>Reviewers are separate agents from the Workers, structurally</li>
+          <li>Run state is markdown and JSON under <span class="mono">.darkrun/</span>, in your repo</li>
+          <li>One Rust binary, git through gitoxide, no C and no git CLI</li>
+          <li>Rides seven harnesses and resumes a run across them</li>
+          <li>FSL-1.1-ALv2, becoming Apache 2.0 on schedule</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="split even bleed" style="margin-top:clamp(34px,4vw,60px);gap:1px">
+    <figure class="rv"><img src="images/02-archon-plant.jpg" alt="A vast brightly lit plant interior with dozens of overhead conveyor lines branching across the ceiling and many parallel work bays running at once."><figcaption><b>Figure 02 / Archon</b>Every bay lit, every branch available. The plant can make anything you can route. Nothing in the building tells you which route is correct. Illustrative image, generated.</figcaption></figure>
+    <figure class="rv"><img src="images/03-darkrun-line.jpg" alt="A single ordered line of six heavy shuttered machine enclosures receding into darkness, each under one amber lamp, with a lone worker standing at a cyan-lit inspection booth midway down."><figcaption><b>Figure 03 / darkrun</b>One line, six shuttered stations, one lit booth where a human is expected to stand. The order is the product. Illustrative image, generated.</figcaption></figure>
+  </div>
+</section>
+
+<section id="fork">
+  <span class="stationno" aria-hidden="true">03</span>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <span class="kicker">03 / The architectural fork</span>
+    <h2 style="margin:14px 0 26px">Who owns<br>the loop</h2>
+    <p class="lede">This is the real difference, and it is not on either project's feature list. Archon is a program that calls agents. darkrun is a program that agents call. Everything else follows from that.</p>
+
+    <div class="diagram rv">
+      <div class="dg-t">Control flow, both directions</div>
+      <svg viewBox="0 0 980 340" role="img" aria-label="Diagram: Archon's orchestrator drives a Claude Code subprocess per node, while darkrun's engine answers ticks from inside the agent's own session.">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b9791a"/></marker>
+          <marker id="cy" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0e9fd6"/></marker>
+        </defs>
+        <!-- left: archon -->
+        <text x="0" y="14" fill="#f0b429" font-size="11" letter-spacing="2.4">ARCHON</text>
+        <text x="0" y="32" fill="#5d6b78" font-size="10.5">orchestrator owns the loop</text>
+        <rect x="0" y="48" width="200" height="52" fill="#1b232c" stroke="#b9791a" stroke-width="1.5"/>
+        <text x="14" y="70" fill="#e7edf3" font-size="11.5">bun process + db</text>
+        <text x="14" y="88" fill="#8b949e" font-size="10">workflow dag, 14 tables</text>
+
+        <rect x="0" y="140" width="92" height="40" fill="#141a21" stroke="#2b3742"/><text x="12" y="164" fill="#c2ccd6" font-size="10.5">node: bash</text>
+        <rect x="108" y="140" width="92" height="40" fill="#141a21" stroke="#2b3742"/><text x="120" y="164" fill="#c2ccd6" font-size="10.5">node: ai</text>
+        <rect x="54" y="222" width="146" height="40" fill="#141a21" stroke="#2b3742"/><text x="66" y="246" fill="#c2ccd6" font-size="10.5">claude code cli</text>
+        <rect x="0" y="292" width="200" height="34" fill="#0e1217" stroke="#2b3742" stroke-dasharray="3 3"/><text x="14" y="314" fill="#8b949e" font-size="10">git worktree per run</text>
+
+        <path d="M46 100 L46 138" stroke="#b9791a" stroke-width="1.4" marker-end="url(#ar)"/>
+        <path d="M154 100 L154 138" stroke="#b9791a" stroke-width="1.4" marker-end="url(#ar)"/>
+        <path d="M154 180 L154 220" stroke="#b9791a" stroke-width="1.4" marker-end="url(#ar)"/>
+        <path d="M100 262 L100 290" stroke="#b9791a" stroke-width="1.4" marker-end="url(#ar)"/>
+        <text x="230" y="160" fill="#5d6b78" font-size="10.5">the agent is a</text>
+        <text x="230" y="176" fill="#5d6b78" font-size="10.5">subprocess of the</text>
+        <text x="230" y="192" fill="#5d6b78" font-size="10.5">workflow it serves</text>
+
+        <line x1="392" y1="0" x2="392" y2="340" stroke="#232e39" stroke-dasharray="2 6"/>
+
+        <!-- right: darkrun -->
+        <text x="430" y="14" fill="#5fd7ff" font-size="11" letter-spacing="2.4">DARKRUN</text>
+        <text x="430" y="32" fill="#5d6b78" font-size="10.5">the agent owns the loop, the engine owns the state</text>
+        <rect x="430" y="48" width="256" height="52" fill="#1b232c" stroke="#0e9fd6" stroke-width="1.5"/>
+        <text x="442" y="70" fill="#e7edf3" font-size="11.5">your harness session</text>
+        <text x="442" y="88" fill="#8b949e" font-size="9.5">claude, cursor, codex, gemini...</text>
+
+        <rect x="742" y="48" width="238" height="52" fill="#1b232c" stroke="#0e9fd6" stroke-width="1.5"/>
+        <text x="754" y="70" fill="#e7edf3" font-size="11.5">darkrun binary (mcp)</text>
+        <text x="754" y="88" fill="#8b949e" font-size="9.5">cursor, gates, dag</text>
+
+        <path d="M690 62 L738 62" stroke="#0e9fd6" stroke-width="1.4" marker-end="url(#cy)"/>
+        <text x="696" y="54" fill="#5d6b78" font-size="9">tick</text>
+        <path d="M738 88 L692 88" stroke="#0e9fd6" stroke-width="1.4" marker-end="url(#cy)"/>
+        <text x="690" y="106" fill="#5d6b78" font-size="9">next action</text>
+
+        <rect x="742" y="150" width="238" height="82" fill="#0e1217" stroke="#2b3742"/>
+        <text x="754" y="172" fill="#c2ccd6" font-size="10.5">.darkrun/ in your repo</text>
+        <text x="754" y="190" fill="#8b949e" font-size="9.5">run.md · units/*.md</text>
+        <text x="754" y="207" fill="#8b949e" font-size="9.5">state.json · feedback/*.md</text>
+        <text x="754" y="224" fill="#8b949e" font-size="9.5">committed, diffable, reviewable</text>
+        <path d="M861 100 L861 148" stroke="#0e9fd6" stroke-width="1.4" marker-end="url(#cy)"/>
+
+        <rect x="430" y="150" width="256" height="40" fill="#141a21" stroke="#2b3742"/><text x="442" y="174" fill="#c2ccd6" font-size="10">workers: make, challenge, resolve</text>
+        <rect x="430" y="206" width="256" height="40" fill="#141a21" stroke="#2b3742"/><text x="442" y="230" fill="#c2ccd6" font-size="10">reviewers: a different agent</text>
+        <rect x="430" y="262" width="256" height="40" fill="#141a21" stroke="#0e9fd6" stroke-dasharray="4 3"/><text x="442" y="286" fill="#5fd7ff" font-size="10">checkpoint: a human decides</text>
+        <path d="M558 100 L558 148" stroke="#0e9fd6" stroke-width="1.4" marker-end="url(#cy)"/>
+        <path d="M558 190 L558 204" stroke="#0e9fd6" stroke-width="1.4" marker-end="url(#cy)"/>
+        <path d="M558 246 L558 260" stroke="#0e9fd6" stroke-width="1.4" marker-end="url(#cy)"/>
+      </svg>
+    </div>
+
+    <div class="split" style="margin-top:clamp(30px,4vw,50px)">
+      <div>
+        <h3 style="margin-bottom:12px">What each choice buys</h3>
+        <p>Archon's orchestrator can guarantee the shape of the run, because it executes the shape. You can read the YAML and know what will happen. The cost is a second stack that has to be running: a Bun process, a database, usually Docker, and a workflow author who had to know the shape of the work before the work started.</p>
+        <p>darkrun computes the next step per tick from what is on disk, so the line can decompose into however many units the work turns out to need, route a reviewer finding back as feedback, and re-orient when inputs drift. The cost is that the engine constrains the agent rather than executing it. The gate is hard. The step inside the gate is an instruction.</p>
+        <p>The consequence nobody advertises: because darkrun does not own the session, a run that starts in Claude Code resumes in Cursor or Codex without conversion. Archon owns the session by design, so its runs live where its orchestrator lives.</p>
+      </div>
+      <figure class="rv">
+        <img src="images/07-ledger.jpg" alt="A worn steel drafting table under a single amber work lamp, holding layered blue-grey drawings, a stack of blank card tags under a rusted clip, a grease pencil, calipers, and a rubber stamp.">
+        <figcaption><b>Figure 04</b>darkrun's run state is this desk, kept in your repository: markdown you can read, diff, and review in a pull request. Archon's is a database beside your repository. Illustrative image, generated.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="determinism">
+  <span class="stationno" aria-hidden="true">04</span>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <span class="kicker">04 / The word both use</span>
+    <h2 style="margin:14px 0 26px">Determinism,<br>twice defined</h2>
+    <div class="verdict rv" style="border-left-color:var(--sodium)">
+      <p>Archon makes the path repeatable. darkrun makes the bar repeatable.</p>
+      <div class="who">Both are called determinism. Only one survives a task nobody anticipated.</div>
+    </div>
+    <div class="split" style="margin-top:clamp(28px,3.5vw,46px)">
+      <div>
+        <p>A repeatable path is worth a great deal when the job recurs: fix this class of issue, review this kind of PR, take an idea to a pull request. Nineteen bundled workflows is nineteen jobs someone already shaped for you, and that is a real gift on day one.</p>
+        <p>A repeatable bar is what you want when the job is novel. darkrun does not claim to know the steps. It claims the artifact will have been challenged by something other than its author, reviewed by an agent that did not write it, and stopped at a gate where a human said continue. That claim holds on work no one wrote a workflow for.</p>
+      </div>
+      <div>
+        <p>Archon can express darkrun's bar as a workflow. It cannot make the bar unavoidable, because the whole product premise is that you author the graph. Opt-in quality is quality that gets skipped under deadline.</p>
+        <p>darkrun can express Archon's paths as factories, and does, but it ships two of them against nineteen. That gap is real and it is the sort of gap a community fills, which is exactly the resource darkrun does not have yet.</p>
+      </div>
+    </div>
+
+    <div class="diagram rv">
+      <div class="dg-t">The line, and the machine every station walks</div>
+      <svg viewBox="0 0 980 200" role="img" aria-label="Diagram: the six stations Frame, Specify, Shape, Build, Prove and Harden, each separated by a gate, above the six-phase machine each station walks.">
+        <text x="0" y="12" fill="#5d6b78" font-size="10" letter-spacing="2">ORDERED BY THE COST OF LATE DISCOVERY</text>
+        <g>
+          <rect x="0" y="26" width="140" height="46" fill="#141a21" stroke="#2b3742"/><text x="14" y="54" fill="#e7edf3" font-size="12">frame</text>
+          <rect x="168" y="26" width="140" height="46" fill="#141a21" stroke="#2b3742"/><text x="182" y="54" fill="#e7edf3" font-size="12">specify</text>
+          <rect x="336" y="26" width="140" height="46" fill="#141a21" stroke="#2b3742"/><text x="350" y="54" fill="#e7edf3" font-size="12">shape</text>
+          <rect x="504" y="26" width="140" height="46" fill="#141a21" stroke="#2b3742"/><text x="518" y="54" fill="#e7edf3" font-size="12">build</text>
+          <rect x="672" y="26" width="140" height="46" fill="#141a21" stroke="#2b3742"/><text x="686" y="54" fill="#e7edf3" font-size="12">prove</text>
+          <rect x="840" y="26" width="140" height="46" fill="#141a21" stroke="#2b3742"/><text x="854" y="54" fill="#e7edf3" font-size="12">harden</text>
+        </g>
+        <g fill="#0e1217" stroke="#5fd7ff">
+          <path d="M154 39 L164 49 L154 59 L144 49 z"/><path d="M322 39 L332 49 L322 59 L312 49 z"/>
+          <path d="M490 39 L500 49 L490 59 L480 49 z"/><path d="M658 39 L668 49 L658 59 L648 49 z"/>
+          <path d="M826 39 L836 49 L826 59 L816 49 z"/>
+        </g>
+        <text x="0" y="98" fill="#5fd7ff" font-size="9.5" letter-spacing="1.6">GATE: AUTO / ASK / EXTERNAL / AWAIT</text>
+        <line x1="0" y1="118" x2="980" y2="118" stroke="#232e39"/>
+        <text x="0" y="142" fill="#5d6b78" font-size="10" letter-spacing="2">INSIDE EVERY STATION</text>
+        <g font-size="11" fill="#c2ccd6">
+          <rect x="0" y="154" width="122" height="34" fill="#0e1217" stroke="#2b3742"/><text x="12" y="176">explore</text>
+          <rect x="134" y="154" width="132" height="34" fill="#0e1217" stroke="#2b3742"/><text x="146" y="176">decompose</text>
+          <rect x="278" y="154" width="300" height="34" fill="#0e1217" stroke="#b9791a"/><text x="290" y="176" fill="#f0b429">make → challenge → resolve</text>
+          <rect x="590" y="154" width="118" height="34" fill="#0e1217" stroke="#2b3742"/><text x="602" y="176">review</text>
+          <rect x="720" y="154" width="140" height="34" fill="#0e1217" stroke="#2b3742"/><text x="732" y="176">checkpoint</text>
+          <rect x="872" y="154" width="108" height="34" fill="#0e1217" stroke="#2b3742"/><text x="884" y="176">lock</text>
+        </g>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<section id="scorecard">
+  <span class="stationno" aria-hidden="true">05</span>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <span class="kicker">05 / Head to head</span>
+    <h2 style="margin:14px 0 20px">Thirteen axes,<br>called honestly</h2>
+    <p class="lede">Each row names a lead. The lead is stated in words as well as color, because a color alone is not an answer.</p>
+
+    <div class="spec rv">
+      <div class="spec-head">
+        <span class="t">Comparison, darkrun against Archon</span>
+        <span class="s">Read 2026-07-29 · lead stated per axis</span>
+      </div>
+      <table>
+        <thead><tr><th>Axis</th><th>Archon</th><th>darkrun</th><th>Lead</th></tr></thead>
+        <tbody>
+          <tr><td class="axis">Public traction</td><td class="cell">23,030 stars, 3,447 forks, 56 contributors, 1,684 commits</td><td class="cell">3 stars, 0 forks, 1 contributor</td><td><span class="lead a"><i class="sw"></i>Archon</span></td></tr>
+          <tr><td class="axis">License friction</td><td class="cell">MIT. Nothing to read, nothing to approve</td><td class="cell">FSL-1.1-ALv2, Apache 2.0 on schedule. Legal has to read it</td><td><span class="lead a"><i class="sw"></i>Archon</span></td></tr>
+          <tr><td class="axis">Category language</td><td class="cell">Owns the phrase "harness builder" and the n8n-for-development frame</td><td class="cell">Factory, Station, Unit, Pass. Distinctive, and a vocabulary to learn</td><td><span class="lead a"><i class="sw"></i>Archon</span></td></tr>
+          <tr><td class="axis">Time to first value</td><td class="cell">30 second install, 19 workflows ready to run</td><td class="cell">Setup, then concepts, then a run. zap exists but is not the front door</td><td><span class="lead a"><i class="sw"></i>Archon</span></td></tr>
+          <tr><td class="axis">Process authoring</td><td class="cell">YAML DAG, a workflow that builds workflows, a community writing more</td><td class="cell">Scaffoldable markdown factories. Two shipped: software and legal</td><td><span class="lead a"><i class="sw"></i>Archon</span></td></tr>
+          <tr><td class="axis">Development pace</td><td class="cell">56 contributors, commits today, 37 open pull requests</td><td class="cell">One person, high output, no bus factor</td><td><span class="lead a"><i class="sw"></i>Archon</span></td></tr>
+          <tr><td class="axis">Runtime footprint</td><td class="cell">Bun process, SQLite or Postgres, usually Docker, a server to keep up</td><td class="cell">One static Rust binary the agent launches. gitoxide, no C, no git CLI</td><td><span class="lead d"><i class="sw"></i>darkrun</span></td></tr>
+          <tr><td class="axis">Where the loop lives</td><td class="cell">Orchestrator drives the agent as a subprocess</td><td class="cell">Engine answers the agent inside its own session</td><td><span class="lead d"><i class="sw"></i>darkrun</span></td></tr>
+          <tr><td class="axis">Run state</td><td class="cell">14 tables in a sidecar database, invisible to code review</td><td class="cell">Markdown and JSON in the repo, diffable, reviewable in a pull request</td><td><span class="lead d"><i class="sw"></i>darkrun</span></td></tr>
+          <tr><td class="axis">Quality enforcement</td><td class="cell">Per workflow, opt in. Excellent when authored, skippable by design</td><td class="cell">Structural. Challenge every pass, Reviewer never the Worker</td><td><span class="lead d"><i class="sw"></i>darkrun</span></td></tr>
+          <tr><td class="axis">Harness portability</td><td class="cell">Owns the assistant: Claude Code, Codex, Pi</td><td class="cell">Seven harnesses, adapts its tools per harness, resumes across them</td><td><span class="lead d"><i class="sw"></i>darkrun</span></td></tr>
+          <tr><td class="axis">Domain range</td><td class="cell">AI coding, by design</td><td class="cell">Engine is domain agnostic. Software and legal factories today</td><td><span class="lead d"><i class="sw"></i>darkrun</span></td></tr>
+          <tr><td class="axis">Human in the loop</td><td class="cell">Reach: Telegram, Slack, Discord, GitHub webhooks, no install</td><td class="cell">Depth: desktop app, iOS, web, relay tunnel, annotations and pickers</td><td><span class="lead e"><i class="sw"></i>Even, split</span></td></tr>
+          <tr><td class="axis">Parallelism</td><td class="cell">A worktree per run, five fixes at once</td><td class="cell">Units fan out per station, worktree isolation per agent</td><td><span class="lead e"><i class="sw"></i>Even</span></td></tr>
+        </tbody>
+      </table>
+      <div class="tally">
+        <span>Archon leads <b>6</b></span>
+        <span>darkrun leads <b>6</b></span>
+        <span>Even <b>2</b></span>
+        <span>Every Archon lead is commercial. Every darkrun lead is architectural.</span>
+      </div>
+    </div>
+    <p class="small" style="margin-top:18px">Fourteen rows, thirteen distinct axes: parallelism and human-in-the-loop are both scored even for different reasons. A tie on count is not a tie in the market. Commercial leads compound on their own; architectural leads only pay once someone shows up to use them.</p>
+  </div>
+</section>
+
+<section id="wins">
+  <span class="stationno" aria-hidden="true">06</span>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <span class="kicker cy">06 / Where darkrun genuinely wins</span>
+    <h2 style="margin:14px 0 26px">Six things they<br>cannot copy cheaply</h2>
+    <ul class="plain" style="margin-top:clamp(20px,2.5vw,34px)">
+      <li class="rv"><h3>The run is a git artifact</h3><p>Every decision, unit, review finding, and gate lives in markdown inside the repository, so process history travels with the code, shows up in a pull request, and can be read a year later by someone who was not there. Archon's equivalent is in a database next to the repo. This is the sharpest true claim darkrun has and it is barely used in the pitch.</p></li>
+      <li class="rv"><h3>One binary, no second stack</h3><p>No Bun, no Node, no SQLite or Postgres, no Docker, no server to keep running. The agent launches a static Rust binary that speaks MCP and exits. For a team that will not stand up infrastructure to try a dev tool, this is the difference between an evaluation and no evaluation.</p></li>
+      <li class="rv"><h3>Generator and evaluator are separated by construction</h3><p>Make, Challenge, Resolve inside every pass, and Reviewers that are different agents from the Workers. A model does not grade its own first draft. Archon can write this as a workflow, and their five-reviewer PR review is close, but per workflow means optional, and optional means skipped when it matters most.</p></li>
+      <li class="rv"><h3>It rides your harness instead of replacing it</h3><p>Seven harnesses, tools trimmed to each one's limits, and a run that resumes in a different tool than it started in because the state is on disk and the manager is a pure read of it. Archon has to own the assistant to run its graph.</p></li>
+      <li class="rv"><h3>Review has depth, not just a notification</h3><p>Diff review, annotations, directions, pickers, and questions rendered from the real API types on desktop, on iOS, and over a relay tunnel. Approving is not a thumbs up on a chat message, it is a review surface. Their reach is better. Your review is better.</p></li>
+      <li class="rv"><h3>The engine is not about code</h3><p>The factory is a methodology container and the software factory is one instance. A legal factory already ships. Archon is AI coding by design, which is a sharper wedge today and a smaller ceiling later.</p></li>
+    </ul>
+  </div>
+  <div class="split even bleed" style="margin-top:clamp(34px,4vw,56px);gap:1px">
+    <figure class="rv"><img src="images/06-billet.jpg" alt="A single forged steel billet cooling on a dark workbench, struck with a blank die stamp, lit by a cold cyan edge light and a warm amber lamp off frame."><figcaption><b>Figure 05</b>One artifact, stamped and sealed. No runtime to install around it. Illustrative image, generated.</figcaption></figure>
+    <figure class="rv"><img src="images/04-review-booth.jpg" alt="A gloved hand holds a rugged handheld terminal glowing cyan inside a dark control booth, with the plant floor almost black through the window behind."><figcaption><b>Figure 06</b>The gate in a hand. Depth of review is darkrun's answer to their breadth of reach. Illustrative image, generated.</figcaption></figure>
+  </div>
+</section>
+
+<section id="theirs">
+  <span class="stationno" aria-hidden="true">07</span>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <span class="kicker">07 / Where Archon wins</span>
+    <h2 style="margin:14px 0 26px">Six things<br>worth respecting</h2>
+    <ul class="plain" style="margin-top:clamp(20px,2.5vw,34px)">
+      <li class="rv"><h3>Distribution, which is the only one that matters today</h3><p>23,030 stars, 3,447 forks, 56 contributors, 193 open issues from people actually using it. They also proved they can carry an audience through a full rewrite: v1 was a Python task-management and RAG tool, and the stars followed the pivot.</p></li>
+      <li class="rv"><h3>MIT</h3><p>No license conversation, no procurement question, no hesitation. FSL is a defensible commercial choice and it will still lose evaluations that never reach you, silently, with no feedback.</p></li>
+      <li class="rv"><h3>They named the category</h3><p>"The first open-source harness builder for AI coding" is a good line and it is theirs. Anyone searching the concept lands on their framing, and darkrun then has to be explained in terms of it.</p></li>
+      <li class="rv"><h3>Zero install human loops</h3><p>Telegram, Slack, Discord, and GitHub webhooks put approvals where people already are. A native app is a better review surface and a worse place to be found at 9pm on a phone that has never installed it.</p></li>
+      <li class="rv"><h3>Nineteen workflows is nineteen answers</h3><p>Fix an issue, review a PR, take an idea to a PR, resolve conflicts, refactor safely, run an interactive PRD. New users get value before they get concepts. That ordering is worth copying.</p></li>
+      <li class="rv"><h3>A community that writes the product for them</h3><p>A workflow that builds workflows plus 56 contributors means their surface grows without their founder. One person shipping 155,000 lines of Rust is impressive and it is still one person.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section id="threats">
+  <span class="stationno" aria-hidden="true">08</span>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <span class="kicker">08 / Threats, with triggers</span>
+    <h2 style="margin:14px 0 26px">What to watch<br>for, exactly</h2>
+    <ul class="plain" style="margin-top:clamp(20px,2.5vw,34px)">
+      <li class="rv"><h3>They absorb the quality machinery</h3><p>Nothing stops a YAML author from adding a challenge node and a distinct evaluator node. The idea is not defensible, only the enforcement is, and enforcement is a weaker story to tell than a feature.</p><span class="watch"><b>Trigger</b> a bundled workflow that separates generator from evaluator by default</span></li>
+      <li class="rv"><h3>They ship an MCP mode</h3><p>If Archon becomes agent-callable, darkrun's "no second process" edge shrinks to the runtime footprint alone, and the footprint argument is much weaker on its own.</p><span class="watch"><b>Trigger</b> an archon mcp command, or an MCP server in their docs</span></li>
+      <li class="rv"><h3>The vocabulary tax</h3><p>Station, Unit, Pass, Baton, Drift is precise and it is also six new words before the first win. Workflow, node, step costs nothing to learn.</p><span class="watch"><b>Trigger</b> a user describing darkrun in their own words and getting the model wrong</span></li>
+      <li class="rv"><h3>The license quietly loses the evaluation</h3><p>This is a decided question and the cost is still real: FSL rejections happen offscreen, so you never learn which teams walked.</p><span class="watch"><b>Trigger</b> any inbound that asks whether the core will ever be Apache before it is</span></li>
+      <li class="rv"><h3>Solo bandwidth against 56 contributors</h3><p>Their surface grows while they sleep. Yours grows when you work. Pick the axes where one person with a compiler beats a crowd, and refuse the rest.</p><span class="watch"><b>Trigger</b> their release cadence overtaking yours on a feature you consider yours</span></li>
+    </ul>
+  </div>
+</section>
+
+<section id="moves">
+  <span class="stationno" aria-hidden="true">09</span>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <span class="kicker cy">09 / What to do</span>
+    <h2 style="margin:14px 0 26px">Six moves,<br>in dependency order</h2>
+    <ol class="moves">
+      <li class="rv"><h3>Lead with the git artifact claim</h3><p>"Your process history ships with your repo and is reviewable in a pull request." Nobody else can say it. Put it above the factory metaphor on every surface, because it needs no vocabulary to understand.</p></li>
+      <li class="rv"><h3>Make zap the front door</h3><p>First value before first concept. One command, one unit, a real result, nothing written under .darkrun/ unless they want it. Stations, Units, and Passes are the second conversation, not the first.</p></li>
+      <li class="rv"><h3>Claim the bar, not the builder</h3><p>Do not compete for "harness builder", they have it. Compete for the guarantee: challenged by someone other than the author, reviewed by an agent that did not write it, stopped where a human decided. Say it as a promise about outcomes.</p></li>
+      <li class="rv"><h3>Import their YAML as a factory</h3><p>One command that turns an Archon workflow into a darkrun factory turns 23,000 people from a wall into a funnel, and it costs one converter plus a mapping doc.</p></li>
+      <li class="rv"><h3>Buy their reach cheaply</h3><p>A GitHub App that posts the gate and a Slack approval that resolves it. The native apps stay the deep surface. Reach is where their humans already are, and it is a bounded amount of work to be there too.</p></li>
+      <li class="rv"><h3>Publish this comparison yourself</h3><p>Challengers who name the incumbent fairly get quoted. A table you wrote, with their wins listed accurately, is more persuasive than one they write about you, and it forces the architectural axes into the conversation.</p></li>
+    </ol>
+
+    <div class="dont rv">
+      <span class="kicker">Do not</span>
+      <p style="margin-top:12px"><strong>Do not chase nineteen workflows.</strong> A menu is not a moat, and matching their library is a race against 56 contributors on the one axis where headcount decides. Ship the two factories deep enough that the third is obviously scaffoldable, and let the interop path do the rest.</p>
+      <p style="margin-bottom:0"><strong>Do not rebuild an orchestrator.</strong> Being the thing the agent calls, rather than the thing that calls the agent, is the whole differentiated bet. Any roadmap item that requires a long running server should be treated as a request to become a worse Archon.</p>
+    </div>
+  </div>
+
+  <figure class="fig-full rv">
+    <img src="images/08-dawn.jpg" alt="Cold blue dawn over an industrial yard: a long dark plant runs quietly under amber lamps with one cyan-lit window, while a huge brightly lit rival plant blazes small on the horizon.">
+    <figcaption><b>Figure 07</b>The honest picture. Your line runs, and theirs is the one on the horizon with the lights on. The architecture argument is already won; the distribution argument has not been started. Illustrative image, generated.</figcaption>
+  </figure>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="stripe-rule"></div>
+    <h3>Sources and method</h3>
+    <div class="src">
+      <div>
+        <p><strong>Archon</strong></p>
+        <ul>
+          <li>github.com/coleam00/Archon, README on dev, read 2026-07-29</li>
+          <li>GitHub API: stars, forks, contributors, commit count, open issues, license, created and pushed dates</li>
+          <li>archon.diy for install and platform setup claims</li>
+        </ul>
+      </div>
+      <div>
+        <p><strong>darkrun</strong></p>
+        <ul>
+          <li>Working tree at commit 1de885f: 17 crates, 232 Rust files, 154,877 lines, 5,850 test cases across 177 files</li>
+          <li>64 MCP tool names in darkrun-mcp, 19 slash commands, 7 harnesses, 2 factories</li>
+          <li>docs/other-harnesses, the harness blog post, LICENSE (FSL-1.1-ALv2)</li>
+        </ul>
+      </div>
+      <div>
+        <p><strong>Imagery</strong></p>
+        <ul>
+          <li>All seven figures are AI generated illustrations, not photographs of any real facility, product, or person</li>
+          <li>Art direction and palette taken from darkrun's own product source: near-black hall, cyan signal, sodium amber, oxide red</li>
+          <li>Identity swatches validated for colour vision deficiency separation against the dark surface</li>
+        </ul>
+      </div>
+    </div>
+    <p class="small">Internal competitive analysis. Figures were accurate at the time of reading and both projects are moving; re-read the API numbers before quoting them.</p>
+  </div>
+</footer>
+</main>
+
+<div id="lb" role="dialog" aria-modal="true" aria-label="Enlarged figure"><img alt=""><span class="hint">Click anywhere or press escape to close</span></div>
+
+<script>
+(function(){
+  var bar=document.getElementById('progress');
+  function prog(){
+    var h=document.documentElement.scrollHeight-window.innerHeight;
+    bar.style.width=(h>0?(window.scrollY/h)*100:0)+'%';
+  }
+  window.addEventListener('scroll',prog,{passive:true});
+  window.addEventListener('resize',prog);prog();
+
+  var links=[].slice.call(document.querySelectorAll('nav#toc a'));
+  var secs=links.map(function(a){return document.querySelector(a.getAttribute('href'));});
+  function spy(){
+    var y=window.scrollY+window.innerHeight*0.32,cur=-1;
+    secs.forEach(function(s,i){if(s&&s.offsetTop<=y)cur=i;});
+    links.forEach(function(a,i){a.classList.toggle('on',i===cur);});
+  }
+  window.addEventListener('scroll',spy,{passive:true});spy();
+
+  var rv=[].slice.call(document.querySelectorAll('.rv'));
+  if('IntersectionObserver' in window && !window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+    var io=new IntersectionObserver(function(es){
+      es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}});
+    },{rootMargin:'0px 0px -8% 0px',threshold:0.06});
+    rv.forEach(function(el){io.observe(el);});
+  } else { rv.forEach(function(el){el.classList.add('in');}); }
+
+  var lb=document.getElementById('lb'),lbImg=lb.querySelector('img');
+  document.querySelectorAll('figure img').forEach(function(img){
+    img.style.cursor='zoom-in';
+    img.addEventListener('click',function(){lbImg.src=img.src;lbImg.alt=img.alt;lb.classList.add('on');});
+  });
+  lb.addEventListener('click',function(){lb.classList.remove('on');});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')lb.classList.remove('on');});
+})();
+</script>
+</body>
+</html>
