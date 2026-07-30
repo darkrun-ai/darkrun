@@ -609,12 +609,41 @@ pre, code, textarea, input, .dr-annotate-text,
 /// sidebar drawer.
 #[component]
 fn Toolbar(drawer_open: Signal<bool>, selection: Signal<Selection>) -> Element {
+    // Drag the window by the toolbar. wry does NOT honor `-webkit-app-region:drag`
+    // (that's an Electron/Chromium feature), and on macOS the native title bar is
+    // hidden (transparent + fullsize-content), so without this the window can't be
+    // moved at all. tao's `drag_window()` starts a native window drag on mousedown.
+    let window = dioxus::desktop::use_window();
+
+    // macOS FULLSCREEN: the traffic lights are gone, so the 78px gutter reserved
+    // for them is just a hole with the wordmark floating in it. Track the window's
+    // fullscreen state and drop the gutter when there is nothing to clear. tao
+    // exposes this as state, not as a Dioxus-visible event, so poll it — cheap
+    // (a window-property read) and it also catches the OS-driven exits (green
+    // button, Mission Control, Ctrl+Cmd+F) that no in-app control fires.
+    let fullscreen = use_signal(|| false);
+    {
+        let window = window.clone();
+        let mut fullscreen = fullscreen;
+        use_future(move || {
+            let window = window.clone();
+            async move {
+                loop {
+                    let now = window.fullscreen().is_some();
+                    if now != *fullscreen.peek() {
+                        fullscreen.set(now);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                }
+            }
+        });
+    }
+
     // On macOS the title bar is transparent + fullsize-content, so this toolbar
     // sits at the very top with the traffic lights floating over its left — pad
-    // left to clear them. The bar acts as the window drag handle via tao's
-    // `drag_window()` on mousedown (wry ignores CSS `-webkit-app-region`); the
-    // buttons stop propagation so a press on them doesn't start a drag.
-    let left_pad = if cfg!(target_os = "macos") { 78 } else { 14 };
+    // left to clear them. In fullscreen there are no traffic lights, so the
+    // wordmark moves back to the normal edge padding.
+    let left_pad = if cfg!(target_os = "macos") && !fullscreen() { 78 } else { 14 };
     // Edge-to-edge: the bar's BACKGROUND bleeds into the top (status bar / notch)
     // and side safe areas, but its content is padded clear of them via
     // env(safe-area-inset-*) so nothing is obstructed. The height grows by the top
@@ -652,11 +681,6 @@ fn Toolbar(drawer_open: Signal<bool>, selection: Signal<Selection>) -> Element {
 
     let mut drawer_open = drawer_open;
     let mut selection = selection;
-    // Drag the window by the toolbar. wry does NOT honor `-webkit-app-region:drag`
-    // (that's an Electron/Chromium feature), and on macOS the native title bar is
-    // hidden (transparent + fullsize-content), so without this the window can't be
-    // moved at all. tao's `drag_window()` starts a native window drag on mousedown.
-    let window = dioxus::desktop::use_window();
     rsx! {
         header {
             style: "{bar}",

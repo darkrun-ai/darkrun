@@ -101,6 +101,12 @@ pub fn StationStrip(
     /// Optional click handler, fired with the station's zero-based index.
     #[props(default)]
     on_select: Option<EventHandler<usize>>,
+    /// The station the surface is currently SHOWING, when that is not the run's
+    /// current station — a reader parked on an earlier station. Rides a ring on
+    /// the marker so the line always says which station you are looking at, not
+    /// only which one the run is on.
+    #[props(default)]
+    viewing: Option<usize>,
 ) -> Element {
     let root = "display:flex;align-items:flex-start;justify-content:center;gap:0;padding:6px 0 2px;";
     let count = stations.len();
@@ -172,9 +178,20 @@ pub fn StationStrip(
                         ),
                         StationStatus::Pending => tokens::var::BORDER_STRONG.to_string(),
                     };
+                    // The last station has no connector — but the node is still
+                    // RENDERED (hidden), because every station item must keep the
+                    // same child list. See the `if`-free note on the item below.
                     let conn_style = format!(
                         "position:absolute;top:16px;left:50%;width:100%;height:3px;z-index:1;\
-                         background:{conn_bg};"
+                         background:{conn_bg};{hide}",
+                        hide = if is_last { "display:none;" } else { "" },
+                    );
+                    let fbdot_style = format!(
+                        "position:absolute;top:-2px;right:34px;width:10px;height:10px;\
+                         border-radius:50%;background:{warn};border:2px solid {base};z-index:3;{hide}",
+                        warn = tokens::var::STATUS_WARN,
+                        base = tokens::var::SURFACE_BASE,
+                        hide = if has_feedback { "" } else { "display:none;" },
                     );
 
                     let item_style = format!(
@@ -182,9 +199,22 @@ pub fn StationStrip(
                          position:relative;min-width:118px;{cursor}",
                         cursor = if clickable { "cursor:pointer;" } else { "" },
                     );
+                    // The station being READ (parked on an earlier station) gets
+                    // a dotted ring under its label so the line distinguishes
+                    // "what I am looking at" from "where the run is".
+                    let is_viewing = viewing == Some(i);
                     let label_style = format!(
-                        "font-family:{sans};font-size:12px;color:{label_color};",
+                        "font-family:{sans};font-size:12px;color:{color};{viewing}",
                         sans = tokens::FONT_SANS,
+                        color = if is_viewing { tokens::var::TEXT } else { label_color },
+                        viewing = if is_viewing {
+                            format!(
+                                "border-bottom:2px dotted {a};font-weight:700;",
+                                a = tokens::var::ACCENT,
+                            )
+                        } else {
+                            String::new()
+                        },
                     );
                     let inner_style = if matches!(status, StationStatus::Current) {
                         "transform:rotate(-45deg);display:block;"
@@ -202,23 +232,33 @@ pub fn StationStrip(
                             role: "listitem",
                             "data-status": status.slug(),
                             "data-station": "{name}",
+                            "data-viewing": if is_viewing { "true" } else { "false" },
+                            title: if clickable { format!("open {name}") } else { name.clone() },
                             style: "{item_style}",
                             onclick: move |_| {
                                 if let Some(h) = &handler {
                                     h.call(i);
                                 }
                             },
-                            if !is_last {
-                                span { class: "dr-station-conn", style: "{conn_style}" }
+                            // NOTE: no `if` around either of these. The strip is
+                            // re-rendered in place every time the run advances, and
+                            // a conditional child makes the item's child LIST change
+                            // shape mid-life — a live window then ends up patching
+                            // siblings by the wrong index and the rail loses the
+                            // segments around the station that just changed. Both
+                            // nodes are always present and hide via `display:none`,
+                            // so an advance only ever patches a style string.
+                            span {
+                                class: "dr-station-conn",
+                                "aria-hidden": "true",
+                                "data-hidden": if is_last { "true" } else { "false" },
+                                style: "{conn_style}",
                             }
-                            if has_feedback {
-                                span {
-                                    class: "dr-station-fbdot",
-                                    title: "pending feedback",
-                                    style: "position:absolute;top:-2px;right:34px;width:10px;height:10px;\
-                                            border-radius:50%;background:{tokens::var::STATUS_WARN};\
-                                            border:2px solid {tokens::var::SURFACE_BASE};z-index:3;",
-                                }
+                            span {
+                                class: "dr-station-fbdot",
+                                title: "pending feedback",
+                                "data-hidden": if has_feedback { "false" } else { "true" },
+                                style: "{fbdot_style}",
                             }
                             div { class: "dr-station-mark", style: "{mark_style}",
                                 span { style: "{inner_style}", "{glyph}" }

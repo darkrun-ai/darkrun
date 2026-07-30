@@ -155,6 +155,105 @@ fn renders_station_strip_and_annotate() {
     assert!(!html.is_empty());
 }
 
+/// Every station item renders the SAME child list whatever its status and
+/// whatever its feedback flag: one connector node and one feedback-dot node,
+/// always present, hidden via style. The strip is re-rendered in place as a run
+/// advances, and a child that appears/disappears makes the item's children shift
+/// index under the renderer's patch — which is how the rail lost the segments
+/// around the station that had just changed. Keep the shape constant.
+#[test]
+fn station_strip_child_nodes_are_structurally_constant() {
+    fn count(html: &str, needle: &str) -> usize {
+        html.matches(needle).count()
+    }
+    fn strip(items: Vec<StationItem>) -> String {
+        // Leak so the fn-pointer component can read a per-case value.
+        let items: &'static Vec<StationItem> = Box::leak(Box::new(items));
+        let mut dom = VirtualDom::new_with_props(
+            |props: Vec<StationItem>| rsx! { StationStrip { stations: props } },
+            items.clone(),
+        );
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    // The state the reported screenshot was in: two done, one current with open
+    // feedback, three pending.
+    let live = strip(vec![
+        StationItem::new("frame", StationStatus::Done),
+        StationItem::new("specify", StationStatus::Done),
+        StationItem::with_feedback("shape", StationStatus::Current),
+        StationItem::new("build", StationStatus::Pending),
+        StationItem::new("prove", StationStatus::Pending),
+        StationItem::new("harden", StationStatus::Pending),
+    ]);
+    // The same line one station earlier, with the feedback flag on a different
+    // station — the transition that used to blank the rail.
+    let earlier = strip(vec![
+        StationItem::new("frame", StationStatus::Done),
+        StationItem::with_feedback("specify", StationStatus::Current),
+        StationItem::new("shape", StationStatus::Pending),
+        StationItem::new("build", StationStatus::Pending),
+        StationItem::new("prove", StationStatus::Pending),
+        StationItem::new("harden", StationStatus::Pending),
+    ]);
+
+    for (label, html) in [("live", &live), ("earlier", &earlier)] {
+        assert_eq!(
+            count(html, "dr-station-conn"),
+            6,
+            "{label}: one connector node per station (the last one hidden): {html}"
+        );
+        assert_eq!(
+            count(html, "dr-station-fbdot"),
+            6,
+            "{label}: one feedback-dot node per station: {html}"
+        );
+        // Exactly one connector is hidden — the last station's.
+        assert_eq!(
+            count(html, r#"data-hidden="true""#),
+            6,
+            "{label}: the last connector plus the five dots without feedback"
+        );
+    }
+    // The rail is drawn for the station BEFORE the current one and for the
+    // current one itself — the two segments that went missing.
+    assert!(
+        live.contains("var(--dr-status-ok)"),
+        "a done station's rail keeps the ok hue: {live}"
+    );
+    assert!(
+        live.contains("linear-gradient(90deg,var(--dr-accent)"),
+        "the current station's rail keeps its gradient: {live}"
+    );
+}
+
+/// A clickable strip marks which station is being READ, so parking on an earlier
+/// station is visible on the line itself.
+#[test]
+fn station_strip_marks_the_station_being_viewed() {
+    fn App() -> Element {
+        rsx! {
+            StationStrip {
+                stations: vec![
+                    StationItem::new("frame", StationStatus::Done),
+                    StationItem::new("specify", StationStatus::Done),
+                    StationItem::new("shape", StationStatus::Current),
+                ],
+                viewing: Some(1),
+                on_select: move |_| {},
+            }
+        }
+    }
+    let html = render(App);
+    assert_eq!(
+        html.matches(r#"data-viewing="true""#).count(),
+        1,
+        "exactly the viewed station is flagged: {html}"
+    );
+    assert!(html.contains("cursor:pointer"), "a selectable strip is clickable: {html}");
+}
+
 #[test]
 fn renders_proof_panel_for_each_kind() {
     fn web() -> ProofView {

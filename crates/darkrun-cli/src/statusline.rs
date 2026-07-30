@@ -668,6 +668,85 @@ fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), Dyn> {
     Ok(())
 }
 
+/// Shell-quote a path for a settings `command` string (paths can carry spaces —
+/// `/Applications/Darkrun AI.app/...` and npm caches both do).
+fn shell_quote(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if s.chars().all(|c| c.is_alphanumeric() || "-_./".contains(c)) {
+        s.into_owned()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// Whether `program` can actually be launched — the smoke test that separates a
+/// working launcher from a plugin shim whose native binary was never vendored.
+fn program_runs(program: &Path) -> bool {
+    std::process::Command::new(program)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// The command to write into `statusLine` — always an ABSOLUTE path.
+///
+/// A bare `darkrun statusline` only works when a directory holding a `darkrun`
+/// launcher happens to be on the PATH Claude Code runs the status line with, and
+/// that is not guaranteed: a project whose plugin bin dir is missing from PATH
+/// gets a command-not-found and Claude renders a BLANK line with no error
+/// anywhere. So resolve a real, launchable path at install time instead:
+///
+/// 1. the plugin's own launcher (`$CLAUDE_PLUGIN_ROOT/bin/darkrun`) when it
+///    exists AND runs — it survives the native binary moving underneath it,
+/// 2. otherwise this very executable, which by definition runs,
+/// 3. otherwise the bare name, so we still write something usable.
+pub fn default_command() -> String {
+    let plugin_launcher = std::env::var_os("CLAUDE_PLUGIN_ROOT")
+        .map(PathBuf::from)
+        .map(|root| root.join("bin").join(exe_name()))
+        .filter(|p| p.is_file() && program_runs(p));
+    let program = plugin_launcher
+        .or_else(|| std::env::current_exe().ok().and_then(|p| p.canonicalize().ok()));
+    match program {
+        Some(p) => format!("{} statusline", shell_quote(&p)),
+        None => "darkrun statusline".to_string(),
+    }
+}
+
+/// The launcher's file name for this platform.
+fn exe_name() -> &'static str {
+    if cfg!(windows) {
+        "darkrun.cmd"
+    } else {
+        "darkrun"
+    }
+}
+
+/// The program a settings `command` string invokes, resolved to a real file —
+/// an absolute/relative path as written, or a bare name looked up on `PATH`.
+/// `None` means Claude Code would get a command-not-found (a blank status line).
+fn resolve_program(command: &str) -> Option<PathBuf> {
+    let raw = command.trim();
+    // The program is the first shell word; honor a single- or double-quoted one
+    // so a spaced install path resolves the same way the shell would run it.
+    let program = match raw.chars().next() {
+        Some(q @ ('\'' | '"')) => raw[1..].split(q).next().unwrap_or_default().to_string(),
+        _ => raw.split_whitespace().next().unwrap_or_default().to_string(),
+    };
+    if program.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(&program);
+    if program.contains('/') || program.contains('\\') {
+        return path.is_file().then_some(path);
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(&program))
+        .find(|p| p.is_file())
+}
+
 /// Wire Claude Code's `statusLine` to `darkrun statusline`, saving any existing
 /// status line as a restorable fallback.
 pub fn install(global: bool, repo: &Path, command: &str) -> Result<(), Dyn> {
@@ -692,6 +771,15 @@ pub fn install(global: bool, repo: &Path, command: &str) -> Result<(), Dyn> {
         settings_file.display(),
         if global { "global" } else { "project" }
     );
+    println!("  command: {command}");
+    // A status line that cannot be launched fails SILENTLY — Claude Code just
+    // renders nothing. Say so here, at the only moment anyone is watching.
+    if resolve_program(command).is_none() {
+        eprintln!(
+            "warning: `{command}` does not resolve to a program on this PATH, so Claude Code \
+             would render a blank status line. Re-run with `--command '<absolute path> statusline'`."
+        );
+    }
     Ok(())
 }
 
@@ -715,9 +803,10 @@ pub fn uninstall(global: bool, repo: &Path) -> Result<(), Dyn> {
 
 #[cfg(test)]
 mod tests {
-    use super::{C_TRACK_DONE, 
-        fallback_path, install, osc8, paint, parse_git_url, phase_chrome, read_json,
-        render, settings_path, uninstall, web_base, write_json,
+    use super::{C_TRACK_DONE,
+        default_command, fallback_path, install, osc8, paint, parse_git_url, phase_chrome,
+        read_json, render, resolve_program, settings_path, shell_quote, uninstall, web_base,
+        write_json,
         ITEM_LEADER, PIP_DONE, PIP_PENDING,
     };
     use darkrun_core::domain::StationPhase;
@@ -979,6 +1068,52 @@ mod tests {
         uninstall(false, clean.path()).unwrap();
         let gone = read_json(&settings_path(false, clean.path()).unwrap()).unwrap();
         assert!(gone.get("statusLine").is_none(), "no fallback → the key is removed");
+    }
+
+    /// The installed command must be an ABSOLUTE path to a real program. A bare
+    /// `darkrun statusline` only resolves when the PATH Claude Code runs the
+    /// status line with happens to carry a darkrun launcher; when it does not,
+    /// the line renders blank with no error anywhere — which is exactly how a
+    /// project ends up with a dead status line.
+    #[test]
+    fn default_command_is_an_absolute_launchable_path() {
+        let command = default_command();
+        assert!(
+            command.ends_with(" statusline"),
+            "the command still invokes the statusline subcommand: {command}"
+        );
+        let program = resolve_program(&command).expect("the default command resolves to a program");
+        assert!(program.is_absolute(), "an absolute path, not a bare name: {program:?}");
+        assert!(program.is_file(), "and it exists: {program:?}");
+    }
+
+    #[test]
+    fn resolve_program_reads_paths_bare_names_and_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaced = dir.path().join("dark run");
+        std::fs::write(&spaced, "#!/bin/sh\n").unwrap();
+        // A quoted, spaced path resolves the way the shell would run it.
+        let quoted = format!("{} statusline", shell_quote(&spaced));
+        assert!(quoted.starts_with('\''), "a spaced path is quoted: {quoted}");
+        assert_eq!(resolve_program(&quoted).as_deref(), Some(spaced.as_path()));
+        // A bare name that is on no PATH entry resolves to nothing — the case
+        // that silently blanks the status line.
+        assert!(resolve_program("darkrun-does-not-exist statusline").is_none());
+        // A path that does not exist is not a program either.
+        assert!(resolve_program("/nope/darkrun statusline").is_none());
+        assert!(resolve_program("").is_none());
+    }
+
+    #[test]
+    fn install_writes_the_command_verbatim_and_still_records_a_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let exe = std::env::current_exe().unwrap();
+        let command = format!("{} statusline", shell_quote(&exe));
+        install(false, repo, &command).unwrap();
+        let after = read_json(&settings_path(false, repo).unwrap()).unwrap();
+        assert_eq!(after["statusLine"]["command"], serde_json::json!(command));
+        assert_eq!(after["statusLine"]["type"], "command");
     }
 
     #[test]
