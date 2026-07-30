@@ -300,9 +300,12 @@ enum StatuslineAction {
         /// Wire the user-level `~/.claude/settings.json` instead of the project.
         #[arg(long)]
         global: bool,
-        /// The command Claude Code runs (override for plugin installs).
-        #[arg(long, default_value = "darkrun statusline")]
-        command: String,
+        /// The command Claude Code runs. Defaults to an ABSOLUTE path to this
+        /// launcher — a bare `darkrun` only works when the PATH Claude Code
+        /// runs the status line with happens to carry it, and when it does not
+        /// the line silently renders blank.
+        #[arg(long)]
+        command: Option<String>,
     },
     /// Restore the status line that was in place before `install`.
     Uninstall {
@@ -603,6 +606,7 @@ fn statusline_command(
         }
         Some(StatuslineAction::Install { global, command }) => {
             let repo_root = resolve_repo(repo)?;
+            let command = command.unwrap_or_else(statusline::default_command);
             statusline::install(global, &repo_root, &command)
         }
         Some(StatuslineAction::Uninstall { global }) => {

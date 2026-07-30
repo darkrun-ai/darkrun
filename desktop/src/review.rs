@@ -298,6 +298,36 @@ fn review_body(
         &feedback_stations,
     );
 
+    // --- Station navigation --------------------------------------------------
+    // The strip is a CONTROL, not just a readout: clicking a station parks the
+    // body on it so its brief, its outcome, and its feedback are readable
+    // without leaving the live run. `None` follows the live station — the
+    // default, and the only state that can decide a gate.
+    let viewed_station = use_signal(|| None::<String>);
+    let station_names: Vec<String> = stations.iter().map(|s| s.name.clone()).collect();
+    let parked: Option<String> = viewed_station
+        .read()
+        .clone()
+        .filter(|s| Some(s.as_str()) != station.as_deref())
+        .filter(|s| station_names.iter().any(|n| n == s));
+    let viewing_idx = parked
+        .as_ref()
+        .and_then(|p| station_names.iter().position(|n| n == p));
+    let select_station = {
+        let names = station_names.clone();
+        let live = station.clone();
+        let mut viewed = viewed_station;
+        move |i: usize| {
+            let Some(name) = names.get(i).cloned() else { return };
+            // Clicking the live station (or the one already open) returns to it.
+            if Some(name.as_str()) == live.as_deref() || viewed.read().as_deref() == Some(&name) {
+                viewed.set(None);
+            } else {
+                viewed.set(Some(name));
+            }
+        }
+    };
+
     // --- Units + outputs (the tab bodies) -----------------------------------
     let units: Vec<map::UnitView> = review.units.iter().map(map::unit_view).collect();
     let outputs = review.output_artifacts.clone();
@@ -361,6 +391,8 @@ fn review_body(
             feedback_count: open_total as u32,
             feedback_alert: open_blockers > 0,
             on_open_feedback: move |_| inbox_sig.set(!inbox_is_open),
+            viewing: viewing_idx,
+            on_select_station: select_station,
         }
 
         // ── The feedback inbox (severity-grouped), toggled from the header ──
@@ -411,7 +443,27 @@ fn review_body(
             }
         }
 
+        // ── Parked on another station: its record, read-only ────────────────
+        if let Some(parked_station) = parked.clone() {
+            StationRecord {
+                key: "{parked_station}",
+                cfg: cfg.clone(),
+                run: run_slug.clone(),
+                station: parked_station.clone(),
+                live_station: station.clone(),
+                brief: review.station_briefs.get(&parked_station).cloned(),
+                outcome: review.station_outcomes.get(&parked_station).cloned(),
+                observation: review.station_observations.get(&parked_station).cloned(),
+                merged: review
+                    .station_states
+                    .iter()
+                    .any(|s| s.station == parked_station && s.merged_into_main),
+                viewed: viewed_station,
+            }
+        }
+
         // ── The tabbed station body ─────────────────────────────────────────
+        if parked.is_none() {
         Card {
             TabBar {
                 tabs,
@@ -437,9 +489,12 @@ fn review_body(
                 }
             }
         }
+        }
 
         // ── The single, severity-driven checkpoint control set ──────────────
-        if gate_open {
+        // Only ever on the LIVE station: a gate is decided where the run is,
+        // never from a station you are reading back.
+        if gate_open && parked.is_none() {
             // Objective evidence first: the proof's numbers (or, at a prove
             // gate, an explicit no-evidence state) sit right above the
             // decision they inform.
@@ -518,6 +573,12 @@ fn ReviewHeader(
     feedback_count: u32,
     feedback_alert: bool,
     on_open_feedback: EventHandler<MouseEvent>,
+    /// Index of the station the body is showing, when parked on one that is not
+    /// the live station.
+    #[props(default)]
+    viewing: Option<usize>,
+    /// Fired with a station's index when the operator clicks the line.
+    on_select_station: EventHandler<usize>,
 ) -> Element {
     let title_style = format!(
         "font-family:{sans};font-size:15px;font-weight:700;color:{text};",
@@ -564,9 +625,14 @@ fn ReviewHeader(
                     Badge { tone: status, filled: true, "{status_label}" }
                 }
             }
-            // The assembly line — the prominent progress.
+            // The assembly line — the prominent progress, and the navigation:
+            // every station on it opens.
             div { style: "margin-top:14px;",
-                StationStrip { stations }
+                StationStrip {
+                    stations,
+                    viewing,
+                    on_select: move |i| on_select_station.call(i),
+                }
             }
             // The phase subheader, scoped to the current station: the label on
             // its own row, centered like the pipeline beneath it.
@@ -575,6 +641,142 @@ fn ReviewHeader(
             }
             div { style: "display:flex;justify-content:center;margin-top:6px;",
                 StationPipeline { dots: strip_for(phase), labels: true }
+            }
+        }
+    }
+}
+
+/// The record a station left behind, opened from the assembly line.
+///
+/// The live review surface is scoped to the station the run is ON; before this
+/// there was no way back to an earlier one, so a brief, an outcome, or a piece
+/// of feedback from a finished station was unreachable once the run moved. This
+/// panel is that read surface: the station's brief, what it produced, the
+/// worker's observations, and its full feedback thread, fetched live off the
+/// same feedback route the current station uses.
+///
+/// It is deliberately READ-ONLY. Deciding a gate, annotating, and replying all
+/// belong to the live station, so parking here never offers a control that would
+/// act on the wrong station.
+#[component]
+fn StationRecord(
+    cfg: ConnConfig,
+    run: Option<String>,
+    station: String,
+    live_station: Option<String>,
+    brief: Option<String>,
+    outcome: Option<String>,
+    observation: Option<String>,
+    merged: bool,
+    viewed: Signal<Option<String>>,
+) -> Element {
+    // The station's feedback, off the same route the live station reads. Keyed
+    // on the station so opening another one refetches.
+    let items = use_signal(Vec::<FeedbackItem>::new);
+    {
+        let cfg = cfg.clone();
+        let run = run.clone();
+        let st = station.clone();
+        use_effect(use_reactive!(|cfg, run, st| {
+            let mut items = items;
+            spawn(async move {
+                let Some(run) = run else { return };
+                if let Ok(resp) = wire::fetch_feedback(&cfg, &run, &st).await {
+                    items.set(resp.items);
+                }
+            });
+        }));
+    }
+    let entries = map::feedback_entries(&items.read());
+    let open_count = items.read().iter().filter(|f| f.status.blocks_gate()).count();
+    let mut viewed_sig = viewed;
+    let live_label = live_station.clone().unwrap_or_else(|| "the live station".into());
+    let body_style = "margin-top:6px;font-size:12.5px;color:var(--dr-text-muted);";
+    rsx! {
+        Card {
+            style { "{darkrun_ui::markdown::CSS}" }
+            div {
+                style: "display:flex;align-items:center;justify-content:space-between;gap:12px;",
+                div { style: "display:flex;align-items:center;gap:8px;",
+                    span {
+                        style: "font-family:var(--dr-font-mono);font-size:13px;font-weight:700;\
+                                color:var(--dr-text);",
+                        "station · {station}"
+                    }
+                    Badge {
+                        tone: if merged { Tone::Ok } else { Tone::Neutral },
+                        if merged { "merged" } else { "open" }
+                    }
+                    if open_count > 0 {
+                        Badge { tone: Tone::Warn, filled: true, "{open_count} open" }
+                    }
+                }
+                Button {
+                    variant: ButtonVariant::Ghost,
+                    on_click: move |_| viewed_sig.set(None),
+                    "back to {live_label}"
+                }
+            }
+            div {
+                style: "margin-top:4px;font-family:var(--dr-font-mono);font-size:11px;\
+                        color:var(--dr-text-faint);",
+                "reading a past station · the run keeps moving on {live_label}"
+            }
+
+            if let Some(text) = brief.clone().filter(|t| !t.trim().is_empty()) {
+                div { style: "margin-top:14px;",
+                    div { style: section_title(), "Brief" }
+                    div {
+                        class: "dr-md",
+                        style: "{body_style}",
+                        dangerous_inner_html: darkrun_ui::markdown::to_html_doc(&text),
+                    }
+                }
+            }
+            if let Some(text) = outcome.clone().filter(|t| !t.trim().is_empty()) {
+                div { style: "margin-top:14px;",
+                    div { style: section_title(), "Outcome" }
+                    div {
+                        class: "dr-md",
+                        style: "{body_style}",
+                        dangerous_inner_html: darkrun_ui::markdown::to_html_doc(&text),
+                    }
+                }
+            }
+            if let Some(text) = observation.clone().filter(|t| !t.trim().is_empty()) {
+                div { style: "margin-top:14px;",
+                    div { style: section_title(), "Observations" }
+                    div {
+                        class: "dr-md",
+                        style: "{body_style}",
+                        dangerous_inner_html: darkrun_ui::markdown::to_html_doc(&text),
+                    }
+                }
+            }
+
+            div { style: "margin-top:16px;",
+                div { style: section_title(), "Feedback" }
+                div { style: "margin-top:8px;",
+                    if entries.is_empty() {
+                        p {
+                            style: "color:var(--dr-text-muted);font-size:12.5px;",
+                            "No feedback was raised on this station."
+                        }
+                    } else {
+                        {feedback_inbox(entries.clone(), None)}
+                    }
+                }
+            }
+
+            if brief.as_deref().unwrap_or_default().trim().is_empty()
+                && outcome.as_deref().unwrap_or_default().trim().is_empty()
+                && observation.as_deref().unwrap_or_default().trim().is_empty()
+                && entries.is_empty()
+            {
+                p {
+                    style: "margin-top:12px;color:var(--dr-text-muted);font-size:12.5px;",
+                    "This station has not recorded a brief, an outcome, or any feedback yet."
+                }
             }
         }
     }
@@ -3245,6 +3447,7 @@ mod subcomponent_render_tests {
                     feedback_count: 3,
                     feedback_alert: true,
                     on_open_feedback: move |_| {},
+                    on_select_station: move |_| {},
                 }
                 AnnotateSurface {
                     cfg: ConnConfig::from_env(),
