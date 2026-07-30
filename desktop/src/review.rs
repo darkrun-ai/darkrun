@@ -3447,6 +3447,7 @@ mod subcomponent_render_tests {
                     feedback_count: 3,
                     feedback_alert: true,
                     on_open_feedback: move |_| {},
+                    on_select_station: move |_| {},
                 }
                 AnnotateSurface {
                     cfg: ConnConfig::from_env(),

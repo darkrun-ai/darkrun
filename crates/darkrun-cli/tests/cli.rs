@@ -1380,7 +1380,17 @@ fn statusline_install_project_writes_settings() {
     assert!(settings.exists());
     let v = json(&std::fs::read_to_string(settings).unwrap());
     assert_eq!(v["statusLine"]["type"], "command");
-    assert_eq!(v["statusLine"]["command"], "darkrun statusline");
+    // An ABSOLUTE path, not a bare `darkrun`: Claude Code runs the status line
+    // with whatever PATH it has, and a name it cannot resolve renders a silently
+    // blank line.
+    let command = v["statusLine"]["command"].as_str().unwrap();
+    assert!(command.ends_with(" statusline"), "invokes the subcommand: {command}");
+    let program = command.trim_end_matches(" statusline");
+    assert!(
+        std::path::Path::new(program).is_absolute(),
+        "an absolute launcher path: {command}"
+    );
+    assert!(std::path::Path::new(program).is_file(), "that exists: {command}");
 }
 
 #[test]
@@ -2448,7 +2458,9 @@ fn statusline_uninstall_on_clean_repo_is_safe() {
 
 #[test]
 fn statusline_install_then_render_uses_installed_command_name() {
-    // After install, the settings command is exactly the render entrypoint.
+    // After install, the settings command is exactly the render entrypoint —
+    // and it RUNS, which is the whole point: an unresolvable command leaves
+    // Claude Code rendering nothing at all, with no error anywhere.
     let repo = temp_repo();
     Cli::new()
         .repo(repo.path())
@@ -2457,7 +2469,13 @@ fn statusline_install_then_render_uses_installed_command_name() {
     let v = json(
         &std::fs::read_to_string(repo.path().join(".claude").join("settings.json")).unwrap(),
     );
-    assert_eq!(v["statusLine"]["command"], "darkrun statusline");
+    let command = v["statusLine"]["command"].as_str().unwrap();
+    let program = command.trim_end_matches(" statusline");
+    let out = std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .expect("the installed command launches");
+    assert!(out.status.success(), "and exits 0: {command}");
     assert_eq!(v["statusLine"]["padding"], 0);
 }
 

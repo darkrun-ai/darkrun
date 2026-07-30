@@ -622,6 +622,10 @@ fn Toolbar(drawer_open: Signal<bool>, selection: Signal<Selection>) -> Element {
     // (a window-property read) and it also catches the OS-driven exits (green
     // button, Mission Control, Ctrl+Cmd+F) that no in-app control fires.
     let fullscreen = use_signal(|| false);
+    // macOS only — it is the only platform with a traffic-light gutter to give
+    // back, and the only one where this poll could cost anything. The `cfg` is
+    // compile-time, so the hook set stays identical across every render.
+    #[cfg(target_os = "macos")]
     {
         let window = window.clone();
         let mut fullscreen = fullscreen;
