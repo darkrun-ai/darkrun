@@ -1472,7 +1472,7 @@ fn RunRow(
     };
     let dot = format!(
         "width:7px;height:7px;border-radius:50%;flex:none;background:{};",
-        run_dot_color(&run.status),
+        run_dot_color(&run.status, &run.mode),
     );
     let me_tag = format!(
         "margin-left:auto;font-size:9px;font-family:{mono};color:{ink};\
@@ -1526,11 +1526,23 @@ fn run_sel_bg() -> String {
 }
 
 /// The status-dot color for a run row: ok/green for an active (live) run, amber
-/// for one awaiting review, faint/grey for idle. Mirrors the mockup's
-/// live / needs-review / idle dots.
-fn run_dot_color(status: &str) -> &'static str {
+/// for one that actually wants the operator, faint/grey for idle. Mirrors the
+/// mockup's live / needs-review / idle dots.
+///
+/// **Mode-aware.** The amber dot means "your turn". On a `dark` run it never
+/// can be: dark is on the loop by definition, so the engine resolves `review`
+/// and `pending` itself and will never stop for the operator on them. Painting
+/// those amber told the operator a lights-out run was waiting on them, which is
+/// the whole complaint this fixes.
+///
+/// `blocked` and `changes_requested` stay amber in every mode — a dark run does
+/// still halt on external/await gates, and those are genuinely the operator's.
+fn run_dot_color(status: &str, mode: &str) -> &'static str {
+    let dark = mode == "dark";
     match status {
         "active" | "in_progress" | "completed" => tokens::var::STATUS_OK,
+        // Engine-internal on a dark run: it walks these without asking.
+        "pending" | "review" if dark => tokens::var::STATUS_OK,
         "blocked" | "changes_requested" | "pending" | "review" => tokens::var::STATUS_WARN,
         _ => tokens::var::TEXT_FAINT,
     }
@@ -3354,6 +3366,7 @@ mod data_render_tests {
             slug: "r".into(),
             title: "Storefront run".into(),
             factory: "software".into(),
+            mode: "solo".into(),
             active_station: "build".into(),
             phase: Some("manufacture".into()),
             status: "active".into(),
@@ -3550,6 +3563,7 @@ mod main_pane_render_tests {
             slug: "r".into(),
             title: "Storefront run".into(),
             factory: "software".into(),
+            mode: "solo".into(),
             active_station: "prove".into(),
             phase: None,
             status: "active".into(),
@@ -3817,6 +3831,7 @@ mod helper_tests {
             slug: "store-checkout".into(),
             title: "Checkout flow".into(),
             factory: "software".into(),
+            mode: "solo".into(),
             active_station: "build".into(),
             phase: Some("manufacture".into()),
             status: status.into(),
@@ -3879,13 +3894,40 @@ mod helper_tests {
     #[test]
     fn run_dot_color_maps_status_classes() {
         for s in ["active", "in_progress", "completed"] {
-            assert_eq!(run_dot_color(s), tokens::var::STATUS_OK);
+            assert_eq!(run_dot_color(s, "solo"), tokens::var::STATUS_OK);
         }
         for s in ["blocked", "changes_requested", "pending", "review"] {
-            assert_eq!(run_dot_color(s), tokens::var::STATUS_WARN);
+            assert_eq!(run_dot_color(s, "solo"), tokens::var::STATUS_WARN);
         }
-        assert_eq!(run_dot_color("idle"), tokens::var::TEXT_FAINT);
+        assert_eq!(run_dot_color("idle", "solo"), tokens::var::TEXT_FAINT);
         assert!(run_sel_bg().ends_with("1f"));
+    }
+
+    #[test]
+    fn a_dark_run_never_shows_the_your_turn_dot_for_review_or_pending() {
+        // THE REPORTED BUG: lights-out runs were painted amber ("needs review")
+        // on states a dark run resolves by itself and will never stop on.
+        for s in ["pending", "review"] {
+            assert_eq!(
+                run_dot_color(s, "dark"),
+                tokens::var::STATUS_OK,
+                "a dark run is not waiting on the operator at `{s}`"
+            );
+            // The same states DO want the operator in the gated modes.
+            for m in ["solo", "team"] {
+                assert_eq!(run_dot_color(s, m), tokens::var::STATUS_WARN, "{m}/{s}");
+            }
+        }
+        // A dark run still halts on genuinely operator-owned gates.
+        for s in ["blocked", "changes_requested"] {
+            assert_eq!(
+                run_dot_color(s, "dark"),
+                tokens::var::STATUS_WARN,
+                "`{s}` is the operator's in every mode"
+            );
+        }
+        // An unknown mode string is treated as gated, never silently dark.
+        assert_eq!(run_dot_color("review", ""), tokens::var::STATUS_WARN);
     }
 
     #[test]

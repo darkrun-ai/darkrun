@@ -1101,6 +1101,7 @@ mod tests {
             slug: "checkout".into(),
             title: "Checkout flow".into(),
             factory: "software".into(),
+            mode: "solo".into(),
             active_station: "build".into(),
             phase: Some("manufacture".into()),
             status: "active".into(),
