@@ -28,6 +28,13 @@ pub struct StationProgress {
     pub total: u32,
 }
 
+/// The decode fallback for [`RunSummary::mode`] / [`RunDetailPayload::mode`]:
+/// the most gated mode, so a payload from an older producer shows the operator
+/// a gate that is not there rather than hiding one that is.
+fn default_mode() -> String {
+    "team".to_string()
+}
+
 /// A compact summary of a single run for the browse list.
 ///
 /// Mirrors the engine's `run_list`-style projection: identity, the live
@@ -43,6 +50,20 @@ pub struct RunSummary {
     pub title: String,
     /// The factory driving the run (e.g. `software`).
     pub factory: String,
+    /// The run's gating [`Mode`](darkrun_core::domain::Mode) as a display
+    /// string: `team`, `solo`, or `dark`.
+    ///
+    /// Load-bearing, not decoration. A `dark` run is on the loop by definition:
+    /// the operator pre-elaborated up front and the engine never stops for
+    /// them. A surface that cannot read this renders "needs review" on a run
+    /// that is explicitly never going to ask, which is exactly what the desktop
+    /// did before this field existed.
+    ///
+    /// Defaults to `team` (the most conservative, most gated mode) so an older
+    /// producer decodes rather than failing, and errs toward showing a gate
+    /// rather than hiding one.
+    #[serde(default = "default_mode")]
+    pub mode: String,
     /// The station the run currently sits on.
     pub active_station: String,
     /// The active phase within the active station, if known.
@@ -163,6 +184,10 @@ pub struct RunDetailPayload {
     pub title: String,
     /// The factory driving the run.
     pub factory: String,
+    /// The run's gating mode (`team` / `solo` / `dark`). See
+    /// [`RunSummary::mode`] for why a surface needs this.
+    #[serde(default = "default_mode")]
+    pub mode: String,
     /// The station the run currently sits on.
     pub active_station: String,
     /// The active phase, if known.
@@ -191,6 +216,7 @@ mod tests {
             slug: "alpha".into(),
             title: "Alpha".into(),
             factory: "software".into(),
+            mode: "solo".into(),
             active_station: "frame".into(),
             phase: Some("spec".into()),
             status: "active".into(),
@@ -299,6 +325,7 @@ mod tests {
             slug: "alpha".into(),
             title: "Alpha".into(),
             factory: "software".into(),
+            mode: "solo".into(),
             active_station: "frame".into(),
             phase: Some("manufacture".into()),
             status: "active".into(),
