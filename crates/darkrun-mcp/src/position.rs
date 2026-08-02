@@ -2181,6 +2181,7 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
                         result: match last.result {
                             Some(IterationResult::Advance) => "advance",
                             Some(IterationResult::Reject) => "reject",
+                            Some(IterationResult::Skip) => "skip",
                             None => "in_flight",
                         }
                         .to_string(),

@@ -93,6 +93,9 @@ fn phase_chrome(phase: StationPhase) -> (&'static str, &'static str) {
 /// Filled / empty progress pips.
 const PIP_DONE: &str = "\u{25b0}";
 const PIP_PENDING: &str = "\u{25b1}";
+/// A hatched pip: a beat consciously waived (recorded `skip`), which must never
+/// look like a beat merely not yet reached.
+const PIP_SKIPPED: &str = "\u{25a8}";
 /// Leader for the second line.
 const ITEM_LEADER: &str = "\u{21b3}";
 
@@ -106,6 +109,11 @@ enum Seg {
     Done,
     Active,
     Rejected,
+    /// Consciously waived, with a recorded reason. Distinct from `Pending`: a
+    /// hatched pip says "this beat will not run and that was a decision", where
+    /// an empty pip says "not reached yet". Reading a jumped beat as an empty
+    /// one is exactly how a skipped-pipeline unit passed for a healthy one.
+    Skipped,
     Pending,
 }
 
@@ -130,6 +138,7 @@ fn worker_segments(
         .map(|w| match recent.get(w.as_str()) {
             Some(Some(R::Advance)) => Seg::Done,
             Some(Some(R::Reject)) => Seg::Rejected,
+            Some(Some(R::Skip)) => Seg::Skipped,
             _ => Seg::Pending,
         })
         .collect();
@@ -164,6 +173,7 @@ fn unit_chip(id: &str, segs: &[Seg], url: Option<&str>) -> String {
             Seg::Done => format!("\x1b[38;5;71m{PIP_DONE}"),
             Seg::Active => format!("\x1b[{PIP_ACTIVE}m{PIP_DONE}"),
             Seg::Rejected => format!("\x1b[1;38;5;167m{PIP_DONE}"),
+            Seg::Skipped => format!("\x1b[38;5;245m{PIP_SKIPPED}"),
             Seg::Pending => format!("\x1b[38;5;250m{PIP_PENDING}"),
         })
         .collect();

@@ -26,20 +26,69 @@ fn approvals_signed(unit: &Unit, approval_roles: &[String]) -> bool {
         .all(|role| matches!(unit.frontmatter.approvals.get(role), Some(Some(_))))
 }
 
-/// Whether a unit's Pass loop is complete: its LAST iteration `advance`d on the
-/// station's last worker. With no declared workers, any `advance` qualifies
-/// (research-style stations that only produce artifacts).
+/// A beat is **settled** when its recorded result releases the loop: the worker
+/// either advanced or was consciously waived. A reject (bounce pending) and an
+/// in-flight beat (`result: None`) are both unsettled.
+fn beat_settled(result: Option<IterationResult>) -> bool {
+    matches!(result, Some(IterationResult::Advance) | Some(IterationResult::Skip))
+}
+
+/// A worker's MOST RECENT recorded result on this unit, or `None` if it never
+/// ran at all. The outer `Option` distinguishes "never ran" from "ran, still in
+/// flight" (`Some(None)`).
+fn latest_beat(unit: &Unit, worker: &str) -> Option<Option<IterationResult>> {
+    unit.frontmatter
+        .iterations
+        .iter()
+        .rev()
+        .find(|it| it.worker == worker)
+        .map(|it| it.result)
+}
+
+/// Whether a unit's Pass loop is complete: **every declared worker has settled**
+/// (advanced, or been consciously waived with a recorded reason) and the loop
+/// ended on the station's last worker. With no declared workers, any settled
+/// last beat qualifies (research-style stations that only produce artifacts).
+///
+/// The per-worker coverage check is load-bearing. This function used to ask only
+/// whether the LAST iteration advanced on the terminal worker, which made the
+/// declared worker sequence decorative: a unit could record `designer` then jump
+/// straight to `resolver` and be marked `completed` with the middle of its own
+/// pipeline never run. That is not a hypothetical — it happened across a real
+/// run, silently, on units the engine then reported as done. A beat that should
+/// not run is a `Skip` with a reason, never an absence.
 fn pass_loop_done(unit: &Unit, workers: &[String]) -> bool {
     let Some(last) = unit.frontmatter.iterations.last() else {
         return false;
     };
-    if last.result != Some(IterationResult::Advance) {
+    if !beat_settled(last.result) {
         return false;
     }
     match workers.last() {
-        Some(terminal) => &last.worker == terminal,
+        // The loop must END on the terminal worker AND have covered every
+        // declared beat on the way — neither check implies the other.
+        Some(terminal) => {
+            &last.worker == terminal
+                && workers
+                    .iter()
+                    .all(|w| latest_beat(unit, w).is_some_and(beat_settled))
+        }
         None => true,
     }
+}
+
+/// The declared workers a unit has **not** settled: never ran, still in flight,
+/// or sitting on an unresolved reject. Empty means the Pass loop is covered.
+///
+/// Surfaces render this so a jumped beat is visible as a jumped beat rather than
+/// as an indistinguishable blank, and the audit path uses it to find units that
+/// were marked complete under the old terminal-worker-only rule.
+pub fn unsettled_workers(unit: &Unit, workers: &[String]) -> Vec<String> {
+    workers
+        .iter()
+        .filter(|w| !latest_beat(unit, w).is_some_and(beat_settled))
+        .cloned()
+        .collect()
 }
 
 /// Derive a station's [`StationPhase`] from its units — the pure cursor-walk
@@ -134,6 +183,146 @@ mod tests {
     }
     fn roles(rs: &[&str]) -> Vec<String> {
         rs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Append a settled beat to a unit.
+    fn beat(u: &mut Unit, worker: &str, result: IterationResult) {
+        u.frontmatter.iterations.push(UnitIteration {
+            worker: worker.into(),
+            result: Some(result),
+            ..Default::default()
+        });
+    }
+
+    /// A unit that has cleared its review gate, so phase derivation falls
+    /// through to the Pass loop rather than stopping at Review.
+    fn reviewed(slug: &str, review_roles: &[String]) -> Unit {
+        let mut u = unit(slug);
+        for r in review_roles {
+            u.frontmatter.reviews.insert(r.clone(), signed());
+        }
+        u
+    }
+
+    #[test]
+    fn a_jumped_middle_beat_does_not_complete_the_pass_loop() {
+        // THE REGRESSION. The old rule asked only "did the last iteration
+        // advance on the terminal worker", so a unit could record the first
+        // worker, jump the middle of its own declared pipeline, and land on the
+        // terminal worker to be marked complete. A real run did exactly this on
+        // five units across two stations; three were reported `completed` with
+        // two of five beats never run.
+        let workers = roles(&["designer", "visual_designer", "spiker", "pressure_tester", "resolver"]);
+        let review_roles = roles(&["fit"]);
+
+        let mut u = reviewed("design-container-and-crypto", &review_roles);
+        beat(&mut u, "designer", IterationResult::Advance);
+        beat(&mut u, "pressure_tester", IterationResult::Advance);
+        beat(&mut u, "resolver", IterationResult::Advance);
+
+        // Last beat advanced ON the terminal worker — the old rule's entire test.
+        assert_eq!(u.frontmatter.iterations.last().unwrap().worker, "resolver");
+        assert!(!pass_loop_done(&u, &workers), "jumped beats must not complete the loop");
+
+        // The two jumped beats are named, not silently absent.
+        assert_eq!(
+            unsettled_workers(&u, &workers),
+            vec!["visual_designer".to_string(), "spiker".to_string()]
+        );
+
+        // And the station stays in Manufacture rather than sailing to Audit.
+        assert_eq!(
+            derive_station_phase(
+                std::slice::from_ref(&u), &workers, &review_roles, &[], Some(true), false
+            ),
+            StationPhase::Manufacture
+        );
+        assert!(!station_units_complete(&u_slice(&u), &workers, &review_roles, &[]));
+    }
+
+    fn u_slice(u: &Unit) -> Vec<Unit> {
+        vec![u.clone()]
+    }
+
+    #[test]
+    fn a_recorded_skip_settles_a_beat_and_completes_the_loop() {
+        // A waived beat is legitimate — when it is written down. The same unit
+        // that fails above passes once the two jumped beats are recorded as
+        // conscious skips, which is the whole point of the variant.
+        let workers = roles(&["designer", "visual_designer", "spiker", "pressure_tester", "resolver"]);
+        let review_roles = roles(&["fit"]);
+
+        let mut u = reviewed("design-container-and-crypto", &review_roles);
+        beat(&mut u, "designer", IterationResult::Advance);
+        beat(&mut u, "visual_designer", IterationResult::Skip);
+        beat(&mut u, "spiker", IterationResult::Skip);
+        beat(&mut u, "pressure_tester", IterationResult::Advance);
+        beat(&mut u, "resolver", IterationResult::Advance);
+
+        assert!(pass_loop_done(&u, &workers), "recorded skips settle their beats");
+        assert!(unsettled_workers(&u, &workers).is_empty());
+        assert_eq!(
+            derive_station_phase(
+                std::slice::from_ref(&u), &workers, &review_roles, &[], Some(true), false
+            ),
+            StationPhase::Checkpoint
+        );
+    }
+
+    #[test]
+    fn an_unresolved_reject_leaves_its_beat_unsettled() {
+        // A reject bounces back; until that worker advances again it is not
+        // settled, even if a later worker went on to advance.
+        let workers = roles(&["make", "challenge", "resolve"]);
+        let mut u = unit("a");
+        beat(&mut u, "make", IterationResult::Advance);
+        beat(&mut u, "challenge", IterationResult::Reject);
+        assert_eq!(unsettled_workers(&u, &workers), roles(&["challenge", "resolve"]));
+        assert!(!pass_loop_done(&u, &workers));
+
+        // The bounce is worked and the loop runs forward to the end.
+        beat(&mut u, "make", IterationResult::Advance);
+        beat(&mut u, "challenge", IterationResult::Advance);
+        beat(&mut u, "resolve", IterationResult::Advance);
+        assert!(unsettled_workers(&u, &workers).is_empty());
+        assert!(pass_loop_done(&u, &workers));
+    }
+
+    #[test]
+    fn an_in_flight_beat_is_not_settled() {
+        // `result: None` means still running — never a completed beat.
+        let workers = roles(&["make", "resolve"]);
+        let mut u = unit("a");
+        beat(&mut u, "make", IterationResult::Advance);
+        u.frontmatter.iterations.push(UnitIteration {
+            worker: "resolve".into(),
+            result: None,
+            ..Default::default()
+        });
+        assert_eq!(unsettled_workers(&u, &workers), roles(&["resolve"]));
+        assert!(!pass_loop_done(&u, &workers));
+    }
+
+    #[test]
+    fn the_loop_must_still_end_on_the_terminal_worker() {
+        // Covering every beat is necessary but not sufficient: the run must come
+        // to rest on the last worker, so a late bounce cannot read as done.
+        let workers = roles(&["make", "resolve"]);
+        let mut u = unit("a");
+        beat(&mut u, "resolve", IterationResult::Advance);
+        beat(&mut u, "make", IterationResult::Advance);
+        assert!(unsettled_workers(&u, &workers).is_empty(), "both beats settled");
+        assert!(!pass_loop_done(&u, &workers), "but the loop ended on `make`");
+    }
+
+    #[test]
+    fn a_station_with_no_declared_workers_still_completes_on_any_advance() {
+        // Research-style stations that only produce artifacts keep the old
+        // behaviour — there is no sequence to enforce.
+        let mut u = unit("a");
+        beat(&mut u, "whoever", IterationResult::Advance);
+        assert!(pass_loop_done(&u, &[]));
+        assert!(unsettled_workers(&u, &[]).is_empty());
     }
 
     #[test]

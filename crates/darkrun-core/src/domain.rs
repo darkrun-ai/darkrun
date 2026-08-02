@@ -648,6 +648,17 @@ pub enum IterationResult {
     Advance,
     /// The worker rejected — bounces to the nearest preceding build worker.
     Reject,
+    /// The worker was **consciously waived** for this unit, with a recorded
+    /// reason. A skip settles the beat the same way an advance does, so the
+    /// Pass loop can complete without it — but it must be *written down*.
+    ///
+    /// This variant exists because the alternative is silence: before it, a
+    /// worker that simply never ran was indistinguishable from one not yet
+    /// reached, and [`pass_loop_done`](crate::derive) only checked the terminal
+    /// worker — so a unit could jump the middle of its own pipeline and still
+    /// be marked complete. A waiver is a legitimate call; an unrecorded one is
+    /// not.
+    Skip,
 }
 
 /// One recorded Pass iteration on a Unit — an **append-only** beat in the

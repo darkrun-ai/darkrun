@@ -2156,7 +2156,7 @@ impl DarkrunServer {
     /// and the **handoff note** that carries the story to the next worker.
     #[tool(
         name = "darkrun_unit_beat",
-        description = "Record one Pass beat (Make/Challenge/Resolve): worker + result (advance|reject) + a handoff note (required on reject). The note is threaded into the next worker's dispatch and surfaced to the operator and reflection. Pass count is derived from the iteration history."
+        description = "Record one Pass beat (Make/Challenge/Resolve): worker + result (advance|reject|skip) + a handoff note (required on reject and skip). Every declared worker must advance or be explicitly skipped before the Pass loop completes — a beat you do not run must be recorded as a skip with a reason, never left absent. The note is threaded into the next worker's dispatch and surfaced to the operator and reflection. Pass count is derived from the iteration history."
     )]
     pub fn darkrun_unit_beat(
         &self,
@@ -2165,13 +2165,29 @@ impl DarkrunServer {
         let result = match input.result.trim().to_ascii_lowercase().as_str() {
             "advance" => darkrun_core::domain::IterationResult::Advance,
             "reject" => darkrun_core::domain::IterationResult::Reject,
-            other => return Ok(err_text(format!("invalid result `{other}` (want advance|reject)"))),
+            "skip" => darkrun_core::domain::IterationResult::Skip,
+            other => {
+                return Ok(err_text(format!(
+                    "invalid result `{other}` (want advance|reject|skip)"
+                )))
+            }
         };
-        // A reject without a reason is exactly the story-loss this records against.
-        if matches!(result, darkrun_core::domain::IterationResult::Reject)
-            && input.note.as_deref().map(str::trim).unwrap_or("").is_empty()
+        // A reject without a reason is exactly the story-loss this records
+        // against — and so is a skip. Waiving a beat is a legitimate call; doing
+        // it silently is how a unit ends up "complete" with its pipeline jumped.
+        if matches!(
+            result,
+            darkrun_core::domain::IterationResult::Reject
+                | darkrun_core::domain::IterationResult::Skip
+        ) && input.note.as_deref().map(str::trim).unwrap_or("").is_empty()
         {
-            return Ok(err_text("a reject must carry a note explaining why it bounced"));
+            let what = match result {
+                darkrun_core::domain::IterationResult::Reject => {
+                    "a reject must carry a note explaining why it bounced"
+                }
+                _ => "a skip must carry a note explaining why this beat was waived",
+            };
+            return Ok(err_text(what));
         }
         let store = self.store();
         match units::record_iteration(
