@@ -122,8 +122,144 @@ pub fn commit_all(store: &StateStore, message: &str) -> CommitOutcome {
     commit_and_push(store, "", message, true)
 }
 
-/// The shared body: ensure the worktree-pool ignore, stage `prefix`, commit on
-/// the CURRENT branch, push it.
+/// The worktree name/path the engine uses to publish state onto run-main. One
+/// per run, reused across commits, and parked under the ignored worktree pool.
+fn state_worktree(root: &Path, slug: &str) -> (String, std::path::PathBuf) {
+    (
+        format!("{slug}-_state"),
+        root.join(".darkrun").join("worktrees").join(slug).join("_state"),
+    )
+}
+
+/// Mirror `src` onto `dst`, skipping `skip_dir` at the top level. `dst` is
+/// cleared first so DELETIONS propagate: a mirror that only ever adds would
+/// leave a resolved feedback file alive on run-main forever.
+fn mirror_dir(src: &Path, dst: &Path, skip_dir: &str) -> std::io::Result<()> {
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)?;
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == std::ffi::OsStr::new(skip_dir) {
+            continue;
+        }
+        let (from, to) = (entry.path(), dst.join(&name));
+        if entry.file_type()?.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursive file copy. Symlinks are followed as plain files; the state tree is
+/// markdown and JSON, never links.
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let (from, to) = (entry.path(), dst.join(entry.file_name()));
+        if entry.file_type()?.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Publish `.darkrun/` state onto the ACTIVE run's `darkrun/<slug>/main` from a
+/// detached worktree, leaving the operator's branch and working tree untouched.
+///
+/// `None` means "no active run, nothing run-scoped to publish" — the caller
+/// declines rather than falling back onto the operator's branch.
+fn commit_state_to_run_main(
+    store: &StateStore,
+    git: &Git,
+    root: &Path,
+    message: &str,
+) -> Option<CommitOutcome> {
+    let slug = store.active_run().ok().flatten()?;
+    let run_main = crate::lifecycle::run_main_branch(&slug);
+    if !git.branch_exists(&run_main).unwrap_or(false) {
+        let _ = crate::lifecycle::ensure_run_main(store, &slug);
+    }
+    if !git.branch_exists(&run_main).unwrap_or(false) {
+        return Some(CommitOutcome::noop());
+    }
+
+    // The pool must be ignored before a worktree is created inside it.
+    ensure_worktrees_gitignored(root);
+
+    let (wt_name, wt_path) = state_worktree(root, &slug);
+    if !wt_path.exists() {
+        // Detached, always — run-main may be checked out in another worktree,
+        // and a detached HEAD can publish by refspec regardless.
+        if git.create_worktree_detached(&wt_name, &wt_path, &run_main).is_err() {
+            return Some(CommitOutcome::noop());
+        }
+    }
+
+    if mirror_dir(&root.join(STATE_PREFIX), &wt_path.join(STATE_PREFIX), "worktrees").is_err() {
+        return Some(CommitOutcome::noop());
+    }
+    if git.add_all_under(&wt_path, STATE_PREFIX).is_err() {
+        return Some(CommitOutcome::noop());
+    }
+    // Nothing changed against run-main's tree — a true no-op, not a phantom
+    // commit (the same dirty gate the in-prefix path enforces).
+    if !git.status_dirty_under(&wt_path, STATE_PREFIX).unwrap_or(false) {
+        return Some(CommitOutcome::noop());
+    }
+    if git.commit(&wt_path, message).is_err() {
+        return Some(CommitOutcome::noop());
+    }
+
+    // Fast-update the local run-main ref to the commit we just made, so the
+    // next detached checkout starts from it. Best-effort: this fails when
+    // run-main is checked out in another worktree, and the refspec push below
+    // still publishes the work either way.
+    if let Ok(oid) = git.head_oid(&wt_path) {
+        let _ = git.set_branch_to(&run_main, &oid);
+    }
+
+    match crate::hosting::push_head_with_nff_recovery(git, &wt_path, &run_main) {
+        crate::hosting::PushOutcome::Pushed => Some(CommitOutcome {
+            committed: true,
+            pushed: true,
+            push_error: None,
+        }),
+        crate::hosting::PushOutcome::Failed { note } => Some(CommitOutcome {
+            committed: true,
+            pushed: false,
+            push_error: Some(note),
+        }),
+    }
+}
+
+/// Whether `branch` lives in the engine's own branch space (`darkrun/...`).
+/// The engine commits ONLY there; the operator's branch is never written to.
+fn in_prefix_space(branch: &str) -> bool {
+    branch == crate::lifecycle::BRANCH_PREFIX
+        || branch.starts_with(&format!("{}/", crate::lifecycle::BRANCH_PREFIX))
+}
+
+/// The shared body: ensure the worktree-pool ignore, stage `prefix`, commit,
+/// push.
+///
+/// **The commit lands in the engine's branch space or nowhere.** When the
+/// checkout sits on a branch outside `darkrun/` (the common case: the operator
+/// started the run from `main`), the commit is routed to the run's
+/// `darkrun/<slug>/main` through a detached worktree rather than being made on
+/// the branch the operator happens to be standing on.
+///
+/// This used to commit on whatever branch it found and push it, which put 324
+/// engine commits directly onto `main` in a real repository. The routing mirrors
+/// the predecessor's `commitAndPushFromWorktree`: commit detached, publish by
+/// refspec, touch no local ref the operator owns.
 fn commit_and_push(
     store: &StateStore,
     prefix: &str,
@@ -141,6 +277,23 @@ fn commit_and_push(
         && !git.status_dirty_under(&root, prefix).unwrap_or(false)
         && !git.status_dirty_under(&root, ".gitignore").unwrap_or(false)
     {
+        return CommitOutcome::noop();
+    }
+    // Outside the prefix space the operator's branch is off-limits: route the
+    // state onto run-main instead. A detached HEAD is treated the same way —
+    // there is no branch to publish, so routing is strictly better than the
+    // old "skip the push" degradation.
+    let on_engine_branch = git
+        .current_branch()
+        .ok()
+        .flatten()
+        .is_some_and(|b| in_prefix_space(&b));
+    if !on_engine_branch {
+        if let Some(outcome) = commit_state_to_run_main(store, &git, &root, message) {
+            return outcome;
+        }
+        // No active run (nothing run-scoped to publish yet) — decline rather
+        // than fall through onto the operator's branch.
         return CommitOutcome::noop();
     }
     ensure_worktrees_gitignored(&root);
@@ -271,62 +424,126 @@ mod tests {
         assert_eq!(content.trim(), ".darkrun/");
     }
 
+    /// Seed an ACTIVE run in the store WITHOUT moving the checkout, so the
+    /// out-of-prefix routing path is the one under test. This is the real-world
+    /// shape: the operator's tree sits on `main` and the engine must not write
+    /// there.
+    fn seed_active_run(root: &Path) -> StateStore {
+        use darkrun_core::domain::{Run, RunFrontmatter, Status};
+        let store = StateStore::new(root);
+        store
+            .write_run(&Run {
+                slug: "r".into(),
+                title: "R".into(),
+                body: String::new(),
+                frontmatter: RunFrontmatter {
+                    factory: "software".into(),
+                    active_station: "frame".into(),
+                    status: Status::Active,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        store.set_active_run("r").unwrap();
+        store
+    }
+
     #[test]
-    fn commit_state_stages_only_state_and_pushes_the_current_branch() {
+    fn state_commits_route_to_run_main_and_never_touch_the_operator_branch() {
+        // THE REGRESSION. With the checkout on `main`, engine state used to
+        // commit and push straight onto `main` — 324 such commits landed on a
+        // real repository's default branch. State must land on the run's own
+        // branch and nowhere else.
         let (_d, root) = repo_with_origin();
-        let store = StateStore::new(&root);
-        // Engine state + an UNRELATED dirty user file.
-        std::fs::create_dir_all(root.join(".darkrun/r")).unwrap();
-        std::fs::write(root.join(".darkrun/r/run.md"), "---\nfactory: software\n---\n# r\n").unwrap();
+        let store = seed_active_run(&root);
         std::fs::write(root.join("user-code.txt"), "untouched\n").unwrap();
+        let main_before = out_git(&root, &["rev-parse", "main"]);
 
         let out = commit_state(&store, "darkrun: state");
-        assert!(out.committed, "state committed");
+        assert!(out.committed, "state committed: {out:?}");
         assert!(out.pushed, "pushed to the bare origin: {:?}", out.push_error);
 
-        // The commit carries the state file but NOT the user file.
-        let files = out_git(&root, &["show", "--name-only", "--format=", "HEAD"]);
+        // `main` did not move, and the checkout is still standing on it.
+        assert_eq!(out_git(&root, &["rev-parse", "main"]), main_before, "main is untouched");
+        assert_eq!(out_git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+
+        // run-main carries the state.
+        let files = out_git(&root, &["ls-tree", "-r", "--name-only", "darkrun/r/main"]);
         assert!(files.contains(".darkrun/r/run.md"), "{files}");
-        assert!(!files.contains("user-code.txt"), "{files}");
-        // The BARE ORIGIN's main has the commit (the send-pack updates the
-        // remote itself; the local `origin/main` tracking ref isn't the test).
+        assert!(!files.contains("user-code.txt"), "user code never rides along: {files}");
+        assert!(!files.contains("worktrees"), "the pool never publishes: {files}");
+
+        // ORIGIN has run-main, and still has the ORIGINAL main.
         let bare = root.parent().unwrap().join("origin.git");
         assert_eq!(
-            out_git(&root, &["rev-parse", "HEAD"]),
-            out_git(&bare, &["rev-parse", "main"]),
+            out_git(&root, &["rev-parse", "darkrun/r/main"]),
+            out_git(&bare, &["rev-parse", "darkrun/r/main"]),
+            "origin tracks the state commit",
         );
-        // The user file is still dirty in the tree (not lost, not committed).
+        assert_eq!(out_git(&bare, &["rev-parse", "main"]), main_before, "origin/main untouched");
+
+        // The user's file is still there, still dirty, never committed.
         let status = out_git(&root, &["status", "--porcelain"]);
         assert!(status.contains("user-code.txt"), "{status}");
     }
 
     #[test]
-    fn commit_state_if_dirty_noops_on_a_clean_state_tree() {
+    fn an_in_prefix_checkout_still_commits_in_place() {
+        // When the tree is already standing inside the engine's branch space
+        // (what `run_start` arranges), the direct path is kept: no detour, no
+        // extra worktree.
+        let (_d, root) = repo_with_origin();
+        let store = seed_active_run(&root);
+        sh_git(&root, &["checkout", "-q", "-b", "darkrun/r/main"]);
+        let out = commit_state(&store, "darkrun: state");
+        assert!(out.committed);
+        assert_eq!(out_git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]), "darkrun/r/main");
+        let files = out_git(&root, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(files.contains(".darkrun/r/run.md"), "{files}");
+    }
+
+    #[test]
+    fn no_active_run_declines_rather_than_writing_to_the_operator_branch() {
+        // Nothing run-scoped to publish yet: the engine must decline, never
+        // fall back onto whatever branch it happens to be standing on.
         let (_d, root) = repo_with_origin();
         let store = StateStore::new(&root);
-        let head_before = out_git(&root, &["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(root.join(".darkrun")).unwrap();
+        std::fs::write(root.join(".darkrun/stray.txt"), "x\n").unwrap();
+        let main_before = out_git(&root, &["rev-parse", "main"]);
+        let out = commit_state(&store, "darkrun: state");
+        assert!(!out.committed, "no active run → no commit");
+        assert_eq!(out_git(&root, &["rev-parse", "main"]), main_before, "main untouched");
+    }
+
+    #[test]
+    fn commit_state_if_dirty_noops_on_a_clean_state_tree() {
+        let (_d, root) = repo_with_origin();
+        let store = seed_active_run(&root);
+        // Publish the seeded run once so the state tree matches run-main…
+        assert!(commit_state_if_dirty(&store, "darkrun: state").committed);
+        let run_main_before = out_git(&root, &["rev-parse", "darkrun/r/main"]);
+        // …then a second call with nothing changed is a true no-op.
         let out = commit_state_if_dirty(&store, "darkrun: nothing");
         assert!(!out.committed, "clean tree → no phantom commit");
-        assert_eq!(out_git(&root, &["rev-parse", "HEAD"]), head_before);
-        // Dirty state → commits.
-        std::fs::create_dir_all(root.join(".darkrun/r")).unwrap();
+        assert_eq!(out_git(&root, &["rev-parse", "darkrun/r/main"]), run_main_before);
+        // Dirty state → commits again.
         std::fs::write(root.join(".darkrun/r/state.json"), "{}\n").unwrap();
         let out = commit_state_if_dirty(&store, "darkrun: state");
         assert!(out.committed);
+        assert_ne!(out_git(&root, &["rev-parse", "darkrun/r/main"]), run_main_before);
     }
 
     #[test]
     fn commit_state_excludes_the_worktree_pool() {
         let (_d, root) = repo_with_origin();
-        let store = StateStore::new(&root);
+        let store = seed_active_run(&root);
         std::fs::create_dir_all(root.join(".darkrun/worktrees/r/frame")).unwrap();
         std::fs::write(root.join(".darkrun/worktrees/r/frame/file.txt"), "x\n").unwrap();
-        std::fs::create_dir_all(root.join(".darkrun/r")).unwrap();
-        std::fs::write(root.join(".darkrun/r/run.md"), "# r\n").unwrap();
 
         let out = commit_state(&store, "darkrun: state");
         assert!(out.committed);
-        let files = out_git(&root, &["show", "--name-only", "--format=", "HEAD"]);
+        let files = out_git(&root, &["ls-tree", "-r", "--name-only", "darkrun/r/main"]);
         assert!(files.contains(".darkrun/r/run.md"), "{files}");
         assert!(!files.contains("worktrees"), "the pool never commits: {files}");
     }
@@ -342,14 +559,15 @@ mod tests {
         std::fs::write(root.join("README.md"), "# t\n").unwrap();
         sh_git(&root, &["add", "-A"]);
         sh_git(&root, &["commit", "-q", "-m", "init"]);
-        let store = StateStore::new(&root);
-        std::fs::create_dir_all(root.join(".darkrun/r")).unwrap();
-        std::fs::write(root.join(".darkrun/r/run.md"), "# r\n").unwrap();
+        let store = seed_active_run(&root);
 
         let out = commit_state(&store, "darkrun: state");
         assert!(out.committed, "the commit still lands");
         assert!(!out.pushed);
         assert!(out.push_error.is_some(), "the failure is reported");
+        // Even with no remote, it landed on run-main rather than `main`.
+        let files = out_git(&root, &["ls-tree", "-r", "--name-only", "darkrun/r/main"]);
+        assert!(files.contains(".darkrun/r/run.md"), "{files}");
     }
 
     #[test]
