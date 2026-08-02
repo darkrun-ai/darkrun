@@ -3332,14 +3332,33 @@ pub fn run_create_pending(
 
 /// Fork `darkrun/<slug>/main` off the base and check it out (the branch half of
 /// [`run_start`], shared with [`run_create_pending`]). Non-git projects no-op.
+///
+/// **A git-backed run that cannot get its own branch refuses to start.** The
+/// fork failure used to be swallowed twice over: `ensure_run_main`'s outcome was
+/// discarded, and the `branch_exists` guard then short-circuited the entire
+/// switch, so the function returned `Ok(())` with the tree still standing on the
+/// operator's branch. Every subsequent state write went there. One real
+/// repository ran four days that way, accumulating 324 engine commits on `main`
+/// with zero reflog mentions of its run branch.
+///
+/// Refusing here is the point: darkrun works inside its own `darkrun/` branch
+/// space, so a run with nowhere correct to write must not begin.
 fn ensure_run_branch(store: &StateStore, slug: &str) -> Result<()> {
-    crate::lifecycle::ensure_run_main(store, slug);
+    let forked = crate::lifecycle::ensure_run_main(store, slug);
     let root = cascade_repo_root(store);
     if let Ok(git) = Git::open(&root) {
         let run_main = crate::lifecycle::run_main_branch(slug);
-        if git.branch_exists(&run_main).unwrap_or(false)
-            && git.current_branch().ok().flatten().as_deref() != Some(run_main.as_str())
-        {
+        if !git.branch_exists(&run_main).unwrap_or(false) {
+            let why = forked.note.unwrap_or_else(|| "no reason recorded".into());
+            return Err(McpError::InvalidInput(format!(
+                "cannot start run '{slug}': its branch '{run_main}' could not be \
+                 created ({why}). darkrun works only inside its own `darkrun/` \
+                 branch space and will not start a run on another branch."
+            )));
+        }
+        if git.current_branch().ok().flatten().as_deref() != Some(run_main.as_str()) {
+            // A dirty tree refuses the switch with a clear, actionable error —
+            // never silently carries uncommitted work across.
             if !git.is_clean().unwrap_or(false) {
                 return Err(McpError::InvalidInput(format!(
                     "cannot start run '{slug}': the working tree has uncommitted or \
@@ -3354,6 +3373,7 @@ fn ensure_run_branch(store: &StateStore, slug: &str) -> Result<()> {
             })?;
         }
     }
+    // The worktree pool must be ignored before the first worktree exists.
     crate::commit::ensure_worktrees_gitignored(&root);
     Ok(())
 }
@@ -3399,33 +3419,9 @@ pub fn run_start(
     // on lands on the run's own branch — committed and pushed as the run
     // progresses, never on whatever branch the operator happened to be on.
     // Non-git projects no-op cleanly (filesystem mode).
-    crate::lifecycle::ensure_run_main(store, slug);
-    {
-        let root = cascade_repo_root(store);
-        if let Ok(git) = Git::open(&root) {
-            let run_main = crate::lifecycle::run_main_branch(slug);
-            if git.branch_exists(&run_main).unwrap_or(false)
-                && git.current_branch().ok().flatten().as_deref() != Some(run_main.as_str())
-            {
-                // A dirty tree refuses the switch with a clear, actionable
-                // error — never silently carries uncommitted work across.
-                if !git.is_clean().unwrap_or(false) {
-                    return Err(McpError::InvalidInput(format!(
-                        "cannot start run '{slug}': the working tree has uncommitted or \
-                         untracked changes, and starting a run switches it to '{run_main}'. \
-                         Commit or stash them, then retry."
-                    )));
-                }
-                git.checkout_branch(&run_main).map_err(|e| {
-                    McpError::InvalidInput(format!(
-                        "cannot start run '{slug}': switching to '{run_main}' failed: {e}"
-                    ))
-                })?;
-            }
-        }
-        // The worktree pool must be ignored before the first worktree exists.
-        crate::commit::ensure_worktrees_gitignored(&root);
-    }
+    // One implementation, shared with `run_create_pending` — this was a second
+    // hand-inlined copy, and both copies carried the same silent skip.
+    ensure_run_branch(store, slug)?;
 
     let now = Utc::now().to_rfc3339();
     let resolved_title = title.clone().unwrap_or_else(|| slug.to_string());
@@ -4016,6 +4012,37 @@ mod tests {
         let dir = tempdir().expect("tmp");
         let store = StateStore::new(dir.path());
         (dir, store)
+    }
+
+    #[test]
+    fn a_run_refuses_to_start_when_it_cannot_get_its_own_branch() {
+        // THE SILENT SKIP. An unforkable run-main used to leave the tree on the
+        // operator's branch and start the run anyway, sending every subsequent
+        // state write there. A run with nowhere correct to write must refuse.
+        let dir = tempdir().unwrap();
+        // A git repo with NO commit: nothing to fork run-main off.
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        let store = StateStore::new(dir.path());
+        let err = run_start(&store, "r", "software", None, Mode::Solo, "full")
+            .expect_err("a run with nowhere correct to write must not start");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("darkrun/r/main"), "names the branch it needed: {msg}");
+        assert!(msg.contains("branch space"), "states the invariant: {msg}");
+        // And it did not leave a half-started run behind.
+        assert!(store.read_run("r").is_err(), "no run state was written: {msg}");
+    }
+
+    #[test]
+    fn a_non_git_project_still_starts_in_filesystem_mode() {
+        // No git at all is a supported mode; the branch guard must not catch it.
+        let (_d, store) = store();
+        run_start(&store, "r", "software", None, Mode::Solo, "full")
+            .expect("filesystem-mode runs still start");
     }
 
     #[test]
@@ -6320,7 +6347,17 @@ mod tests {
     fn git_discrete_frame_at_open_pr(plan: Vec<String>) -> (tempfile::TempDir, StateStore) {
         use darkrun_core::domain::{Checkpoint, CheckpointKind, Station, StationPhase, Status};
         let dir = tempdir().unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["init", "-q"]).status().unwrap();
+        // A real repo has a base commit; a run cannot fork its branch without
+        // one, so seed `main` the way every project darkrun runs on already is.
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).status().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@darkrun.ai"]);
+        git(&["config", "user.name", "darkrun test"]);
+        std::fs::write(dir.path().join("README.md"), "# x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
         let store = StateStore::new(dir.path());
         run_start(&store, "r", "software", None, Mode::Team, "full").unwrap();
         let mut state = store.read_state("r").unwrap().unwrap();
@@ -7176,7 +7213,17 @@ mod tests {
         }
         let dir = tempdir().unwrap();
         // A git repo so the head-push branch runs (it fails silently — no remote).
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["init", "-q"]).status().unwrap();
+        // A real repo has a base commit; a run cannot fork its branch without
+        // one, so seed `main` the way every project darkrun runs on already is.
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).status().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@darkrun.ai"]);
+        git(&["config", "user.name", "darkrun test"]);
+        std::fs::write(dir.path().join("README.md"), "# x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
         let store = StateStore::new(dir.path());
         run_start(&store, "r", "software", None, Mode::Team, "full").unwrap();
         // Force the run to sit at frame's checkpoint; team mode makes its
@@ -7215,7 +7262,17 @@ mod tests {
             }
         }
         let dir = tempdir().unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["init", "-q"]).status().unwrap();
+        // A real repo has a base commit; a run cannot fork its branch without
+        // one, so seed `main` the way every project darkrun runs on already is.
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).status().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@darkrun.ai"]);
+        git(&["config", "user.name", "darkrun test"]);
+        std::fs::write(dir.path().join("README.md"), "# x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
         let store = StateStore::new(dir.path());
         run_start(&store, "r", "software", None, Mode::Team, "full").unwrap();
         let mut state = store.read_state("r").unwrap().unwrap();
