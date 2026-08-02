@@ -159,6 +159,19 @@ enum RunCommand {
         /// Run slug (defaults to the active run).
         slug: Option<String>,
     },
+    /// Audit units for JUMPED PASS BEATS — declared workers that never ran and
+    /// were never recorded as a conscious skip.
+    ///
+    /// Units marked `completed` with unsettled beats were passed by the old
+    /// terminal-worker-only rule and are not trustworthy: the middle of their
+    /// pipeline did not run. Exits non-zero when any are found.
+    Audit {
+        /// Run slug (defaults to every run in the store).
+        slug: Option<String>,
+        /// Emit JSON instead of the human-readable report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Decide the current Checkpoint — approve to advance, or `--reject` to
     /// route rework back as drift.
     Decide {
@@ -440,6 +453,117 @@ fn resolve_slug(
     }
 }
 
+/// One unit carrying declared Pass beats that never settled.
+#[derive(Debug, serde::Serialize)]
+struct JumpedBeats {
+    run: String,
+    station: String,
+    unit: String,
+    /// The unit's own recorded status. `completed` here is the serious case: the
+    /// engine reported it done with part of its pipeline never run.
+    status: String,
+    /// Declared workers with no settled beat, in factory order.
+    unsettled: Vec<String>,
+    /// The beats it did record, in order, as `worker:result`.
+    recorded: Vec<String>,
+}
+
+/// Scan runs for units whose declared workers never ran and were never recorded
+/// as a conscious skip. See [`RunCommand::Audit`].
+fn cmd_audit(
+    store: &StateStore,
+    slug: Option<String>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runs = match slug {
+        Some(s) => vec![s],
+        None => store.list_runs()?,
+    };
+
+    let mut findings: Vec<JumpedBeats> = Vec::new();
+    for run_slug in &runs {
+        let Ok(run) = store.read_run(run_slug) else { continue };
+        let Ok(factory) = darkrun_content::load_factory(&run.frontmatter.factory) else {
+            continue;
+        };
+        let Ok(units) = store.read_units(run_slug) else { continue };
+        for unit in &units {
+            let station = unit.station().to_string();
+            let workers: Vec<String> = match factory.station(&station) {
+                Some(def) => def.workers.iter().map(|w| w.name().to_string()).collect(),
+                None => continue,
+            };
+            let unsettled = darkrun_core::derive::unsettled_workers(unit, &workers);
+            if unsettled.is_empty() {
+                continue;
+            }
+            findings.push(JumpedBeats {
+                run: run_slug.clone(),
+                station,
+                unit: unit.slug.clone(),
+                status: format!("{:?}", unit.status()).to_lowercase(),
+                unsettled,
+                recorded: unit
+                    .frontmatter
+                    .iterations
+                    .iter()
+                    .map(|it| {
+                        let r = match it.result {
+                            Some(darkrun_core::domain::IterationResult::Advance) => "advance",
+                            Some(darkrun_core::domain::IterationResult::Reject) => "reject",
+                            Some(darkrun_core::domain::IterationResult::Skip) => "skip",
+                            None => "in_flight",
+                        };
+                        format!("{}:{r}", it.worker)
+                    })
+                    .collect(),
+            });
+        }
+    }
+
+    // A unit still in flight legitimately has unsettled beats; one marked
+    // `completed` does not. Report both, but only the latter is a defect.
+    let wrongly_complete: Vec<&JumpedBeats> =
+        findings.iter().filter(|f| f.status == "completed").collect();
+
+    if json {
+        print_json(&serde_json::json!({
+            "runs_scanned": runs.len(),
+            "units_with_unsettled_beats": findings.len(),
+            "wrongly_marked_complete": wrongly_complete.len(),
+            "findings": &findings,
+        }))?;
+    } else if findings.is_empty() {
+        println!("no jumped Pass beats across {} run(s)", runs.len());
+    } else {
+        println!(
+            "{} unit(s) with unsettled Pass beats across {} run(s); {} marked COMPLETE\n",
+            findings.len(),
+            runs.len(),
+            wrongly_complete.len()
+        );
+        for f in &findings {
+            let flag = if f.status == "completed" { "  <-- marked complete" } else { "" };
+            println!("{}/{} · {} [{}]{}", f.run, f.station, f.unit, f.status, flag);
+            println!("   never settled: {}", f.unsettled.join(", "));
+            println!(
+                "   recorded:      {}\n",
+                if f.recorded.is_empty() { "(nothing)".to_string() } else { f.recorded.join(" -> ") }
+            );
+        }
+    }
+
+    if wrongly_complete.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} unit(s) marked complete with beats that never ran",
+            wrongly_complete.len()
+        )
+        .into())
+    }
+}
+
 /// Handle the `run` subcommands.
 fn run_command(repo_root: &Path, cmd: RunCommand) -> Result<(), Box<dyn std::error::Error>> {
     let store = StateStore::new(repo_root);
@@ -488,6 +612,7 @@ fn run_command(repo_root: &Path, cmd: RunCommand) -> Result<(), Box<dyn std::err
             });
             print_json(&show)
         }
+        RunCommand::Audit { slug, json } => cmd_audit(&store, slug, json),
         RunCommand::Decide {
             slug,
             reject,

@@ -2181,6 +2181,7 @@ fn build_prompt_context(store: &StateStore, slug: &str, action: &RunAction) -> R
                         result: match last.result {
                             Some(IterationResult::Advance) => "advance",
                             Some(IterationResult::Reject) => "reject",
+                            Some(IterationResult::Skip) => "skip",
                             None => "in_flight",
                         }
                         .to_string(),
@@ -4738,11 +4739,18 @@ mod tests {
             fm.approvals.insert(r.clone(), stamp());
         }
         fm.approvals.insert("user".into(), stamp());
-        fm.iterations.push(UnitIteration {
-            worker: def.workers.last().cloned().unwrap_or_default(),
-            result: Some(IterationResult::Advance),
-            ..Default::default()
-        });
+        // A done Pass loop means EVERY declared worker settled, not just the
+        // terminal beat — so walk the whole sequence. Stamping only the last
+        // worker is precisely the jumped-pipeline shape the derivation now
+        // rejects, and this test needs a genuinely finished loop to reach the
+        // post-review gate it is actually asserting on.
+        for w in &def.workers {
+            fm.iterations.push(UnitIteration {
+                worker: w.clone(),
+                result: Some(IterationResult::Advance),
+                ..Default::default()
+            });
+        }
         fm.quality_gates = vec![QualityGate {
             name: "tests".into(),
             command: "cargo test".into(),
@@ -5442,8 +5450,8 @@ mod tests {
         let def = factory.station("frame").unwrap();
         let stamp = || Some(Stamp { at: "2026-01-01T00:00:00Z".into() });
 
-        // A frame unit signed by every REAL reviewer (reviews + approvals), Pass
-        // loop done on the terminal worker, and NO synthetic "user" approval.
+        // A frame unit signed by every REAL reviewer (reviews + approvals), a
+        // fully walked Pass loop, and NO synthetic "user" approval.
         let mut fm = UnitFrontmatter {
             status: Status::Completed,
             station: Some("frame".into()),
@@ -5453,11 +5461,16 @@ mod tests {
             fm.reviews.insert(r.clone(), stamp());
             fm.approvals.insert(r.clone(), stamp());
         }
-        fm.iterations.push(UnitIteration {
-            worker: def.workers.last().cloned().unwrap_or_default(),
-            result: Some(IterationResult::Advance),
-            ..Default::default()
-        });
+        // Every declared worker settles — a loop that stamped only the terminal
+        // beat is no longer done, and would wedge this test at Manufacture
+        // instead of exercising the Reflect surfacing it exists to check.
+        for w in &def.workers {
+            fm.iterations.push(UnitIteration {
+                worker: w.clone(),
+                result: Some(IterationResult::Advance),
+                ..Default::default()
+            });
+        }
         store
             .write_unit("r", &Unit { slug: "frame-u".into(), frontmatter: fm, title: "u".into(), body: String::new() })
             .unwrap();
