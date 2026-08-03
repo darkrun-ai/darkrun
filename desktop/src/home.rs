@@ -1540,7 +1540,11 @@ fn run_sel_bg() -> String {
 fn run_dot_color(status: &str, mode: &str) -> &'static str {
     let dark = mode == "dark";
     match status {
-        "active" | "in_progress" | "completed" => tokens::var::STATUS_OK,
+        // A finished run is IDLE, not live. Painting it the same green as a
+        // running one made the sidebar's most useful distinction — what is
+        // moving right now — unreadable at a glance.
+        "completed" => tokens::var::TEXT_FAINT,
+        "active" | "in_progress" => tokens::var::STATUS_OK,
         // Engine-internal on a dark run: it walks these without asking.
         "pending" | "review" if dark => tokens::var::STATUS_OK,
         "blocked" | "changes_requested" | "pending" | "review" => tokens::var::STATUS_WARN,
@@ -3893,8 +3897,12 @@ mod helper_tests {
 
     #[test]
     fn run_dot_color_maps_status_classes() {
-        for s in ["active", "in_progress", "completed"] {
+        for s in ["active", "in_progress"] {
             assert_eq!(run_dot_color(s, "solo"), tokens::var::STATUS_OK);
+        }
+        // A finished run reads as idle, never as live.
+        for m in ["solo", "team", "dark"] {
+            assert_eq!(run_dot_color("completed", m), tokens::var::TEXT_FAINT, "{m}");
         }
         for s in ["blocked", "changes_requested", "pending", "review"] {
             assert_eq!(run_dot_color(s, "solo"), tokens::var::STATUS_WARN);

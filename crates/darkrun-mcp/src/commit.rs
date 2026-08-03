@@ -115,13 +115,6 @@ pub fn commit_state_if_dirty(store: &StateStore, message: &str) -> CommitOutcome
     commit_state(store, message)
 }
 
-/// Stage EVERYTHING (`git add -A`) + commit + push the current branch. Only
-/// for call sites that have already validated the dirty user code belongs in
-/// this commit (e.g. a pass-beat advance committing the unit's work).
-pub fn commit_all(store: &StateStore, message: &str) -> CommitOutcome {
-    commit_and_push(store, "", message, true)
-}
-
 /// The worktree name/path the engine uses to publish state onto run-main. One
 /// per run, reused across commits, and parked under the ignored worktree pool.
 fn state_worktree(root: &Path, slug: &str) -> (String, std::path::PathBuf) {
