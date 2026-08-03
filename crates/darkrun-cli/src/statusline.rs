@@ -446,9 +446,21 @@ fn phase_track(active: Option<StationPhase>, phase_code: &str, gated: bool, seal
 }
 
 pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
-    let root = repo_override
+    let cwd = repo_override
         .or_else(read_cwd_from_stdin)
         .or_else(|| std::env::current_dir().ok())?;
+
+    // Resolve to the PROJECT root before reading state. `.darkrun/` is tracked
+    // content on the run branches, so every linked worktree the engine creates
+    // carries its own checked-out COPY of it — a stale snapshot frozen at that
+    // branch's last commit. Rooting at the raw cwd meant a session started in
+    // one of those worktrees read the copy it was standing in and reported a
+    // different station, phase, and unit tally than the run was actually on.
+    //
+    // There is exactly one real `.darkrun/`: the main checkout's. Every
+    // worktree of a repo is one project, which is what `project_root_of`
+    // already encodes for the desktop's registry.
+    let root = darkrun_git::project_root_of(&cwd);
 
     let store = StateStore::new(&root);
     let slug = store.active_run().ok().flatten()?;
@@ -1124,6 +1136,73 @@ mod tests {
         let after = read_json(&settings_path(false, repo).unwrap()).unwrap();
         assert_eq!(after["statusLine"]["command"], serde_json::json!(command));
         assert_eq!(after["statusLine"]["type"], "command");
+    }
+
+    #[test]
+    fn a_linked_worktree_reads_the_projects_state_not_its_own_stale_copy() {
+        // THE REPORTED BUG. `.darkrun/` is tracked content on the run branches,
+        // so every worktree the engine creates carries its own checked-out COPY
+        // of it, frozen at that branch's last commit. Rooting at the raw cwd
+        // made a session started inside one of those report a different
+        // station, phase, and unit tally than the run was actually on.
+        use darkrun_core::domain::{Run, RunFrontmatter};
+        use darkrun_core::StateStore;
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").current_dir(&root).args(args).output().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@darkrun.ai"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join("README.md"), "# t\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
+
+        // The PROJECT's real state: the run is on `build`.
+        let store = StateStore::new(&root);
+        store
+            .write_run(&Run {
+                slug: "r".into(),
+                title: "R".into(),
+                body: String::new(),
+                frontmatter: RunFrontmatter {
+                    factory: "software".into(),
+                    active_station: "build".into(),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        store.set_active_run("r").unwrap();
+
+        // A linked worktree carrying a STALE copy claiming `frame`.
+        let wt = root.join(".darkrun/worktrees/r/build");
+        git(&["worktree", "add", "-q", "--detach", wt.to_str().unwrap(), "HEAD"]);
+        let stale = StateStore::new(&wt);
+        stale
+            .write_run(&Run {
+                slug: "r".into(),
+                title: "R".into(),
+                body: String::new(),
+                frontmatter: RunFrontmatter {
+                    factory: "software".into(),
+                    active_station: "frame".into(),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        stale.set_active_run("r").unwrap();
+
+        // Rendered FROM the worktree, it must report the project's station.
+        let line = render(Some(wt.clone())).expect("renders from a linked worktree");
+        assert!(line.contains("build"), "reads the project's live state: {line}");
+        assert!(!line.contains("frame"), "never the worktree's stale copy: {line}");
+
+        // And the main checkout still agrees with itself.
+        let from_root = render(Some(root.clone())).expect("renders from the root");
+        assert!(from_root.contains("build"), "{from_root}");
     }
 
     #[test]
