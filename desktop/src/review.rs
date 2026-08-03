@@ -335,7 +335,12 @@ fn review_body(
     let unit_outputs = review.unit_outputs.clone();
 
     // --- Surface-local UI state --------------------------------------------
-    let active_tab = use_signal(|| "units".to_string());
+    // EMPTY means "the operator has not chosen a tab yet", which lets the pane
+    // steer to whatever currently needs them (see `opening_tab`). It hard-coded
+    // `units` before, so a station sitting on three open blockers still opened
+    // on Units and left the operator to go find them — the surface knew what
+    // was wrong and showed no sign of it.
+    let active_tab = use_signal(String::new);
     let annotate_target = use_signal(|| None::<AnnotateTarget>);
     let inbox_open = use_signal(|| false);
     // The feedback item a reply is being composed on (its `FB-NN` id), set by
@@ -373,7 +378,11 @@ fn review_body(
     // The tab strip, with the Feedback tab carrying the open-annotation count
     // (danger-red when any blocker/high is open).
     let tabs = build_tabs(units.len(), outputs.len(), knowledge.len(), open_total);
-    let active = active_tab.read().clone();
+    // Until the operator picks a tab, the pane steers itself to whatever is
+    // actually waiting on them, and says so in one line above the strip.
+    let chosen = active_tab.read().clone();
+    let steer = Steer::resolve(open_blockers, open_total, gate_open, units.len(), outputs.len());
+    let active = if chosen.is_empty() { steer.tab.to_string() } else { chosen };
 
     let mut tab_sig = active_tab;
     let mut inbox_sig = inbox_open;
@@ -465,6 +474,22 @@ fn review_body(
         // ── The tabbed station body ─────────────────────────────────────────
         if parked.is_none() {
         Card {
+            // What this pane wants, in one line, before the tabs. Rendered only
+            // while something is actually waiting: a quiet station says nothing
+            // rather than adding another badge to the noise.
+            if !steer.why.is_empty() {
+                div {
+                    style: "display:flex;align-items:center;gap:8px;margin-bottom:10px;\
+                            font-size:12.5px;color:var(--dr-text);",
+                    span {
+                        style: format!(
+                            "width:6px;height:6px;border-radius:50%;flex:none;background:{};",
+                            if open_blockers > 0 { tokens::var::STATUS_DANGER } else { tokens::var::STATUS_WARN },
+                        ),
+                    }
+                    span { "{steer.why}" }
+                }
+            }
             TabBar {
                 tabs,
                 active: active.clone(),
@@ -540,6 +565,63 @@ fn proof_at_gate(
             }
         },
         _ => rsx! {},
+    }
+}
+
+/// Where the review pane points the operator, and **why**, before they have
+/// picked a tab themselves.
+///
+/// The surface already knew everything needed to answer "what wants me right
+/// now" — open blockers, open feedback, whether a gate is holding — and used
+/// none of it: it opened on `units` unconditionally and left the operator to
+/// hunt. That is the "noise with no signal about where to look or why" this
+/// exists to fix. One rule, highest-urgency first, and the reason is stated in
+/// the operator's words rather than implied by a badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Steer {
+    /// The tab to open.
+    tab: &'static str,
+    /// One line saying what this pane wants, shown above the strip. Empty when
+    /// nothing is waiting, so a quiet station stays quiet.
+    why: &'static str,
+}
+
+impl Steer {
+    fn resolve(
+        open_blockers: usize,
+        open_total: usize,
+        gate_open: bool,
+        units: usize,
+        outputs: usize,
+    ) -> Self {
+        // A blocker holds the checkpoint: nothing else matters until it clears.
+        if open_blockers > 0 {
+            return Steer {
+                tab: "feedback",
+                why: "Blocking feedback is holding this checkpoint. Clear it to approve.",
+            };
+        }
+        if open_total > 0 {
+            return Steer {
+                tab: "feedback",
+                why: "Open feedback is waiting on you.",
+            };
+        }
+        // A gate with a clean inbox wants the decision itself, and the evidence
+        // for it lives on Overview alongside the proof panel.
+        if gate_open {
+            return Steer {
+                tab: "overview",
+                why: "This station is at its checkpoint and waiting on your decision.",
+            };
+        }
+        if units > 0 {
+            return Steer { tab: "units", why: "" };
+        }
+        if outputs > 0 {
+            return Steer { tab: "outputs", why: "" };
+        }
+        Steer { tab: "overview", why: "" }
     }
 }
 
@@ -3265,6 +3347,49 @@ mod render_tests {
             rsx! { ReviewApp { cfg: ConnConfig::from_env() } }
         }
         let _ = render(App);
+    }
+
+    #[test]
+    fn the_pane_opens_on_whatever_is_actually_waiting() {
+        // THE REPORTED BUG: the pane opened on `units` unconditionally, so a
+        // station held by open blockers gave no sign of where to look or why.
+        let blocked = Steer::resolve(3, 5, true, 11, 4);
+        assert_eq!(blocked.tab, "feedback", "a blocker outranks everything");
+        assert!(blocked.why.contains("holding this checkpoint"), "{}", blocked.why);
+
+        // Non-blocking feedback still wins over browsing units.
+        let open = Steer::resolve(0, 2, false, 11, 4);
+        assert_eq!(open.tab, "feedback");
+        assert!(!open.why.is_empty(), "it says why");
+
+        // A clean inbox at a live gate wants the decision, not the unit list.
+        let gate = Steer::resolve(0, 0, true, 11, 4);
+        assert_eq!(gate.tab, "overview");
+        assert!(gate.why.contains("waiting on your decision"), "{}", gate.why);
+
+        // Nothing waiting: land on units and stay SILENT rather than adding
+        // another badge to a quiet station.
+        let calm = Steer::resolve(0, 0, false, 11, 4);
+        assert_eq!(calm.tab, "units");
+        assert_eq!(calm.why, "", "a quiet station says nothing");
+
+        // Degenerate stations still land somewhere sensible.
+        assert_eq!(Steer::resolve(0, 0, false, 0, 4).tab, "outputs");
+        assert_eq!(Steer::resolve(0, 0, false, 0, 0).tab, "overview");
+    }
+
+    #[test]
+    fn an_operators_tab_choice_outranks_the_steer() {
+        // The steer is a starting point, not a hijack: once the operator picks
+        // a tab, re-renders must not yank them back to Feedback.
+        let steer = Steer::resolve(3, 5, true, 11, 4);
+        let chosen = "knowledge".to_string();
+        let active = if chosen.is_empty() { steer.tab.to_string() } else { chosen.clone() };
+        assert_eq!(active, "knowledge", "an explicit choice is respected");
+        // …and an empty choice still defers to the steer.
+        let unchosen = String::new();
+        let active = if unchosen.is_empty() { steer.tab.to_string() } else { unchosen };
+        assert_eq!(active, "feedback");
     }
 
     #[test]
