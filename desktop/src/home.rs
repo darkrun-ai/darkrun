@@ -2567,6 +2567,26 @@ fn worktree_label(path: &std::path::Path, canonical: &std::path::Path) -> String
     }
 }
 
+/// Whether a checkout is a real place to READ run state from.
+///
+/// The engine's own worktree pool lives under `<repo>/.darkrun/worktrees/`, and
+/// because `.darkrun/` is tracked content on the run branches, every one of
+/// those checkouts carries its own COPY of the state — a snapshot frozen at
+/// that branch's last commit. Scanning them surfaced the same runs several
+/// times over, at whatever position each copy was stale at.
+///
+/// A pool worktree is the engine's scratch space, never an independent checkout
+/// of the project. The single real `.darkrun/` is the main one.
+fn is_state_readable_checkout(path: &std::path::Path) -> bool {
+    !path
+        .components()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|w| {
+            w[0].as_os_str() == ".darkrun" && w[1].as_os_str() == "worktrees"
+        })
+}
+
 /// A stable signature of the IDLE checkouts the offline reader scans: each
 /// worktree with no live engine and an on-disk `.darkrun/`, as `slug@path`,
 /// sorted. The poller recomputes the offline run lists only when THIS changes (an
@@ -2576,7 +2596,10 @@ fn offline_projects_key(projects: &[Project]) -> Vec<String> {
     let mut key: Vec<String> = Vec::new();
     for proj in projects {
         for w in &proj.worktrees {
-            if w.port.is_none() && w.path.join(".darkrun").is_dir() {
+            if w.port.is_none()
+                && w.path.join(".darkrun").is_dir()
+                && is_state_readable_checkout(&w.path)
+            {
                 key.push(format!("{}@{}", proj.slug, w.path.display()));
             }
         }
@@ -2597,7 +2620,10 @@ fn read_offline_runs(projects: &[Project]) -> BTreeMap<String, Vec<RunSummary>> 
     let mut out = BTreeMap::new();
     for proj in projects {
         for w in &proj.worktrees {
-            if w.is_live() || !w.path.join(".darkrun").is_dir() {
+            if w.is_live()
+                || !w.path.join(".darkrun").is_dir()
+                || !is_state_readable_checkout(&w.path)
+            {
                 continue;
             }
             let store = darkrun_core::StateStore::new(&w.path);
@@ -3893,6 +3919,31 @@ mod helper_tests {
         others.insert("/tmp/store".into(), by_run(run_with("active", false, "x")));
         let hidden = visible_projects(&[proj("store")], &others, true, "");
         assert!(hidden.is_empty());
+    }
+
+    #[test]
+    fn the_engines_worktree_pool_is_never_read_as_a_checkout() {
+        use std::path::Path;
+        // The main checkout and a real agent worktree are both readable.
+        assert!(is_state_readable_checkout(Path::new("/repo")));
+        assert!(is_state_readable_checkout(Path::new(
+            "/repo/.claude/worktrees/wiggly-gathering-spark"
+        )));
+        // The engine's own pool is not: each of those carries a STALE copy of
+        // `.darkrun/`, so scanning them surfaced the same runs several times at
+        // whatever position each copy was frozen at.
+        assert!(!is_state_readable_checkout(Path::new(
+            "/repo/.darkrun/worktrees/relic/shape"
+        )));
+        assert!(!is_state_readable_checkout(Path::new(
+            "/repo/.darkrun/worktrees/relic/units/shape/design-product-surface"
+        )));
+        assert!(!is_state_readable_checkout(Path::new(
+            "/repo/.darkrun/worktrees/relic/_merge-darkrun-relic-main"
+        )));
+        // A directory merely NAMED `.darkrun` or `worktrees` is not the pool.
+        assert!(is_state_readable_checkout(Path::new("/repo/worktrees/x")));
+        assert!(is_state_readable_checkout(Path::new("/repo/.darkrun")));
     }
 
     #[test]
