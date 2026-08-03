@@ -50,7 +50,7 @@ impl CommitOutcome {
 }
 
 /// The engine-state prefix staged by [`commit_state`].
-const STATE_PREFIX: &str = ".darkrun";
+pub(crate) const STATE_PREFIX: &str = ".darkrun";
 
 /// The gitignore line that keeps the engine's worktree POOL (and only the
 /// pool) out of the tracked state tree.

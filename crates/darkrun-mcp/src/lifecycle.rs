@@ -870,8 +870,16 @@ pub fn sync_branch_downstream(store: &StateStore, slug: &str, station: &str) -> 
         if strictly_behind {
             let on_run_main =
                 git.current_branch().ok().flatten().as_deref() == Some(run_main.as_str());
-            // Never move the ref under a dirty primary checkout of it.
-            if !on_run_main || git.is_clean().unwrap_or(false) {
+            // Never move the ref under a dirty primary checkout of it — but
+            // `.darkrun/` is the engine's own bookkeeping, not the operator's
+            // work. Counting it would let the engine's own state churn wedge
+            // this fast-forward permanently (see the same exclusion in
+            // `ensure_run_branch`).
+            let theirs_clean = git
+                .dirty_paths_excluding(&root, &[crate::commit::STATE_PREFIX])
+                .map(|p| p.is_empty())
+                .unwrap_or(false);
+            if !on_run_main || theirs_clean {
                 let _ = git.set_branch_to(&run_main, &origin_rm);
                 if on_run_main {
                     // Refresh the checked-out tree + index to the new tip.

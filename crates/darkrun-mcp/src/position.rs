@@ -3359,11 +3359,23 @@ fn ensure_run_branch(store: &StateStore, slug: &str) -> Result<()> {
         if git.current_branch().ok().flatten().as_deref() != Some(run_main.as_str()) {
             // A dirty tree refuses the switch with a clear, actionable error —
             // never silently carries uncommitted work across.
-            if !git.is_clean().unwrap_or(false) {
+            //
+            // `.darkrun/` is EXCLUDED: it is the engine's own bookkeeping, not
+            // the operator's work, and holding the operator responsible for it
+            // is a self-inflicted deadlock. In a repo that ran the pre-#260
+            // engine, `.darkrun/` is tracked on the base branch, so the moment
+            // the engine stopped committing there those files read as pending
+            // changes forever and a plain `is_clean` gate would refuse to start
+            // any run at all.
+            let theirs = git.dirty_paths_excluding(&root, &[crate::commit::STATE_PREFIX]).unwrap_or_default();
+            if !theirs.is_empty() {
+                let shown = theirs.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+                let more = theirs.len().saturating_sub(5);
+                let tail = if more > 0 { format!(" (+{more} more)") } else { String::new() };
                 return Err(McpError::InvalidInput(format!(
                     "cannot start run '{slug}': the working tree has uncommitted or \
                      untracked changes, and starting a run switches it to '{run_main}'. \
-                     Commit or stash them, then retry."
+                     Commit or stash them, then retry: {shown}{tail}"
                 )));
             }
             git.checkout_branch(&run_main).map_err(|e| {
@@ -4012,6 +4024,57 @@ mod tests {
         let dir = tempdir().expect("tmp");
         let store = StateStore::new(dir.path());
         (dir, store)
+    }
+
+    #[test]
+    fn engine_state_churn_never_blocks_starting_a_run() {
+        // THE UPGRADE DEADLOCK. Repos that ran the pre-routing engine have
+        // `.darkrun/` TRACKED on their base branch. Once the engine stopped
+        // committing there, those files read as pending changes forever — and a
+        // plain `is_clean()` gate would then refuse to start any run at all,
+        // blaming the operator for the engine's own bookkeeping.
+        let dir = tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).status().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@darkrun.ai"]);
+        git(&["config", "user.name", "darkrun test"]);
+        std::fs::write(dir.path().join("README.md"), "# x\n").unwrap();
+        // `.darkrun/` committed on the base branch, exactly as a legacy repo has it.
+        std::fs::create_dir_all(dir.path().join(".darkrun/legacy")).unwrap();
+        std::fs::write(dir.path().join(".darkrun/legacy/state.json"), "{}\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base with tracked state"]);
+        // …and now it differs from what is committed, the post-upgrade steady state.
+        std::fs::write(dir.path().join(".darkrun/legacy/state.json"), "{\"moved\":1}\n").unwrap();
+
+        let store = StateStore::new(dir.path());
+        run_start(&store, "r", "software", None, Mode::Solo, "full")
+            .expect("engine state churn is not the operator's dirty work");
+    }
+
+    #[test]
+    fn the_operators_own_dirty_work_still_blocks_a_run_start() {
+        // The exclusion must not swallow the real gate: uncommitted USER code
+        // still refuses the branch switch, and now names the files.
+        let dir = tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).status().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@darkrun.ai"]);
+        git(&["config", "user.name", "darkrun test"]);
+        std::fs::write(dir.path().join("README.md"), "# x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
+        std::fs::write(dir.path().join("src.rs"), "fn main() {}\n").unwrap();
+
+        let store = StateStore::new(dir.path());
+        let err = run_start(&store, "r", "software", None, Mode::Solo, "full")
+            .expect_err("the operator's uncommitted work still blocks the switch");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("src.rs"), "it names what to deal with: {msg}");
     }
 
     #[test]
