@@ -304,6 +304,13 @@ struct BenchArgs {
 struct StatuslineArgs {
     #[command(subcommand)]
     action: Option<StatuslineAction>,
+    /// Explain what the status line resolved and, when it prints nothing, WHY.
+    ///
+    /// A blank status line is the correct output when there is no run to show
+    /// (Claude Code then keeps whatever line you had), but it is
+    /// indistinguishable from a crash. This says which step came up empty.
+    #[arg(long)]
+    explain: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -720,6 +727,10 @@ fn statusline_command(
     args: StatuslineArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match args.action {
+        None if args.explain => {
+            println!("{}", statusline::explain(repo));
+            Ok(())
+        }
         None => {
             if let Some(line) = statusline::render(repo) {
                 println!("{line}");
