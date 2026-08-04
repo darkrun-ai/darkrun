@@ -1180,7 +1180,10 @@ mod tests {
         // A linked worktree carrying a STALE copy claiming `frame`.
         let wt = root.join(".darkrun/worktrees/r/build");
         git(&["worktree", "add", "-q", "--detach", wt.to_str().unwrap(), "HEAD"]);
-        let stale = StateStore::new(&wt);
+        // `::at` on purpose: this SEEDS the stale copy the test exists to
+        // prove is never read. `::new` would resolve it back to the project and
+        // overwrite the very state we are checking against.
+        let stale = StateStore::at(&wt);
         stale
             .write_run(&Run {
                 slug: "r".into(),
