@@ -377,10 +377,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             args.timeout_s,
         ),
         other => {
-            let repo_root = match repo {
-                Some(p) => p,
-                None => std::env::current_dir()?,
-            };
+            let repo_root = resolve_repo(repo)?;
             match other {
                 Command::Mcp(args) => serve_mcp(repo_root, args.addr, args.harness),
                 Command::Serve(args) => serve_http(repo_root, args.addr),
@@ -743,10 +740,21 @@ fn statusline_command(
 
 /// Resolve a repo root for commands that need a concrete project directory.
 fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    match repo {
-        Some(p) => Ok(p),
-        None => Ok(std::env::current_dir()?),
-    }
+    let raw = match repo {
+        Some(p) => p,
+        None => std::env::current_dir()?,
+    };
+    // Resolve to the PROJECT root. `.darkrun/` is tracked content on the run
+    // branches, so every linked worktree carries its own COPY of the state.
+    // Rooting the store at the raw cwd meant an engine booted inside one of
+    // those (which is where agents work) read AND WROTE that stale copy
+    // instead of the project's real state.
+    //
+    // The read side of this was fixed for the status line and the desktop; this
+    // is the same resolution for the engine, the review server, and every `run`
+    // subcommand. An explicit `--repo` is resolved too: pointing it at a
+    // worktree should still mean "this project".
+    Ok(darkrun_git::project_root_of(&raw))
 }
 
 /// Pretty-print a serializable value as JSON to stdout.
@@ -777,7 +785,49 @@ fn slugify(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::slugify;
+    use super::{resolve_repo, slugify};
+
+    #[test]
+    fn the_engine_roots_at_the_project_not_the_worktree_it_booted_in() {
+        // THE WRITE SIDE. `.darkrun/` is tracked content on the run branches,
+        // so every linked worktree carries its own COPY of the state. An engine
+        // booted inside one — which is exactly where agents work — used to root
+        // its store there and mutate that stale copy instead of the project's
+        // real state.
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").current_dir(&root).args(args).output().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@darkrun.ai"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join("README.md"), "# t\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
+        let wt = root.join(".darkrun/worktrees/r/build");
+        git(&["worktree", "add", "-q", "--detach", wt.to_str().unwrap(), "HEAD"]);
+
+        // Booting from inside the worktree resolves back to the project.
+        let resolved = resolve_repo(Some(wt.clone())).expect("resolves");
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            root.canonicalize().unwrap(),
+            "a worktree resolves to the project root, not itself",
+        );
+        // The main checkout resolves to itself.
+        let from_root = resolve_repo(Some(root.clone())).expect("resolves");
+        assert_eq!(
+            from_root.canonicalize().unwrap(),
+            root.canonicalize().unwrap(),
+        );
+        // A non-git directory passes through untouched (filesystem mode).
+        let plain = tempfile::tempdir().unwrap();
+        let p = resolve_repo(Some(plain.path().to_path_buf())).expect("resolves");
+        assert_eq!(p, plain.path());
+    }
 
     #[test]
     fn slugify_collapses_and_trims() {
