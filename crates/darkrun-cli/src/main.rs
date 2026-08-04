@@ -830,6 +830,63 @@ mod tests {
     }
 
     #[test]
+    fn cores_resolver_agrees_with_the_git_crates() {
+        // `darkrun-core` cannot depend on a git implementation (the wasm site
+        // depends on core), so it resolves worktrees by reading `.git` and
+        // `commondir` itself. Two implementations of one rule drift silently,
+        // so pin them together here — this crate is one of the few that has
+        // both — across every shape that matters.
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").current_dir(&root).args(args).output().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@darkrun.ai"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join("README.md"), "# t\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
+
+        let engine_pool = root.join(".darkrun/worktrees/r/build");
+        let agent_wt = root.join(".claude/worktrees/some-agent");
+        git(&["worktree", "add", "-q", "--detach", engine_pool.to_str().unwrap(), "HEAD"]);
+        git(&["worktree", "add", "-q", "--detach", agent_wt.to_str().unwrap(), "HEAD"]);
+
+        let plain = tempfile::tempdir().unwrap();
+        for probe in [
+            root.clone(),
+            engine_pool.clone(),
+            agent_wt.clone(),
+            plain.path().to_path_buf(),
+        ] {
+            // The two resolvers must agree, and both must land on the project.
+            let via_git = darkrun_git::project_root_of(&probe);
+            let via_core = darkrun_core::StateStore::new(&probe);
+            let core_root = via_core.root().parent().unwrap().to_path_buf();
+            assert_eq!(
+                core_root.canonicalize().unwrap_or(core_root.clone()),
+                via_git.canonicalize().unwrap_or(via_git.clone()),
+                "core and git resolvers disagree on {}",
+                probe.display(),
+            );
+        }
+
+        // And the resolution is real, not a pass-through that happens to match.
+        let store = darkrun_core::StateStore::new(&engine_pool);
+        assert_eq!(
+            store.root().canonicalize().unwrap(),
+            root.join(".darkrun").canonicalize().unwrap(),
+            "a worktree store roots at the PROJECT's .darkrun",
+        );
+        // `::at` deliberately does not resolve — the escape hatch still works.
+        let raw = darkrun_core::StateStore::at(&engine_pool);
+        assert_eq!(raw.root(), engine_pool.join(".darkrun"));
+    }
+
+    #[test]
     fn slugify_collapses_and_trims() {
         assert_eq!(slugify("Add a Login Page!"), "add-a-login-page");
         assert_eq!(slugify("  spaced  out  "), "spaced-out");

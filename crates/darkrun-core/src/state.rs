@@ -458,6 +458,70 @@ pub struct WriteConflict {
     pub current_content: String,
 }
 
+/// Resolve a checkout directory to its PROJECT root: a linked git worktree maps
+/// to the main repository's working dir; a main checkout, a bare path, or a
+/// non-git directory maps to itself.
+///
+/// Deliberately std-only. `darkrun-core` is a dependency of the wasm site,
+/// which must not pull a git implementation in, so this reads the two plain
+/// text files git already writes rather than opening the repository:
+///
+/// - a linked worktree's `.git` is a FILE containing `gitdir: <path>`;
+/// - that dir holds `commondir`, pointing (usually relatively) at the main
+///   `.git`, whose parent is the main working tree.
+///
+/// Kept behaviourally identical to `darkrun_git::project_root_of`, and pinned
+/// there by a cross-check test so the two can never drift.
+fn project_root(dir: &Path) -> PathBuf {
+    let mine = || dir.to_path_buf();
+    let dot_git = dir.join(".git");
+    // A directory `.git` is a main checkout; anything unreadable is not ours.
+    match std::fs::metadata(&dot_git) {
+        Ok(m) if m.is_file() => {}
+        _ => return mine(),
+    }
+    let Ok(text) = std::fs::read_to_string(&dot_git) else {
+        return mine();
+    };
+    let Some(gitdir) = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("gitdir:"))
+        .map(|g| PathBuf::from(g.trim()))
+    else {
+        return mine();
+    };
+    // `commondir` is relative to the worktree's git dir far more often than not.
+    let Ok(raw) = std::fs::read_to_string(gitdir.join("commondir")) else {
+        return mine();
+    };
+    let rel = PathBuf::from(raw.trim());
+    let common = if rel.is_absolute() { rel } else { gitdir.join(rel) };
+    // Resolve `..` LEXICALLY before taking the parent: `Path::parent` strips
+    // components textually, so on an un-normalized `…/worktrees/<n>/../..` it
+    // fabricates a bogus root. This is the same trap `project_root_of`
+    // documents having hit.
+    match normalize_dots(&common).parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => mine(),
+    }
+}
+
+/// Lexically resolve `.` / `..`. No filesystem access, no symlink resolution.
+fn normalize_dots(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Reads and writes the `.darkrun/` filesystem state layout.
 #[derive(Debug, Clone)]
 pub struct StateStore {
@@ -465,8 +529,35 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// Create a store rooted at `<repo_root>/.darkrun`.
+    /// Create a store rooted at the PROJECT's `.darkrun`, resolving a linked
+    /// worktree back to the main checkout it belongs to.
+    ///
+    /// **The resolution is the whole point.** `.darkrun/` is tracked content on
+    /// the run branches, so every linked worktree that checks one out
+    /// materializes its own COPY of the state, frozen at that branch's last
+    /// commit. A store rooted at a raw worktree path therefore reads — and,
+    /// from the engine, WRITES — a stale duplicate rather than the project's
+    /// real state.
+    ///
+    /// Resolving here rather than in each caller is deliberate. Four separate
+    /// consumers (the status line, the desktop's offline reader, its worktree
+    /// scan, and the CLI's repo root) each got this wrong independently, and
+    /// fixing them one at a time left the next one to be added wrong by
+    /// default. There is exactly one real `.darkrun/`, so the type that opens
+    /// it is where that fact belongs.
+    ///
+    /// Use [`StateStore::at`] when you genuinely mean one exact directory.
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
+        StateStore::at(project_root(repo_root.as_ref()))
+    }
+
+    /// Create a store rooted at EXACTLY `<repo_root>/.darkrun`, with no
+    /// worktree resolution.
+    ///
+    /// Only for callers that truly mean this one directory — the engine's own
+    /// detached state worktree, and tests that deliberately construct a stale
+    /// copy to prove it is not read. Everything else wants [`StateStore::new`].
+    pub fn at(repo_root: impl AsRef<Path>) -> Self {
         StateStore {
             root: repo_root.as_ref().join(".darkrun"),
         }
