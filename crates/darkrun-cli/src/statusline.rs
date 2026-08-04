@@ -445,6 +445,105 @@ fn phase_track(active: Option<StationPhase>, phase_code: &str, gated: bool, seal
     track
 }
 
+/// Diagnose the status line: what it resolved, and when it renders nothing,
+/// WHICH step came up empty.
+///
+/// Printing nothing is the CORRECT behaviour with no active run — Claude Code
+/// keeps whatever line you had — but it is indistinguishable from the binary
+/// dying. This walks the same resolution `render` does and reports each step,
+/// so "my status line disappeared" is answerable without guessing.
+pub fn explain(repo_override: Option<PathBuf>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let Some(cwd) = repo_override
+        .or_else(read_cwd_from_stdin)
+        .or_else(|| std::env::current_dir().ok())
+    else {
+        return "no working directory could be resolved (no --repo, no stdin \
+                payload, and the process has no cwd)"
+            .to_string();
+    };
+    let _ = writeln!(out, "cwd:          {}", cwd.display());
+
+    let root = darkrun_git::project_root_of(&cwd);
+    let _ = writeln!(out, "project root: {}", root.display());
+    if root != cwd {
+        let _ = writeln!(
+            out,
+            "              (resolved from a linked worktree — state is read \
+             from the project, never a worktree's stale copy)"
+        );
+    }
+
+    let state_dir = root.join(".darkrun");
+    if !state_dir.is_dir() {
+        let _ = writeln!(
+            out,
+            "\nnothing to render: {} does not exist, so this project has no \
+             darkrun state. That is not an error — the status line stays blank \
+             and Claude Code keeps your previous line.",
+            state_dir.display()
+        );
+        return out;
+    }
+    let _ = writeln!(out, "state dir:    {}", state_dir.display());
+
+    let store = StateStore::new(&root);
+    let slug = match store.active_run() {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            let _ = writeln!(
+                out,
+                "\nnothing to render: no ACTIVE run. `.darkrun/active` is absent \
+                 or points nowhere, and no run on disk is active/in-progress. \
+                 Start one with `darkrun run start <description>`."
+            );
+            return out;
+        }
+        Err(e) => {
+            let _ = writeln!(out, "\nnothing to render: could not read the active run: {e}");
+            return out;
+        }
+    };
+    let _ = writeln!(out, "active run:   {slug}");
+
+    let run = match store.read_run(&slug) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = writeln!(
+                out,
+                "\nnothing to render: run '{slug}' is the active run but its \
+                 document could not be read: {e}"
+            );
+            return out;
+        }
+    };
+    let _ = writeln!(out, "factory:      {}", run.frontmatter.factory);
+    if darkrun_content::load_factory(&run.frontmatter.factory).is_err() {
+        let _ = writeln!(
+            out,
+            "\nnothing to render: factory '{}' could not be loaded, so the \
+             station pipeline cannot be drawn.",
+            run.frontmatter.factory
+        );
+        return out;
+    }
+
+    match render(Some(root)) {
+        Some(line) => {
+            let _ = writeln!(out, "\nrenders:\n{line}");
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "\nnothing to render, and every checked step passed — please \
+                 report this, it is a bug."
+            );
+        }
+    }
+    out
+}
+
 pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
     let cwd = repo_override
         .or_else(read_cwd_from_stdin)
@@ -825,7 +924,7 @@ pub fn uninstall(global: bool, repo: &Path) -> Result<(), Dyn> {
 
 #[cfg(test)]
 mod tests {
-    use super::{C_TRACK_DONE,
+    use super::{explain, C_TRACK_DONE,
         default_command, fallback_path, install, osc8, paint, parse_git_url, phase_chrome,
         read_json, render, resolve_program, settings_path, shell_quote, uninstall, web_base,
         write_json,
@@ -1206,6 +1305,50 @@ mod tests {
         // And the main checkout still agrees with itself.
         let from_root = render(Some(root.clone())).expect("renders from the root");
         assert!(from_root.contains("build"), "{from_root}");
+    }
+
+    #[test]
+    fn explain_names_the_step_that_came_up_empty() {
+        use darkrun_core::domain::{Run, RunFrontmatter};
+        use darkrun_core::StateStore;
+        // A blank status line is CORRECT with no run, but indistinguishable
+        // from a crash. `--explain` has to say which step was empty.
+
+        // 1. No state at all.
+        let empty = tempfile::tempdir().unwrap();
+        let out = explain(Some(empty.path().to_path_buf()));
+        assert!(out.contains("does not exist"), "names the missing state dir: {out}");
+        assert!(out.contains("not an error"), "says a blank line is expected: {out}");
+
+        // 2. State present, but no ACTIVE run.
+        let idle = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(idle.path().join(".darkrun")).unwrap();
+        let out = explain(Some(idle.path().to_path_buf()));
+        assert!(out.contains("no ACTIVE run"), "distinguishes idle from absent: {out}");
+        assert!(out.contains("darkrun run start"), "says what to do next: {out}");
+
+        // 3. An active run explains all the way through to the rendered line.
+        let live = tempfile::tempdir().unwrap();
+        // A plain tempdir is not a git repo, so this roots exactly here either way.
+        let store = StateStore::new(live.path());
+        store
+            .write_run(&Run {
+                slug: "r".into(),
+                title: "R".into(),
+                body: String::new(),
+                frontmatter: RunFrontmatter {
+                    factory: "software".into(),
+                    active_station: "frame".into(),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        store.set_active_run("r").unwrap();
+        let out = explain(Some(live.path().to_path_buf()));
+        assert!(out.contains("active run:   r"), "reports the run: {out}");
+        assert!(out.contains("factory:      software"), "reports the factory: {out}");
+        assert!(out.contains("renders:"), "shows the line it produced: {out}");
+        assert!(!out.contains("nothing to render"), "{out}");
     }
 
     #[test]
