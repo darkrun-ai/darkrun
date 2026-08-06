@@ -19,6 +19,18 @@ name: release-please
 # pushed by GITHUB_TOKEN does NOT trigger other workflows, so release.yml would
 # never fire. With a PAT, merging the release PR pushes a tag that triggers
 # release.yml, and CI also runs on the release PR itself.
+#
+# The job runs release-please TWICE on purpose, with the tag push in between.
+# One combined invocation cuts the release and then immediately builds the next
+# release PR — and in that second half it has to find the release it just made,
+# to know which commits are already shipped. It finds it by resolving the GitHub
+# Release's tag commit, and a `draft: true` release has NO tag until the step
+# below creates one. So the lookup missed, release-please fell back to "previous
+# version from the manifest, unknown SHA", and with no SHA to stop at it walked
+# the entire history (`Considering: 801 commits`) and wrote EVERY conventional
+# commit in the repo into the changelog. That is how v0.14.0 and v0.15.0 shipped
+# byte-identical 260-line feature lists. Splitting the phases so the tag exists
+# before the changelog is computed is the fix; do not merge them back together.
 
 on:
   push:
@@ -36,11 +48,17 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      # Phase 1 — cut the release for a merged release PR, and nothing else.
+      # `skip-github-pull-request` holds back the release-PR half until the tag
+      # exists (see the header comment).
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          skip-github-pull-request: true
 
+      # Phase 2 — tag it.
+      #
       # release-please with `draft: true` creates a DRAFT GitHub Release but NOT a
       # git tag ref (GitHub only creates the tag when a release is PUBLISHED).
       # release.yml triggers on `push: tags`, so without a real tag it never fires
@@ -59,8 +77,39 @@ jobs:
         run: |
           set -euo pipefail
           if gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
-            echo "tag $TAG already exists — nothing to do"; exit 0
+            echo "tag $TAG already exists — nothing to do"
+          else
+            gh api -X POST "repos/$REPO/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$SHA"
+            echo "created tag $TAG -> $SHA (release.yml will build + publish)"
           fi
-          gh api -X POST "repos/$REPO/git/refs" \
-            -f ref="refs/tags/$TAG" -f sha="$SHA"
-          echo "created tag $TAG -> $SHA (release.yml will build + publish)"
+
+          # Phase 3 reads the release's tagCommit to decide where the changelog
+          # starts, and the ref we just wrote is not instantly visible there.
+          # Wait for it rather than race it: losing this race is silent, and the
+          # cost is a release shipped with the whole repo history as its notes.
+          for _ in $(seq 30); do
+            # SC2016: $owner/$repo/$tag are GraphQL variables, not shell ones.
+            # shellcheck disable=SC2016
+            oid="$(gh api graphql \
+              -f query='query($owner:String!,$repo:String!,$tag:String!){
+                repository(owner:$owner,name:$repo){
+                  release(tagName:$tag){ tagCommit { oid } } } }' \
+              -f owner="${REPO%/*}" -f repo="${REPO#*/}" -f tag="$TAG" \
+              -q '.data.repository.release.tagCommit.oid // empty' 2>/dev/null || true)"
+            if [ -n "$oid" ]; then
+              echo "release $TAG resolves to $oid — safe to build the next release PR"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::warning::$TAG never resolved on its release node; the next release PR's changelog may cover the whole history"
+
+      # Phase 3 — open/refresh the "chore: release X.Y.Z" PR. Runs on every push
+      # to main, including the one that just cut a release, now that the tag it
+      # needs to scope the changelog is in place.
+      - id: release_pr
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          skip-github-release: true
