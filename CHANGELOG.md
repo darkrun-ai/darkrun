@@ -2,6 +2,39 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.13.0](https://github.com/darkrun-ai/darkrun/compare/v0.12.2...v0.13.0) (2026-08-04)
+
+
+### Features
+
+* **cli:** `darkrun statusline --explain` says why the line is blank ([2b57a6e](https://github.com/darkrun-ai/darkrun/commit/2b57a6e3b29e23738192a5de526011a6b607bfab))
+* **cli:** darkrun statusline --explain says why the line is blank ([#270](https://github.com/darkrun-ai/darkrun/issues/270)) ([f0238e1](https://github.com/darkrun-ai/darkrun/commit/f0238e1c1a0001076cb06c7e0abfbcc428e37923))
+
+
+### Bug Fixes
+
+* **api,desktop:** send the run's mode over the wire and stop nagging dark runs ([fbdb9f0](https://github.com/darkrun-ai/darkrun/commit/fbdb9f0535555ae35f9bc59396866835a821de87))
+* **api,desktop:** send the run's mode over the wire and stop nagging dark runs ([#261](https://github.com/darkrun-ai/darkrun/issues/261)) ([d0eaa58](https://github.com/darkrun-ai/darkrun/commit/d0eaa58f49b68727e2f605a95db1c416f43dfc54))
+* **cli:** the engine roots at the project, not the worktree it booted in ([ec17657](https://github.com/darkrun-ai/darkrun/commit/ec1765750ce4ebb57d3ae4b7377f123d2ef491f5))
+* **cli:** the engine roots at the project, not the worktree it booted in ([#268](https://github.com/darkrun-ai/darkrun/issues/268)) ([a197a83](https://github.com/darkrun-ai/darkrun/commit/a197a835fbd39bea495bdc5c3898946f6bf090d9))
+* **cli:** the statusline reads the project's state, not a worktree's stale copy ([eec5f59](https://github.com/darkrun-ai/darkrun/commit/eec5f5933a16f90d198250482b681fb8483a2a6b))
+* **cli:** the statusline reads the project's state, not a worktree's stale copy ([#266](https://github.com/darkrun-ai/darkrun/issues/266)) ([e3f83fb](https://github.com/darkrun-ai/darkrun/commit/e3f83fb3d2db7cfc06e82df3a410e3fbc4a8a506))
+* **core:** require every declared Pass beat to settle before a unit completes ([96e3ef6](https://github.com/darkrun-ai/darkrun/commit/96e3ef63c649257079df3056c52ae5708b395d9c))
+* **core:** require every declared Pass beat to settle before a unit completes ([#259](https://github.com/darkrun-ai/darkrun/issues/259)) ([532d3df](https://github.com/darkrun-ai/darkrun/commit/532d3df53b044f30fb392886d7d2f2beee6146ca))
+* **core:** StateStore resolves to the project by construction ([b8c2f43](https://github.com/darkrun-ai/darkrun/commit/b8c2f43be78afdd75a90491bc9fa594325f79bbc))
+* **core:** StateStore resolves to the project by construction ([#269](https://github.com/darkrun-ai/darkrun/issues/269)) ([55a7b87](https://github.com/darkrun-ai/darkrun/commit/55a7b87761eaa9abd43482cf3eb016832e896f08))
+* **desktop,cli:** keep the station rail whole, open past stations, resolve the statusline absolutely ([7afde25](https://github.com/darkrun-ai/darkrun/commit/7afde25a0042004184d66b8dc26973d857798977))
+* **desktop,cli:** whole station rail, navigable past stations, a status line that resolves ([#257](https://github.com/darkrun-ai/darkrun/issues/257)) ([8eef6df](https://github.com/darkrun-ai/darkrun/commit/8eef6df6d9316740600ad665250c73cd248acd85))
+* **desktop:** the engine's worktree pool is not a checkout to read state from ([311df71](https://github.com/darkrun-ai/darkrun/commit/311df7150b0fff0e123cc5a3fcb8a8eb28e2e5dd))
+* **desktop:** the engine's worktree pool is not a checkout to read state from ([#267](https://github.com/darkrun-ai/darkrun/issues/267)) ([7a5f46f](https://github.com/darkrun-ai/darkrun/commit/7a5f46fa51b9cb91115ad752875f29443fdef160))
+* **desktop:** the review pane opens on what is waiting, and says why ([9d9c3f6](https://github.com/darkrun-ai/darkrun/commit/9d9c3f6da4cb17bc75abc9271bfecb5249b0762f))
+* **desktop:** the review pane opens on what is waiting, and says why ([#264](https://github.com/darkrun-ai/darkrun/issues/264)) ([50871a4](https://github.com/darkrun-ai/darkrun/commit/50871a48f8c6b9498acfe62bcdf3f4807811de08))
+* **mcp:** a run that cannot get its own branch refuses to start ([d18484d](https://github.com/darkrun-ai/darkrun/commit/d18484d4f0bd0884a1290060f52293f306b56525))
+* **mcp:** engine state commits land in the darkrun/ branch space or nowhere ([48e8e1b](https://github.com/darkrun-ai/darkrun/commit/48e8e1b086263ba37428451374e99128da889f6e))
+* **mcp:** engine state commits land in the darkrun/ branch space or nowhere ([#260](https://github.com/darkrun-ai/darkrun/issues/260)) ([a2a8acc](https://github.com/darkrun-ai/darkrun/commit/a2a8acc10728cc26d970dbb34f841cde89539fb7))
+* **mcp:** the engine's own state never counts as the operator's dirty work ([4b11496](https://github.com/darkrun-ai/darkrun/commit/4b11496e24c495d193c92c7b3dc8d2c06618d447))
+* **mcp:** the engine's own state never counts as the operator's dirty work ([#265](https://github.com/darkrun-ai/darkrun/issues/265)) ([780e877](https://github.com/darkrun-ai/darkrun/commit/780e8773dec595035213aabd37ac3e5f2fcabf39))
+
 ## [0.12.2](https://github.com/darkrun-ai/darkrun/compare/v0.12.1...v0.12.2) (2026-07-19)
 
 
