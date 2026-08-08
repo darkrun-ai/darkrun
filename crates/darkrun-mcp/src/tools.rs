@@ -254,6 +254,13 @@ impl DarkrunServer {
             _ => return,
         };
         let store = self.store();
+        // NEVER raise the desktop for a run this checkout is not on. The branch
+        // is the signal: a tree on the default branch is not working a run, and
+        // launching a window (plus a notification) for one is the most intrusive
+        // way to assert a run the operator is not on.
+        if crate::lifecycle::run_on_branch(&store).as_deref() != Some(run.as_str()) {
+            return;
+        }
         // Build/refresh the run's review session (carries the open gate) so a
         // connected desktop navigates to it and a freshly-launched one finds it.
         let _ = crate::sessions::create_show(&self.sessions, &store, run);
