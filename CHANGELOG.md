@@ -2,6 +2,15 @@
 
 All notable changes to darkrun are recorded here. Versions follow semver.
 
+## [0.15.1](https://github.com/darkrun-ai/darkrun/compare/v0.15.0...v0.15.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* **ci:** scope the release changelog to the commits since the last release ([31923c9](https://github.com/darkrun-ai/darkrun/commit/31923c95a2749f4885ca6a273c0b5a8e108e32bd))
+* **ci:** scope the release changelog to the commits since the last release ([#274](https://github.com/darkrun-ai/darkrun/issues/274)) ([87e90f2](https://github.com/darkrun-ai/darkrun/commit/87e90f2295edcb577141f56967fb213be7c7b5d5))
+* the operator surfaces are branch-scoped — main is never on a run ([f278f6f](https://github.com/darkrun-ai/darkrun/commit/f278f6f7bd5ff634fcc754b052d77a8e045f13b3))
+
 ## [0.15.0](https://github.com/darkrun-ai/darkrun/compare/v0.14.0...v0.15.0) (2026-08-06)
 
 
