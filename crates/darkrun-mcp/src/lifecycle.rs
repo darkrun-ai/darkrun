@@ -276,7 +276,109 @@ fn open_git(store: &StateStore) -> Option<(Git, PathBuf)> {
     Git::open(&root).ok().map(|g| (g, root))
 }
 
-/// Fork `darkrun/<slug>/main` off the resolved base at run start. Idempotent:
+/// Which run the CURRENT CHECKOUT is on — the answer every OPERATOR SURFACE
+/// (status line, hooks, desktop raise) must ask before it renders or acts.
+///
+/// **The branch is the signal.** darkrun works inside its own `darkrun/`
+/// branch space; a checkout sitting on the default branch is by definition not
+/// on a run, and a surface that claims otherwise is asserting a run the
+/// operator is not working.
+///
+/// Priority, mirroring the predecessor's `pickActiveIntent`:
+///
+/// 1. Branch `darkrun/<slug>/…` → that slug. The branch names the run.
+/// 2. The **default branch** → `None`, always. Never a run, no exceptions.
+/// 3. Any other branch → the single live run when there is exactly one, else
+///    `None`.
+///
+/// Step 3 deliberately does NOT fall back to "the most recently started run",
+/// which is what [`StateStore::active_run`] does for the ENGINE's slug
+/// resolution. The predecessor removed exactly that guess after it was reported
+/// (2026-05-20) commandeering the status line for an intent the operator was
+/// not on. Guessing here reintroduces that bug on every surface at once.
+///
+/// Outside a git repo (filesystem mode) there are no branches, so only the
+/// unambiguous single-live-run rule applies.
+/// The checked-out branch, by plain file reads — no git library, no repository
+/// discovery, no locks.
+///
+/// [`run_on_branch`] is called by HOOKS, which fire on every tool use. Opening a
+/// gix repository there is both too slow and unsafe: repo discovery walks the
+/// filesystem and takes locks, and the hook suite mutates the process CWD, which
+/// deadlocked the whole test binary when this used `Git::open`. Reading `HEAD` is
+/// two file reads and cannot block.
+///
+/// Handles both a normal checkout (`.git/HEAD`) and a linked worktree (`.git` is
+/// a file pointing at the worktree's git dir). Detached HEAD → `None`.
+fn current_branch_fast(store: &StateStore) -> Option<String> {
+    let root = store.root().parent()?;
+    let dot_git = root.join(".git");
+    let head = match std::fs::metadata(&dot_git).ok()? {
+        m if m.is_dir() => dot_git.join("HEAD"),
+        m if m.is_file() => {
+            let text = std::fs::read_to_string(&dot_git).ok()?;
+            let gitdir = text
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("gitdir:"))
+                .map(|g| std::path::PathBuf::from(g.trim()))?;
+            gitdir.join("HEAD")
+        }
+        _ => return None,
+    };
+    let raw = std::fs::read_to_string(head).ok()?;
+    // `ref: refs/heads/<branch>` — anything else is a detached HEAD (a raw oid).
+    let name = raw.trim().strip_prefix("ref:")?.trim().strip_prefix("refs/heads/")?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+pub fn run_on_branch(store: &StateStore) -> Option<String> {
+    let exists = |slug: &str| store.run_dir(slug).join("run.md").exists();
+
+    // A detached HEAD names no run, so it falls through to the unambiguous rule.
+    if let Some(branch) = current_branch_fast(store) {
+        // 1. The branch names the run.
+        if let Some(slug) = branch
+            .strip_prefix(&format!("{BRANCH_PREFIX}/"))
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(slug, _)| slug)
+            .filter(|slug| exists(slug))
+        {
+            return Some(slug.to_string());
+        }
+        // 2. The default branch is never on a run.
+        if branch == resolve_base_branch(store) {
+            return None;
+        }
+    }
+
+    // 3. Exactly one live run, or nothing.
+    let mut live = store
+        .list_runs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|slug| match store.read_run(slug) {
+            // "Live" means NOT ARCHIVED, mirroring the predecessor's primary
+            // filter — and deliberately nothing narrower:
+            //
+            // - a freshly created run has not ticked yet, so requiring
+            //   Active/InProgress would blind the surfaces until the first tick;
+            // - a SEALED run is not done until its work lands on the default
+            //   branch ("a sealed-but-unmerged intent is still live — keep
+            //   showing it"), and the status line has a whole `✓ sealed`
+            //   treatment that only renders if the run resolves.
+            //
+            // `archived` is the operator's explicit "put this away" signal, and
+            // it is the right and only filter here.
+            Ok(run) => !run.frontmatter.archived.unwrap_or(false),
+            Err(_) => false,
+        });
+    match (live.next(), live.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
+}
+
+/// Fork `darkrun/<slug>/main` off the resolved base at run start. Idempotent:/// Fork `darkrun/<slug>/main` off the resolved base at run start. Idempotent:
 /// a no-op when run-main already exists. No-op outside a git repo.
 pub fn ensure_run_main(store: &StateStore, slug: &str) -> LifecycleOutcome {
     let Some((git, _root)) = open_git(store) else {
@@ -1018,6 +1120,75 @@ mod tests {
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
+
+    /// Write a run doc so `run_on_branch` can resolve it.
+    fn seed_run(store: &StateStore, slug: &str, archived: bool) {
+        use darkrun_core::domain::{Run, RunFrontmatter};
+        store
+            .write_run(&Run {
+                slug: slug.into(),
+                title: slug.into(),
+                body: String::new(),
+                frontmatter: RunFrontmatter {
+                    factory: "software".into(),
+                    active_station: "frame".into(),
+                    archived: archived.then_some(true),
+                    ..Default::default()
+                },
+            })
+            .expect("write run");
+    }
+
+    #[test]
+    fn the_branch_names_the_run() {
+        let (_d, root, store) = init_repo();
+        let git = |args: &[&str]| {
+            let _ = Command::new("git").current_dir(&root).args(args).output();
+        };
+        seed_run(&store, "alpha", false);
+        seed_run(&store, "beta", false);
+
+        // 1. On a run branch, the BRANCH decides — even with another live run
+        //    present, which is exactly the ambiguity that used to be guessed.
+        git(&["checkout", "-q", "-b", "darkrun/beta/main"]);
+        assert_eq!(run_on_branch(&store).as_deref(), Some("beta"));
+        git(&["checkout", "-q", "-b", "darkrun/alpha/frame"]);
+        assert_eq!(run_on_branch(&store).as_deref(), Some("alpha"), "station branches too");
+    }
+
+    #[test]
+    fn the_default_branch_is_never_on_a_run() {
+        // THE REPORTED BUG. A checkout on the default branch is not working a
+        // run, and a surface that renders one there asserts a run the operator
+        // is not on. This holds even when exactly one live run exists, which is
+        // the case that would otherwise satisfy the fallback.
+        let (_d, root, store) = init_repo();
+        let git = |args: &[&str]| {
+            let _ = Command::new("git").current_dir(&root).args(args).output();
+        };
+        seed_run(&store, "solo", false);
+        git(&["checkout", "-q", "main"]);
+        assert_eq!(run_on_branch(&store), None, "main is never on a run");
+    }
+
+    #[test]
+    fn an_ambiguous_branch_refuses_rather_than_guessing() {
+        // The predecessor removed "pick the most recently started" after it was
+        // reported commandeering the status line for an intent the operator was
+        // not on (2026-05-20). Two live runs on a non-run branch → no signal.
+        let (_d, root, store) = init_repo();
+        let git = |args: &[&str]| {
+            let _ = Command::new("git").current_dir(&root).args(args).output();
+        };
+        git(&["checkout", "-q", "-b", "feature/unrelated"]);
+        seed_run(&store, "one", false);
+        assert_eq!(run_on_branch(&store).as_deref(), Some("one"), "unambiguous → resolves");
+        seed_run(&store, "two", false);
+        assert_eq!(run_on_branch(&store), None, "ambiguous → refuses to guess");
+        // Archiving one restores the unambiguous case.
+        seed_run(&store, "two", true);
+        assert_eq!(run_on_branch(&store).as_deref(), Some("one"), "archived does not count");
+    }
 
     fn init_repo() -> (TempDir, PathBuf, StateStore) {
         let dir = TempDir::new().expect("tmp");

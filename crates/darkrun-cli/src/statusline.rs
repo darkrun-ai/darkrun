@@ -489,21 +489,32 @@ pub fn explain(repo_override: Option<PathBuf>) -> String {
     let _ = writeln!(out, "state dir:    {}", state_dir.display());
 
     let store = StateStore::new(&root);
-    let slug = match store.active_run() {
-        Ok(Some(s)) => s,
-        Ok(None) => {
+    // The BRANCH decides whether this checkout is on a run at all.
+    let branch = {
+        use darkrun_git::GitBackend as _;
+        darkrun_git::Git::open(&root).ok().and_then(|g| g.current_branch().ok().flatten())
+    };
+    let _ = writeln!(out, "branch:       {}", branch.as_deref().unwrap_or("(detached / not a repo)"));
+
+    let Some(slug) = darkrun_mcp::lifecycle::run_on_branch(&store) else {
+        let base = darkrun_mcp::lifecycle::resolve_base_branch(&store);
+        if branch.as_deref() == Some(base.as_str()) {
             let _ = writeln!(
                 out,
-                "\nnothing to render: no ACTIVE run. `.darkrun/active` is absent \
-                 or points nowhere, and no run on disk is active/in-progress. \
-                 Start one with `darkrun run start <description>`."
+                "\nnothing to render: `{base}` is the project's default branch, which is \
+                 never on a run. darkrun works inside its own `darkrun/<slug>/…` branch \
+                 space — switch to a run branch to see its status line. This is \
+                 deliberate: rendering here would assert a run you are not working."
             );
-            return out;
+        } else {
+            let _ = writeln!(
+                out,
+                "\nnothing to render: branch `{}` names no run, and there is not exactly \
+                 one live run to fall back to. darkrun does not guess which run you mean.",
+                branch.as_deref().unwrap_or("(none)")
+            );
         }
-        Err(e) => {
-            let _ = writeln!(out, "\nnothing to render: could not read the active run: {e}");
-            return out;
-        }
+        return out;
     };
     let _ = writeln!(out, "active run:   {slug}");
 
@@ -562,7 +573,11 @@ pub fn render(repo_override: Option<PathBuf>) -> Option<String> {
     let root = darkrun_git::project_root_of(&cwd);
 
     let store = StateStore::new(&root);
-    let slug = store.active_run().ok().flatten()?;
+    // Which run is this CHECKOUT on? The branch is the signal — a tree sitting
+    // on the default branch is not on a run, and rendering one there asserts a
+    // run the operator is not working. Never `active_run()`, whose
+    // newest-started fallback is the engine's slug resolution, not a surface's.
+    let slug = darkrun_mcp::lifecycle::run_on_branch(&store)?;
     let run = store.read_run(&slug).ok()?;
     let factory = darkrun_content::load_factory(&run.frontmatter.factory).ok()?;
     let state = store.read_state(&slug).ok().flatten();
@@ -1259,6 +1274,9 @@ mod tests {
         std::fs::write(root.join("README.md"), "# t\n").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "base"]);
+        // The project is ON the run's branch — the default branch is never on a
+        // run, so the status line renders nothing there by design.
+        git(&["checkout", "-q", "-b", "darkrun/r/main"]);
 
         // The PROJECT's real state: the run is on `build`.
         let store = StateStore::new(&root);
@@ -1324,8 +1342,10 @@ mod tests {
         let idle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(idle.path().join(".darkrun")).unwrap();
         let out = explain(Some(idle.path().to_path_buf()));
-        assert!(out.contains("no ACTIVE run"), "distinguishes idle from absent: {out}");
-        assert!(out.contains("darkrun run start"), "says what to do next: {out}");
+        assert!(
+            out.contains("names no run") || out.contains("no ACTIVE run"),
+            "distinguishes idle from absent: {out}"
+        );
 
         // 3. An active run explains all the way through to the rendered line.
         let live = tempfile::tempdir().unwrap();
@@ -1363,6 +1383,9 @@ mod tests {
         let git = |args: &[&str]| { Command::new("git").current_dir(root).args(args).output().unwrap(); };
         git(&["init", "-q"]);
         git(&["remote", "add", "origin", "https://github.com/acme/store.git"]);
+        // A run is worked on ITS OWN branch; the default branch is never on a
+        // run, so the status line correctly renders nothing there.
+        git(&["checkout", "-q", "-b", "darkrun/store-r/main"]);
 
         let store = StateStore::new(root);
         let run = Run {

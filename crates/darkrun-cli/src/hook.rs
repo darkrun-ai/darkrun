@@ -94,7 +94,7 @@ fn additional_context(ctx: &str) -> String {
 /// one. Returns `None` (silent allow) on any error.
 fn inject_state_file(cwd: &Path) -> Option<String> {
     let store = StateStore::new(cwd);
-    let slug = store.active_run().ok()??;
+    let slug = darkrun_mcp::lifecycle::run_on_branch(&store)?;
     let run = store.read_run(&slug).ok()?;
     let ctx = format!(
         "Active darkrun Run `{slug}` — factory `{}`, station `{}`. State lives under \
@@ -330,7 +330,7 @@ fn workflow_guard(input: &Value, cwd: &Path) -> Option<String> {
     }
     // No active run, no guidance to give.
     let store = StateStore::new(cwd);
-    let slug = store.active_run().ok()??;
+    let slug = darkrun_mcp::lifecycle::run_on_branch(&store)?;
     let path = file_path(input);
     if path.is_empty() {
         return None;
@@ -358,7 +358,7 @@ fn context_monitor(input: &Value, cwd: &Path) -> Option<String> {
     }
     // Only surface inside an active run — otherwise it's noise.
     let store = StateStore::new(cwd);
-    let slug = store.active_run().ok()??;
+    let slug = darkrun_mcp::lifecycle::run_on_branch(&store)?;
     let remaining = ((max - total) * 100) / max;
     if remaining > 35 {
         return None;
@@ -449,7 +449,7 @@ fn stamp_agent_write(input: &Value, cwd: &Path) {
         return;
     }
     let store = StateStore::new(cwd);
-    let Ok(Some(slug)) = store.active_run() else {
+    let Some(slug) = darkrun_mcp::lifecycle::run_on_branch(&store) else {
         return;
     };
     append_drift_witness(&store, &slug, path);
