@@ -62,7 +62,7 @@ jobs:
           git config --global init.defaultBranch main
 
       - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
+        uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2
         with:
           tool: cargo-tarpaulin
 
