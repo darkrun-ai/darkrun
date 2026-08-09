@@ -11,7 +11,7 @@ description = "darkrun observability — Sentry init shared across the binary su
 # Sentry, C-free: reqwest + rustls transport (no native-tls / openssl), with
 # panic + backtrace + release-health. The DSN is injected at build time for the
 # distributed binaries and read from the env for the server.
-sentry = { version = "0.48", default-features = false, features = [
+sentry = { version = "0.49", default-features = false, features = [
     "backtrace",
     "contexts",
     "panic",
