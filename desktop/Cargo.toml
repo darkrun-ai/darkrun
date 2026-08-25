@@ -80,7 +80,7 @@ url = { workspace = true }
 # quick-xml, which carries open RustSec advisories with no upgrade path while
 # wayland-scanner pins quick-xml 0.39); the macOS backend is unconditional.
 [target.'cfg(not(target_os = "ios"))'.dependencies]
-rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
