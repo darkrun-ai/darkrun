@@ -8,7 +8,7 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "~> 7.35"
+      version = "~> 8.0"
     }
     sentry = {
       source  = "jianyuan/sentry"
